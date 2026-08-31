@@ -446,7 +446,14 @@ async fn retries_on_500_then_succeeds() {
     // Lots of retries available; backoff is jittered around 2s on first
     // retry, so this test takes a bit to run.
     let cfg = test_config(server.base_url(), "test-model");
-    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+    let handle = SamplerActor::spawn(
+        cfg,
+        RetryPolicy {
+            retry_only_before_output: true,
+            ..RetryPolicy::default()
+        },
+        event_tx,
+    );
 
     let rid = RequestId::from("req-retry");
     handle.submit(rid.clone(), user_request("hi"));
@@ -472,6 +479,176 @@ async fn retries_on_500_then_succeeds() {
         counter.load(Ordering::SeqCst) >= 2,
         "server hit at least twice"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_response_before_output_retries_then_succeeds() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                let events = if attempt == 0 {
+                    vec![text_chunk_event("", true), Event::default().data("[DONE]")]
+                } else {
+                    sse::chat_completion_events("ok", "test-model")
+                };
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy {
+            retry_only_before_output: true,
+            ..RetryPolicy::default()
+        },
+        event_tx,
+    );
+
+    handle.submit(
+        RequestId::from("req-empty-before-output"),
+        user_request("hi"),
+    );
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SamplingEvent::Retrying { .. }))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(SamplingEvent::Completed { response, .. })
+            if response.assistant_text() == "ok"
+    ));
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "one empty attempt and one retry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_stream_failure_after_output_is_terminal() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let first = stream::once(async {
+                    Ok::<_, std::io::Error>(text_chunk_event("partial", false))
+                });
+                let reset = stream::once(async {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    Err(std::io::Error::other("stream reset after output"))
+                });
+                Sse::new(first.chain(reset))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy {
+            retry_only_before_output: true,
+            ..RetryPolicy::default()
+        },
+        event_tx,
+    );
+
+    handle.submit(RequestId::from("req-fail-after-output"), user_request("hi"));
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(5)).await;
+    server.shutdown();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SamplingEvent::ChannelToken {
+            channel: SamplingChannel::Text,
+            text,
+            ..
+        } if text == "partial"
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SamplingEvent::Retrying { .. }))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(SamplingEvent::Failed { error, .. }) if error.is_retryable
+    ));
+    assert_eq!(counter.load(Ordering::SeqCst), 1, "output forbids replay");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_response_after_reasoning_output_is_terminal() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let events = sse_events_to_axum(sse::responses_api_reasoning_only_events(
+                    "irreversible reasoning",
+                    "test-model",
+                ));
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        responses_config(server.base_url(), None),
+        RetryPolicy {
+            retry_only_before_output: true,
+            ..RetryPolicy::default()
+        },
+        event_tx,
+    );
+
+    handle.submit(
+        RequestId::from("req-empty-after-output"),
+        user_request("hi"),
+    );
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(5)).await;
+    server.shutdown();
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SamplingEvent::ChannelToken {
+            channel: SamplingChannel::Reasoning,
+            ..
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SamplingEvent::Retrying { .. }))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(SamplingEvent::Failed { error, .. })
+            if error.kind == SamplingErrorKind::EmptyResponse
+    ));
+    assert_eq!(counter.load(Ordering::SeqCst), 1, "output forbids replay");
 }
 
 // ---------------------------------------------------------------------------
@@ -903,7 +1080,10 @@ async fn responses_confident_doom_loop_signal_resamples_once() {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
     let handle = SamplerActor::spawn(
         responses_config(server.base_url(), Some(DoomLoopRecoveryPolicy::default())),
-        RetryPolicy::default(),
+        RetryPolicy {
+            retry_only_before_output: true,
+            ..RetryPolicy::default()
+        },
         event_tx,
     );
 

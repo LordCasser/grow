@@ -639,6 +639,8 @@ pub enum SessionUpdate {
     },
     /// Structured hook execution data attached to tool call blocks.
     HookExecution {
+        /// Stable Timeline identity of the projected occurrence.
+        occurrence_id: String,
         /// The hook event name ("pre_tool_use" or "post_tool_use").
         event_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

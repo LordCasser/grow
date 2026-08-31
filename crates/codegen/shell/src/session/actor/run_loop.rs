@@ -113,12 +113,28 @@ async fn reject_queued_inputs_for_shutdown(session: &SessionActor) {
             }
         }
         state.pending_inputs = kept;
-        session.broadcast_queue_changed(&state);
         removed
     };
     for input in removed {
-        SessionActor::respond_removed_prompt(input.respond_to);
+        if let Err(error) = session
+            .dismiss_input_ids(
+                input.input_ids.clone(),
+                chat_state::InputDismissReason::SessionClosing,
+            )
+            .await
+        {
+            tracing::error!(%error, prompt_id = input.prompt_id, "shutdown input dismissal was not durable");
+            let _ = input
+                .respond_to
+                .send(Err(acp::Error::internal_error().data(format!(
+                    "session shutdown could not durably dismiss queued input: {error}"
+                ))));
+        } else {
+            SessionActor::respond_removed_prompt(input.respond_to);
+        }
     }
+    let state = session.state.lock().await;
+    session.broadcast_queue_changed(&state);
 }
 
 /// Cancel every non-Workflow Task child and keep the root Goal accounting
@@ -301,30 +317,31 @@ async fn finish_graceful_shutdown(
     // SessionEnd is admitted only after every foreground/control owner has
     // reached its terminal. Hooks and memory are therefore the final normal
     // producers before the persistence barrier.
-    let envelope = session.fire_hook(
-        ::hooks::event::HookEventName::SessionEnd,
-        None,
-        ::hooks::event::HookPayload::SessionEnd {
-            reason: shutdown.reason.to_string(),
-            turn_count: None,
-            tool_call_count: None,
-        },
-    );
-    if let Some(registry) = session.hooks.registry.borrow().clone() {
-        let ctx = session.hook_run_ctx();
-        let results = ::hooks::dispatcher::dispatch_non_blocking(
-            &registry,
+    if let Err(error) = session
+        .dispatch_observe_hook(
             ::hooks::event::HookEventName::SessionEnd,
-            &envelope,
-            &ctx,
+            chat_state::HookCause::Session {
+                session_id: session.session_id_string(),
+            },
+            ::hooks::event::HookPayload::SessionEnd {
+                reason: shutdown.reason.to_string(),
+                turn_count: None,
+                tool_call_count: None,
+            },
+            None,
         )
-        .await;
-        session
-            .send_hook_execution("session_end", None, None, &results)
-            .await;
+        .await
+    {
+        tracing::error!(%error, "session-end hook lifecycle was not durable");
+        session.fail_stop_sideband_admission().await;
+        session.sideband_cancel.cancel();
+        session.finalizer_sideband_cancel.cancel();
+        session.sideband_repair_cancel.cancel();
+        session.durable_ui_cancel.cancel();
+        session.signals_handle.shutdown();
+        cleanup_session_scratch(session);
+        return;
     }
-    session.dispatch_session_end_stop(shutdown.reason).await;
-
     let mut session_end_result = "disabled";
     let mut total_chunks_at_end = 0usize;
     if !session.startup_hints.is_subagent {
@@ -660,12 +677,10 @@ pub(super) async fn run_session(
         crate::util::config::resolve_mcp_liveness_watchers(user_cfg.as_ref())
     };
     if !session.startup_hints.is_subagent && liveness_watchers_enabled {
-        let (event_tx, event_rx) =
-            tokio::sync::mpsc::unbounded_channel::<::mcp::servers::McpClientEvent>();
-        {
+        let event_rx = {
             let mut mcp_state = session.mcp_state.lock().await;
-            mcp_state.set_client_event_tx(Some(event_tx));
-        }
+            mcp_state.install_client_event_channel()
+        };
         let dispatcher_session_id = session.session_info.id.0.to_string();
         let dispatcher_cwd = std::path::PathBuf::from(session.session_info.cwd.as_str());
         let dispatcher_gateway = session.notifications.gateway.clone();
@@ -1606,14 +1621,19 @@ pub(super) async fn run_session(
                         title,
                         level,
                     } => {
-                        session
+                        if let Err(error) = session
                             .dispatch_notification_hook(
                                 &notification_type,
                                 message,
                                 title,
                                 level,
                             )
-                            .await;
+                            .await
+                        {
+                            tracing::error!(%error, "notification hook lifecycle was not durable");
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                            return;
+                        }
                     }
                     SessionCommand::RecordGoalOwnedTaskIds {
                         goal_id,
@@ -1665,9 +1685,6 @@ pub(super) async fn run_session(
                         // Cancellation terminates the exact turn named when a
                         // steer was admitted. Never leak residual steering to
                         // the next user turn or Goal continuation.
-                        session
-                            .discard_residual_interjections_at_turn_end()
-                            .await;
                         let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
                         let cancel_result = session
                             .cancel_running_task(
@@ -1683,6 +1700,11 @@ pub(super) async fn run_session(
                             terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
+                        // `cancel_running_task` durably closes the target Turn;
+                        // only then is Steer -> Fifo a valid Timeline reroute.
+                        session
+                            .discard_residual_interjections_at_turn_end()
+                            .await;
 
                         // Auto-pause the active Goal ONLY on an explicit
                         // user "Pause goal" intent (the Goal interrupt
@@ -1863,7 +1885,14 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(session.rewind_file_counts().await);
                     }
                     SessionCommand::GrowSessionNotification { notification } => {
-                        session.handle_grow_session_notification(notification).await;
+                        if let Err(error) = session
+                            .handle_grow_session_notification(notification)
+                            .await
+                        {
+                            tracing::error!(%error, "subagent hook lifecycle was not durable");
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                            return;
+                        }
                     }
                     SessionCommand::RecordSubagentUsage {
                         subagent_id,
@@ -1983,17 +2012,13 @@ pub(super) async fn run_session(
                         // and a cap-only edit changes no server configs.
                         session.reseed_mcp_output_cap().await;
 
-                        // Capture the dispatcher's
-                        // event sender alongside the diff so we
-                        // can fan out `McpClientEvent::ConfigDiff`
-                        // immediately after the in-memory swap
-                        // completes — without holding the
-                        // `mcp_state` lock across the emit.
-                        let (diff, dispatch_event_tx) = {
+                        // Commit the config transition and publish its typed
+                        // config-origin event while the same state snapshot is
+                        // held. The raw dispatcher sender never leaves
+                        // `McpState`.
+                        let diff = {
                             let mut mcp_state = session.mcp_state.lock().await;
-                            let diff = mcp_state.update_configs_diff(mcp_servers);
-                            let tx = mcp_state.client_event_tx();
-                            (diff, tx)
+                            mcp_state.update_configs_diff_and_emit(mcp_servers)
                         };
 
                         let Some(diff) = diff else {
@@ -2005,8 +2030,8 @@ pub(super) async fn run_session(
                             continue;
                         };
 
-                        // Emit one `ConfigDiff` so the
-                        // `StatusDispatcher` fans out per-server
+                        // The typed `ConfigDiff` emitted above lets the
+                        // `StatusDispatcher` fan out per-server
                         // `mcp/server_status` with
                         // `reason: ConfigAdded` / `ConfigRemoved`.
                         // Best-effort — a dropped dispatcher
@@ -2014,17 +2039,6 @@ pub(super) async fn run_session(
                         // off or the session has shut down; the
                         // tool-bridge tear-down and re-init below
                         // still happen.
-                        if (!diff.added.is_empty() || !diff.removed.is_empty())
-                            && let Some(tx) = &dispatch_event_tx
-                        {
-                            let _ = tx.send(
-                                ::mcp::servers::McpClientEvent::ConfigDiff {
-                                    added: diff.added.clone(),
-                                    removed: diff.removed.clone(),
-                                },
-                            );
-                        }
-
                         for name in &diff.removed {
                             let prefix = format!(
                                 "{}{}",
@@ -2086,11 +2100,7 @@ pub(super) async fn run_session(
                             configs.retain(|c| crate::session::mcp_servers::mcp_server_name(c) != server_name);
                         }
 
-                        let diff = mcp_state.update_configs_diff(configs);
-                        // Snapshot the dispatcher
-                        // sender BEFORE dropping the lock so the
-                        // emit below survives any later mutation.
-                        let dispatch_event_tx = mcp_state.client_event_tx();
+                        let diff = mcp_state.update_configs_diff_and_emit(configs);
                         drop(mcp_state);
 
                         let Some(diff) = diff else {
@@ -2098,22 +2108,11 @@ pub(super) async fn run_session(
                             continue;
                         };
 
-                        // ToggleMcpServer mirrors
-                        // UpdateMcpServers — fan out per-server
+                        // ToggleMcpServer mirrors UpdateMcpServers: its typed
+                        // config event fans out per-server
                         // status via the dispatcher (`ConfigAdded`
                         // / `ConfigRemoved` reason codes on
                         // `mcp/server_status`).
-                        if (!diff.added.is_empty() || !diff.removed.is_empty())
-                            && let Some(tx) = &dispatch_event_tx
-                        {
-                            let _ = tx.send(
-                                ::mcp::servers::McpClientEvent::ConfigDiff {
-                                    added: diff.added.clone(),
-                                    removed: diff.removed.clone(),
-                                },
-                            );
-                        }
-
                         for name in &diff.removed {
                             let prefix = format!(
                                 "{}{}",
@@ -2292,7 +2291,7 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(session.hooks.client_hooks.borrow().clone());
                     }
                     SessionCommand::SetClientHooks { hooks } => {
-                        *session.hooks.client_hooks.borrow_mut() = hooks;
+                        session.replace_client_hooks(hooks);
                     }
                     SessionCommand::GetMcpStatus { respond_to } => {
                         let mcp_state = session.mcp_state.clone();
@@ -2384,25 +2383,21 @@ pub(super) async fn run_session(
                         });
                     }
                     SessionCommand::DispatchSessionStartHook { source } => {
-                        let envelope = session.fire_hook(
+                        if let Err(error) = session.dispatch_observe_hook(
                             ::hooks::event::HookEventName::SessionStart,
-                            None,
+                            chat_state::HookCause::Session {
+                                session_id: session.session_id_string(),
+                            },
                             ::hooks::event::HookPayload::SessionStart {
                                 source,
                                 model_id: None,
                                 agent_type: None,
                             },
-                        );
-                        if let Some(registry) = session.hooks.registry.borrow().clone() {
-                            let ctx = session.hook_run_ctx();
-                            let results = ::hooks::dispatcher::dispatch_non_blocking(
-                                &registry,
-                                ::hooks::event::HookEventName::SessionStart,
-                                &envelope,
-                                &ctx,
-                            )
-                            .await;
-                            session.send_hook_execution("session_start", None, None, &results).await;
+                            None,
+                        ).await {
+                            tracing::error!(%error, "session-start hook lifecycle was not durable");
+                            terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                            return;
                         }
                     }
                     SessionCommand::GetActiveAgent { responds_to } => {
@@ -2483,14 +2478,15 @@ pub(super) async fn run_session(
                     SessionCommand::SteerTurn { expected_turn_id, text, id, images, respond_to } => {
                         let image_count = images.len() as u32;
                         let admitted = session
-                            .admit_mid_turn_interjection(
+                            .admit_human_steer(
                                 &expected_turn_id,
                                 text.clone(),
                                 images,
+                                id.clone(),
                             )
                             .await;
-                        if !admitted {
-                            let _ = respond_to.send(Err("the target turn is no longer running".to_string()));
+                        if let Err(error) = admitted {
+                            let _ = respond_to.send(Err(error));
                             continue;
                         }
                         // Broadcast to every attached client so all panes

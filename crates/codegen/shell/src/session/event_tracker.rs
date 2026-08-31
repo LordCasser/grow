@@ -133,6 +133,7 @@ impl EventTracker {
 
     async fn start_turn_transaction(&self, event: Event) -> Result<(), TimelineWriteError> {
         let Event::TurnStarted {
+            input_ids,
             identity,
             model_id,
             conversation_message_count,
@@ -154,6 +155,7 @@ impl EventTracker {
         self.timeline
             .record_timeline_event_durably(TimelineEventKind::Turn(TurnEvent::Started {
                 id,
+                input_ids,
                 identity,
                 model_id,
                 input_message_count: conversation_message_count,
@@ -652,8 +654,8 @@ mod tests {
     fn test_identity() -> chat_state::TurnIdentity {
         chat_state::TurnIdentity {
             goal_definition_revision: None,
-            origin: "user".into(),
-            turn_kind: "user".into(),
+            origin: "test".into(),
+            turn_kind: "internal".into(),
             goal_id: None,
             stage_id: None,
         }
@@ -726,6 +728,7 @@ mod tests {
                     .start_turn(Event::TurnStarted {
                         session_id: "session".into(),
                         turn_number: 1,
+                        input_ids: Vec::new(),
                         identity: test_identity(),
                         model_id: "model".into(),
                         permission_mode: diagnostics::enums::PermissionMode::Ask,
@@ -819,6 +822,7 @@ mod tests {
                     .start_turn(Event::TurnStarted {
                         session_id: "session".into(),
                         turn_number: 1,
+                        input_ids: Vec::new(),
                         identity: test_identity(),
                         model_id: "model".into(),
                         permission_mode: diagnostics::enums::PermissionMode::Ask,
@@ -909,6 +913,7 @@ mod tests {
                 let start = tracker.start_turn(Event::TurnStarted {
                     session_id: "session".into(),
                     turn_number: 1,
+                    input_ids: Vec::new(),
                     identity: test_identity(),
                     model_id: "model".into(),
                     permission_mode: diagnostics::enums::PermissionMode::Ask,
@@ -1003,6 +1008,7 @@ mod tests {
                         .start_turn(Event::TurnStarted {
                             session_id: "session".into(),
                             turn_number: 1,
+                            input_ids: Vec::new(),
                             identity: test_identity(),
                             model_id: "model".into(),
                             permission_mode: diagnostics::enums::PermissionMode::Ask,
@@ -1086,6 +1092,7 @@ mod tests {
                         .start_turn(Event::TurnStarted {
                             session_id: "session".into(),
                             turn_number: 1,
+                            input_ids: Vec::new(),
                             identity: test_identity(),
                             model_id: "model".into(),
                             permission_mode: diagnostics::enums::PermissionMode::Ask,

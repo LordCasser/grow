@@ -629,59 +629,45 @@ impl SessionActor {
         let resolved_tool_name = dispatch_target_name
             .clone()
             .unwrap_or_else(|| call.function.name.clone());
-        if self.hook_event_active(::hooks::event::HookEventName::PreToolUse) {
-            let (hook_tool_input, hook_tool_input_truncated) =
-                ::hooks::event::truncate_payload(raw_input.clone());
-            let envelope = self.make_hook_envelope(
+        let (hook_tool_input, hook_tool_input_truncated) =
+            ::hooks::event::truncate_payload(raw_input.clone());
+        let envelope = self.make_hook_envelope(
+            ::hooks::event::HookEventName::PreToolUse,
+            None,
+            ::hooks::event::HookPayload::PreToolUse {
+                tool_name: resolved_tool_name.clone(),
+                tool_use_id: call.id.clone(),
+                tool_input: hook_tool_input,
+                tool_input_truncated: hook_tool_input_truncated,
+                subagent_type: self.subagent_type_label(),
+            },
+        );
+        let aggregate = self
+            .dispatch_hook_occurrence(
                 ::hooks::event::HookEventName::PreToolUse,
-                None,
-                ::hooks::event::HookPayload::PreToolUse {
-                    tool_name: resolved_tool_name.clone(),
-                    tool_use_id: call.id.clone(),
-                    tool_input: hook_tool_input,
-                    tool_input_truncated: hook_tool_input_truncated,
-                    subagent_type: self.subagent_type_label(),
+                chat_state::HookCause::Tool {
+                    call_id: call.id.clone(),
                 },
-            );
-            let hook_registry_snapshot = self.hooks.registry.borrow().clone();
-            if let Some(registry) = hook_registry_snapshot {
-                let ctx = self.hook_run_ctx();
-                let pre_result =
-                    ::hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx).await;
-                self.send_hook_execution(
-                    "pre_tool_use",
-                    Some(&resolved_tool_name),
-                    None,
-                    &pre_result.results,
+                envelope,
+                ::hooks::event::GateKind::Tool,
+            )
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("pre-tool hook lifecycle was not durable: {error}"))
+            })?;
+        let decision = aggregate.into_tool_decision();
+        if let ::hooks::result::HookDecision::Deny { reason, hook_name } = decision {
+            return Ok(ToolPreflight::resolved(
+                self.deny_tool(
+                    &call.id,
+                    &tool_call_id,
+                    resolved_tool_name,
+                    hook_name,
+                    reason,
                 )
-                .await;
-                self.emit_hook_executed_diagnostics(
-                    "pre_tool_use",
-                    Some(&resolved_tool_name),
-                    &pre_result.results,
-                )
-                .await;
-                if let ::hooks::result::HookDecision::Deny { reason, hook_name } =
-                    pre_result.decision
-                {
-                    return Ok(ToolPreflight::resolved(
-                        self.deny_tool(
-                            &call.id,
-                            &tool_call_id,
-                            resolved_tool_name.clone(),
-                            hook_name,
-                            reason,
-                        )
-                        .await?,
-                    ));
-                }
-            }
-            if let Some(denied) = self
-                .run_pre_tool_use_client_hook(&call, &tool_call_id, &envelope)
-                .await?
-            {
-                return Ok(ToolPreflight::resolved(denied));
-            }
+                .await?,
+            ));
         }
         {
             let (perm_title, perm_kind, perm_raw_input) = tool_call_display
@@ -776,7 +762,12 @@ impl SessionActor {
                     None,
                     Some("info".into()),
                 )
-                .await;
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error().data(format!(
+                        "permission notification hook lifecycle was not durable: {error}"
+                    ))
+                })?;
             }
             let classifier_turns = if effective_mode
                 == workspace::permission::types::EffectivePermissionMode::Auto
@@ -931,18 +922,19 @@ impl SessionActor {
                         .await?;
                     let (tool_input_value, tool_input_truncated) =
                         ::hooks::event::truncate_payload(raw_input.clone());
-                    self.dispatch_hook(
-                        ::hooks::event::HookEventName::PermissionDenied,
-                        ::hooks::event::HookPayload::PermissionDenied {
+                    let permission_denied_hook = DeferredObserveHook {
+                        event: ::hooks::event::HookEventName::PermissionDenied,
+                        cause: chat_state::HookCause::Tool {
+                            call_id: call.id.clone(),
+                        },
+                        payload: ::hooks::event::HookPayload::PermissionDenied {
                             tool_name: resolved_tool_name.clone(),
                             tool_use_id: tool_call_id.to_string(),
                             tool_input: tool_input_value,
                             tool_input_truncated,
                         },
-                        None,
-                        Some(&resolved_tool_name),
-                    )
-                    .await;
+                        prompt_id: None,
+                    };
                     let loop_action = if is_policy_deny || child_nonterminal {
                         ToolLoop::Continue
                     } else {
@@ -951,7 +943,10 @@ impl SessionActor {
                             reason: reason.clone(),
                         }
                     };
-                    return Ok(ToolPreflight::resolved(loop_action));
+                    return Ok(ToolPreflight::resolved_with_post_terminal_hook(
+                        loop_action,
+                        permission_denied_hook,
+                    ));
                 }
                 Decision::Cancelled => {
                     let message = format!(

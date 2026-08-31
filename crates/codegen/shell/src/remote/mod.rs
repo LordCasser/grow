@@ -2,5 +2,5 @@
 
 pub mod client;
 
-pub(crate) use client::DEFAULT_CONTEXT_WINDOW;
-pub use client::{BackendError, fetch_bundle};
+pub use client::BackendError;
+pub(crate) use client::{BundleServiceCredential, DEFAULT_CONTEXT_WINDOW, fetch_bundle};

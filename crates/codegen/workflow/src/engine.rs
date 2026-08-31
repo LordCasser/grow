@@ -733,10 +733,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
 
             let mut results = rhai::Array::with_capacity(resolved.len());
             for (_, value) in resolved {
-                match value_to_dynamic(&value) {
-                    Ok(value) => results.push(value),
-                    Err(error) => return Err(error),
-                }
+                results.push(value_to_dynamic(&value)?);
             }
             Ok(results)
         },

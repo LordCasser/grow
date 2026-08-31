@@ -49,6 +49,22 @@ pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamE
         ResponseStreamEvent::ResponseCodeInterpreterCallCodeDone(event) => !event.code.is_empty(),
         ResponseStreamEvent::ResponseCustomToolCallInputDelta(event) => !event.delta.is_empty(),
         ResponseStreamEvent::ResponseCustomToolCallInputDone(event) => !event.input.is_empty(),
+        ResponseStreamEvent::ResponseCompleted(event) => {
+            !event.response.output.is_empty()
+                || event
+                    .response
+                    .usage
+                    .as_ref()
+                    .is_some_and(|usage| usage.output_tokens > 0)
+        }
+        ResponseStreamEvent::ResponseIncomplete(event) => {
+            !event.response.output.is_empty()
+                || event
+                    .response
+                    .usage
+                    .as_ref()
+                    .is_some_and(|usage| usage.output_tokens > 0)
+        }
         ResponseStreamEvent::ResponseFailed(event) => {
             !event.response.output.is_empty()
                 || event
@@ -57,9 +73,7 @@ pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamE
                     .as_ref()
                     .is_some_and(|usage| usage.output_tokens > 0)
         }
-        ResponseStreamEvent::ResponseCompleted(_)
-        | ResponseStreamEvent::ResponseIncomplete(_)
-        | ResponseStreamEvent::ResponseOutputItemAdded(_)
+        ResponseStreamEvent::ResponseOutputItemAdded(_)
         | ResponseStreamEvent::ResponseOutputItemDone(_)
         | ResponseStreamEvent::ResponseContentPartAdded(_)
         | ResponseStreamEvent::ResponseContentPartDone(_)
@@ -90,6 +104,28 @@ pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamE
 pub(crate) fn responses_event_may_have_output(event: &rs::ResponseStreamEvent) -> bool {
     !matches!(event, rs::ResponseStreamEvent::ResponseError(_))
         && responses_event_has_meaningful_content(event)
+}
+
+/// Preserve Responses API termination diagnostics without letting wire values
+/// become control semantics. The typed mapping remains the sole authority for
+/// turn behavior; this string only retains the exact status and, when present,
+/// the exact incomplete-detail reason carried alongside it.
+fn responses_raw_stop_reason(
+    status: &rs::Status,
+    incomplete_details: Option<&rs::IncompleteDetails>,
+) -> String {
+    let status = match status {
+        rs::Status::Completed => "completed",
+        rs::Status::Failed => "failed",
+        rs::Status::InProgress => "in_progress",
+        rs::Status::Cancelled => "cancelled",
+        rs::Status::Queued => "queued",
+        rs::Status::Incomplete => "incomplete",
+    };
+    incomplete_details.map_or_else(
+        || status.to_owned(),
+        |details| format!("{status}:{}", details.reason),
+    )
 }
 
 /// Transform a raw Responses API event stream into a stream of
@@ -422,6 +458,8 @@ pub(crate) fn stream_responses_tracked<'a>(
             .and_then(|s| s.parse::<i64>().ok());
 
         let status = response.status.clone();
+        let raw_stop_reason =
+            responses_raw_stop_reason(&status, response.incomplete_details.as_ref());
 
         // Convert to ConversationItem(s); patch in accumulated reasoning
         // text as a fallback when the final response lacks `content` /
@@ -472,7 +510,7 @@ pub(crate) fn stream_responses_tracked<'a>(
             doom_loop_signals,
             stop_message: None, // not reported on the Responses API
             message_id: None,   // no provider message id on the Responses API
-            raw_stop_reason: None,
+            raw_stop_reason: Some(raw_stop_reason),
             stop_sequence: None,
         };
 
@@ -563,6 +601,17 @@ mod tests {
         })
     }
 
+    fn incomplete_event(reason: &str) -> rs::ResponseStreamEvent {
+        let mut response = build_response(rs_types::Status::Incomplete);
+        response.incomplete_details = Some(rs_types::IncompleteDetails {
+            reason: reason.to_owned(),
+        });
+        rs::ResponseStreamEvent::ResponseIncomplete(rs_types::ResponseIncompleteEvent {
+            response,
+            sequence_number: 0,
+        })
+    }
+
     async fn collect(s: impl Stream<Item = SamplingEvent>) -> Vec<SamplingEvent> {
         let mut out = Vec::new();
         let mut s = pin!(s);
@@ -622,6 +671,31 @@ mod tests {
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
+                assert_eq!(response.raw_stop_reason.as_deref(), Some("completed"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_status_and_detail_are_preserved_beside_typed_length() {
+        let raw = stream::iter(vec![Ok(incomplete_event("max_output_tokens"))]).boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::Length));
+                assert_eq!(
+                    response.raw_stop_reason.as_deref(),
+                    Some("incomplete:max_output_tokens")
+                );
             }
             other => panic!("expected Completed, got {other:?}"),
         }
@@ -740,8 +814,8 @@ mod tests {
         // Empty text delta is not.
         let empty = text_delta_event("");
         assert!(!responses_event_has_meaningful_content(&empty));
-        // Completed is meaningful (terminal).
-        assert!(responses_event_has_meaningful_content(&completed_event()));
+        // A terminal frame with no output is not irreversible model output.
+        assert!(!responses_event_has_meaningful_content(&completed_event()));
     }
 
     #[test]
@@ -794,6 +868,23 @@ mod tests {
         .await;
 
         assert!(output_observed.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn tracked_stream_leaves_empty_completion_retryable() {
+        let output_observed = Arc::new(AtomicBool::new(false));
+        let raw = stream::iter(vec![Ok(completed_event())]).boxed();
+        let _ = collect(stream_responses_tracked(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            Arc::clone(&output_observed),
+        ))
+        .await;
+
+        assert!(!output_observed.load(Ordering::Relaxed));
     }
 
     fn function_call_added_event(

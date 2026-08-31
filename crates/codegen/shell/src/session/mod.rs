@@ -5,6 +5,7 @@ pub mod commands;
 pub mod compaction_config;
 pub mod control;
 pub mod handle;
+pub(crate) mod input_inbox;
 pub mod listing;
 pub mod memory_state;
 pub(crate) mod notification_inbox;
@@ -40,7 +41,8 @@ pub(crate) fn image_blocks(
 ///
 /// Producers assign this value explicitly. Opaque prompt ids are identities,
 /// not a second wire protocol for reconstructing lifecycle semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PromptOrigin {
     /// A normal user-initiated prompt.
     User,
@@ -82,7 +84,8 @@ pub enum PromptOrigin {
 }
 
 /// Participation of a regular turn in the user-visible lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnKind {
     User,
     Internal,

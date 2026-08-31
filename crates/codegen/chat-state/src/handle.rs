@@ -106,6 +106,24 @@ impl ChatStateHandle {
         .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
+    pub async fn submit_input_durably(
+        &self,
+        input_id: String,
+        intent: crate::InputIntent,
+        payload_ref: crate::InputPayloadRef,
+    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
+        self.query("SubmitInputDurably", |reply| {
+            ChatStateCommand::SubmitInputDurably {
+                input_id,
+                intent,
+                payload_ref,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
     pub async fn recover_interrupted_durably(
         &self,
     ) -> Result<Vec<crate::TimelineEvent>, TimelineWriteError> {
@@ -488,6 +506,22 @@ impl ChatStateHandle {
         .await
     }
 
+    /// Read a completed or in-flight Hook occurrence from the Timeline fold.
+    pub async fn hook_projection(
+        &self,
+        occurrence_id: impl Into<String>,
+    ) -> Option<crate::HookLifecycleProjection> {
+        let occurrence_id = occurrence_id.into();
+        self.query("GetHookProjection", |reply| {
+            ChatStateCommand::GetHookProjection {
+                occurrence_id,
+                reply,
+            }
+        })
+        .await
+        .flatten()
+    }
+
     pub async fn timeline_events(&self) -> Option<Vec<crate::TimelineEvent>> {
         self.query("GetTimelineEvents", |reply| {
             ChatStateCommand::GetTimelineEvents { reply }
@@ -498,6 +532,20 @@ impl ChatStateHandle {
     pub async fn pending_notifications(&self) -> Option<Vec<crate::PendingNotification>> {
         self.query("GetPendingNotifications", |reply| {
             ChatStateCommand::GetPendingNotifications { reply }
+        })
+        .await
+    }
+
+    pub async fn get_pending_allowed_inputs(&self) -> Option<Vec<crate::PendingAllowedInput>> {
+        self.query("GetPendingAllowedInputs", |reply| {
+            ChatStateCommand::GetPendingAllowedInputs { reply }
+        })
+        .await
+    }
+
+    pub async fn submitted_input_payload_hashes(&self) -> Option<BTreeSet<String>> {
+        self.query("GetSubmittedInputPayloadHashes", |reply| {
+            ChatStateCommand::GetSubmittedInputPayloadHashes { reply }
         })
         .await
     }

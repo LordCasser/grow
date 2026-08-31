@@ -28,7 +28,7 @@ impl HookRegistry {
     pub fn has_enabled_hooks(&self, event: HookEventName) -> bool {
         self.hooks_for(event)
             .iter()
-            .any(|s| s.enabled && !crate::trust::is_hook_disabled(&s.name))
+            .any(|s| s.validate().is_ok() && s.enabled && !crate::trust::is_hook_disabled(&s.name))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -41,6 +41,10 @@ impl HookRegistry {
 
     pub fn append_specs(&mut self, specs: Vec<HookSpec>) {
         for spec in specs {
+            if let Err(detail) = spec.validate() {
+                tracing::error!(hook = %spec.name, %detail, "hooks: rejected invalid HookSpec");
+                continue;
+            }
             self.hooks.entry(spec.event).or_default().push(spec);
         }
     }
@@ -192,19 +196,29 @@ pub fn collect_specs_from_sources(
 }
 
 /// Build a registry from specs, deduping on (event, command_raw,
-/// url_raw, configured_matcher) so a hook from several origins runs once; earlier
+/// url_raw, configured_matcher, on_failure) so a hook from several origins runs once; earlier
 /// specs win, so callers place higher-authority first. `timeout_ms`/`extra_env`
 /// are intentionally excluded from the key.
 pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
     let mut hooks: HashMap<HookEventName, Vec<HookSpec>> = HashMap::new();
-    let mut seen_content: std::collections::HashSet<(HookEventName, String, String, String)> =
-        std::collections::HashSet::new();
+    let mut seen_content: std::collections::HashSet<(
+        HookEventName,
+        String,
+        String,
+        String,
+        crate::config::OnFailure,
+    )> = std::collections::HashSet::new();
     for spec in specs {
+        if let Err(detail) = spec.validate() {
+            tracing::error!(hook = %spec.name, %detail, "hooks: rejected invalid HookSpec");
+            continue;
+        }
         let key = (
             spec.event,
             spec.command_raw.clone().unwrap_or_default(),
             spec.url_raw.clone().unwrap_or_default(),
             spec.configured_matcher.clone().unwrap_or_default(),
+            spec.on_failure,
         );
         if seen_content.insert(key) {
             hooks.entry(spec.event).or_default().push(spec);
@@ -372,6 +386,7 @@ mod tests {
             .filter(|e| e.traits().gate != GateKind::Observe)
             .collect();
         let expected: std::collections::HashSet<_> = [
+            HookEventName::UserPromptSubmit,
             HookEventName::PreToolUse,
             HookEventName::Stop,
             HookEventName::SubagentStop,
@@ -458,6 +473,41 @@ mod tests {
         assert!(errors.is_empty());
         let hooks = registry.hooks_for(HookEventName::PreToolUse);
         assert_eq!(hooks.len(), 2);
+    }
+
+    #[test]
+    fn loaded_registry_is_immutable_until_an_explicit_reload() {
+        let project = tempfile::tempdir().unwrap();
+        write_json(
+            project.path(),
+            "project.json",
+            &simple_hook_with_id("pre_tool_use", "reviewed"),
+        );
+
+        let (loaded, errors) = load_hooks(None, Some(project.path()));
+        assert!(errors.is_empty());
+        write_json(
+            project.path(),
+            "project.json",
+            &simple_hook_with_id("pre_tool_use", "mutated"),
+        );
+
+        assert_eq!(
+            loaded.hooks_for(HookEventName::PreToolUse)[0]
+                .command_raw
+                .as_deref(),
+            Some("reviewed.sh"),
+            "a lower-authority filesystem write must not mutate the live registry"
+        );
+        let (reloaded, errors) = load_hooks(None, Some(project.path()));
+        assert!(errors.is_empty());
+        assert_eq!(
+            reloaded.hooks_for(HookEventName::PreToolUse)[0]
+                .command_raw
+                .as_deref(),
+            Some("mutated.sh"),
+            "only the explicit discovery boundary may admit the new file contents"
+        );
     }
 
     #[test]
@@ -838,6 +888,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5_000,
+            on_failure: crate::config::OnFailure::Allow,
             source_dir: PathBuf::from("/tmp"),
             extra_env: Default::default(),
             layer: crate::config::HookProvenance::File,
@@ -855,6 +906,39 @@ mod tests {
                 .matcher
                 .is_none(),
             "no configured pattern must stay match-all (matcher None)"
+        );
+    }
+
+    #[test]
+    fn append_rejects_programmatic_on_failure_block_for_observe_event() {
+        let mut spec = recompile_test_spec("invalid", None);
+        spec.event = HookEventName::SessionStart;
+        spec.on_failure = crate::config::OnFailure::Block;
+        let mut registry = HookRegistry::default();
+        registry.append_specs(vec![spec]);
+        assert!(registry.hooks_for(HookEventName::SessionStart).is_empty());
+    }
+
+    #[test]
+    fn lower_authority_duplicate_cannot_replace_the_frozen_policy() {
+        let mut higher = recompile_test_spec("user:strict", None);
+        higher.timeout_ms = 30_000;
+        higher.extra_env.insert("POLICY".into(), "strict".into());
+        higher.layer = crate::config::HookProvenance::User;
+        let mut lower = recompile_test_spec("project:relaxed", None);
+        lower.timeout_ms = 1;
+        lower.extra_env.insert("POLICY".into(), "relaxed".into());
+        lower.layer = crate::config::HookProvenance::File;
+
+        let registry = registry_from_specs_deduped(vec![higher, lower]);
+        let hooks = registry.hooks_for(HookEventName::PreToolUse);
+
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].name, "user:strict");
+        assert_eq!(hooks[0].timeout_ms, 30_000);
+        assert_eq!(
+            hooks[0].extra_env.get("POLICY").map(String::as_str),
+            Some("strict")
         );
     }
 

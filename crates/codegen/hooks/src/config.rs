@@ -70,6 +70,11 @@ pub struct RawHandler {
     pub url: Option<String>,
     /// Seconds (converted to milliseconds internally).
     pub timeout: Option<u64>,
+    /// Failure policy is accepted only on admission gates. `None` preserves
+    /// whether the field was absent so an explicit `allow` on another event
+    /// is rejected rather than silently treated as the default.
+    #[serde(default)]
+    pub on_failure: Option<OnFailure>,
     /// Extra env vars, merged into [`HookSpec::extra_env`].
     #[serde(default, deserialize_with = "deserialize_optional_string_map")]
     pub env: HashMap<String, String>,
@@ -109,6 +114,24 @@ fn default_timeout_ms(event: crate::event::HookEventName) -> u64 {
 pub enum HandlerType {
     Command,
     Http,
+}
+
+/// Per-handler policy for an execution failure on an admission event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnFailure {
+    #[default]
+    Allow,
+    Block,
+}
+
+impl OnFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Block => "block",
+        }
+    }
 }
 
 impl HandlerType {
@@ -155,6 +178,7 @@ pub struct HookSpec {
     /// Pre-expansion `url` for display; see `command_raw`.
     pub url_raw: Option<String>,
     pub timeout_ms: u64,
+    pub on_failure: OnFailure,
     pub source_dir: PathBuf,
     /// Env injected into the hook process, and consulted by load-time `command`/
     /// `url` expansion. Precedence low→high: user `env` (reserved keys stripped) <
@@ -163,6 +187,26 @@ pub struct HookSpec {
     /// The hook's origin and single source of truth for classification: `File`
     /// (JSON files, agent frontmatter), a config tier, or `Plugin`.
     pub layer: HookProvenance,
+}
+
+impl HookSpec {
+    /// Revalidate programmatic, plugin, and serialized construction at every
+    /// registry boundary. Raw config additionally retains field presence so an
+    /// explicit `allow` on an unsupported event is rejected during parsing.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.on_failure == OnFailure::Block
+            && !matches!(
+                self.event,
+                HookEventName::UserPromptSubmit | HookEventName::PreToolUse
+            )
+        {
+            return Err(format!(
+                "on_failure=block is not allowed for {} hooks",
+                self.event
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Namespace prefixes stamped on hook names, matched by [`hook_origin`]. Shared
@@ -457,6 +501,19 @@ fn build_one_spec(
     compiled_matcher: Option<HookMatcher>,
     ctx: &SpecContext<'_>,
 ) -> Result<HookSpec, HookError> {
+    if handler.on_failure.is_some()
+        && !matches!(
+            event,
+            HookEventName::UserPromptSubmit | HookEventName::PreToolUse
+        )
+    {
+        return Err(HookError::InvalidConfig {
+            name,
+            path: ctx.error_path.to_path_buf(),
+            detail: format!("'on_failure' is not allowed for {event} hooks"),
+        });
+    }
+    let on_failure = handler.on_failure.unwrap_or_default();
     let timeout_ms = handler
         .timeout
         // Untrusted config value: saturate rather than overflow (debug panic /
@@ -515,6 +572,7 @@ fn build_one_spec(
         url,
         url_raw,
         timeout_ms,
+        on_failure,
         source_dir: ctx.source_dir.to_path_buf(),
         extra_env,
         layer: ctx.provenance,
@@ -655,6 +713,51 @@ mod tests {
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].command, Some(PathBuf::from("a.sh")));
         assert_eq!(specs[1].command, Some(PathBuf::from("b.sh")));
+    }
+
+    #[test]
+    fn on_failure_defaults_and_admission_events_accept_block() {
+        let json = r#"{
+            "hooks": {
+                "pre_tool_use": [{"hooks": [
+                    {"type":"command","command":"default.sh"},
+                    {"type":"command","command":"strict.sh","on_failure":"block"}
+                ]}],
+                "user_prompt_submit": [{"hooks": [
+                    {"type":"command","command":"prompt.sh","on_failure":"block"}
+                ]}]
+            }
+        }"#;
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/on-failure.json"));
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(specs[0].on_failure, OnFailure::Block);
+        assert_eq!(specs[1].on_failure, OnFailure::Allow);
+        assert_eq!(specs[2].on_failure, OnFailure::Block);
+    }
+
+    #[test]
+    fn on_failure_field_is_rejected_on_every_non_admission_event() {
+        for event in HookEventName::ALL.iter().copied().filter(|event| {
+            !matches!(
+                event,
+                HookEventName::PreToolUse | HookEventName::UserPromptSubmit
+            )
+        }) {
+            let json = format!(
+                "{{\"hooks\":{{\"{event}\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"x.sh\",\"on_failure\":\"allow\"}}]}}]}}}}"
+            );
+            let (specs, errors) = parse_hook_file(&json, Path::new("/tmp/invalid-on-failure.json"));
+            assert!(specs.is_empty(), "{event} unexpectedly accepted on_failure");
+            assert_eq!(errors.len(), 1, "{event} must produce one config error");
+        }
+    }
+
+    #[test]
+    fn on_failure_unknown_value_is_a_configuration_error() {
+        let json = r#"{"hooks":{"pre_tool_use":[{"hooks":[{"type":"command","command":"x.sh","on_failure":"maybe"}]}]}}"#;
+        let (specs, errors) = parse_hook_file(json, Path::new("/tmp/bad-on-failure.json"));
+        assert!(specs.is_empty());
+        assert_eq!(errors.len(), 1);
     }
 
     #[test]

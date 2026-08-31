@@ -553,6 +553,10 @@ pub struct MvpAgent {
     /// on completion without re-borrowing `&self`. `Send` is required
     /// because the inner `sync_bundle_to_root` now uses `spawn_blocking`.
     bundle_sync_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    /// Agent-start snapshot of the sole deployment-key authority. Explicit
+    /// and background bundle syncs receive clones of this inseparable
+    /// URL+credential capability; chat/model endpoint changes cannot retarget it.
+    bundle_service_credential: Option<crate::remote::BundleServiceCredential>,
     /// Local workspace ops, built lazily via [`Self::ensure_local_workspace_ops`].
     /// The agent never opens Computer Hub as a harness/client; remote cloud
     /// sandboxes are gateway-owned (`gateway_bridge` / `computer_sessions`).
@@ -1427,14 +1431,12 @@ impl MvpAgent {
     ///    against `~/.grow/bundled/` and the manifest.
     pub(crate) fn maybe_sync_bundle_in_background(&self, force: bool) {
         use crate::extensions::bundle::{
-            BUNDLE_SYNC_TTL, bundle_cache_is_fresh, has_bundle_credentials,
-            maybe_sync_bundle_to_root,
+            BUNDLE_SYNC_TTL, bundle_cache_is_fresh, maybe_sync_bundle_to_root,
         };
         use std::sync::atomic::Ordering;
-        let deployment_key = self.deployment_key();
-        if !has_bundle_credentials(deployment_key.as_deref()) {
+        let Some(credential) = self.bundle_service_credential() else {
             return;
-        }
+        };
         let root = crate::bundle::bundled_root();
         if !force && bundle_cache_is_fresh(&root, BUNDLE_SYNC_TTL) {
             tracing::debug!("proactive bundle sync skipped pre-spawn: cache is fresh");
@@ -1448,17 +1450,15 @@ impl MvpAgent {
             tracing::debug!("proactive bundle sync skipped: another sync is already in flight");
             return;
         }
-        let proxy_base_url = self.cli_chat_proxy_base_url();
         let senders: Vec<
             tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
         > = self.sessions.borrow().values().map(|h| h.cmd_tx.clone()).collect();
         tokio::task::spawn_local(async move {
             let result = maybe_sync_bundle_to_root(
                 &root,
-                &proxy_base_url,
-                deployment_key.as_deref(),
+                &credential,
                 force,
-                    BUNDLE_SYNC_TTL,
+                BUNDLE_SYNC_TTL,
                 )
                 .await;
             in_flight.store(false, Ordering::Release);

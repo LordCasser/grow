@@ -948,9 +948,7 @@ fn deferred_model_switch_applied_on_worktree_session_created() {
 fn session_startup_allowed_requires_trust() {
     let mut app = test_app();
     assert!(app.session_startup_allowed());
-    app.trust_state = TrustState::Pending {
-        workspace: PathBuf::from("/x"),
-    };
+    app.trust_state = TrustState::pending_for_test(PathBuf::from("/x"));
     assert!(
         !app.session_startup_allowed(),
         "pending trust must block session startup",
@@ -962,9 +960,7 @@ fn session_startup_allowed_requires_trust() {
 #[test]
 fn finish_trust_resolves_and_replays_startup() {
     let mut app = test_app();
-    app.trust_state = TrustState::Pending {
-        workspace: PathBuf::from("/x"),
-    };
+    app.trust_state = TrustState::pending_for_test(PathBuf::from("/x"));
     app.deferred_startup.session =
         Some(crate::app::session_startup::DeferredSessionStartup::Load {
             session_id: "deferred-session".into(),
@@ -995,14 +991,55 @@ fn trust_folder_grants_and_resolves() {
     let repo = tempfile::tempdir().expect("repo tempdir");
     let workspace = workspace_key(repo.path());
     let mut app = test_app();
+    app.cwd = repo.path().to_path_buf();
     app.trust_state = TrustState::Pending {
         workspace: workspace.clone(),
+        expected_identity: workspace::trust::workspace_identity_for_cwd(repo.path(), &workspace)
+            .unwrap(),
     };
     let _ = dispatch(Action::TrustFolder, &mut app);
     assert!(matches!(app.trust_state, TrustState::Done));
     assert!(
         TrustStore::load().is_trusted(&workspace),
         "accepting must persist the trust grant for the workspace",
+    );
+}
+
+/// A trust answer applies to the entity shown before the wait, not whatever
+/// later appears at the same pathname.
+#[serial_test::serial(GROW_HOME)]
+#[test]
+fn trust_folder_rejects_confirmation_period_replacement() {
+    use workspace::trust::{TrustStore, workspace_identity_for_cwd, workspace_key};
+
+    let home = tempfile::tempdir().expect("home tempdir");
+    unsafe { std::env::set_var("GROW_HOME", home.path()) };
+    simulate_release_build();
+
+    let root = tempfile::tempdir().expect("repo parent tempdir");
+    let repo = root.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git2::Repository::init(&repo).unwrap();
+    let workspace = workspace_key(&repo);
+    let expected_identity = workspace_identity_for_cwd(&repo, &workspace).unwrap();
+
+    let mut app = test_app();
+    app.cwd = repo.clone();
+    app.trust_state = TrustState::Pending {
+        workspace: workspace.clone(),
+        expected_identity,
+    };
+
+    std::fs::rename(&repo, root.path().join("old-repo")).unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    git2::Repository::init(&repo).unwrap();
+
+    let effects = dispatch(Action::TrustFolder, &mut app);
+    assert!(effects.is_empty());
+    assert!(matches!(app.trust_state, TrustState::Pending { .. }));
+    assert!(
+        !TrustStore::load().is_trusted_for_cwd(&repo, &workspace),
+        "accepting the stale question must not trust the replacement",
     );
 }
 /// Regression / negative-space: a session-creating dispatch (e.g. the
@@ -1012,9 +1049,7 @@ fn trust_folder_grants_and_resolves() {
 #[test]
 fn new_session_is_gated_while_trust_pending() {
     let mut app = test_app();
-    app.trust_state = TrustState::Pending {
-        workspace: PathBuf::from("/x"),
-    };
+    app.trust_state = TrustState::pending_for_test(PathBuf::from("/x"));
     assert!(app.agents.is_empty());
     let effects = dispatch(Action::NewSession, &mut app);
     assert!(
@@ -1079,9 +1114,7 @@ fn drain_clears_all_startup_fields_even_when_intents_coexist() {
 fn deferred_worktree_ref_replays_through_gate() {
     let mut app = test_app();
     app.cwd_has_git_ancestor = true;
-    app.trust_state = TrustState::Pending {
-        workspace: PathBuf::from("/x"),
-    };
+    app.trust_state = TrustState::pending_for_test(PathBuf::from("/x"));
     let effects = dispatch(
         Action::NewWorktreeSession {
             load_session_id: None,
@@ -1124,9 +1157,7 @@ fn deferred_worktree_ref_replays_through_gate() {
 fn gated_worktree_without_load_id_preserves_stashed_resume() {
     let mut app = test_app();
     app.cwd_has_git_ancestor = true;
-    app.trust_state = TrustState::Pending {
-        workspace: PathBuf::from("/x"),
-    };
+    app.trust_state = TrustState::pending_for_test(PathBuf::from("/x"));
     let effects = dispatch(Action::LoadSession("resume-me".into(), None), &mut app);
     assert!(effects.is_empty(), "a gated resume produces no effects");
     assert_eq!(
@@ -1182,9 +1213,7 @@ fn gated_worktree_without_load_id_preserves_stashed_resume() {
 fn gated_worktree_with_none_companions_preserves_stashed_label_and_ref() {
     let mut app = test_app();
     app.cwd_has_git_ancestor = true;
-    app.trust_state = TrustState::Pending {
-        workspace: PathBuf::from("/x"),
-    };
+    app.trust_state = TrustState::pending_for_test(PathBuf::from("/x"));
     let effects = dispatch(
         Action::NewWorktreeSession {
             load_session_id: Some("mysess".into()),

@@ -270,7 +270,22 @@ pub enum TrustState {
         /// The resolved workspace root (git root) that is trusted on accept and
         /// is shown in the question.
         workspace: std::path::PathBuf,
+        /// Complete filesystem identity captured before the question became
+        /// visible. Acceptance persists only this identity.
+        expected_identity: workspace::trust::WorkspaceIdentity,
     },
+}
+
+#[cfg(test)]
+impl TrustState {
+    fn pending_for_test(workspace: std::path::PathBuf) -> Self {
+        let expected_identity = workspace::trust::workspace_identity(&std::env::temp_dir())
+            .expect("test temp directory must be identifiable");
+        Self::Pending {
+            workspace,
+            expected_identity,
+        }
+    }
 }
 /// Result of `handle_input`. Tells the event loop what to do next.
 #[derive(Debug)]
@@ -6073,9 +6088,7 @@ pub(crate) mod tests {
     fn welcome_trust_decline_keys_quit() {
         for code in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
             let mut app = test_app();
-            app.trust_state = TrustState::Pending {
-                workspace: std::path::PathBuf::from("/tmp/x"),
-            };
+            app.trust_state = TrustState::pending_for_test(std::path::PathBuf::from("/tmp/x"));
             let outcome = app.handle_input(&key_event(code, KeyModifiers::NONE));
             assert!(
                 matches!(outcome, InputOutcome::Action(Action::Quit)),
@@ -6083,9 +6096,7 @@ pub(crate) mod tests {
             );
         }
         let mut app = test_app();
-        app.trust_state = TrustState::Pending {
-            workspace: std::path::PathBuf::from("/tmp/x"),
-        };
+        app.trust_state = TrustState::pending_for_test(std::path::PathBuf::from("/tmp/x"));
         let outcome = app.handle_input(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Action(Action::TrustFolder)));
     }

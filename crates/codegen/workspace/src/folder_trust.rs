@@ -9,18 +9,19 @@
 //!
 //! ## Precedence (canonical — see [`decide`])
 //! 1. Feature flag OFF  → trusted (no gating; preserves prior behavior).
-//! 2. Store (self/ancestor recorded trusted) → trusted. An explicit `--trust`
-//!    grant is persisted to the store up front (see [`grant_folder_trust`]), so
-//!    it is honored here.
-//! 3. Key unrecordable (an over-broad root — the user's own `$HOME` / filesystem
+//! 2. Workspace/source entity cannot be identified → untrusted (fail closed).
+//! 3. Store (this exact workspace entity recorded trusted) → trusted. An
+//!    explicit `--trust` grant is persisted to the store up front (see
+//!    [`grant_folder_trust`]), so it is honored here.
+//! 4. Key unrecordable (an over-broad root — the user's own `$HOME` / filesystem
 //!    root / non-absolute — that the store refuses to persist) → trusted: it
 //!    can't be durably gated, so gating would re-prompt forever on a key that can
 //!    never persist. See [`crate::trust::is_unsafe_trust_root`].
-//! 4. No repo-local code-exec configs present → trusted (nothing to gate).
-//! 5. Interactive TTY   → prompt the user (y/N).
-//! 6. Otherwise (headless) → untrusted.
+//! 5. No repo-local code-exec configs present → trusted (nothing to gate).
+//! 6. Interactive TTY   → prompt the user (y/N).
+//! 7. Otherwise (headless) → untrusted.
 //!
-//! (How the consume side caches this verdict — e.g. that the rule-4 allow is
+//! (How the consume side caches this verdict — e.g. that the rule-5 allow is
 //! provisional and re-checked rather than cached — is a `shell`
 //! concern, documented there.)
 
@@ -30,7 +31,7 @@ use std::path::Path;
 use config_types::{BoolFlag, RemoteSettings};
 use toml::Value as TomlValue;
 
-use crate::trust::{TrustStore, workspace_key};
+use crate::trust::{TrustStore, WorkspaceIdentity, workspace_identity_for_cwd, workspace_key};
 
 /// The pure trust outcome for a set of inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,8 +45,11 @@ pub enum TrustOutcome {
 }
 
 /// Inputs to the pure [`decide`] precedence function.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DecideInputs {
+    /// Complete identity observed before the decision/prompt. This exact value
+    /// must be carried through persistence; `None` always fails closed.
+    pub expected_identity: Option<WorkspaceIdentity>,
     pub store_trusted: bool,
     pub repo_configs_present: bool,
     pub is_interactive: bool,
@@ -61,6 +65,9 @@ pub struct DecideInputs {
 pub fn decide(feature_enabled: bool, i: &DecideInputs) -> TrustOutcome {
     if !feature_enabled {
         return TrustOutcome::Trusted;
+    }
+    if i.expected_identity.is_none() {
+        return TrustOutcome::Untrusted;
     }
     if i.store_trusted {
         return TrustOutcome::Trusted;
@@ -85,7 +92,20 @@ pub fn decide(feature_enabled: bool, i: &DecideInputs) -> TrustOutcome {
 /// `compute` and launch-dir resolve so the store read and repo-config scan
 /// cannot drift across callers.
 pub fn decide_inputs(cwd: &Path, key: &Path) -> DecideInputs {
-    decide_inputs_with_interactive(cwd, key, is_interactive())
+    let expected_identity = workspace_identity_for_cwd(cwd, key).ok();
+    gather_decide_inputs(cwd, key, is_interactive(), expected_identity)
+}
+
+/// Gather decision inputs for an identity already captured at admission.
+///
+/// This prevents cache lookup, prompt display, and persistence from silently
+/// switching to a replacement entity through independent path re-resolution.
+pub fn decide_inputs_with_expected_identity(
+    cwd: &Path,
+    key: &Path,
+    expected_identity: Option<WorkspaceIdentity>,
+) -> DecideInputs {
+    gather_decide_inputs(cwd, key, is_interactive(), expected_identity)
 }
 
 /// Like [`decide_inputs`] but with caller-supplied interactivity, so the gather
@@ -99,14 +119,41 @@ pub fn decide_inputs_with_interactive(
     key: &Path,
     is_interactive: bool,
 ) -> DecideInputs {
+    let expected_identity = workspace_identity_for_cwd(cwd, key).ok();
+    gather_decide_inputs(cwd, key, is_interactive, expected_identity)
+}
+
+fn gather_decide_inputs(
+    cwd: &Path,
+    key: &Path,
+    is_interactive: bool,
+    expected_identity: Option<WorkspaceIdentity>,
+) -> DecideInputs {
+    let mut expected_identity = expected_identity.filter(|expected| {
+        workspace_identity_for_cwd(cwd, key).is_ok_and(|current| current == *expected)
+    });
+    let mut store_trusted = expected_identity
+        .as_ref()
+        .is_some_and(|identity| TrustStore::load().is_trusted_identity(key, identity));
+    let repo_configs_present = repo_configs_present(cwd);
+    // The config scan can take long enough for a same-path checkout replacement.
+    // Revalidate the same captured identity after all decision I/O; a mismatch
+    // clears both identity and any store match derived from it.
+    if expected_identity.as_ref().is_some_and(|expected| {
+        !workspace_identity_for_cwd(cwd, key).is_ok_and(|current| current == *expected)
+    }) {
+        expected_identity = None;
+        store_trusted = false;
+    }
     DecideInputs {
-        store_trusted: TrustStore::load().is_trusted(key),
+        expected_identity,
+        store_trusted,
         // Deliberate second discover: the caller's `key` came from `workspace_key`
         // (its own git2 discover), and `repo_configs_present` → `RepoDirChain::resolve`
         // discovers the same repo again. Collapsing the two would mean threading the
         // resolved root into key derivation (rippling `workspace_key` repo-wide) — out
         // of scope; NOT the redundant discovers this change already removed.
-        repo_configs_present: repo_configs_present(cwd),
+        repo_configs_present,
         is_interactive,
         // An over-broad key (home / fs-root / non-absolute) can never be recorded
         // by the store, so decide() trusts it rather than prompt on a key that
@@ -187,7 +234,11 @@ pub fn grant_folder_trust(cwd: &Path) {
     if folder_trust_inert() {
         return;
     }
-    persist_trust(&mut TrustStore::load(), &workspace_key(cwd));
+    let key = workspace_key(cwd);
+    let Ok(expected_identity) = workspace_identity_for_cwd(cwd, &key) else {
+        return;
+    };
+    persist_trust(&mut TrustStore::load(), cwd, &key, &expected_identity);
 }
 
 /// Store-only half of revoking trust for `cwd`'s workspace: persist an explicit
@@ -195,21 +246,23 @@ pub fn grant_folder_trust(cwd: &Path) {
 /// it had been trusted. The in-process `DECISIONS` cache downgrade is the shell
 /// wrapper's job (the cache lives there).
 ///
-/// Writing a store deny for a never-trusted folder would record a most-specific
-/// child DENY that poisons a future ancestor `set_trusted` cascade — so that
-/// write stays gated. Symmetric with [`grant_folder_trust`].
+/// A revoke only records an explicit deny when it actually revokes a matching
+/// grant; undecided/untrusted workspaces remain unchanged. Symmetric with
+/// [`grant_folder_trust`].
 pub fn revoke_folder_trust_store(cwd: &Path) -> bool {
     // Local/dev builds never wrote the store, so there is nothing to revoke.
     if folder_trust_inert() {
         return false;
     }
     let key = workspace_key(cwd);
+    let Ok(expected_identity) = workspace_identity_for_cwd(cwd, &key) else {
+        return false;
+    };
     let mut store = TrustStore::load();
-    let was_trusted = store.is_trusted(&key);
-    // Persist an explicit deny ONLY for an actually-trusted folder: writing one
-    // for a never-trusted folder would record a most-specific child DENY that
-    // overrides a future ancestor `set_trusted` grant (cascade poisoning).
-    if was_trusted && let Err(e) = store.set_untrusted(&key) {
+    let was_trusted = store.is_trusted_identity(&key, &expected_identity);
+    // Persist a deny only when this call actually revokes the current entity's
+    // grant; do not manufacture records for undecided/untrusted workspaces.
+    if was_trusted && let Err(e) = store.set_untrusted_identity(&key, expected_identity) {
         tracing::warn!(
             path = %key.display(),
             error = %e,
@@ -219,13 +272,37 @@ pub fn revoke_folder_trust_store(cwd: &Path) -> bool {
     was_trusted
 }
 
-pub fn persist_trust(store: &mut TrustStore, key: &Path) {
-    if let Err(e) = store.set_trusted(key) {
+pub fn persist_trust(
+    store: &mut TrustStore,
+    cwd: &Path,
+    key: &Path,
+    expected_identity: &WorkspaceIdentity,
+) -> bool {
+    if !workspace_identity_for_cwd(cwd, key).is_ok_and(|current| current == *expected_identity) {
         tracing::warn!(
             path = %key.display(),
-            error = %e,
-            "folder trust: failed to persist trust decision"
+            "folder trust: workspace identity changed before persistence; refusing grant"
         );
+        return false;
+    }
+    match store.set_trusted_identity(key, expected_identity.clone()) {
+        Ok(()) => {
+            // Revalidate after the write so a source/repository replacement in
+            // the validation-to-persist window cannot make this call report a
+            // usable grant for a different entity. The record contains the
+            // frozen identity, so a replacement during the write also remains
+            // untrusted on every later store read.
+            workspace_identity_for_cwd(cwd, key).is_ok_and(|current| current == *expected_identity)
+                && store.is_trusted_identity(key, expected_identity)
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %key.display(),
+                error = %error,
+                "folder trust: failed to persist trust decision"
+            );
+            false
+        }
     }
 }
 
@@ -407,6 +484,9 @@ mod tests {
 
     fn inputs() -> DecideInputs {
         DecideInputs {
+            expected_identity: Some(
+                crate::trust::workspace_identity(&std::env::temp_dir()).unwrap(),
+            ),
             store_trusted: false,
             repo_configs_present: true,
             is_interactive: false,
@@ -423,6 +503,16 @@ mod tests {
     #[test]
     fn trust_precedence_is_explicit() {
         assert_eq!(decide(false, &inputs()), TrustOutcome::Trusted);
+        assert_eq!(
+            decide(
+                true,
+                &DecideInputs {
+                    expected_identity: None,
+                    ..inputs()
+                },
+            ),
+            TrustOutcome::Untrusted,
+        );
         assert_eq!(
             decide(
                 true,
@@ -464,6 +554,27 @@ mod tests {
             TrustOutcome::Prompt,
         );
         assert_eq!(decide(true, &inputs()), TrustOutcome::Untrusted);
+    }
+
+    #[test]
+    fn captured_identity_rejects_confirmation_period_replacement() {
+        let parent = tempfile::tempdir().unwrap();
+        let repo = parent.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        let key = workspace_key(&repo);
+        let inputs = decide_inputs_with_interactive(&repo, &key, true);
+        let expected_identity = inputs
+            .expected_identity
+            .expect("workspace must be identified before prompting");
+
+        std::fs::rename(&repo, parent.path().join("old-repo")).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        git2::Repository::init(&repo).unwrap();
+
+        let mut store = TrustStore::load_from(parent.path().join("trust.toml"));
+        assert!(!persist_trust(&mut store, &repo, &key, &expected_identity));
+        assert!(!store.is_trusted_for_cwd(&repo, &key));
     }
 
     #[test]

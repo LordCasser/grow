@@ -1970,9 +1970,10 @@ mod continuation_step_tests {
                     .start_turn(crate::session::events::Event::TurnStarted {
                         session_id: actor.session_id_string(),
                         turn_number: 1,
+                        input_ids: Vec::new(),
                         identity: chat_state::TurnIdentity {
                             origin: "user".into(),
-                            turn_kind: "regular".into(),
+                            turn_kind: "internal".into(),
                             goal_id: None,
                             goal_definition_revision: None,
                             stage_id: None,

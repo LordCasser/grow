@@ -1,5 +1,64 @@
 #![allow(dead_code)]
 use super::*;
+
+#[cfg(test)]
+pub(crate) async fn admit_test_human_input(actor: &SessionActor, label: &str) -> Vec<String> {
+    let input_id = format!("test-input-{label}");
+    actor
+        .chat_state_handle
+        .submit_input_durably(
+            input_id.clone(),
+            chat_state::InputIntent::Prompt,
+            chat_state::InputPayloadRef {
+                blake3: blake3::hash(label.as_bytes()).to_hex().to_string(),
+                bytes: label.len().max(1) as u64,
+            },
+        )
+        .await
+        .unwrap();
+    let occurrence_id = format!("test-hook-{label}");
+    actor
+        .chat_state_handle
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Hook(
+            chat_state::HookEvent::Triggered {
+                occurrence_id: occurrence_id.clone(),
+                event: chat_state::HookEventType::UserPromptSubmit,
+                gate: chat_state::HookGateKind::Prompt,
+                cause: chat_state::HookCause::Input {
+                    input_id: input_id.clone(),
+                },
+                config_generation: 1,
+                handlers: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    actor
+        .chat_state_handle
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Hook(
+            chat_state::HookEvent::Completed {
+                occurrence_id,
+                decision: chat_state::HookAggregateDecision::Prompt {
+                    decision: chat_state::HookGateDecision::Allow,
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    actor
+        .chat_state_handle
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Input(
+            chat_state::InputEvent::AdmissionResolved {
+                input_id: input_id.clone(),
+                decision: chat_state::InputAdmissionDecision::Allow,
+                route: Some(chat_state::InputRoute::Fifo),
+                supersedes: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    vec![input_id]
+}
 /// Wrap `id` in a shared auth-method handle for `SessionActor` test literals
 /// (the field is now a shared live handle, not an owned id).
 pub(crate) fn test_auth_method_id(id: &str) -> crate::agent::auth_method::SharedAuthMethodId {
@@ -22,6 +81,7 @@ pub(crate) async fn begin_test_causal_turn(actor: &SessionActor) {
             goal_definition_revision: None,
             stage_id: None,
         },
+        Vec::new(),
     )
     .await;
 }
@@ -30,6 +90,7 @@ pub(crate) async fn begin_test_causal_turn(actor: &SessionActor) {
 async fn begin_test_causal_turn_with_identity(
     actor: &SessionActor,
     identity: chat_state::TurnIdentity,
+    input_ids: Vec<String>,
 ) {
     actor.events.begin_turn();
     actor
@@ -37,6 +98,7 @@ async fn begin_test_causal_turn_with_identity(
         .start_turn(crate::session::events::Event::TurnStarted {
             session_id: actor.session_id_string(),
             turn_number: 1,
+            input_ids,
             identity,
             model_id: "test".into(),
             permission_mode: actor.permissions.mode(),
@@ -75,7 +137,12 @@ pub(crate) async fn begin_test_active_causal_turn_with_origin(
     origin: crate::session::PromptOrigin,
     turn_kind: crate::session::TurnKind,
 ) {
-    begin_test_causal_turn_with_identity(actor, origin.turn_identity(turn_kind)).await;
+    let input_ids = if turn_kind == crate::session::TurnKind::User {
+        admit_test_human_input(actor, prompt_id).await
+    } else {
+        Vec::new()
+    };
+    begin_test_causal_turn_with_identity(actor, origin.turn_identity(turn_kind), input_ids).await;
     let mut task = running_task_stub(prompt_id);
     task.origin = origin;
     task.turn_kind = turn_kind;
@@ -135,6 +202,7 @@ pub(crate) async fn record_test_prompt(actor: &SessionActor, prompt_text: &str) 
         .record_timeline_event(chat_state::TimelineEventKind::Turn(
             chat_state::TurnEvent::Started {
                 id,
+                input_ids: Vec::new(),
                 identity: chat_state::TurnIdentity {
                     origin: "user".into(),
                     turn_kind: "internal".into(),
@@ -416,6 +484,7 @@ pub(crate) async fn create_test_actor_ex(
             .expect("pin test session directory"),
         ),
         notification_artifact_gate: TokioMutex::new(()),
+        input_artifact_gate: TokioMutex::new(()),
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
         state,
@@ -584,6 +653,7 @@ pub(crate) async fn create_test_actor_ex(
         hooks: HookSessionState {
             registry: std::cell::RefCell::new(None),
             client_hooks: Default::default(),
+            generation: std::cell::Cell::new(1),
             resolved_workspace_root: String::new(),
             vcs_kind: workspace::session::git::VcsKind::Git,
             load_errors: std::cell::RefCell::new(Vec::new()),
@@ -643,6 +713,7 @@ pub(crate) fn user_item_with_rx(
     let (respond_to, rx) = oneshot::channel();
     let text = format!("text for {id}");
     let item = InputItem {
+        input_ids: Vec::new(),
         notification_ids: Vec::new(),
         prompt_id: id.to_string(),
         turn_kind: crate::session::TurnKind::User,
@@ -681,6 +752,7 @@ pub(crate) fn input_with_origin_rx(
     let (respond_to, rx) = oneshot::channel();
     let verbatim = origin.is_synthetic();
     let item = InputItem {
+        input_ids: Vec::new(),
         notification_ids: Vec::new(),
         prompt_id: prompt_id.to_string(),
         turn_kind: if origin.is_synthetic() {

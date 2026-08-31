@@ -2104,7 +2104,10 @@ fn initialize_advertises_stable_v1_coordination_capability() {
             .and_then(|meta| meta.get("grow/coordination"))
             .expect("coordination capability");
         assert_eq!(coordination["version"], 1);
-        assert_eq!(coordination["operations"], serde_json::json!(["list", "ask", "cancel"]));
+        assert_eq!(
+            coordination["operations"],
+            serde_json::json!(["list", "ask", "cancel"])
+        );
         assert_eq!(coordination["localOnly"], true);
         assert_eq!(coordination["audit"], true);
     });

@@ -109,3 +109,23 @@ pub fn assemble_hooks(
         errors,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_hook_sources_require_a_fresh_trust_verdict() {
+        let paths = HookSourcePaths {
+            global: vec![PathBuf::from("/global/hooks")],
+            project: vec![PathBuf::from("/project/.grow/hooks")],
+        };
+
+        let (global, project) = paths.as_sources(false);
+        assert_eq!(global.len(), 1);
+        assert!(project.is_empty());
+
+        let (_, project) = paths.as_sources(true);
+        assert_eq!(project.len(), 1);
+    }
+}

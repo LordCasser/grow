@@ -36,7 +36,8 @@ pub mod storage;
 pub mod text_utils;
 pub mod watcher;
 
-pub use backend::{EndpointScopedCredentials, MemoryBackendImpl, MemoryBackendParams};
+pub use backend::{MemoryBackendImpl, MemoryBackendParams};
+pub use embedding::EmbeddingEndpoint;
 pub use index::{MemoryIndex, init_sqlite_vec};
 pub use storage::{MemoryScope, MemoryStorage};
 

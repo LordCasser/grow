@@ -199,6 +199,11 @@ fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id()
                         Duration::from_secs(60),
                         actor.handle_prompt(
                             "chat-history-integrity",
+                            crate::session::actor::tests::support::admit_test_human_input(
+                                &actor,
+                                "chat-history-integrity",
+                            )
+                            .await,
                             crate::session::PromptOrigin::User,
                             Vec::new(),
                             crate::session::TurnKind::User,

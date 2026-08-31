@@ -138,6 +138,7 @@ impl SessionActor {
     pub(in crate::session::actor) async fn handle_prompt(
         self: &Arc<Self>,
         prompt_id: &str,
+        input_ids: Vec<String>,
         origin: super::super::PromptOrigin,
         notification_ids: Vec<String>,
         turn_kind: TurnKind,
@@ -149,6 +150,7 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         persist_ack: Option<oneshot::Sender<()>>,
     ) -> PromptTurnResult {
+        let turn_input_ids = input_ids;
         let handle_prompt_start = std::time::Instant::now();
         let prompt_length: usize = prompt_blocks
             .iter()
@@ -287,6 +289,7 @@ impl SessionActor {
             .start_turn(crate::session::events::Event::TurnStarted {
                 session_id: self.session_id_string(),
                 turn_number,
+                input_ids: turn_input_ids.clone(),
                 identity: turn_identity,
                 model_id: model_id.clone(),
                 permission_mode,
@@ -310,6 +313,37 @@ impl SessionActor {
             ));
         }
         super::super::tasks_cancel::signal_durable_turn_start(true);
+        if origin.is_synthetic() && !matches!(origin, super::super::PromptOrigin::HostCommand) {
+            let Some(turn) = self.events.current_turn() else {
+                return Err(crate::session::commands::fatal_turn_boundary_error(
+                    "start",
+                    "synthetic prompt hook has no durable Turn cause",
+                ));
+            };
+            let cause = if let [notification_id] = notification_ids.as_slice() {
+                chat_state::HookCause::Notification {
+                    notification_id: notification_id.clone(),
+                }
+            } else {
+                chat_state::HookCause::Turn { turn }
+            };
+            let envelope = self.make_hook_envelope(
+                ::hooks::event::HookEventName::UserPromptSubmit,
+                Some(prompt_id.to_string()),
+                ::hooks::event::HookPayload::UserPromptSubmit {
+                    prompt: Some(original_prompt_text.clone()),
+                },
+            );
+            if let Err(error) = self
+                .dispatch_prompt_hook(cause, envelope, ::hooks::event::GateKind::Observe)
+                .await
+            {
+                return Err(crate::session::commands::fatal_turn_boundary_error(
+                    "start",
+                    format!("synthetic prompt hook lifecycle was not durable: {error}"),
+                ));
+            }
+        }
         // SUPPRESS_TURN is scoped to the durable Timeline turn, not to one
         // invocation of the model/recovery wrapper. Stop-hook continuations
         // and completion recovery may sample several times under this same
@@ -330,7 +364,8 @@ impl SessionActor {
         let mut turn_model_id = None;
         let mut turn_timer = None;
         let mut timeline_error_override = None;
-        let execution: Result<AdmittedTurnSuccess, acp::Error> = async {
+        let mut turn_input_settled = false;
+        let mut execution: Result<AdmittedTurnSuccess, acp::Error> = async {
             let implicit_goal_set = should_capture_implicit_goal_objective(
                 &origin,
                 admitted_behavior == tool_types::BehaviorId::Goal,
@@ -656,7 +691,6 @@ impl SessionActor {
                         .data(format!("failed to save user images to assets dir: {e}"))
                 })?
             };
-            let prompt_text_for_hook = user_message.clone();
             {
                 if matches!(origin, super::super::PromptOrigin::User) {
                     self.maybe_inject_interrupt_reminder().await;
@@ -707,26 +741,40 @@ impl SessionActor {
                 for image in &extra_images {
                     user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
                 }
-                let input_commit = if notification_ids.is_empty() {
-                    self.chat_state_handle
-                        .push_user_message_durably(user_chat)
-                        .await
-                } else {
+                let input_commit = if matches!(origin, super::super::PromptOrigin::User)
+                    && !turn_input_ids.is_empty()
+                {
                     let turn = self.events.current_turn().ok_or_else(|| {
-                        chat_state::TimelineWriteError::Invalid(
-                            chat_state::TimelineError::InvalidNotification,
-                        )
+                        "human input commit has no durable Turn reservation".to_string()
                     });
                     match turn {
                         Ok(turn) => self
-                            .consume_notifications_durably(
-                                notification_ids.clone(),
-                                turn,
-                                Some(user_chat),
-                            )
-                            .await
-                            .map(|_| ()),
+                            .consume_fifo_inputs(turn_input_ids.clone(), turn, user_chat)
+                            .await,
                         Err(error) => Err(error),
+                    }
+                } else {
+                    if notification_ids.is_empty() {
+                        self.chat_state_handle
+                            .push_user_message_durably(user_chat)
+                            .await
+                            .map_err(|error| error.to_string())
+                    } else {
+                        let turn = self.events.current_turn().ok_or_else(|| {
+                            "notification input commit has no durable Turn".to_string()
+                        });
+                        match turn {
+                            Ok(turn) => self
+                                .consume_notifications_durably(
+                                    notification_ids.clone(),
+                                    turn,
+                                    Some(user_chat),
+                                )
+                                .await
+                                .map(|_| ())
+                                .map_err(|error| error.to_string()),
+                            Err(error) => Err(error),
+                        }
                     }
                 };
                 if let Err(error) = input_commit {
@@ -746,6 +794,27 @@ impl SessionActor {
                     return Err(acp::Error::internal_error()
                         .data(format!("user message was not durably recorded: {error}")));
                 }
+                if matches!(origin, super::super::PromptOrigin::User)
+                    && !turn_input_ids.is_empty()
+                {
+                    turn_input_settled = true;
+                }
+                if matches!(origin, super::super::PromptOrigin::User)
+                    && !turn_input_ids.is_empty()
+                    && !notification_ids.is_empty()
+                {
+                    let Some(turn) = self.events.current_turn() else {
+                        return Err(acp::Error::internal_error()
+                            .data("notification drain lost the active Turn"));
+                    };
+                    self.consume_notifications_durably(notification_ids.clone(), turn, None)
+                        .await
+                        .map_err(|error| {
+                            acp::Error::internal_error().data(format!(
+                                "notifications were not durably admitted: {error}"
+                            ))
+                        })?;
+                }
                 if !notification_ids.is_empty() {
                     self.drain_active_notifications().await;
                 }
@@ -763,17 +832,6 @@ impl SessionActor {
             if matches!(origin, super::super::PromptOrigin::User) {
                 self.schedule_session_title(original_prompt_text.clone())
                     .await;
-            }
-            if !matches!(origin, super::super::PromptOrigin::HostCommand) {
-                self.dispatch_hook(
-                    ::hooks::event::HookEventName::UserPromptSubmit,
-                    ::hooks::event::HookPayload::UserPromptSubmit {
-                        prompt: Some(prompt_text_for_hook),
-                    },
-                    Some(prompt_id),
-                    None,
-                )
-                .await;
             }
             turn_scope_guard = Some(TurnSubagentScopeGuard::new(
                 self.current_prompt_id.clone(),
@@ -853,6 +911,21 @@ impl SessionActor {
             result.map(AdmittedTurnSuccess::Model)
         }
         .await;
+        if !turn_input_settled && !turn_input_ids.is_empty() {
+            let handled = match self.events.current_turn() {
+                Some(turn) => {
+                    self.complete_unmodeled_fifo_inputs(turn_input_ids.clone(), turn)
+                        .await
+                }
+                None => Err("host-routed input lost its durable Turn reservation".into()),
+            };
+            if let Err(error) = handled {
+                execution = Err(crate::session::commands::fatal_turn_boundary_error(
+                    "input_terminal",
+                    format!("unmodeled input was not durably completed: {error}"),
+                ));
+            }
+        }
         let turn_duration_ms = turn_timer
             .map(|timer| timer.elapsed().as_millis() as u64)
             .unwrap_or_default();
@@ -1001,6 +1074,7 @@ impl SessionActor {
                         .map(|(_, context)| context.clone()),
                 ),
             };
+        let terminal_turn = self.events.current_turn();
         // Transfer foreground ownership before the durable terminal command is
         // enqueued. Stop may still arrive while the writer acknowledgement or
         // post-turn hooks are pending, but it must then observe Settling and
@@ -1075,21 +1149,27 @@ impl SessionActor {
         };
         let turn_model_id = turn_model_id.unwrap_or(model_id);
         let doom_event_model = turn_model_id.clone();
+        let mut hook_timeline_error = None;
         match &result {
             Ok(TurnOutcome::Completed { refusal, .. }) => {
                 if let Some(explanation) = refusal {
                     let details = (!explanation.is_empty()).then(|| explanation.clone());
-                    self.dispatch_hook(
-                        ::hooks::event::HookEventName::StopFailure,
-                        ::hooks::event::HookPayload::StopFailure {
-                            error: ::hooks::event::StopFailureKind::InvalidRequest,
-                            error_details: details.clone(),
-                            last_assistant_message: details,
-                        },
-                        Some(prompt_id),
-                        None,
-                    )
-                    .await;
+                    if let Some(turn) = terminal_turn
+                        && let Err(error) = self
+                            .dispatch_observe_hook(
+                                ::hooks::event::HookEventName::StopFailure,
+                                chat_state::HookCause::Turn { turn },
+                                ::hooks::event::HookPayload::StopFailure {
+                                    error: ::hooks::event::StopFailureKind::InvalidRequest,
+                                    error_details: details.clone(),
+                                    last_assistant_message: details,
+                                },
+                                Some(prompt_id.to_owned()),
+                            )
+                            .await
+                    {
+                        hook_timeline_error = Some(error);
+                    }
                 }
                 self.send_after_turn_event(tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
@@ -1224,6 +1304,22 @@ impl SessionActor {
                 });
             }
             Err(err) => {
+                if let Some(turn) = terminal_turn
+                    && let Err(error) = self
+                        .dispatch_observe_hook(
+                            ::hooks::event::HookEventName::StopFailure,
+                            chat_state::HookCause::Turn { turn },
+                            ::hooks::event::HookPayload::StopFailure {
+                                error: Self::stop_failure_error_type(err),
+                                error_details: Self::turn_error_detail(err),
+                                last_assistant_message: Some(Self::format_turn_error_message(err)),
+                            },
+                            Some(prompt_id.to_owned()),
+                        )
+                        .await
+                {
+                    hook_timeline_error = Some(error);
+                }
                 self.send_after_turn_event(tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
                     outcome: tool_protocol::turn_hook::TurnHookOutcome::Error,
@@ -1250,17 +1346,6 @@ impl SessionActor {
                     cancellation_category: None,
                     error_category: Some(error_category),
                 });
-                self.dispatch_hook(
-                    ::hooks::event::HookEventName::StopFailure,
-                    ::hooks::event::HookPayload::StopFailure {
-                        error: Self::stop_failure_error_type(err),
-                        error_details: Self::turn_error_detail(err),
-                        last_assistant_message: Some(Self::format_turn_error_message(err)),
-                    },
-                    Some(prompt_id),
-                    None,
-                )
-                .await;
             }
         }
         ::diagnostics::session_ctx::log_session_event(
@@ -1321,6 +1406,13 @@ impl SessionActor {
                 .notifications
                 .persistence_tx
                 .send(PersistenceMsg::RewindPoint(rewind_point));
+        }
+        if let Some(error) = hook_timeline_error {
+            drop(turn_scope_guard);
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "hook lifecycle",
+                error.to_string(),
+            ));
         }
         match result {
             Ok(outcome) => {

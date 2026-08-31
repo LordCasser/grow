@@ -1540,6 +1540,7 @@ impl SessionActor {
         state.foreground = ForegroundState::RegularTurn(AgentTask::new_prompt(
             self.clone(),
             prompt_id.clone(),
+            Vec::new(),
             origin.clone(),
             None,
             notification_ids,

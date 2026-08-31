@@ -142,7 +142,7 @@ pub(super) async fn stop_session_background_services(
         tracing::warn!(%error, "failed to join MCP initialization worker");
         errors.push(format!("MCP initialization worker: {error}"));
     }
-    session.mcp_state.lock().await.set_client_event_tx(None);
+    session.mcp_state.lock().await.close_client_event_channel();
     if let Err(error) = session.project_discovery_worker.abort_and_join().await {
         tracing::warn!(%error, "failed to join project discovery watcher");
         errors.push(format!("project discovery watcher: {error}"));

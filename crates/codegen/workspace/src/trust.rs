@@ -5,18 +5,29 @@
 //! that decides whether repo-local MCP / LSP servers (which run arbitrary
 //! commands from repo-controlled config files) are allowed to spawn.
 //!
-//! TOML shape:
+//! TOML shape (schema 2):
 //! ```toml
+//! schema_version = 2
+//!
 //! [folders."/abs/repo/root"]
 //! trusted = true
 //! decided_at = 1780000000
+//!
+//! [folders."/abs/repo/root".identity.current.root]
+//! platform = "unix"
+//! device = 16777234
+//! inode = 123456
 //! ```
 //!
-//! Trust **cascades to subdirectories**: if a folder is recorded trusted, any
-//! path at or below it is considered trusted, unless a nearer (more specific)
-//! folder records its own decision — the longest matching path prefix wins, so
-//! an explicit child untrust overrides an ancestor's trust. The persisted file
-//! is written atomically with owner-only (`0600`) permissions.
+//! Decisions match one canonical [`workspace_key`] exactly. Callers collapse a
+//! cwd to its repository/source root before consulting the store, so prefix
+//! inheritance is both unnecessary and unsafe. Every decision is additionally
+//! bound to the filesystem entity at that key (and to the repository common
+//! gitdir when present). A grow-managed checkout also binds its source repository
+//! as provenance, but the source never replaces the current checkout identity or
+//! key. Replacing a directory, reinitializing its repository, or creating a new
+//! worktree/clone therefore cannot inherit a prior grant. The persisted file is
+//! written atomically with owner-only (`0600`) permissions.
 //!
 //! The store is rooted at [`config::user_grow_home`] — the **Option**
 //! home that resolves to `None` (rather than a cwd-relative `./.grow`) when
@@ -36,21 +47,77 @@ use serde::{Deserialize, Serialize};
 /// Filename of the folder-trust store under `~/.grow/`.
 pub const TRUST_FILE_NAME: &str = "trusted_folders.toml";
 
+/// Current, intentionally incompatible trust-store schema.
+const TRUST_SCHEMA_VERSION: u32 = 2;
+
+/// Stable identity of one filesystem entity.
+///
+/// Pathnames are deliberately absent: the containing map already records the
+/// canonical workspace key, while this value proves that the object currently
+/// found at that path is the same object the user decided about.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "platform", rename_all = "snake_case")]
+enum FilesystemEntityIdentity {
+    #[cfg(unix)]
+    Unix { device: u64, inode: u64 },
+    #[cfg(windows)]
+    Windows {
+        volume_serial_number: u32,
+        file_index: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct WorkspaceEntityIdentity {
+    root: FilesystemEntityIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_marker: Option<FilesystemEntityIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    git_common_dir: Option<FilesystemEntityIdentity>,
+}
+
+/// Complete identity used by the durable store and the shell's decision cache.
+///
+/// `current` always identifies the workspace key the user was shown. Its
+/// `git_marker` binds that checkout's `.git` directory/file and its
+/// `git_common_dir` binds repository-shared metadata. For a grow-managed
+/// checkout, `managed_source` is an additional provenance conjunct: both the
+/// current checkout and source must still match, but source identity never
+/// substitutes for current identity or makes two checkout paths share trust.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkspaceIdentity {
+    current: WorkspaceEntityIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managed_source: Option<WorkspaceEntityIdentity>,
+}
+
 /// A single folder's trust record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderTrust {
-    /// Whether the folder (and its subdirectories) is trusted.
+    /// Whether this exact workspace entity is trusted.
     pub trusted: bool,
     /// Unix timestamp (seconds) of when the decision was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_at: Option<i64>,
+    /// Filesystem entity that existed when the user made the decision.
+    identity: WorkspaceIdentity,
 }
 
 /// On-disk document shape for `trusted_folders.toml`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TrustDocument {
+    schema_version: u32,
     #[serde(default)]
     folders: BTreeMap<String, FolderTrust>,
+}
+
+impl Default for TrustDocument {
+    fn default() -> Self {
+        Self {
+            schema_version: TRUST_SCHEMA_VERSION,
+            folders: BTreeMap::new(),
+        }
+    }
 }
 
 /// Persisted set of trusted folders.
@@ -73,7 +140,8 @@ impl TrustStore {
     ///
     /// When no user home resolves (see the module-level fail-closed note) the
     /// path is `None` and this returns an [`Self::empty`] store. Otherwise an
-    /// empty store is returned if the file is missing or unparseable (logged).
+    /// empty store is returned if the file is missing, unparseable, or has an
+    /// incompatible schema (logged). No migration is attempted.
     pub fn load() -> Self {
         match Self::default_path() {
             Some(path) => Self::load_from(path),
@@ -119,60 +187,58 @@ impl TrustStore {
         Some(user_grow_home?.join(TRUST_FILE_NAME))
     }
 
-    /// Whether `workspace_key` is trusted, per the MOST-SPECIFIC recorded
-    /// decision (longest matching path prefix).
+    /// Whether this exact `workspace_key` filesystem entity is trusted.
     ///
-    /// This is the SHARED folder-trust gate: the most-specific-wins semantics
-    /// apply to ALL folder-trust surfaces (repo-local MCP and LSP servers, and
-    /// project hooks), not just hooks.
-    ///
-    /// Trust cascades to subdirectories: a trusted parent folder trusts all of
-    /// its children. When both an ancestor and a nearer folder are recorded, the
-    /// longest matching prefix wins, so an explicit child untrust overrides an
-    /// ancestor's trust instead of being undone by the cascade. The query key is
-    /// canonicalized here, so callers need not pre-canonicalize (symmetric with
-    /// [`Self::set_trusted`]).
+    /// This is the SHARED folder-trust gate for repo-local MCP/LSP servers and
+    /// project hooks. The query key is canonicalized here, then matched exactly;
+    /// cwd-to-repository collapsing belongs solely to [`workspace_key`].
     ///
     /// Over-broad keys are ignored on read (fail closed): an empty/relative
     /// key, the filesystem root, or the user's home directory are never honored
-    /// even if such a record reaches the file via hand-edit or migration — each
-    /// would otherwise trust huge swaths of the filesystem through the cascade.
+    /// even if such a record reaches the file via hand-edit.
     /// See [`is_unsafe_trust_root`].
     pub fn is_trusted(&self, workspace_key: &Path) -> bool {
+        self.is_trusted_for_cwd(workspace_key, workspace_key)
+    }
+
+    /// Whether `workspace_key` contains a trusted record for exactly
+    /// `expected_identity`.
+    ///
+    /// The identity is supplied by the caller so one filesystem observation can
+    /// be carried through decision, prompt, cache, and persistence without a
+    /// path-only re-resolution changing which entity the decision applies to.
+    pub fn is_trusted_identity(
+        &self,
+        workspace_key: &Path,
+        expected_identity: &WorkspaceIdentity,
+    ) -> bool {
         let workspace_key = canonicalize_or_owned(workspace_key);
-        // Among all recorded ancestor folders (including the key itself), the
-        // longest match decides. Canonical, code-produced keys are normalized, so
-        // that longest match is unique. A hand-edited store could hold
-        // non-canonical aliases (e.g. `/a/b` vs `/a/b/`) that tie on depth; on a
-        // tie we require EVERY tied record to be trusted, so a contradictory edit
-        // fails closed.
-        let mut best_depth: Option<usize> = None;
-        let mut trusted = false;
-        for (folder, record) in &self.doc.folders {
-            let folder = Path::new(folder);
-            if is_unsafe_trust_root(folder) || !workspace_key.starts_with(folder) {
-                continue;
-            }
-            let depth = folder.components().count();
-            match best_depth {
-                Some(d) if depth < d => {}
-                Some(d) if depth == d => trusted &= record.trusted,
-                _ => {
-                    best_depth = Some(depth);
-                    trusted = record.trusted;
-                }
-            }
+        if is_unsafe_trust_root(&workspace_key) {
+            return false;
         }
-        trusted
+        let Some(key) = workspace_key.to_str() else {
+            return false;
+        };
+        self.doc
+            .folders
+            .get(key)
+            .is_some_and(|record| record.trusted && record.identity == *expected_identity)
+    }
+
+    /// Resolve and verify the complete identity for `cwd`, including managed
+    /// source provenance when present. Identity resolution failure is untrusted.
+    pub fn is_trusted_for_cwd(&self, cwd: &Path, workspace_key: &Path) -> bool {
+        workspace_identity_for_cwd(cwd, workspace_key)
+            .is_ok_and(|identity| self.is_trusted_identity(workspace_key, &identity))
     }
 
     /// Record `workspace_key` as **trusted** and persist to disk.
     ///
     /// The key is canonicalized before storage so alias spellings (symlinks,
     /// `/tmp` vs `/private/tmp`, …) still match later lookups, which canonicalize
-    /// too. Keys are stored as UTF-8 strings (via `to_string_lossy`); a non-UTF-8
-    /// path (rare on Unix) is stored lossily and therefore fails closed (it
-    /// simply won't match on lookup) rather than over-trusting.
+    /// too. Keys are stored as UTF-8 strings; a non-UTF-8 path is rejected rather
+    /// than lossily serialized, because two distinct byte paths could otherwise
+    /// collide in the persisted map.
     ///
     /// **Over-broad roots are refused:** if the canonical key is non-absolute,
     /// the filesystem root, or the user's home directory it is rejected —
@@ -183,6 +249,28 @@ impl TrustStore {
     /// read-modify-write contract and the no-home `Ok(())` no-op.
     pub fn set_trusted(&mut self, workspace_key: &Path) -> io::Result<()> {
         self.record_decision(workspace_key, true)
+    }
+
+    /// Persist a grant for an identity captured at the user-decision boundary.
+    ///
+    /// The caller must obtain `identity` from [`workspace_identity_for_cwd`]
+    /// before prompting/committing. Recording that frozen value, rather than
+    /// re-reading the path here, prevents a same-path replacement between the
+    /// consent check and the store write from receiving the old decision.
+    pub(crate) fn set_trusted_identity(
+        &mut self,
+        workspace_key: &Path,
+        identity: WorkspaceIdentity,
+    ) -> io::Result<()> {
+        self.record_decision_with_identity(workspace_key, true, identity)
+    }
+
+    pub(crate) fn set_untrusted_identity(
+        &mut self,
+        workspace_key: &Path,
+        identity: WorkspaceIdentity,
+    ) -> io::Result<()> {
+        self.record_decision_with_identity(workspace_key, false, identity)
     }
 
     /// Record `workspace_key` as **untrusted** ("Never" / explicitly declined)
@@ -234,7 +322,33 @@ impl TrustStore {
             );
             return Ok(());
         }
+        if self.path.is_none() {
+            tracing::warn!(
+                path = %canonical.display(),
+                trusted,
+                "folder trust: no user grow home resolved; trust decision not recorded"
+            );
+            return Ok(());
+        }
+        let identity = workspace_identity(&canonical)?;
+        self.record_decision_with_identity(&canonical, trusted, identity)
+    }
 
+    fn record_decision_with_identity(
+        &mut self,
+        workspace_key: &Path,
+        trusted: bool,
+        identity: WorkspaceIdentity,
+    ) -> io::Result<()> {
+        let canonical = canonicalize_or_owned(workspace_key);
+        if is_unsafe_trust_root(&canonical) {
+            tracing::warn!(
+                path = %canonical.display(),
+                trusted,
+                "folder trust: refusing to record an over-broad root (home, filesystem root, or non-absolute path); nothing recorded"
+            );
+            return Ok(());
+        }
         // No backing file (no-home env) → record nothing, return `Ok` so
         // callers treat "no home" like "nothing to persist" (see fn doc).
         let Some(path) = self.path.as_deref() else {
@@ -245,7 +359,12 @@ impl TrustStore {
             );
             return Ok(());
         };
-
+        let key = canonical.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "folder trust key is not valid UTF-8",
+            )
+        })?;
         // The lock file lives beside the store, so ensure the dir exists first.
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(
@@ -262,10 +381,11 @@ impl TrustStore {
         // Re-read the latest on-disk state (merges a peer's concurrent writes).
         let mut doc = Self::read_doc(path);
         doc.folders.insert(
-            canonical.to_string_lossy().to_string(),
+            key.to_owned(),
             FolderTrust {
                 trusted,
                 decided_at: now_unix(),
+                identity,
             },
         );
 
@@ -289,14 +409,27 @@ impl TrustStore {
                 return TrustDocument::default();
             }
         };
-        toml::from_str(&contents).unwrap_or_else(|e| {
+        let doc: TrustDocument = match toml::from_str(&contents) {
+            Ok(doc) => doc,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "folder trust: failed to parse trust store; treating as empty"
+                );
+                return TrustDocument::default();
+            }
+        };
+        if doc.schema_version != TRUST_SCHEMA_VERSION {
             tracing::warn!(
                 path = %path.display(),
-                error = %e,
-                "folder trust: failed to parse trust store; treating as empty"
+                found = doc.schema_version,
+                expected = TRUST_SCHEMA_VERSION,
+                "folder trust: incompatible trust-store schema; treating as empty"
             );
-            TrustDocument::default()
-        })
+            return TrustDocument::default();
+        }
+        doc
     }
 
     /// Write `doc` to `path` atomically (unique temp + fsync + rename) with
@@ -335,26 +468,141 @@ impl TrustStore {
     }
 }
 
+/// Resolve the stable filesystem identity for an already-derived workspace key.
+///
+/// Callers must derive the key with [`workspace_key`] first. A plain directory
+/// binds only its root. A repository additionally binds its `.git` marker and
+/// common gitdir. Any metadata or repository-identity read error fails closed:
+/// grants are not recorded and existing grants are not honored.
+pub fn workspace_identity(workspace_key: &Path) -> io::Result<WorkspaceIdentity> {
+    Ok(WorkspaceIdentity {
+        current: workspace_entity_identity(workspace_key)?,
+        managed_source: None,
+    })
+}
+
+fn workspace_entity_identity(workspace_root: &Path) -> io::Result<WorkspaceEntityIdentity> {
+    let key = canonicalize_or_owned(workspace_root);
+    let root = filesystem_entity_identity(&key)?;
+
+    let dot_git = key.join(".git");
+    let git_marker = match dot_git.try_exists() {
+        Ok(true) => Some(filesystem_entity_identity(&dot_git)?),
+        Ok(false) => None,
+        Err(error) => return Err(error),
+    };
+    let git_common_dir = match git2::Repository::open(&key) {
+        Ok(repo) => Some(filesystem_entity_identity(repo.commondir())?),
+        Err(error) if git_marker.is_some() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("workspace has git metadata that cannot be resolved: {error}"),
+            ));
+        }
+        Err(_) => None,
+    };
+
+    Ok(WorkspaceEntityIdentity {
+        root,
+        git_marker,
+        git_common_dir,
+    })
+}
+
+/// Resolve the current workspace identity and optional grow-managed source
+/// provenance as independent conjuncts.
+///
+/// The current workspace key is always identified first. A managed source is
+/// then discovered and identified separately; it never replaces the current
+/// identity. Failure of either required identity fails closed.
+pub fn workspace_identity_for_cwd(
+    cwd: &Path,
+    workspace_key: &Path,
+) -> io::Result<WorkspaceIdentity> {
+    let current = workspace_entity_identity(workspace_key)?;
+    let managed_source =
+        if let Some(source_repo) = crate::worktree::source_repo_for_cwd(&cwd.to_string_lossy()) {
+            let repo = git2::Repository::discover(&source_repo).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("managed worktree source repository is unavailable: {error}"),
+                )
+            })?;
+            let source_root = repo.workdir().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "managed worktree source repository has no workdir",
+                )
+            })?;
+            Some(workspace_entity_identity(source_root)?)
+        } else {
+            None
+        };
+    Ok(WorkspaceIdentity {
+        current,
+        managed_source,
+    })
+}
+
+#[cfg(unix)]
+fn filesystem_entity_identity(path: &Path) -> io::Result<FilesystemEntityIdentity> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(path)?;
+    Ok(FilesystemEntityIdentity::Unix {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn filesystem_entity_identity(path: &Path) -> io::Result<FilesystemEntityIdentity> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileInformationByHandle,
+    };
+
+    // FILE_FLAG_BACKUP_SEMANTICS is required to open directories. Sharing read,
+    // write, and delete avoids turning an identity probe into a rename/delete
+    // lock; the handle remains open through GetFileInformationByHandle.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)?;
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe {
+        GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut information)
+            .map_err(io::Error::other)?;
+    }
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Ok(FilesystemEntityIdentity::Windows {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn filesystem_entity_identity(_path: &Path) -> io::Result<FilesystemEntityIdentity> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "folder trust has no filesystem identity implementation for this platform",
+    ))
+}
+
 /// Compute the trust **workspace key** for a working directory.
 ///
 /// The key is the canonicalized git repository root when `cwd` is inside a
 /// repo (trust applies to the whole repo), otherwise the canonicalized `cwd`.
 ///
-/// A grow-managed worktree first collapses onto its recorded source repo's git
-/// ROOT (via the `~/.grow/worktrees.db` registry), so every `grow -w` worktree
-/// shares one trust key regardless of creation mode — including standalone clones
-/// that git can't link back to their source — and regardless of the subdir
-/// `grow -w` was launched from (the recorded source repo may be a repo subdir).
-/// Non-registry git worktrees fall through to the git-topology collapse below.
-///
-/// A linked git worktree collapses onto its MAIN checkout's root so every
-/// `grow -w` worktree of a repo shares one trust key. The collapse fires ONLY
-/// for the conventional `<workdir>/.git` layout — i.e. the common gitdir
-/// resolves back to `<main_workdir>/.git`. For bare or `--separate-git-dir`
-/// repos (where the common gitdir's inferred workdir would be the gitdir's
-/// parent, broader than the real checkout) the key instead falls back to the
-/// worktree's own workdir, so it is narrow and never widened. Resolution is via
-/// git2 (honoring `core.worktree`), never path surgery.
+/// Linked worktrees and standalone clones key on their own checkout roots. They
+/// may share git metadata or carry managed-source provenance in
+/// [`workspace_identity_for_cwd`], but neither relationship makes a new checkout
+/// inherit another checkout's trust decision.
 ///
 /// Finally, an over-broad derived root is rejected in favor of the cwd: when
 /// `$HOME` is itself a git repo (dotfiles-in-home) the up-walk would otherwise
@@ -372,31 +620,10 @@ pub fn workspace_key(cwd: &Path) -> PathBuf {
 /// Git-topology-derived workspace key (pre-safety-guard); see [`workspace_key`],
 /// which rejects an over-broad derived root in favor of the cwd.
 fn git_derived_workspace_key(cwd: &Path) -> PathBuf {
-    // A grow-managed worktree (any creation mode, incl. standalone clones git
-    // can't link) collapses onto its recorded source repo so trust is shared.
-    if let Some(source_repo) = crate::worktree::source_repo_for_cwd(&cwd.to_string_lossy()) {
-        // Key on the source repo's git ROOT so every worktree of one repo shares
-        // ONE key regardless of the subdir grow -w was launched from (parity with
-        // the git-topology branch below). Fall back to the recorded path when the
-        // source repo is gone (deleted-source standalone worktrees still work).
-        let root = git2::Repository::discover(&source_repo)
-            .ok()
-            .and_then(|r| r.workdir().map(canonicalize_or_owned));
-        return root.unwrap_or_else(|| canonicalize_or_owned(&source_repo));
-    }
-    if let Ok(repo) = git2::Repository::discover(cwd) {
-        // Share one trust key across a repo's worktrees instead of re-prompting per worktree.
-        if repo.is_worktree()
-            && let Ok(main) = git2::Repository::open(repo.commondir())
-            && let Some(main_workdir) = main.workdir()
-            && canonicalize_or_owned(&main_workdir.join(".git"))
-                == canonicalize_or_owned(repo.commondir())
-        {
-            return canonicalize_or_owned(main_workdir);
-        }
-        if let Some(workdir) = repo.workdir() {
-            return canonicalize_or_owned(workdir);
-        }
+    if let Ok(repo) = git2::Repository::discover(cwd)
+        && let Some(workdir) = repo.workdir()
+    {
+        return canonicalize_or_owned(workdir);
     }
     canonicalize_or_owned(cwd)
 }
@@ -412,14 +639,10 @@ pub fn is_home_dir(path: &Path) -> bool {
 /// Whether `key` is too broad to ever be a safe trust root — refused on write
 /// and ignored on read (fail closed).
 ///
-/// Each case would trust huge swaths of the filesystem via the subdirectory
-/// cascade in [`TrustStore::is_trusted`]:
-/// - **empty / relative** — the empty path is a prefix of every path, so it
-///   would trust everything (`is_absolute()` is false for these);
-/// - **filesystem root** (`/`) — `parent()` is `None`, and the root is a prefix
-///   of every absolute path, so it would trust the entire filesystem;
-/// - **home directory** — would trust every repository checked out under
-///   `$HOME`.
+/// Empty/relative, filesystem-root, and home-directory keys are refused. This
+/// narrow-key policy prevents a trust decision from being attached to an
+/// ambiguous or non-project workspace and preserves the prompt/persistence
+/// contract.
 ///
 /// Also consumed by [`crate::folder_trust`] as the "key can never be recorded"
 /// signal: such a key can't be durably gated, so it resolves Trusted instead of
@@ -563,6 +786,62 @@ mod tests {
     }
 
     #[test]
+    fn same_path_directory_replacement_does_not_inherit_trust() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let mut store = TrustStore::load_from(store_path.clone());
+        store.set_trusted(&repo).unwrap();
+        assert!(store.is_trusted(&repo));
+
+        // Keep the original entity alive under a different name so inode/file
+        // index reuse cannot make the test flaky, then create a new entity at
+        // the exact trusted pathname.
+        std::fs::rename(&repo, tmp.path().join("old-repo")).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+
+        assert!(!store.is_trusted(&repo));
+        assert!(!TrustStore::load_from(store_path).is_trusted(&repo));
+    }
+
+    #[test]
+    fn replacing_git_metadata_in_place_does_not_inherit_trust() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git2::Repository::init(&repo).unwrap();
+
+        let mut store = TrustStore::load_from(store_path.clone());
+        store.set_trusted(&repo).unwrap();
+        assert!(store.is_trusted(&repo));
+
+        // The worktree root entity stays unchanged. Only the repository
+        // identity changes, which must independently invalidate the grant.
+        std::fs::rename(repo.join(".git"), repo.join(".git-from-trusted-repo")).unwrap();
+        git2::Repository::init(&repo).unwrap();
+
+        assert!(!store.is_trusted(&repo));
+        assert!(!TrustStore::load_from(store_path).is_trusted(&repo));
+    }
+
+    #[test]
+    fn identity_read_failure_never_grants_trust() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let mut store = TrustStore::load_from(store_path);
+        store.set_trusted(&repo).unwrap();
+        std::fs::rename(&repo, tmp.path().join("moved-repo")).unwrap();
+
+        assert!(!store.is_trusted(&repo));
+    }
+
+    #[test]
     fn persist_overwrites_existing_and_round_trips_both() {
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join(TRUST_FILE_NAME);
@@ -598,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn trust_cascades_to_subdirectories() {
+    fn trust_matches_only_the_exact_workspace_key() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         let child = repo.join("crates").join("inner");
@@ -609,66 +888,14 @@ mod tests {
         let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
         store.set_trusted(&repo_key).unwrap();
 
-        // Child dir is trusted because an ancestor (the repo root) is trusted.
-        assert!(store.is_trusted(&child_key));
-        // A sibling outside the trusted root is NOT trusted.
-        let sibling = canonicalize_or_owned(tmp.path()).join("other-repo");
-        assert!(!store.is_trusted(&sibling));
-        // A sibling that *string*-prefixes the trusted root must NOT be trusted:
-        // the cascade is component-wise (`Path::starts_with`), so `…/repo` must
-        // not trust `…/repo-sibling` or `…/repository`.
-        let prefix_sibling = canonicalize_or_owned(tmp.path()).join("repo-sibling");
-        assert!(
-            !store.is_trusted(&prefix_sibling),
-            "string-prefix sibling must NOT be trusted (cascade is component-wise)"
-        );
-    }
-
-    #[test]
-    fn most_specific_decision_wins_over_ancestor_cascade() {
-        // An explicit child untrust must override a trusted ancestor (the bug
-        // where an untrust was undone by the cascade on the next reload). The
-        // longest-prefix match decides, so siblings of the untrusted child stay
-        // trusted via the ancestor.
-        let tmp = tempfile::tempdir().unwrap();
-        let parent = tmp.path().join("parent");
-        let child = parent.join("child");
-        let other = parent.join("other");
-        std::fs::create_dir_all(&child).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-        let parent_key = canonicalize_or_owned(&parent);
-        let child_key = canonicalize_or_owned(&child);
-        let other_key = canonicalize_or_owned(&other);
-
-        let mut store = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
-        store.set_trusted(&parent_key).unwrap();
-        store.set_untrusted(&child_key).unwrap();
-
-        assert!(store.is_trusted(&parent_key), "the ancestor stays trusted");
         assert!(
             !store.is_trusted(&child_key),
-            "an explicit child untrust overrides the trusted ancestor"
+            "the store must not inherit a parent path's grant; callers collapse cwd via workspace_key"
         );
-        assert!(
-            !store.is_trusted(&child_key.join("nested")),
-            "the untrust cascades to the child's own subdirectories"
-        );
-        assert!(
-            store.is_trusted(&other_key),
-            "a sibling without its own decision is still trusted via the ancestor"
-        );
-
-        // The most-specific-wins decision survives a reload from disk.
-        let reloaded = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
-        assert!(!reloaded.is_trusted(&child_key));
-        assert!(reloaded.is_trusted(&other_key));
     }
 
     #[test]
-    fn most_specific_trust_wins_over_untrusted_ancestor() {
-        // The symmetric half of most-specific-wins: an UNTRUSTED ancestor plus a
-        // nearer TRUSTED child => the child IS trusted (the nearer decision wins),
-        // and that trust cascades to the child's own subdirectories.
+    fn parent_deny_does_not_override_explicit_child_grant() {
         let tmp = tempfile::tempdir().unwrap();
         let parent = tmp.path().join("parent");
         let child = parent.join("child");
@@ -686,14 +913,9 @@ mod tests {
         );
         assert!(
             store.is_trusted(&child_key),
-            "a nearer explicit trust overrides the untrusted ancestor"
-        );
-        assert!(
-            store.is_trusted(&child_key.join("nested")),
-            "the child's trust cascades to its own subdirectories"
+            "the child's exact grant is independent from the parent record"
         );
 
-        // The decision survives a reload from disk.
         let reloaded = TrustStore::load_from(tmp.path().join(TRUST_FILE_NAME));
         assert!(!reloaded.is_trusted(&parent_key));
         assert!(reloaded.is_trusted(&child_key));
@@ -783,21 +1005,67 @@ mod tests {
     }
 
     #[test]
-    fn empty_key_is_not_trusted() {
-        // Fail closed: a degenerate `[folders.""] trusted = true` must not trust
-        // anything. The empty path is a prefix of every path, so honoring it
-        // would trust the whole filesystem (fail open).
+    fn old_schema_fails_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join(TRUST_FILE_NAME);
-        std::fs::write(&store_path, "[folders.\"\"]\ntrusted = true\n").unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            &store_path,
+            format!(
+                "[folders.'{}']\ntrusted = true\n",
+                canonicalize_or_owned(&repo).to_string_lossy()
+            ),
+        )
+        .unwrap();
 
         let store = TrustStore::load_from(store_path);
-        // The record loads, so this exercises the read-side guard (not a parse drop).
-        assert!(!store.is_empty(), "empty-key record should still load");
+        assert!(store.is_empty(), "schema 1 records must not be migrated");
         assert!(
-            !store.is_trusted(Path::new("/some/arbitrary/path")),
-            "an empty key must not trust the filesystem"
+            !store.is_trusted(&repo),
+            "an incompatible document must never grant trust"
         );
+    }
+
+    #[test]
+    fn mismatched_schema_version_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let mut writer = TrustStore::load_from(store_path.clone());
+        writer.set_trusted(&repo).unwrap();
+        let body = std::fs::read_to_string(&store_path).unwrap().replacen(
+            "schema_version = 2",
+            "schema_version = 1",
+            1,
+        );
+        std::fs::write(&store_path, body).unwrap();
+
+        let store = TrustStore::load_from(store_path);
+        assert!(store.is_empty());
+        assert!(!store.is_trusted(&repo));
+    }
+
+    #[test]
+    fn current_schema_missing_identity_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            &store_path,
+            format!(
+                "schema_version = {TRUST_SCHEMA_VERSION}\n\n[folders.'{}']\ntrusted = true\n",
+                canonicalize_or_owned(&repo).to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let store = TrustStore::load_from(store_path);
+        assert!(store.is_empty(), "identity-less records must be rejected");
+        assert!(!store.is_trusted(&repo));
     }
 
     #[test]
@@ -813,64 +1081,17 @@ mod tests {
     }
 
     #[test]
-    fn root_key_is_not_trusted() {
-        // Fail closed: a `[folders."/"]` record must not trust every absolute
-        // path. The root is a prefix of all of them via the cascade, so it is
-        // ignored on read even if it reaches the file by hand-edit / migration.
+    fn unsafe_keys_are_not_persisted() {
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join(TRUST_FILE_NAME);
-        std::fs::write(&store_path, "[folders.\"/\"]\ntrusted = true\n").unwrap();
+        let mut store = TrustStore::load_from(store_path.clone());
+        store.set_trusted(Path::new("")).unwrap();
+        assert!(store.is_empty(), "relative/empty keys must be refused");
 
-        let store = TrustStore::load_from(store_path);
-        assert!(!store.is_empty(), "root-key record should still load");
-        assert!(
-            !store.is_trusted(Path::new("/any/abs/path")),
-            "filesystem root must never be honored as a trust key"
-        );
-    }
-
-    #[test]
-    fn tied_conflicting_aliases_fail_closed() {
-        // Two equal-depth, non-canonical aliases of the SAME folder with CONFLICTING
-        // decisions: `Path::components()` normalizes the trailing slash so `/a/b` and
-        // `/a/b/` tie on depth, yet they load as distinct map keys. The tie branch
-        // ANDs the tied records, so any untrusted tied alias forces a fail-closed
-        // `false` REGARDLESS of map order. Asserting BOTH orderings is what pins
-        // this: a revert to a last-wins form (return the LAST equal-depth record,
-        // i.e. `/a/b/`) returns `true` for ordering (b) below and fails this test,
-        // whereas pinning a single ordering would pass under both the AND-loop and
-        // the buggy last-wins form.
-        let fails_closed = |trusted_ab: bool, trusted_ab_slash: bool| {
-            let tmp = tempfile::tempdir().unwrap();
-            let store_path = tmp.path().join(TRUST_FILE_NAME);
-            std::fs::write(
-                &store_path,
-                format!(
-                    "[folders.'/a/b']\ntrusted = {trusted_ab}\n\
-                     [folders.'/a/b/']\ntrusted = {trusted_ab_slash}\n"
-                ),
-            )
-            .unwrap();
-            let store = TrustStore::load_from(store_path);
-            assert_eq!(store.len(), 2, "both alias records should load distinctly");
-            // `/a/b/c` does not exist, so `canonicalize_or_owned` is a no-op; both
-            // aliases prefix it and tie on depth.
-            !store.is_trusted(Path::new("/a/b/c"))
-        };
-
-        // (a) untrusted alias sorts LAST (`/a/b/`): caught by a revert to the
-        //     original `any(trusted)` form, but NOT by a last-wins revert.
-        assert!(
-            fails_closed(true, false),
-            "tie with `/a/b` trusted + `/a/b/` untrusted must fail closed"
-        );
-        // (b) untrusted alias sorts FIRST (`/a/b`): a last-wins revert returns the
-        //     last record (`/a/b/` = trusted) => true, so THIS ordering is what
-        //     catches a last-wins regression; the AND-loop still yields false.
-        assert!(
-            fails_closed(false, true),
-            "tie with `/a/b` untrusted + `/a/b/` trusted must STILL fail closed"
-        );
+        let root = std::path::Path::new(std::path::MAIN_SEPARATOR_STR);
+        store.set_trusted(root).unwrap();
+        assert!(store.is_empty(), "filesystem root must be refused");
+        assert!(!store_path.exists());
     }
 
     #[test]
@@ -880,25 +1101,31 @@ mod tests {
         let _lock = crate::ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // A hand-edited / migrated `[folders."<home>"]` record must not trust
-        // repos under $HOME — the read side ignores it, matching set_trusted.
+        // A hand-edited current-schema `[folders."<home>"]` record must not be
+        // honored. This exercises the read guard rather than the write refusal.
         let Some(home) = dirs::home_dir() else {
             return; // no home dir in this environment; nothing to assert
         };
         let canonical_home = canonicalize_or_owned(&home);
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join(TRUST_FILE_NAME);
-        // TOML literal-string key avoids escaping issues on any platform.
-        let body = format!(
-            "[folders.'{}']\ntrusted = true\n",
-            canonical_home.to_string_lossy()
+        let mut doc = TrustDocument::default();
+        doc.folders.insert(
+            canonical_home.to_string_lossy().into_owned(),
+            FolderTrust {
+                trusted: true,
+                decided_at: None,
+                // The read-side unsafe-key guard runs before identity matching;
+                // a valid but unrelated identity keeps this test independent
+                // from the real home directory's repository state.
+                identity: workspace_identity(tmp.path()).unwrap(),
+            },
         );
-        std::fs::write(&store_path, body).unwrap();
+        TrustStore::persist_doc(&store_path, &doc).unwrap();
 
         let store = TrustStore::load_from(store_path);
-        let sub = canonical_home.join("some").join("sub");
         assert!(
-            !store.is_trusted(&sub),
+            !store.is_trusted(&canonical_home),
             "a home-dir key on disk must not be honored"
         );
     }
@@ -1047,11 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_key_collapses_linked_worktrees_onto_main_checkout() {
-        // Every linked `grow -w` worktree of a repo must share ONE trust key:
-        // its main checkout's root. Build a real repo + two linked worktrees and
-        // assert each collapses onto the main checkout (so it is trusted once,
-        // not re-prompted per worktree).
+    fn linked_worktrees_have_distinct_trust_keys_and_do_not_inherit_main_trust() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("main");
         std::fs::create_dir_all(&main).unwrap();
@@ -1074,26 +1297,33 @@ mod tests {
         repo.worktree("wt2", &wt2, None).unwrap();
 
         let main_key = workspace_key(&main);
-        // Parity: the main checkout keys off its own workdir.
         assert_eq!(main_key, canonicalize_or_owned(&main));
         assert_eq!(
             workspace_key(&wt1),
-            main_key,
-            "worktree must collapse onto main checkout"
+            canonicalize_or_owned(&wt1),
+            "a linked worktree keys on its own checkout"
         );
         assert_eq!(
             workspace_key(&wt2),
-            main_key,
-            "second worktree must share the same key"
+            canonicalize_or_owned(&wt2),
+            "a second linked worktree has its own key"
         );
+        let nested = wt1.join("crates").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(workspace_key(&nested), canonicalize_or_owned(&wt1));
+
+        let mut store = TrustStore::load_from(dir.path().join(TRUST_FILE_NAME));
+        store.set_trusted(&main_key).unwrap();
+        assert!(!store.is_trusted_for_cwd(&wt1, &workspace_key(&wt1)));
+        assert!(!store.is_trusted_for_cwd(&wt2, &workspace_key(&wt2)));
     }
 
     #[test]
     fn workspace_key_bare_repo_worktree_does_not_widen_to_parent() {
         // A bare repo's `commondir()` is the bare dir itself, so a naive
         // `commondir().parent()` would key off the dir CONTAINING the repo and
-        // trust every sibling via the subdirectory cascade. The key must instead
-        // fall back to the worktree's OWN dir (narrow, never widened).
+        // make unrelated sibling worktrees share one trust identity. The key
+        // must instead fall back to the worktree's OWN dir (narrow, never widened).
         let dir = tempfile::tempdir().unwrap();
         let bare = dir.path().join("repo.git");
         let repo = git2::Repository::init_bare(&bare).unwrap();
@@ -1187,7 +1417,7 @@ mod tests {
         );
     }
 
-    // ── workspace_key registry collapse (grow-managed worktrees) ─────────
+    // ── grow-managed worktree provenance ─────────────────────────────────
 
     // Crate-shared env lock + env guards bundled as ONE value so the env restores
     // before the lock releases by struct field order (see lib.rs), regardless of
@@ -1196,9 +1426,8 @@ mod tests {
 
     /// Point `GROW_HOME` at an isolated tempdir and register one grow-managed
     /// worktree at `<home>/worktrees/repo/<name>` recording `source_repo` and
-    /// `creation_mode`. The worktree dir is a PLAIN directory — NOT a git linked
-    /// worktree — so only the registry can collapse it. Returns `(env, worktree
-    /// dir)`; the [`LockedTestEnv`] holds the lock and restores `GROW_HOME` on
+    /// `creation_mode`. Returns `(env, worktree dir)`; the [`LockedTestEnv`]
+    /// holds the lock and restores `GROW_HOME` on
     /// drop (before releasing the lock), so the caller may bind it any way.
     fn register_grow_worktree(
         temp: &tempfile::TempDir,
@@ -1241,14 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_key_collapses_standalone_grow_worktree_onto_source_repo() {
-        // A standalone worktree is a full clone with its OWN `.git`, so git
-        // topology can't link it to its source; the registry (worktrees.db) must
-        // collapse it onto the recorded source repo so trust is shared. The
-        // worktree dir is a plain dir (no git), proving the REGISTRY path — not
-        // git topology — does the collapse. `source_repo` is a real git repo (as
-        // in production), so the git-root normalization is deterministic
-        // regardless of where `$TMPDIR` lives.
+    fn standalone_managed_clone_keeps_its_own_key_and_does_not_inherit_source_trust() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = dunce::canonicalize(temp.path()).unwrap();
         let source_repo = root.join("source-repo");
@@ -1256,30 +1478,85 @@ mod tests {
         git2::Repository::init(&source_repo).unwrap();
 
         let (_env, wt) = register_grow_worktree(&temp, "wt", &source_repo, "standalone");
+        git2::Repository::init(&wt).unwrap();
 
-        let expected = canonicalize_or_owned(&source_repo);
+        let expected = canonicalize_or_owned(&wt);
         assert_eq!(
             workspace_key(&wt),
             expected,
-            "a standalone grow worktree must collapse onto its recorded source repo"
+            "a standalone clone keys on its own checkout"
         );
-        // A cwd nested below the worktree root collapses onto the same key (the
-        // registry walk ascends to the registered worktree).
         let nested = wt.join("crates").join("inner");
         std::fs::create_dir_all(&nested).unwrap();
         assert_eq!(
             workspace_key(&nested),
             expected,
-            "a nested cwd in the worktree collapses onto the same source repo"
+            "a nested cwd collapses only to its current repository root"
+        );
+
+        let mut store = TrustStore::load_from(root.join(TRUST_FILE_NAME));
+        store.set_trusted(&source_repo).unwrap();
+        assert!(store.is_trusted(&source_repo));
+        assert!(
+            !store.is_trusted_for_cwd(&wt, &expected),
+            "a newly created clone must not inherit source trust"
         );
     }
 
     #[test]
-    fn workspace_key_collapses_worktree_onto_source_repo_git_root() {
-        // The registry records `source_repo` as the launch cwd, which may be a
-        // SUBDIR of the repo. workspace_key must key on the repo's git ROOT so a
-        // worktree launched from a subdir shares ONE key with the source and
-        // linked worktrees (which key on the root), not on `<repo>/sub`.
+    fn managed_worktree_grant_requires_current_and_source_identity() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let source_repo = root.join("source-repo");
+        std::fs::create_dir_all(&source_repo).unwrap();
+        git2::Repository::init(&source_repo).unwrap();
+
+        let (_env, wt) = register_grow_worktree(&temp, "wt", &source_repo, "standalone");
+        git2::Repository::init(&wt).unwrap();
+        let key = workspace_key(&wt);
+        let expected_identity = workspace_identity_for_cwd(&wt, &key).unwrap();
+        let store_path = root.join(TRUST_FILE_NAME);
+        let mut store = TrustStore::load_from(store_path.clone());
+        store
+            .set_trusted_identity(&key, expected_identity.clone())
+            .unwrap();
+        assert!(store.is_trusted_for_cwd(&wt, &key));
+
+        std::fs::rename(
+            source_repo.join(".git"),
+            source_repo.join(".git-from-source-repo"),
+        )
+        .unwrap();
+        let unavailable_source_key = workspace_key(&wt);
+        assert_eq!(unavailable_source_key, wt);
+        assert!(
+            workspace_identity(&unavailable_source_key).is_ok(),
+            "the current checkout remains identifiable by itself"
+        );
+        assert!(
+            workspace_identity_for_cwd(&wt, &unavailable_source_key).is_err(),
+            "managed provenance must additionally require a resolvable source repository"
+        );
+        assert!(!store.is_trusted_for_cwd(&wt, &unavailable_source_key));
+        assert!(
+            !TrustStore::load_from(store_path).is_trusted_for_cwd(&wt, &unavailable_source_key)
+        );
+
+        let mut fresh = TrustStore::load_from(root.join("unavailable-source-trust.toml"));
+        assert!(
+            !crate::folder_trust::persist_trust(
+                &mut fresh,
+                &wt,
+                &unavailable_source_key,
+                &expected_identity,
+            ),
+            "an explicit grant must also fail when managed source identity is unavailable"
+        );
+        assert!(fresh.is_empty());
+    }
+
+    #[test]
+    fn managed_source_subdir_is_provenance_not_workspace_key() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = dunce::canonicalize(temp.path()).unwrap();
         let repo = root.join("realrepo");
@@ -1289,12 +1566,14 @@ mod tests {
         std::fs::create_dir_all(&subdir).unwrap();
 
         let (_env, wt) = register_grow_worktree(&temp, "wt", &subdir, "standalone");
+        git2::Repository::init(&wt).unwrap();
 
         assert_eq!(
             workspace_key(&wt),
-            canonicalize_or_owned(&repo),
-            "source_repo recorded as a subdir must collapse onto the repo git root"
+            canonicalize_or_owned(&wt),
+            "a source subdir must not replace the current checkout key"
         );
+        assert!(workspace_identity_for_cwd(&wt, &workspace_key(&wt)).is_ok());
     }
 
     #[test]

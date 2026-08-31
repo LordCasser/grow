@@ -165,6 +165,11 @@ async fn implicit_goal_objective_commits_its_turn_terminal_before_continuation()
             let result = actor
                 .handle_prompt(
                     "goal-objective",
+                    crate::session::actor::tests::support::admit_test_human_input(
+                        &actor,
+                        "goal-objective",
+                    )
+                    .await,
                     crate::session::PromptOrigin::User,
                     Vec::new(),
                     crate::session::TurnKind::User,
@@ -236,6 +241,7 @@ fn autonomous_first_turn_commits_the_deferred_prefix_before_turn_started() {
             actor
                 .handle_prompt(
                     "first-goal-continuation",
+                    Vec::new(),
                     crate::session::PromptOrigin::GoalContinuation {
                         goal_id: "goal-1".into(),
                         definition_revision: 1,

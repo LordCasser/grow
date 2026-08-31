@@ -13,11 +13,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 23;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 24;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 pub const MAX_WORKFLOW_INITIAL_MANIFEST_BYTES: usize = 512 * 1024;
 pub const MAX_NOTIFICATION_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_PAYLOAD_BYTES: u64 = 1024 * 1024;
+pub const MAX_HOOK_ID_BYTES: usize = 128;
+pub const MAX_HOOK_HANDLER_NAME_BYTES: usize = 256;
+pub const MAX_HOOK_CONTROL_TEXT_BYTES: usize = 4 * 1024;
+pub const MAX_HOOK_HANDLERS: usize = 256;
+pub const MAX_INPUT_PAYLOAD_BYTES: u64 = 1024 * 1024;
+pub const MAX_TURN_INPUTS: usize = 256;
 /// A busy turn can accumulate monitor ticks faster than the model can consume
 /// them. Preserve a useful recent window per monitor while the task output
 /// artifact remains the complete stream.
@@ -58,6 +64,14 @@ mod turn_id_serde {
         let value = String::deserialize(deserializer)?;
         value.parse().map_err(serde::de::Error::custom)
     }
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -206,6 +220,7 @@ pub struct PromptRecord {
 pub enum TurnEvent {
     Started {
         id: TurnId,
+        input_ids: Vec<String>,
         identity: TurnIdentity,
         model_id: String,
         input_message_count: usize,
@@ -915,6 +930,385 @@ pub enum NotificationDismissReason {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookEventType {
+    SessionStart,
+    UserPromptSubmit,
+    PreToolUse,
+    PostToolUse,
+    PostToolUseFailure,
+    PermissionDenied,
+    Stop,
+    StopFailure,
+    StopCancelled,
+    Notification,
+    SubagentStart,
+    SubagentStop,
+    PreCompact,
+    PostCompact,
+    SessionEnd,
+}
+
+impl HookEventType {
+    pub const ALL: [Self; 15] = [
+        Self::SessionStart,
+        Self::UserPromptSubmit,
+        Self::PreToolUse,
+        Self::PostToolUse,
+        Self::PostToolUseFailure,
+        Self::PermissionDenied,
+        Self::Stop,
+        Self::StopFailure,
+        Self::StopCancelled,
+        Self::Notification,
+        Self::SubagentStart,
+        Self::SubagentStop,
+        Self::PreCompact,
+        Self::PostCompact,
+        Self::SessionEnd,
+    ];
+
+    pub const fn gate(self) -> HookGateKind {
+        match self {
+            Self::UserPromptSubmit => HookGateKind::Prompt,
+            Self::PreToolUse => HookGateKind::Tool,
+            Self::Stop | Self::SubagentStop => HookGateKind::Stop,
+            Self::SessionStart
+            | Self::PostToolUse
+            | Self::PostToolUseFailure
+            | Self::PermissionDenied
+            | Self::StopFailure
+            | Self::StopCancelled
+            | Self::Notification
+            | Self::SubagentStart
+            | Self::PreCompact
+            | Self::PostCompact
+            | Self::SessionEnd => HookGateKind::Observe,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookGateKind {
+    Observe,
+    Prompt,
+    Tool,
+    Stop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookCause {
+    Session {
+        session_id: String,
+    },
+    Input {
+        input_id: String,
+    },
+    Tool {
+        call_id: String,
+    },
+    Turn {
+        turn: TurnId,
+    },
+    /// A synthetic UserPrompt references a pending notification receipt. A
+    /// standalone Notification hook is the lifecycle root and therefore uses
+    /// its own occurrence id here.
+    Notification {
+        notification_id: String,
+    },
+    Subagent {
+        subagent_id: String,
+    },
+    Compaction {
+        compaction_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookHandlerProvenance {
+    UserConfig,
+    UserFile,
+    ProjectFile,
+    Plugin,
+    Agent,
+    Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookHandlerKind {
+    Command,
+    Http,
+    Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookFailurePolicy {
+    Allow,
+    Block,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookRunSkipReason {
+    MatcherMiss,
+    Disabled,
+    PolicyDisabled,
+    PriorBlock,
+    ProcessInterrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookHandlerPlanAction {
+    Execute,
+    Skip { reason: HookRunSkipReason },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookHandlerPlan {
+    pub index: u32,
+    pub run_id: String,
+    pub name: String,
+    pub provenance: HookHandlerProvenance,
+    pub kind: HookHandlerKind,
+    pub failure_policy: HookFailurePolicy,
+    pub action: HookHandlerPlanAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookRunOutcome {
+    Success,
+    Blocked,
+    Failed { message: String },
+    TimedOut,
+    Cancelled,
+    InterruptedOutcomeUnknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookRunControl {
+    None,
+    Block {
+        reason: String,
+    },
+    StopKeepWorking {
+        #[serde(deserialize_with = "deserialize_required_option")]
+        reason: Option<String>,
+        #[serde(deserialize_with = "deserialize_required_option")]
+        additional_context: Option<String>,
+    },
+    StopForce {
+        #[serde(deserialize_with = "deserialize_required_option")]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookAggregateDecision {
+    Observe,
+    Prompt { decision: HookGateDecision },
+    Tool { decision: HookGateDecision },
+    Stop { decision: HookStopDecision },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookGateDecision {
+    Allow,
+    Block { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookStopDecision {
+    AllowStop,
+    KeepWorking {
+        reasons: Vec<String>,
+        additional_context: Vec<String>,
+    },
+    ForceStop {
+        #[serde(deserialize_with = "deserialize_required_option")]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookEvent {
+    Triggered {
+        occurrence_id: String,
+        event: HookEventType,
+        gate: HookGateKind,
+        cause: HookCause,
+        config_generation: u64,
+        handlers: Vec<HookHandlerPlan>,
+    },
+    RunStarted {
+        occurrence_id: String,
+        run_id: String,
+        handler_index: u32,
+    },
+    RunFinished {
+        occurrence_id: String,
+        run_id: String,
+        handler_index: u32,
+        elapsed_ms: u64,
+        outcome: HookRunOutcome,
+        control: HookRunControl,
+    },
+    RunSkipped {
+        occurrence_id: String,
+        run_id: String,
+        handler_index: u32,
+        reason: HookRunSkipReason,
+    },
+    Completed {
+        occurrence_id: String,
+        decision: HookAggregateDecision,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum InputIntent {
+    Prompt,
+    Steer,
+    Followup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputPayloadRef {
+    pub blake3: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "route", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InputRoute {
+    Fifo,
+    Steer { target_turn: TurnId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InputAdmissionDecision {
+    Allow,
+    Block { reason: InputBlockReason },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InputBlockReason {
+    Hook { reason: String },
+    StaleSteerTarget,
+    ProcessInterrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum InputDismissReason {
+    UserRemoved,
+    SessionClosing,
+    RouteSuperseded,
+    Invalidated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InputEvent {
+    Submitted {
+        input_id: String,
+        intent: InputIntent,
+        payload_ref: InputPayloadRef,
+    },
+    AdmissionResolved {
+        input_id: String,
+        decision: InputAdmissionDecision,
+        #[serde(deserialize_with = "deserialize_required_option")]
+        route: Option<InputRoute>,
+        supersedes: Vec<String>,
+    },
+    Rerouted {
+        input_ids: Vec<String>,
+        route: InputRoute,
+    },
+    Consumed {
+        input_ids: Vec<String>,
+        turn: TurnId,
+        item: ConversationItem,
+    },
+    Handled {
+        input_ids: Vec<String>,
+        turn: TurnId,
+    },
+    Dismissed {
+        input_ids: Vec<String>,
+        reason: InputDismissReason,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookHandlerLifecycle {
+    Pending,
+    Started,
+    Finished {
+        elapsed_ms: u64,
+        outcome: HookRunOutcome,
+        control: HookRunControl,
+    },
+    Skipped {
+        reason: HookRunSkipReason,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookLifecycleProjection {
+    pub occurrence_id: String,
+    pub event: HookEventType,
+    pub gate: HookGateKind,
+    pub cause: HookCause,
+    pub config_generation: u64,
+    pub handlers: Vec<HookHandlerPlan>,
+    pub runs: Vec<HookHandlerLifecycle>,
+    pub decision: Option<HookAggregateDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputState {
+    Submitted,
+    Allowed { route: InputRoute },
+    Blocked { reason: InputBlockReason },
+    Consumed { route: InputRoute },
+    Dismissed { reason: InputDismissReason },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputLifecycle {
+    pub input_id: String,
+    pub intent: InputIntent,
+    pub payload_ref: InputPayloadRef,
+    pub state: InputState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAllowedInput {
+    pub input_id: String,
+    pub intent: InputIntent,
+    pub payload_ref: InputPayloadRef,
+    pub route: InputRoute,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingNotification {
     pub received_seq: EventSeq,
@@ -950,6 +1344,8 @@ pub fn notification_id(
 )]
 pub enum TimelineEventKind {
     Messages(MessageEvent),
+    Input(InputEvent),
+    Hook(HookEvent),
     Turn(TurnEvent),
     Step(StepEvent),
     Request(RequestEvent),
@@ -1027,6 +1423,9 @@ impl TimelineEvent {
                 input: Some(input),
                 ..
             }) => Some(std::slice::from_ref(input)),
+            TimelineEventKind::Input(InputEvent::Consumed { item, .. }) => {
+                Some(std::slice::from_ref(item))
+            }
             _ => None,
         }
     }
@@ -1037,6 +1436,7 @@ struct LifecycleFold {
     active_turn: Option<TurnId>,
     active_step: Option<StepId>,
     seen_turns: BTreeSet<TurnId>,
+    internal_turns: BTreeSet<TurnId>,
     seen_steps: BTreeSet<StepId>,
     seen_requests: BTreeSet<String>,
     seen_tools: BTreeSet<String>,
@@ -1047,6 +1447,36 @@ struct LifecycleFold {
     open_tools: BTreeMap<String, (TurnId, StepId, String)>,
     open_compaction: Option<OpenCompaction>,
     control_revision: Option<u64>,
+    hooks: BTreeMap<String, HookFold>,
+    seen_hook_run_ids: BTreeSet<String>,
+    user_prompt_hooks: BTreeMap<String, String>,
+    inputs: BTreeMap<String, InputFold>,
+    pending_notifications: BTreeSet<String>,
+    seen_hook_notification_causes: BTreeSet<String>,
+    hook_session_id: Option<String>,
+    subagent_seed_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct HookFold {
+    event: HookEventType,
+    gate: HookGateKind,
+    cause: HookCause,
+    config_generation: u64,
+    handlers: Vec<HookHandlerPlan>,
+    runs: Vec<HookHandlerLifecycle>,
+    decision: Option<HookAggregateDecision>,
+}
+
+#[derive(Debug, Clone)]
+struct InputFold {
+    intent: InputIntent,
+    payload_ref: InputPayloadRef,
+    admission: Option<InputAdmissionDecision>,
+    route: Option<InputRoute>,
+    reserved_turn: Option<TurnId>,
+    consumed: bool,
+    dismissed: Option<InputDismissReason>,
 }
 
 #[derive(Debug, Clone)]
@@ -1263,6 +1693,20 @@ pub enum TimelineError {
     NotificationAlreadyConsumed(String),
     #[error("notification {0} has no received fact")]
     NotificationNotFound(String),
+    #[error("invalid hook lifecycle fact")]
+    InvalidHook,
+    #[error("hook occurrence {0} already has a trigger fact")]
+    DuplicateHookOccurrence(String),
+    #[error("hook occurrence {0} has no trigger fact")]
+    HookNotFound(String),
+    #[error("hook occurrence {0} is already completed")]
+    HookAlreadyCompleted(String),
+    #[error("invalid input lifecycle fact")]
+    InvalidInput,
+    #[error("input {0} already has a submitted fact")]
+    DuplicateInput(String),
+    #[error("input {0} has no submitted fact")]
+    InputNotFound(String),
 }
 
 impl Timeline {
@@ -1334,6 +1778,18 @@ impl Timeline {
         usize::try_from(seq.get())
             .ok()
             .and_then(|index| self.events.get(index))
+    }
+
+    pub(crate) fn submitted_input_event(&self, input_id: &str) -> Option<&TimelineEvent> {
+        self.events.iter().find(|event| {
+            matches!(
+                &event.kind,
+                TimelineEventKind::Input(InputEvent::Submitted {
+                    input_id: existing,
+                    ..
+                }) if existing == input_id
+            )
+        })
     }
 
     pub fn next_seq(&self) -> EventSeq {
@@ -1733,6 +2189,83 @@ impl Timeline {
         self.lifecycle.active_step
     }
 
+    pub fn hook_projection(&self, occurrence_id: &str) -> Option<HookLifecycleProjection> {
+        let hook = self.lifecycle.hooks.get(occurrence_id)?;
+        Some(HookLifecycleProjection {
+            occurrence_id: occurrence_id.to_owned(),
+            event: hook.event,
+            gate: hook.gate,
+            cause: hook.cause.clone(),
+            config_generation: hook.config_generation,
+            handlers: hook.handlers.clone(),
+            runs: hook.runs.clone(),
+            decision: hook.decision.clone(),
+        })
+    }
+
+    pub fn input_state(&self, input_id: &str) -> Option<InputLifecycle> {
+        let input = self.lifecycle.inputs.get(input_id)?;
+        let state = match (&input.admission, input.dismissed) {
+            (_, Some(reason)) => InputState::Dismissed { reason },
+            (None, None) => InputState::Submitted,
+            (Some(InputAdmissionDecision::Block { reason }), None) => InputState::Blocked {
+                reason: reason.clone(),
+            },
+            (Some(InputAdmissionDecision::Allow), None) if input.consumed => InputState::Consumed {
+                route: input
+                    .route
+                    .clone()
+                    .expect("a consumed input must have a durable route"),
+            },
+            (Some(InputAdmissionDecision::Allow), None) => InputState::Allowed {
+                route: input
+                    .route
+                    .clone()
+                    .expect("an allowed input must have an atomic initial route"),
+            },
+        };
+        Some(InputLifecycle {
+            input_id: input_id.to_owned(),
+            intent: input.intent,
+            payload_ref: input.payload_ref.clone(),
+            state,
+        })
+    }
+
+    pub fn pending_allowed_inputs(&self) -> Vec<PendingAllowedInput> {
+        self.events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                TimelineEventKind::Input(InputEvent::Submitted { input_id, .. }) => Some(input_id),
+                _ => None,
+            })
+            .filter_map(|input_id| {
+                let input = self.lifecycle.inputs.get(input_id)?;
+                let InputAdmissionDecision::Allow = input.admission.as_ref()? else {
+                    return None;
+                };
+                (!input.consumed && input.dismissed.is_none() && input.reserved_turn.is_none())
+                    .then(|| PendingAllowedInput {
+                        input_id: input_id.clone(),
+                        intent: input.intent,
+                        payload_ref: input.payload_ref.clone(),
+                        route: input
+                            .route
+                            .clone()
+                            .expect("an allowed input must have an atomic initial route"),
+                    })
+            })
+            .collect()
+    }
+
+    pub fn submitted_input_payload_hashes(&self) -> BTreeSet<String> {
+        self.lifecycle
+            .inputs
+            .values()
+            .map(|input| input.payload_ref.blake3.clone())
+            .collect()
+    }
+
     pub fn open_request_ids(&self) -> impl Iterator<Item = &str> {
         self.lifecycle.open_requests.keys().map(String::as_str)
     }
@@ -1858,12 +2391,28 @@ impl Timeline {
                 .then_some((run_id.clone(), lifecycle.execution_epoch))
             })
             .collect::<Vec<_>>();
+        let hooks = self
+            .lifecycle
+            .hooks
+            .iter()
+            .filter_map(|(occurrence_id, hook)| {
+                hook.decision.is_none().then_some(occurrence_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let inputs = self
+            .lifecycle
+            .inputs
+            .iter()
+            .filter_map(|(input_id, input)| input.admission.is_none().then_some(input_id.clone()))
+            .collect::<Vec<_>>();
         if self.lifecycle.active_turn.is_none()
             && self.lifecycle.active_step.is_none()
             && self.lifecycle.open_requests.is_empty()
             && self.lifecycle.open_tools.is_empty()
             && self.lifecycle.open_compaction.is_none()
             && workflows.is_empty()
+            && hooks.is_empty()
+            && inputs.is_empty()
         {
             return Ok(Vec::new());
         }
@@ -1891,8 +2440,121 @@ impl Timeline {
                 "tools": tools.iter().map(|(id, _)| id).collect::<Vec<_>>(),
                 "compaction": compaction.as_ref().map(|open| &open.id),
                 "workflows": workflows.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                "hooks": &hooks,
+                "inputs": &inputs,
             })),
         }))?;
+        for occurrence_id in hooks {
+            let projection = self
+                .hook_projection(&occurrence_id)
+                .ok_or_else(|| TimelineError::HookNotFound(occurrence_id.clone()))?;
+            for (index, (handler, run)) in
+                projection.handlers.iter().zip(&projection.runs).enumerate()
+            {
+                match run {
+                    HookHandlerLifecycle::Pending => {
+                        let reason = match handler.action {
+                            HookHandlerPlanAction::Skip { reason } => reason,
+                            HookHandlerPlanAction::Execute => {
+                                if self
+                                    .lifecycle
+                                    .hooks
+                                    .get(&occurrence_id)
+                                    .is_some_and(|hook| hook.decisive_before(index))
+                                {
+                                    HookRunSkipReason::PriorBlock
+                                } else {
+                                    HookRunSkipReason::ProcessInterrupted
+                                }
+                            }
+                        };
+                        self.record(TimelineEventKind::Hook(HookEvent::RunSkipped {
+                            occurrence_id: occurrence_id.clone(),
+                            run_id: handler.run_id.clone(),
+                            handler_index: handler.index,
+                            reason,
+                        }))?;
+                    }
+                    HookHandlerLifecycle::Started => {
+                        self.record(TimelineEventKind::Hook(HookEvent::RunFinished {
+                            occurrence_id: occurrence_id.clone(),
+                            run_id: handler.run_id.clone(),
+                            handler_index: handler.index,
+                            elapsed_ms: 0,
+                            outcome: HookRunOutcome::InterruptedOutcomeUnknown,
+                            control: HookRunControl::None,
+                        }))?;
+                    }
+                    HookHandlerLifecycle::Finished { .. }
+                    | HookHandlerLifecycle::Skipped { .. } => {}
+                }
+            }
+            let decision = self
+                .lifecycle
+                .hooks
+                .get(&occurrence_id)
+                .ok_or_else(|| TimelineError::HookNotFound(occurrence_id.clone()))?
+                .derived_decision()?;
+            self.record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id,
+                decision,
+            }))?;
+        }
+        for input_id in inputs {
+            if !self.lifecycle.user_prompt_hooks.contains_key(&input_id) {
+                let occurrence_id = format!(
+                    "hook-recovery-{}",
+                    blake3::hash(input_id.as_bytes()).to_hex()
+                );
+                self.record(TimelineEventKind::Hook(HookEvent::Triggered {
+                    occurrence_id: occurrence_id.clone(),
+                    event: HookEventType::UserPromptSubmit,
+                    gate: HookGateKind::Prompt,
+                    cause: HookCause::Input {
+                        input_id: input_id.clone(),
+                    },
+                    config_generation: 0,
+                    handlers: Vec::new(),
+                }))?;
+                self.record(TimelineEventKind::Hook(HookEvent::Completed {
+                    occurrence_id,
+                    decision: HookAggregateDecision::Prompt {
+                        decision: HookGateDecision::Allow,
+                    },
+                }))?;
+            }
+            let occurrence_id = self
+                .lifecycle
+                .user_prompt_hooks
+                .get(&input_id)
+                .ok_or(TimelineError::InvalidInput)?;
+            let hook = self
+                .lifecycle
+                .hooks
+                .get(occurrence_id)
+                .ok_or(TimelineError::InvalidInput)?;
+            let decision = match hook.decision.as_ref() {
+                Some(HookAggregateDecision::Prompt {
+                    decision: HookGateDecision::Block { reason },
+                }) => InputAdmissionDecision::Block {
+                    reason: InputBlockReason::Hook {
+                        reason: reason.clone(),
+                    },
+                },
+                Some(HookAggregateDecision::Prompt {
+                    decision: HookGateDecision::Allow,
+                }) => InputAdmissionDecision::Block {
+                    reason: InputBlockReason::ProcessInterrupted,
+                },
+                _ => return Err(TimelineError::InvalidInput),
+            };
+            self.record(TimelineEventKind::Input(InputEvent::AdmissionResolved {
+                input_id,
+                decision,
+                route: None,
+                supersedes: Vec::new(),
+            }))?;
+        }
         for id in requests {
             let duration_ms = duration_since(self.request_started_at(&id), now);
             self.record(TimelineEventKind::Request(RequestEvent::Cancelled {
@@ -2353,9 +3015,13 @@ impl Timeline {
                 input: Some(input),
                 ..
             }) => self.append_surface_items(event.seq, std::slice::from_ref(input)),
+            TimelineEventKind::Input(InputEvent::Consumed { item, .. }) => {
+                self.append_surface_items(event.seq, std::slice::from_ref(item))
+            }
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: None, ..
             }) => {}
+            TimelineEventKind::Input(InputEvent::Handled { .. }) => {}
             TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => {}
             TimelineEventKind::Control(control) => {
                 for layer in &control.retired_context_layers {
@@ -2429,7 +3095,7 @@ impl Timeline {
                         let checkpoints = self
                             .pending_notifications
                             .iter()
-                            .filter_map(|(pending_id, pending)| {
+                            .filter(|(_, pending)| {
                                 matches!(
                                     &pending.source,
                                     NotificationSource::TaskStillRunning {
@@ -2437,8 +3103,8 @@ impl Timeline {
                                         ..
                                     } if pending_task_id == task_id
                                 )
-                                .then(|| pending_id.clone())
                             })
+                            .map(|(pending_id, _)| pending_id.clone())
                             .collect::<Vec<_>>();
                         for checkpoint_id in checkpoints {
                             self.pending_notifications.remove(&checkpoint_id);
@@ -3445,10 +4111,628 @@ impl Timeline {
     }
 }
 
+impl HookFold {
+    fn handler(&self, run_id: &str, handler_index: u32) -> Option<(usize, &HookHandlerPlan)> {
+        let index = usize::try_from(handler_index).ok()?;
+        let handler = self.handlers.get(index)?;
+        (handler.index == handler_index && handler.run_id == run_id).then_some((index, handler))
+    }
+
+    fn all_handlers_closed(&self) -> bool {
+        self.runs.iter().all(|run| {
+            matches!(
+                run,
+                HookHandlerLifecycle::Finished { .. } | HookHandlerLifecycle::Skipped { .. }
+            )
+        })
+    }
+
+    fn decisive_before(&self, handler_index: usize) -> bool {
+        match self.gate {
+            HookGateKind::Observe => false,
+            HookGateKind::Prompt | HookGateKind::Tool => self
+                .handlers
+                .iter()
+                .zip(&self.runs)
+                .take(handler_index)
+                .any(|(handler, run)| gate_run_block_reason(handler, run).is_some()),
+            HookGateKind::Stop => self.runs.iter().take(handler_index).any(|run| {
+                matches!(
+                    run,
+                    HookHandlerLifecycle::Finished {
+                        outcome: HookRunOutcome::Success,
+                        control: HookRunControl::StopForce { .. },
+                        ..
+                    } | HookHandlerLifecycle::Finished {
+                        outcome: HookRunOutcome::Success,
+                        control: HookRunControl::StopKeepWorking {
+                            reason: Some(_),
+                            ..
+                        },
+                        ..
+                    }
+                )
+            }),
+        }
+    }
+
+    fn derived_decision(&self) -> Result<HookAggregateDecision, TimelineError> {
+        if !self.all_handlers_closed() {
+            return Err(TimelineError::InvalidHook);
+        }
+        Ok(match self.gate {
+            HookGateKind::Observe => HookAggregateDecision::Observe,
+            HookGateKind::Prompt | HookGateKind::Tool => {
+                let decision = self
+                    .handlers
+                    .iter()
+                    .zip(&self.runs)
+                    .find_map(|(handler, run)| gate_run_block_reason(handler, run))
+                    .map_or(HookGateDecision::Allow, |reason| HookGateDecision::Block {
+                        reason,
+                    });
+                match self.gate {
+                    HookGateKind::Prompt => HookAggregateDecision::Prompt { decision },
+                    HookGateKind::Tool => HookAggregateDecision::Tool { decision },
+                    HookGateKind::Observe | HookGateKind::Stop => unreachable!(),
+                }
+            }
+            HookGateKind::Stop => {
+                let force = self.runs.iter().find_map(|run| match run {
+                    HookHandlerLifecycle::Finished {
+                        outcome: HookRunOutcome::Success,
+                        control: HookRunControl::StopForce { reason },
+                        ..
+                    } => Some(reason.clone()),
+                    _ => None,
+                });
+                let decision = if let Some(reason) = force {
+                    HookStopDecision::ForceStop { reason }
+                } else {
+                    let mut reasons = Vec::new();
+                    let mut additional_context = Vec::new();
+                    for run in &self.runs {
+                        if let HookHandlerLifecycle::Finished {
+                            outcome: HookRunOutcome::Success,
+                            control:
+                                HookRunControl::StopKeepWorking {
+                                    reason,
+                                    additional_context: context,
+                                },
+                            ..
+                        } = run
+                        {
+                            if let Some(reason) = reason {
+                                reasons.push(reason.clone());
+                            }
+                            if let Some(context) = context {
+                                additional_context.push(context.clone());
+                            }
+                        }
+                    }
+                    if reasons.is_empty() && additional_context.is_empty() {
+                        HookStopDecision::AllowStop
+                    } else {
+                        HookStopDecision::KeepWorking {
+                            reasons,
+                            additional_context,
+                        }
+                    }
+                };
+                HookAggregateDecision::Stop { decision }
+            }
+        })
+    }
+}
+
+fn gate_run_block_reason(handler: &HookHandlerPlan, run: &HookHandlerLifecycle) -> Option<String> {
+    match run {
+        HookHandlerLifecycle::Finished {
+            outcome: HookRunOutcome::Blocked,
+            control: HookRunControl::Block { reason },
+            ..
+        } => Some(reason.clone()),
+        HookHandlerLifecycle::Finished {
+            outcome: HookRunOutcome::InterruptedOutcomeUnknown,
+            ..
+        }
+        | HookHandlerLifecycle::Skipped {
+            reason: HookRunSkipReason::ProcessInterrupted,
+        } if matches!(handler.action, HookHandlerPlanAction::Execute) => {
+            Some("hook outcome is unknown after process interruption".into())
+        }
+        HookHandlerLifecycle::Finished {
+            outcome:
+                HookRunOutcome::Failed { .. } | HookRunOutcome::TimedOut | HookRunOutcome::Cancelled,
+            control: HookRunControl::Block { reason },
+            ..
+        } if handler.failure_policy == HookFailurePolicy::Block => Some(reason.clone()),
+        _ => None,
+    }
+}
+
 impl LifecycleFold {
+    fn valid_effective_hook_gate(
+        &self,
+        occurrence_id: &str,
+        event: HookEventType,
+        gate: HookGateKind,
+        cause: &HookCause,
+    ) -> bool {
+        if event != HookEventType::UserPromptSubmit && gate != event.gate() {
+            return false;
+        }
+        match (event, cause) {
+            (
+                HookEventType::SessionStart | HookEventType::SessionEnd,
+                HookCause::Session { session_id },
+            ) => {
+                self.active_turn.is_none()
+                    && self
+                        .hook_session_id
+                        .as_ref()
+                        .is_none_or(|known| known == session_id)
+            }
+            (HookEventType::UserPromptSubmit, HookCause::Input { input_id }) => {
+                gate == HookGateKind::Prompt
+                    && self.inputs.get(input_id).is_some_and(|input| {
+                        input.admission.is_none()
+                            && input.route.is_none()
+                            && input.reserved_turn.is_none()
+                            && !input.consumed
+                            && input.dismissed.is_none()
+                    })
+            }
+            (HookEventType::UserPromptSubmit, HookCause::Notification { notification_id }) => {
+                gate == HookGateKind::Observe
+                    && self.active_turn.is_some()
+                    && self.pending_notifications.contains(notification_id)
+            }
+            (HookEventType::UserPromptSubmit, HookCause::Turn { turn }) => {
+                gate == HookGateKind::Observe
+                    && self.internal_turns.contains(turn)
+                    && self.active_turn == Some(*turn)
+            }
+            (HookEventType::UserPromptSubmit, _) => false,
+            (HookEventType::PreToolUse, HookCause::Tool { call_id }) => {
+                self.open_tools.contains_key(call_id)
+            }
+            (
+                HookEventType::PostToolUse
+                | HookEventType::PostToolUseFailure
+                | HookEventType::PermissionDenied,
+                HookCause::Tool { call_id },
+            ) => self.seen_tools.contains(call_id) && !self.open_tools.contains_key(call_id),
+            (HookEventType::Stop, HookCause::Turn { turn }) => self.active_turn == Some(*turn),
+            (
+                HookEventType::StopFailure | HookEventType::StopCancelled,
+                HookCause::Turn { turn },
+            ) => self.seen_turns.contains(turn) && self.active_turn != Some(*turn),
+            (HookEventType::Notification, HookCause::Notification { notification_id }) => {
+                notification_id == occurrence_id
+                    && !self.seen_hook_notification_causes.contains(notification_id)
+            }
+            (HookEventType::SubagentStart, HookCause::Subagent { subagent_id }) => {
+                self.open_subagents.contains_key(subagent_id)
+            }
+            (HookEventType::SubagentStop, HookCause::Subagent { subagent_id }) => {
+                self.active_turn.is_some()
+                    && self.subagent_seed_id.as_deref() == Some(subagent_id.as_str())
+            }
+            (HookEventType::PreCompact, HookCause::Compaction { compaction_id }) => self
+                .open_compaction
+                .as_ref()
+                .is_some_and(|open| open.id == compaction_id.as_str()),
+            (HookEventType::PostCompact, HookCause::Compaction { compaction_id }) => {
+                self.open_compaction.is_none() && self.seen_compactions.contains(compaction_id)
+            }
+            _ => false,
+        }
+    }
+
     fn accept(&mut self, kind: &TimelineEventKind) -> Result<(), TimelineError> {
         match kind {
-            TimelineEventKind::Turn(TurnEvent::Started { id, .. }) => {
+            TimelineEventKind::Input(InputEvent::Submitted {
+                input_id,
+                intent,
+                payload_ref,
+            }) => {
+                if !valid_hook_identifier(input_id)
+                    || !valid_blake3(&payload_ref.blake3)
+                    || payload_ref.bytes == 0
+                    || payload_ref.bytes > MAX_INPUT_PAYLOAD_BYTES
+                {
+                    return Err(TimelineError::InvalidInput);
+                }
+                if self.inputs.contains_key(input_id) {
+                    return Err(TimelineError::DuplicateInput(input_id.clone()));
+                }
+                self.inputs.insert(
+                    input_id.clone(),
+                    InputFold {
+                        intent: *intent,
+                        payload_ref: payload_ref.clone(),
+                        admission: None,
+                        route: None,
+                        reserved_turn: None,
+                        consumed: false,
+                        dismissed: None,
+                    },
+                );
+            }
+            TimelineEventKind::Input(InputEvent::AdmissionResolved {
+                input_id,
+                decision,
+                route,
+                supersedes,
+            }) => {
+                let occurrence_id = self
+                    .user_prompt_hooks
+                    .get(input_id)
+                    .ok_or(TimelineError::InvalidInput)?;
+                let hook = self
+                    .hooks
+                    .get(occurrence_id)
+                    .ok_or(TimelineError::InvalidInput)?;
+                let Some(hook_decision) = &hook.decision else {
+                    return Err(TimelineError::InvalidInput);
+                };
+                let input = self
+                    .inputs
+                    .get(input_id)
+                    .ok_or_else(|| TimelineError::InputNotFound(input_id.clone()))?;
+                let valid_resolution = match decision {
+                    InputAdmissionDecision::Allow => route.as_ref().is_some_and(|route| {
+                        valid_initial_input_route(input.intent, route, self.active_turn)
+                    }),
+                    InputAdmissionDecision::Block { .. } => {
+                        route.is_none() && supersedes.is_empty()
+                    }
+                };
+                if input.admission.is_some()
+                    || !valid_input_admission(decision, hook_decision)
+                    || !valid_resolution
+                    || (!supersedes.is_empty() && !valid_input_id_batch(supersedes))
+                    || supersedes.iter().any(|superseded| superseded == input_id)
+                {
+                    return Err(TimelineError::InvalidInput);
+                }
+                for superseded in supersedes {
+                    let input = self
+                        .inputs
+                        .get(superseded)
+                        .ok_or_else(|| TimelineError::InputNotFound(superseded.clone()))?;
+                    if input.consumed
+                        || input.dismissed.is_some()
+                        || input.reserved_turn.is_some()
+                        || !matches!(input.admission, Some(InputAdmissionDecision::Allow))
+                        || !matches!(input.route, Some(InputRoute::Fifo))
+                    {
+                        return Err(TimelineError::InvalidInput);
+                    }
+                }
+                let input = self
+                    .inputs
+                    .get_mut(input_id)
+                    .expect("validated input must remain present");
+                input.admission = Some(decision.clone());
+                input.route = route.clone();
+                for superseded in supersedes {
+                    self.inputs
+                        .get_mut(superseded)
+                        .expect("validated superseded input must remain present")
+                        .dismissed = Some(InputDismissReason::RouteSuperseded);
+                }
+            }
+            TimelineEventKind::Input(InputEvent::Rerouted { input_ids, route }) => {
+                if !valid_input_id_batch(input_ids) {
+                    return Err(TimelineError::InvalidInput);
+                }
+                for input_id in input_ids {
+                    let input = self
+                        .inputs
+                        .get(input_id)
+                        .ok_or_else(|| TimelineError::InputNotFound(input_id.clone()))?;
+                    let valid_transition = match input.route.as_ref() {
+                        None => valid_initial_input_route(input.intent, route, self.active_turn),
+                        Some(current) => valid_input_reroute(
+                            input.intent,
+                            current,
+                            route,
+                            self.active_turn,
+                            &self.seen_turns,
+                        ),
+                    };
+                    if input.consumed
+                        || input.dismissed.is_some()
+                        || input.reserved_turn.is_some()
+                        || !matches!(input.admission, Some(InputAdmissionDecision::Allow))
+                        || !valid_transition
+                    {
+                        return Err(TimelineError::InvalidInput);
+                    }
+                }
+                for input_id in input_ids {
+                    self.inputs
+                        .get_mut(input_id)
+                        .expect("validated input must remain present")
+                        .route = Some(route.clone());
+                }
+            }
+            TimelineEventKind::Input(InputEvent::Consumed {
+                input_ids,
+                turn,
+                item,
+            }) => {
+                if !valid_input_id_batch(input_ids) {
+                    return Err(TimelineError::InvalidInput);
+                }
+                for input_id in input_ids {
+                    let input = self
+                        .inputs
+                        .get(input_id)
+                        .ok_or_else(|| TimelineError::InputNotFound(input_id.clone()))?;
+                    let Some(InputAdmissionDecision::Allow) = &input.admission else {
+                        return Err(TimelineError::InvalidInput);
+                    };
+                    let valid = match input.route.as_ref() {
+                        Some(InputRoute::Steer { target_turn }) => {
+                            *target_turn == *turn
+                                && input.reserved_turn.is_none()
+                                && self.active_turn == Some(*turn)
+                                && valid_consumed_input_item(item)
+                        }
+                        Some(InputRoute::Fifo) => {
+                            input.reserved_turn == Some(*turn)
+                                && self.active_turn == Some(*turn)
+                                && valid_consumed_input_item(item)
+                        }
+                        None => false,
+                    };
+                    if input.consumed || input.dismissed.is_some() || !valid {
+                        return Err(TimelineError::InvalidInput);
+                    }
+                }
+                for input_id in input_ids {
+                    self.inputs
+                        .get_mut(input_id)
+                        .expect("validated input must remain present")
+                        .consumed = true;
+                    self.inputs
+                        .get_mut(input_id)
+                        .expect("validated input must remain present")
+                        .reserved_turn = None;
+                }
+            }
+            TimelineEventKind::Input(InputEvent::Handled { input_ids, turn }) => {
+                if !valid_input_id_batch(input_ids) {
+                    return Err(TimelineError::InvalidInput);
+                }
+                for input_id in input_ids {
+                    let input = self
+                        .inputs
+                        .get(input_id)
+                        .ok_or_else(|| TimelineError::InputNotFound(input_id.clone()))?;
+                    if input.consumed
+                        || input.dismissed.is_some()
+                        || input.reserved_turn != Some(*turn)
+                        || self.active_turn != Some(*turn)
+                        || !matches!(input.admission, Some(InputAdmissionDecision::Allow))
+                        || !matches!(input.route, Some(InputRoute::Fifo))
+                    {
+                        return Err(TimelineError::InvalidInput);
+                    }
+                }
+                for input_id in input_ids {
+                    let input = self
+                        .inputs
+                        .get_mut(input_id)
+                        .expect("validated input must remain present");
+                    input.consumed = true;
+                    input.reserved_turn = None;
+                }
+            }
+            TimelineEventKind::Input(InputEvent::Dismissed { input_ids, reason }) => {
+                if !valid_input_id_batch(input_ids) {
+                    return Err(TimelineError::InvalidInput);
+                }
+                for input_id in input_ids {
+                    let input = self
+                        .inputs
+                        .get(input_id)
+                        .ok_or_else(|| TimelineError::InputNotFound(input_id.clone()))?;
+                    if input.consumed
+                        || input.dismissed.is_some()
+                        || input.reserved_turn.is_some()
+                        || !matches!(input.admission, Some(InputAdmissionDecision::Allow))
+                    {
+                        return Err(TimelineError::InvalidInput);
+                    }
+                }
+                for input_id in input_ids {
+                    self.inputs
+                        .get_mut(input_id)
+                        .expect("validated input must remain present")
+                        .dismissed = Some(*reason);
+                }
+            }
+            TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id,
+                event,
+                gate,
+                cause,
+                config_generation,
+                handlers,
+            }) => {
+                if !valid_hook_identifier(occurrence_id)
+                    || !valid_hook_cause(*event, cause)
+                    || !self.valid_effective_hook_gate(occurrence_id, *event, *gate, cause)
+                    || handlers.len() > MAX_HOOK_HANDLERS
+                    || self.hooks.contains_key(occurrence_id)
+                {
+                    return Err(if self.hooks.contains_key(occurrence_id) {
+                        TimelineError::DuplicateHookOccurrence(occurrence_id.clone())
+                    } else {
+                        TimelineError::InvalidHook
+                    });
+                }
+                if let HookCause::Input { input_id } = cause {
+                    if !self.inputs.contains_key(input_id)
+                        || self.user_prompt_hooks.contains_key(input_id)
+                    {
+                        return Err(TimelineError::InvalidHook);
+                    }
+                    self.user_prompt_hooks
+                        .insert(input_id.clone(), occurrence_id.clone());
+                }
+                match (event, cause) {
+                    (
+                        HookEventType::SessionStart | HookEventType::SessionEnd,
+                        HookCause::Session { session_id },
+                    ) => {
+                        if self.hook_session_id.is_none() {
+                            self.hook_session_id = Some(session_id.clone());
+                        }
+                    }
+                    (HookEventType::Notification, HookCause::Notification { notification_id }) => {
+                        self.seen_hook_notification_causes
+                            .insert(notification_id.clone());
+                    }
+                    _ => {}
+                }
+                for (index, handler) in handlers.iter().enumerate() {
+                    let Ok(index) = u32::try_from(index) else {
+                        return Err(TimelineError::InvalidHook);
+                    };
+                    if handler.index != index
+                        || !valid_hook_identifier(&handler.run_id)
+                        || !valid_hook_handler_name(&handler.name)
+                        || !valid_hook_handler_plan(*event, handler)
+                        || !self.seen_hook_run_ids.insert(handler.run_id.clone())
+                    {
+                        return Err(TimelineError::InvalidHook);
+                    }
+                }
+                self.hooks.insert(
+                    occurrence_id.clone(),
+                    HookFold {
+                        event: *event,
+                        gate: *gate,
+                        cause: cause.clone(),
+                        config_generation: *config_generation,
+                        handlers: handlers.clone(),
+                        runs: vec![HookHandlerLifecycle::Pending; handlers.len()],
+                        decision: None,
+                    },
+                );
+            }
+            TimelineEventKind::Hook(HookEvent::RunStarted {
+                occurrence_id,
+                run_id,
+                handler_index,
+            }) => {
+                let hook = self
+                    .hooks
+                    .get_mut(occurrence_id)
+                    .ok_or_else(|| TimelineError::HookNotFound(occurrence_id.clone()))?;
+                if hook.decision.is_some() {
+                    return Err(TimelineError::HookAlreadyCompleted(occurrence_id.clone()));
+                }
+                let Some((index, handler)) = hook.handler(run_id, *handler_index) else {
+                    return Err(TimelineError::InvalidHook);
+                };
+                if !matches!(handler.action, HookHandlerPlanAction::Execute)
+                    || !matches!(hook.runs[index], HookHandlerLifecycle::Pending)
+                {
+                    return Err(TimelineError::InvalidHook);
+                }
+                hook.runs[index] = HookHandlerLifecycle::Started;
+            }
+            TimelineEventKind::Hook(HookEvent::RunFinished {
+                occurrence_id,
+                run_id,
+                handler_index,
+                elapsed_ms,
+                outcome,
+                control,
+            }) => {
+                let hook = self
+                    .hooks
+                    .get_mut(occurrence_id)
+                    .ok_or_else(|| TimelineError::HookNotFound(occurrence_id.clone()))?;
+                if hook.decision.is_some() {
+                    return Err(TimelineError::HookAlreadyCompleted(occurrence_id.clone()));
+                }
+                let Some((index, handler)) = hook.handler(run_id, *handler_index) else {
+                    return Err(TimelineError::InvalidHook);
+                };
+                if !matches!(hook.runs[index], HookHandlerLifecycle::Started)
+                    || !valid_hook_run_result(hook.gate, handler, outcome, control)
+                {
+                    return Err(TimelineError::InvalidHook);
+                }
+                hook.runs[index] = HookHandlerLifecycle::Finished {
+                    elapsed_ms: *elapsed_ms,
+                    outcome: outcome.clone(),
+                    control: control.clone(),
+                };
+            }
+            TimelineEventKind::Hook(HookEvent::RunSkipped {
+                occurrence_id,
+                run_id,
+                handler_index,
+                reason,
+            }) => {
+                let hook = self
+                    .hooks
+                    .get_mut(occurrence_id)
+                    .ok_or_else(|| TimelineError::HookNotFound(occurrence_id.clone()))?;
+                if hook.decision.is_some() {
+                    return Err(TimelineError::HookAlreadyCompleted(occurrence_id.clone()));
+                }
+                let Some((index, handler)) = hook.handler(run_id, *handler_index) else {
+                    return Err(TimelineError::InvalidHook);
+                };
+                let valid_reason = match (&handler.action, reason) {
+                    (HookHandlerPlanAction::Skip { reason: planned }, actual) => planned == actual,
+                    (HookHandlerPlanAction::Execute, HookRunSkipReason::ProcessInterrupted) => true,
+                    // The source/trust verdict is intentionally rechecked after
+                    // Triggered is durable and immediately before execution.
+                    // A revoked, replaced, or provenance-mismatched source must
+                    // close as a policy skip without starting the handler.
+                    (HookHandlerPlanAction::Execute, HookRunSkipReason::PolicyDisabled) => true,
+                    (HookHandlerPlanAction::Execute, HookRunSkipReason::PriorBlock) => {
+                        hook.decisive_before(index)
+                    }
+                    _ => false,
+                };
+                if !matches!(hook.runs[index], HookHandlerLifecycle::Pending) || !valid_reason {
+                    return Err(TimelineError::InvalidHook);
+                }
+                hook.runs[index] = HookHandlerLifecycle::Skipped { reason: *reason };
+            }
+            TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id,
+                decision,
+            }) => {
+                let hook = self
+                    .hooks
+                    .get_mut(occurrence_id)
+                    .ok_or_else(|| TimelineError::HookNotFound(occurrence_id.clone()))?;
+                if hook.decision.is_some() {
+                    return Err(TimelineError::HookAlreadyCompleted(occurrence_id.clone()));
+                }
+                if hook.derived_decision()? != *decision {
+                    return Err(TimelineError::InvalidHook);
+                }
+                hook.decision = Some(decision.clone());
+            }
+            TimelineEventKind::Turn(TurnEvent::Started {
+                id,
+                input_ids,
+                identity,
+                ..
+            }) => {
                 if let Some(active) = self.active_turn {
                     return Err(TimelineError::TurnAlreadyActive {
                         active,
@@ -3457,6 +4741,43 @@ impl LifecycleFold {
                 }
                 if !self.seen_turns.insert(*id) {
                     return Err(TimelineError::TurnAlreadySeen(*id));
+                }
+                let input_shape_valid = match identity.turn_kind.as_str() {
+                    "user" => !input_ids.is_empty() && input_ids.len() <= MAX_TURN_INPUTS,
+                    "internal" => input_ids.is_empty(),
+                    _ => false,
+                };
+                if !input_shape_valid {
+                    return Err(TimelineError::InvalidInput);
+                }
+                let mut unique_inputs = BTreeSet::new();
+                for input_id in input_ids {
+                    if !unique_inputs.insert(input_id) {
+                        return Err(TimelineError::InvalidInput);
+                    }
+                    let input = self
+                        .inputs
+                        .get(input_id)
+                        .ok_or_else(|| TimelineError::InputNotFound(input_id.clone()))?;
+                    let Some(InputAdmissionDecision::Allow) = &input.admission else {
+                        return Err(TimelineError::InvalidInput);
+                    };
+                    if input.consumed
+                        || input.dismissed.is_some()
+                        || input.reserved_turn.is_some()
+                        || !matches!(input.route, Some(InputRoute::Fifo))
+                    {
+                        return Err(TimelineError::InvalidInput);
+                    }
+                }
+                for input_id in input_ids {
+                    self.inputs
+                        .get_mut(input_id)
+                        .expect("validated input must remain present")
+                        .reserved_turn = Some(*id);
+                }
+                if identity.turn_kind == "internal" {
+                    self.internal_turns.insert(*id);
                 }
                 self.active_turn = Some(*id);
             }
@@ -3473,6 +4794,11 @@ impl LifecycleFold {
                     || self.open_compaction.is_some()
                 {
                     return Err(TimelineError::OpenChildren { boundary: "turn" });
+                }
+                for input in self.inputs.values_mut() {
+                    if input.reserved_turn == Some(*id) {
+                        input.reserved_turn = None;
+                    }
                 }
                 self.active_turn = None;
             }
@@ -3856,15 +5182,31 @@ impl LifecycleFold {
                         .clone(),
                 ));
             }
+            TimelineEventKind::Notification(NotificationEvent::Received { id, .. }) => {
+                self.pending_notifications.insert(id.clone());
+            }
+            TimelineEventKind::Notification(NotificationEvent::Consumed {
+                notification_ids,
+                ..
+            })
+            | TimelineEventKind::Notification(NotificationEvent::Dismissed {
+                notification_ids,
+                ..
+            }) => {
+                for id in notification_ids {
+                    self.pending_notifications.remove(id);
+                }
+            }
+            TimelineEventKind::SubagentSeed(seed) => {
+                self.subagent_seed_id = Some(seed.subagent_id.clone());
+            }
             TimelineEventKind::Messages(_)
             | TimelineEventKind::ImageProjection(_)
             | TimelineEventKind::Recovery(_)
             | TimelineEventKind::Observation(_)
             | TimelineEventKind::SessionTitle(_)
             | TimelineEventKind::Sideband(_)
-            | TimelineEventKind::SubagentSeed(_)
-            | TimelineEventKind::SubagentResult(_)
-            | TimelineEventKind::Notification(_) => {}
+            | TimelineEventKind::SubagentResult(_) => {}
             TimelineEventKind::Control(control) => {
                 if let Some(previous) = self.control_revision
                     && control.revision <= previous
@@ -3885,6 +5227,252 @@ fn valid_notification_identifier(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= MAX_NOTIFICATION_ID_BYTES
         && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn valid_hook_identifier(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAX_HOOK_ID_BYTES
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn valid_hook_handler_name(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAX_HOOK_HANDLER_NAME_BYTES
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn valid_hook_text(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= MAX_HOOK_CONTROL_TEXT_BYTES
+        && !value.bytes().any(|byte| byte == 0)
+}
+
+fn valid_optional_hook_text(value: Option<&str>) -> bool {
+    value.is_none_or(valid_hook_text)
+}
+
+fn valid_hook_cause(event: HookEventType, cause: &HookCause) -> bool {
+    match (event, cause) {
+        (
+            HookEventType::SessionStart | HookEventType::SessionEnd,
+            HookCause::Session { session_id },
+        ) => valid_hook_identifier(session_id),
+        (HookEventType::UserPromptSubmit, HookCause::Input { input_id }) => {
+            valid_hook_identifier(input_id)
+        }
+        (HookEventType::UserPromptSubmit, HookCause::Notification { notification_id }) => {
+            valid_hook_identifier(notification_id)
+        }
+        (HookEventType::UserPromptSubmit, HookCause::Turn { .. }) => true,
+        (
+            HookEventType::PreToolUse
+            | HookEventType::PostToolUse
+            | HookEventType::PostToolUseFailure
+            | HookEventType::PermissionDenied,
+            HookCause::Tool { call_id },
+        ) => valid_hook_identifier(call_id),
+        (
+            HookEventType::Stop | HookEventType::StopFailure | HookEventType::StopCancelled,
+            HookCause::Turn { .. },
+        ) => true,
+        (HookEventType::Notification, HookCause::Notification { notification_id }) => {
+            valid_hook_identifier(notification_id)
+        }
+        (
+            HookEventType::SubagentStart | HookEventType::SubagentStop,
+            HookCause::Subagent { subagent_id },
+        ) => valid_hook_identifier(subagent_id),
+        (
+            HookEventType::PreCompact | HookEventType::PostCompact,
+            HookCause::Compaction { compaction_id },
+        ) => valid_hook_identifier(compaction_id),
+        _ => false,
+    }
+}
+
+fn valid_hook_handler_plan(event: HookEventType, handler: &HookHandlerPlan) -> bool {
+    let planned_action = matches!(
+        handler.action,
+        HookHandlerPlanAction::Execute
+            | HookHandlerPlanAction::Skip {
+                reason: HookRunSkipReason::MatcherMiss
+                    | HookRunSkipReason::Disabled
+                    | HookRunSkipReason::PolicyDisabled,
+            }
+    );
+    let kind_matches_provenance = matches!(
+        (handler.kind, handler.provenance),
+        (HookHandlerKind::Client, HookHandlerProvenance::Client)
+            | (
+                HookHandlerKind::Command | HookHandlerKind::Http,
+                HookHandlerProvenance::UserConfig
+                    | HookHandlerProvenance::UserFile
+                    | HookHandlerProvenance::ProjectFile
+                    | HookHandlerProvenance::Plugin
+                    | HookHandlerProvenance::Agent
+            )
+    );
+    let failure_policy_valid = handler.failure_policy == HookFailurePolicy::Allow
+        || matches!(
+            event,
+            HookEventType::UserPromptSubmit | HookEventType::PreToolUse
+        );
+    planned_action && kind_matches_provenance && failure_policy_valid
+}
+
+fn valid_hook_run_result(
+    gate: HookGateKind,
+    handler: &HookHandlerPlan,
+    outcome: &HookRunOutcome,
+    control: &HookRunControl,
+) -> bool {
+    if let HookRunOutcome::Failed { message } = outcome
+        && !valid_hook_text(message)
+    {
+        return false;
+    }
+    if matches!(outcome, HookRunOutcome::InterruptedOutcomeUnknown) {
+        return matches!(control, HookRunControl::None);
+    }
+    if matches!(
+        outcome,
+        HookRunOutcome::Failed { .. } | HookRunOutcome::TimedOut | HookRunOutcome::Cancelled
+    ) {
+        return if matches!(gate, HookGateKind::Prompt | HookGateKind::Tool)
+            && handler.failure_policy == HookFailurePolicy::Block
+        {
+            matches!(control, HookRunControl::Block { reason } if valid_hook_text(reason))
+        } else {
+            matches!(control, HookRunControl::None)
+        };
+    }
+    match gate {
+        HookGateKind::Observe => {
+            matches!(
+                (outcome, control),
+                (HookRunOutcome::Success, HookRunControl::None)
+            )
+        }
+        HookGateKind::Prompt | HookGateKind::Tool => {
+            matches!(
+                (outcome, control),
+                (HookRunOutcome::Success, HookRunControl::None)
+            ) || matches!(
+                (outcome, control),
+                (
+                    HookRunOutcome::Blocked,
+                    HookRunControl::Block { reason }
+                ) if valid_hook_text(reason)
+            )
+        }
+        HookGateKind::Stop => {
+            matches!(
+                (outcome, control),
+                (HookRunOutcome::Success, HookRunControl::None)
+            ) || matches!(
+                (outcome, control),
+                (
+                    HookRunOutcome::Success,
+                    HookRunControl::StopKeepWorking {
+                        reason,
+                        additional_context,
+                    }
+                ) if (reason.is_some() || additional_context.is_some())
+                    && valid_optional_hook_text(reason.as_deref())
+                    && valid_optional_hook_text(additional_context.as_deref())
+            ) || matches!(
+                (outcome, control),
+                (
+                    HookRunOutcome::Success,
+                    HookRunControl::StopForce { reason }
+                ) if valid_optional_hook_text(reason.as_deref())
+            )
+        }
+    }
+}
+
+fn valid_input_admission(
+    decision: &InputAdmissionDecision,
+    hook_decision: &HookAggregateDecision,
+) -> bool {
+    match (decision, hook_decision) {
+        (
+            InputAdmissionDecision::Block {
+                reason: InputBlockReason::StaleSteerTarget | InputBlockReason::ProcessInterrupted,
+            },
+            HookAggregateDecision::Prompt {
+                decision: HookGateDecision::Allow,
+            },
+        ) => true,
+        (
+            InputAdmissionDecision::Block {
+                reason: InputBlockReason::Hook { reason },
+            },
+            HookAggregateDecision::Prompt {
+                decision:
+                    HookGateDecision::Block {
+                        reason: hook_reason,
+                    },
+            },
+        ) => valid_hook_text(reason) && reason == hook_reason,
+        (
+            InputAdmissionDecision::Allow,
+            HookAggregateDecision::Prompt {
+                decision: HookGateDecision::Allow,
+            },
+        ) => true,
+        _ => false,
+    }
+}
+
+fn valid_initial_input_route(
+    intent: InputIntent,
+    route: &InputRoute,
+    active_turn: Option<TurnId>,
+) -> bool {
+    match (intent, route) {
+        (InputIntent::Prompt | InputIntent::Steer | InputIntent::Followup, InputRoute::Fifo) => {
+            true
+        }
+        (
+            InputIntent::Prompt | InputIntent::Steer | InputIntent::Followup,
+            InputRoute::Steer { target_turn },
+        ) => active_turn == Some(*target_turn),
+    }
+}
+
+fn valid_input_reroute(
+    intent: InputIntent,
+    current: &InputRoute,
+    next: &InputRoute,
+    active_turn: Option<TurnId>,
+    seen_turns: &BTreeSet<TurnId>,
+) -> bool {
+    match (intent, current, next) {
+        (
+            InputIntent::Prompt | InputIntent::Steer | InputIntent::Followup,
+            InputRoute::Fifo,
+            InputRoute::Steer { target_turn },
+        ) => active_turn == Some(*target_turn),
+        (
+            InputIntent::Prompt | InputIntent::Steer | InputIntent::Followup,
+            InputRoute::Steer { target_turn },
+            InputRoute::Fifo,
+        ) => seen_turns.contains(target_turn) && active_turn != Some(*target_turn),
+        _ => false,
+    }
+}
+
+fn valid_input_id_batch(input_ids: &[String]) -> bool {
+    if input_ids.is_empty() || input_ids.len() > MAX_TURN_INPUTS {
+        return false;
+    }
+    let mut unique = BTreeSet::new();
+    input_ids.iter().all(|input_id| unique.insert(input_id))
+}
+
+fn valid_consumed_input_item(item: &ConversationItem) -> bool {
+    matches!(item, ConversationItem::User(user) if !user.content.is_empty())
 }
 
 fn valid_compaction_replacement(items: &[ConversationItem]) -> bool {
@@ -4808,7 +6396,7 @@ mod tests {
     fn user_identity() -> TurnIdentity {
         TurnIdentity {
             origin: "user".into(),
-            turn_kind: "user".into(),
+            turn_kind: "internal".into(),
             goal_id: None,
             goal_definition_revision: None,
             stage_id: None,
@@ -4844,6 +6432,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity,
                 model_id: "model".into(),
                 input_message_count: timeline.surface_len(),
@@ -4878,6 +6467,1657 @@ mod tests {
             user_identity(),
             TurnInputKind::Prompt,
         );
+    }
+
+    fn start_internal_turn(timeline: &mut Timeline, id: u64) -> TurnId {
+        let turn = TurnId(id);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                input_ids: Vec::new(),
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: timeline.surface_len(),
+                prompt_index: 0,
+                prompt_text: "test".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        turn
+    }
+
+    fn start_tool(timeline: &mut Timeline, turn: TurnId, call_id: &str) -> StepId {
+        let step = StepId { turn, index: 0 };
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Tool(ToolEvent::Started {
+                call_id: call_id.into(),
+                turn,
+                step,
+                name: "test_tool".into(),
+                input: None,
+            }))
+            .unwrap();
+        step
+    }
+
+    fn submit_human_input(timeline: &mut Timeline, input_id: &str, intent: InputIntent) {
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Submitted {
+                input_id: input_id.into(),
+                intent,
+                payload_ref: InputPayloadRef {
+                    blake3: blake3::hash(input_id.as_bytes()).to_hex().to_string(),
+                    bytes: input_id.len() as u64,
+                },
+            }))
+            .unwrap();
+    }
+
+    fn trigger_user_prompt(
+        timeline: &mut Timeline,
+        input_id: &str,
+        handlers: Vec<HookHandlerPlan>,
+    ) -> String {
+        let occurrence_id = format!("hook-{input_id}");
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: occurrence_id.clone(),
+                event: HookEventType::UserPromptSubmit,
+                gate: HookGateKind::Prompt,
+                cause: HookCause::Input {
+                    input_id: input_id.into(),
+                },
+                config_generation: 1,
+                handlers,
+            }))
+            .unwrap();
+        occurrence_id
+    }
+
+    fn allow_input_with(
+        timeline: &mut Timeline,
+        input_id: &str,
+        route: InputRoute,
+        supersedes: Vec<String>,
+    ) {
+        let occurrence_id = trigger_user_prompt(timeline, input_id, Vec::new());
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id,
+                decision: HookAggregateDecision::Prompt {
+                    decision: HookGateDecision::Allow,
+                },
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::AdmissionResolved {
+                input_id: input_id.into(),
+                decision: InputAdmissionDecision::Allow,
+                route: Some(route),
+                supersedes,
+            }))
+            .unwrap();
+    }
+
+    fn allow_input(timeline: &mut Timeline, input_id: &str) {
+        allow_input_with(timeline, input_id, InputRoute::Fifo, Vec::new());
+    }
+
+    fn command_handler(index: u32, run_id: &str) -> HookHandlerPlan {
+        HookHandlerPlan {
+            index,
+            run_id: run_id.into(),
+            name: format!("handler-{index}"),
+            provenance: HookHandlerProvenance::ProjectFile,
+            kind: HookHandlerKind::Command,
+            failure_policy: HookFailurePolicy::Allow,
+            action: HookHandlerPlanAction::Execute,
+        }
+    }
+
+    fn hook_event_slug(event: HookEventType) -> &'static str {
+        match event {
+            HookEventType::SessionStart => "session-start",
+            HookEventType::UserPromptSubmit => "user-prompt-submit",
+            HookEventType::PreToolUse => "pre-tool-use",
+            HookEventType::PostToolUse => "post-tool-use",
+            HookEventType::PostToolUseFailure => "post-tool-use-failure",
+            HookEventType::PermissionDenied => "permission-denied",
+            HookEventType::Stop => "stop",
+            HookEventType::StopFailure => "stop-failure",
+            HookEventType::StopCancelled => "stop-cancelled",
+            HookEventType::Notification => "notification",
+            HookEventType::SubagentStart => "subagent-start",
+            HookEventType::SubagentStop => "subagent-stop",
+            HookEventType::PreCompact => "pre-compact",
+            HookEventType::PostCompact => "post-compact",
+            HookEventType::SessionEnd => "session-end",
+        }
+    }
+
+    fn end_turn(timeline: &mut Timeline, turn: TurnId) {
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: completed_terminal(),
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+    }
+
+    fn complete_tool(timeline: &mut Timeline, call_id: &str) {
+        timeline
+            .record(TimelineEventKind::Tool(ToolEvent::Completed {
+                call_id: call_id.into(),
+                name: "test_tool".into(),
+                outcome: "completed".into(),
+                duration_ms: 1,
+                details: None,
+            }))
+            .unwrap();
+    }
+
+    fn valid_hook_cause_timeline(event: HookEventType) -> (Timeline, HookCause) {
+        match event {
+            HookEventType::SessionStart | HookEventType::SessionEnd => (
+                Timeline::default(),
+                HookCause::Session {
+                    session_id: "session-matrix".into(),
+                },
+            ),
+            HookEventType::UserPromptSubmit => {
+                let mut timeline = Timeline::default();
+                submit_human_input(&mut timeline, "input-matrix", InputIntent::Prompt);
+                (
+                    timeline,
+                    HookCause::Input {
+                        input_id: "input-matrix".into(),
+                    },
+                )
+            }
+            HookEventType::PreToolUse => {
+                let mut timeline = Timeline::default();
+                let turn = start_internal_turn(&mut timeline, 1);
+                start_tool(&mut timeline, turn, "tool-matrix");
+                (
+                    timeline,
+                    HookCause::Tool {
+                        call_id: "tool-matrix".into(),
+                    },
+                )
+            }
+            HookEventType::PostToolUse
+            | HookEventType::PostToolUseFailure
+            | HookEventType::PermissionDenied => {
+                let mut timeline = Timeline::default();
+                let turn = start_internal_turn(&mut timeline, 1);
+                start_tool(&mut timeline, turn, "tool-matrix");
+                complete_tool(&mut timeline, "tool-matrix");
+                (
+                    timeline,
+                    HookCause::Tool {
+                        call_id: "tool-matrix".into(),
+                    },
+                )
+            }
+            HookEventType::Stop => {
+                let mut timeline = Timeline::default();
+                let turn = start_internal_turn(&mut timeline, 1);
+                (timeline, HookCause::Turn { turn })
+            }
+            HookEventType::StopFailure | HookEventType::StopCancelled => {
+                let mut timeline = Timeline::default();
+                let turn = start_internal_turn(&mut timeline, 1);
+                end_turn(&mut timeline, turn);
+                (timeline, HookCause::Turn { turn })
+            }
+            HookEventType::Notification => {
+                let occurrence_id = format!("hook-{}", hook_event_slug(event));
+                (
+                    Timeline::default(),
+                    HookCause::Notification {
+                        notification_id: occurrence_id,
+                    },
+                )
+            }
+            HookEventType::SubagentStart => {
+                let mut timeline = Timeline::default();
+                timeline
+                    .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                        subagent_spawn("subagent-matrix", "child-matrix"),
+                    )))
+                    .unwrap();
+                (
+                    timeline,
+                    HookCause::Subagent {
+                        subagent_id: "subagent-matrix".into(),
+                    },
+                )
+            }
+            HookEventType::SubagentStop => {
+                let mut timeline = Timeline::default();
+                timeline
+                    .record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+                        parent_timeline_id: "parent-matrix".into(),
+                        parent_spawn_seq: 1,
+                        subagent_id: "subagent-matrix".into(),
+                        security_parent_session_id: "parent-session".into(),
+                        context_source: SubagentContextSource::New,
+                        source_ref: None,
+                        normalized: false,
+                    }))
+                    .unwrap();
+                start_internal_turn(&mut timeline, 1);
+                (
+                    timeline,
+                    HookCause::Subagent {
+                        subagent_id: "subagent-matrix".into(),
+                    },
+                )
+            }
+            HookEventType::PreCompact => {
+                let mut timeline =
+                    Timeline::from_seed(vec![ConversationItem::user("source")]).unwrap();
+                timeline
+                    .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                        id: "compact-matrix".into(),
+                        source_items: 1,
+                        prompt_index: 0,
+                    }))
+                    .unwrap();
+                (
+                    timeline,
+                    HookCause::Compaction {
+                        compaction_id: "compact-matrix".into(),
+                    },
+                )
+            }
+            HookEventType::PostCompact => {
+                let mut timeline =
+                    Timeline::from_seed(vec![ConversationItem::user("source")]).unwrap();
+                timeline
+                    .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                        id: "compact-matrix".into(),
+                        source_items: 1,
+                        prompt_index: 0,
+                    }))
+                    .unwrap();
+                let target = record_compaction_summary(&mut timeline, "compact-matrix");
+                timeline
+                    .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
+                    .unwrap();
+                timeline
+                    .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                        id: "compact-matrix".into(),
+                        source_items: 1,
+                        result_items: 1,
+                        duration_ms: 1,
+                    }))
+                    .unwrap();
+                (
+                    timeline,
+                    HookCause::Compaction {
+                        compaction_id: "compact-matrix".into(),
+                    },
+                )
+            }
+        }
+    }
+
+    fn allow_hook_decision(gate: HookGateKind) -> HookAggregateDecision {
+        match gate {
+            HookGateKind::Observe => HookAggregateDecision::Observe,
+            HookGateKind::Prompt => HookAggregateDecision::Prompt {
+                decision: HookGateDecision::Allow,
+            },
+            HookGateKind::Tool => HookAggregateDecision::Tool {
+                decision: HookGateDecision::Allow,
+            },
+            HookGateKind::Stop => HookAggregateDecision::Stop {
+                decision: HookStopDecision::AllowStop,
+            },
+        }
+    }
+
+    #[test]
+    fn hook_event_type_all_is_exhaustive_and_gate_stable() {
+        assert_eq!(HookEventType::ALL.len(), 15);
+        assert_eq!(
+            HookEventType::ALL
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .len(),
+            15
+        );
+        assert_eq!(HookEventType::UserPromptSubmit.gate(), HookGateKind::Prompt);
+        assert_eq!(HookEventType::PreToolUse.gate(), HookGateKind::Tool);
+        assert_eq!(HookEventType::Stop.gate(), HookGateKind::Stop);
+        assert_eq!(HookEventType::SubagentStop.gate(), HookGateKind::Stop);
+    }
+
+    #[test]
+    fn every_hook_event_records_and_replays_a_complete_typed_lifecycle() {
+        for event in HookEventType::ALL {
+            let (mut timeline, cause) = valid_hook_cause_timeline(event);
+            let occurrence_id = format!("hook-{}", hook_event_slug(event));
+            let run_id = format!("run-{}", hook_event_slug(event));
+            let gate = event.gate();
+            let decision = allow_hook_decision(gate);
+            timeline
+                .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                    occurrence_id: occurrence_id.clone(),
+                    event,
+                    gate,
+                    cause: cause.clone(),
+                    config_generation: 17,
+                    handlers: vec![command_handler(0, &run_id)],
+                }))
+                .unwrap_or_else(|error| panic!("{event:?} trigger failed: {error}"));
+            timeline
+                .record(TimelineEventKind::Hook(HookEvent::RunStarted {
+                    occurrence_id: occurrence_id.clone(),
+                    run_id: run_id.clone(),
+                    handler_index: 0,
+                }))
+                .unwrap_or_else(|error| panic!("{event:?} run start failed: {error}"));
+            timeline
+                .record(TimelineEventKind::Hook(HookEvent::RunFinished {
+                    occurrence_id: occurrence_id.clone(),
+                    run_id: run_id.clone(),
+                    handler_index: 0,
+                    elapsed_ms: 1,
+                    outcome: HookRunOutcome::Success,
+                    control: HookRunControl::None,
+                }))
+                .unwrap_or_else(|error| panic!("{event:?} run finish failed: {error}"));
+            timeline
+                .record(TimelineEventKind::Hook(HookEvent::Completed {
+                    occurrence_id: occurrence_id.clone(),
+                    decision: decision.clone(),
+                }))
+                .unwrap_or_else(|error| panic!("{event:?} completion failed: {error}"));
+
+            let hook_states = timeline
+                .events()
+                .iter()
+                .filter_map(|timeline_event| match &timeline_event.kind {
+                    TimelineEventKind::Hook(HookEvent::Triggered {
+                        occurrence_id: id, ..
+                    }) if id == &occurrence_id => Some("triggered"),
+                    TimelineEventKind::Hook(HookEvent::RunStarted {
+                        occurrence_id: id, ..
+                    }) if id == &occurrence_id => Some("run_started"),
+                    TimelineEventKind::Hook(HookEvent::RunFinished {
+                        occurrence_id: id, ..
+                    }) if id == &occurrence_id => Some("run_finished"),
+                    TimelineEventKind::Hook(HookEvent::RunSkipped {
+                        occurrence_id: id, ..
+                    }) if id == &occurrence_id => Some("run_skipped"),
+                    TimelineEventKind::Hook(HookEvent::Completed {
+                        occurrence_id: id, ..
+                    }) if id == &occurrence_id => Some("completed"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                hook_states,
+                ["triggered", "run_started", "run_finished", "completed"],
+                "{event:?}"
+            );
+
+            let replayed = Timeline::from_events(timeline.events().to_vec())
+                .unwrap_or_else(|error| panic!("{event:?} replay failed: {error}"));
+            let projection = replayed
+                .hook_projection(&occurrence_id)
+                .unwrap_or_else(|| panic!("{event:?} projection missing"));
+            assert_eq!(projection.event, event);
+            assert_eq!(projection.gate, gate);
+            assert_eq!(projection.cause, cause);
+            assert_eq!(projection.config_generation, 17);
+            assert_eq!(projection.decision, Some(decision));
+            assert_eq!(
+                projection.runs,
+                [HookHandlerLifecycle::Finished {
+                    elapsed_ms: 1,
+                    outcome: HookRunOutcome::Success,
+                    control: HookRunControl::None,
+                }],
+                "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_terminal_matrix_closes_empty_skipped_and_non_decisive_failures() {
+        let mut no_handlers = Timeline::default();
+        no_handlers
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "hook-empty".into(),
+                event: HookEventType::Notification,
+                gate: HookGateKind::Observe,
+                cause: HookCause::Notification {
+                    notification_id: "hook-empty".into(),
+                },
+                config_generation: 1,
+                handlers: Vec::new(),
+            }))
+            .unwrap();
+        no_handlers
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: "hook-empty".into(),
+                decision: HookAggregateDecision::Observe,
+            }))
+            .unwrap();
+        assert!(
+            no_handlers
+                .hook_projection("hook-empty")
+                .unwrap()
+                .runs
+                .is_empty()
+        );
+
+        let mut skipped = Timeline::default();
+        let reasons = [
+            HookRunSkipReason::MatcherMiss,
+            HookRunSkipReason::Disabled,
+            HookRunSkipReason::PolicyDisabled,
+        ];
+        let handlers = reasons
+            .iter()
+            .enumerate()
+            .map(|(index, reason)| {
+                let mut handler = command_handler(index as u32, &format!("skip-{index}"));
+                handler.action = HookHandlerPlanAction::Skip { reason: *reason };
+                handler
+            })
+            .collect::<Vec<_>>();
+        skipped
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "hook-skipped".into(),
+                event: HookEventType::Notification,
+                gate: HookGateKind::Observe,
+                cause: HookCause::Notification {
+                    notification_id: "hook-skipped".into(),
+                },
+                config_generation: 2,
+                handlers,
+            }))
+            .unwrap();
+        for (index, reason) in reasons.into_iter().enumerate() {
+            skipped
+                .record(TimelineEventKind::Hook(HookEvent::RunSkipped {
+                    occurrence_id: "hook-skipped".into(),
+                    run_id: format!("skip-{index}"),
+                    handler_index: index as u32,
+                    reason,
+                }))
+                .unwrap();
+        }
+        skipped
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: "hook-skipped".into(),
+                decision: HookAggregateDecision::Observe,
+            }))
+            .unwrap();
+        assert!(
+            skipped
+                .hook_projection("hook-skipped")
+                .unwrap()
+                .runs
+                .iter()
+                .all(|run| matches!(run, HookHandlerLifecycle::Skipped { .. }))
+        );
+
+        let mut failures = Timeline::default();
+        failures
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "hook-failures".into(),
+                event: HookEventType::Notification,
+                gate: HookGateKind::Observe,
+                cause: HookCause::Notification {
+                    notification_id: "hook-failures".into(),
+                },
+                config_generation: 3,
+                handlers: vec![
+                    command_handler(0, "failed-run"),
+                    command_handler(1, "timed-out-run"),
+                    command_handler(2, "cancelled-run"),
+                ],
+            }))
+            .unwrap();
+        let outcomes = [
+            HookRunOutcome::Failed {
+                message: "exit status 1".into(),
+            },
+            HookRunOutcome::TimedOut,
+            HookRunOutcome::Cancelled,
+        ];
+        let run_ids = ["failed-run", "timed-out-run", "cancelled-run"];
+        for (index, (run_id, outcome)) in run_ids.into_iter().zip(outcomes).enumerate() {
+            failures
+                .record(TimelineEventKind::Hook(HookEvent::RunStarted {
+                    occurrence_id: "hook-failures".into(),
+                    run_id: run_id.into(),
+                    handler_index: index as u32,
+                }))
+                .unwrap();
+            failures
+                .record(TimelineEventKind::Hook(HookEvent::RunFinished {
+                    occurrence_id: "hook-failures".into(),
+                    run_id: run_id.into(),
+                    handler_index: index as u32,
+                    elapsed_ms: index as u64,
+                    outcome,
+                    control: HookRunControl::None,
+                }))
+                .unwrap();
+        }
+        failures
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: "hook-failures".into(),
+                decision: HookAggregateDecision::Observe,
+            }))
+            .unwrap();
+        let replayed = Timeline::from_events(failures.events().to_vec()).unwrap();
+        assert!(
+            replayed
+                .hook_projection("hook-failures")
+                .unwrap()
+                .runs
+                .iter()
+                .all(|run| matches!(run, HookHandlerLifecycle::Finished { .. }))
+        );
+    }
+
+    #[test]
+    fn hook_causes_are_bound_to_the_exact_lifecycle_identity() {
+        let turn = TurnId(7);
+        let step = StepId { turn, index: 0 };
+        let fresh_input = InputFold {
+            intent: InputIntent::Prompt,
+            payload_ref: InputPayloadRef {
+                blake3: blake3::hash(b"input").to_hex().to_string(),
+                bytes: 5,
+            },
+            admission: None,
+            route: None,
+            reserved_turn: None,
+            consumed: false,
+            dismissed: None,
+        };
+        let mut active = LifecycleFold {
+            active_turn: Some(turn),
+            active_step: Some(step),
+            ..Default::default()
+        };
+        active.seen_turns.insert(turn);
+        active.internal_turns.insert(turn);
+        active.inputs.insert("input".into(), fresh_input);
+        active.pending_notifications.insert("receipt".into());
+        active.seen_tools.insert("closed-tool".into());
+        active
+            .open_tools
+            .insert("open-tool".into(), (turn, step, "tool".into()));
+        active.open_subagents.insert(
+            "open-child".into(),
+            OpenSubagent {
+                workflow_run_id: None,
+            },
+        );
+        active.subagent_seed_id = Some("seed-child".into());
+        active.open_compaction = Some(OpenCompaction {
+            id: "open-compaction".into(),
+            source_items: 1,
+            summaries: 0,
+            replacements: 0,
+            target: None,
+        });
+
+        assert!(active.valid_effective_hook_gate(
+            "input-hook",
+            HookEventType::UserPromptSubmit,
+            HookGateKind::Prompt,
+            &HookCause::Input {
+                input_id: "input".into(),
+            },
+        ));
+        assert!(active.valid_effective_hook_gate(
+            "receipt-hook",
+            HookEventType::UserPromptSubmit,
+            HookGateKind::Observe,
+            &HookCause::Notification {
+                notification_id: "receipt".into(),
+            },
+        ));
+        assert!(active.valid_effective_hook_gate(
+            "turn-hook",
+            HookEventType::UserPromptSubmit,
+            HookGateKind::Observe,
+            &HookCause::Turn { turn },
+        ));
+        assert!(active.valid_effective_hook_gate(
+            "pre-tool-hook",
+            HookEventType::PreToolUse,
+            HookGateKind::Tool,
+            &HookCause::Tool {
+                call_id: "open-tool".into(),
+            },
+        ));
+        for event in [
+            HookEventType::PostToolUse,
+            HookEventType::PostToolUseFailure,
+            HookEventType::PermissionDenied,
+        ] {
+            assert!(active.valid_effective_hook_gate(
+                "post-tool-hook",
+                event,
+                HookGateKind::Observe,
+                &HookCause::Tool {
+                    call_id: "closed-tool".into(),
+                },
+            ));
+        }
+        assert!(active.valid_effective_hook_gate(
+            "stop-hook",
+            HookEventType::Stop,
+            HookGateKind::Stop,
+            &HookCause::Turn { turn },
+        ));
+        assert!(active.valid_effective_hook_gate(
+            "subagent-start-hook",
+            HookEventType::SubagentStart,
+            HookGateKind::Observe,
+            &HookCause::Subagent {
+                subagent_id: "open-child".into(),
+            },
+        ));
+        assert!(active.valid_effective_hook_gate(
+            "subagent-stop-hook",
+            HookEventType::SubagentStop,
+            HookGateKind::Stop,
+            &HookCause::Subagent {
+                subagent_id: "seed-child".into(),
+            },
+        ));
+        assert!(active.valid_effective_hook_gate(
+            "pre-compact-hook",
+            HookEventType::PreCompact,
+            HookGateKind::Observe,
+            &HookCause::Compaction {
+                compaction_id: "open-compaction".into(),
+            },
+        ));
+
+        for (event, gate, cause) in [
+            (
+                HookEventType::UserPromptSubmit,
+                HookGateKind::Prompt,
+                HookCause::Input {
+                    input_id: "forged-input".into(),
+                },
+            ),
+            (
+                HookEventType::UserPromptSubmit,
+                HookGateKind::Observe,
+                HookCause::Notification {
+                    notification_id: "forged-receipt".into(),
+                },
+            ),
+            (
+                HookEventType::PreToolUse,
+                HookGateKind::Tool,
+                HookCause::Tool {
+                    call_id: "closed-tool".into(),
+                },
+            ),
+            (
+                HookEventType::PostToolUse,
+                HookGateKind::Observe,
+                HookCause::Tool {
+                    call_id: "open-tool".into(),
+                },
+            ),
+            (
+                HookEventType::Stop,
+                HookGateKind::Stop,
+                HookCause::Turn { turn: TurnId(8) },
+            ),
+            (
+                HookEventType::SubagentStart,
+                HookGateKind::Observe,
+                HookCause::Subagent {
+                    subagent_id: "forged-child".into(),
+                },
+            ),
+            (
+                HookEventType::SubagentStop,
+                HookGateKind::Stop,
+                HookCause::Subagent {
+                    subagent_id: "forged-child".into(),
+                },
+            ),
+            (
+                HookEventType::PreCompact,
+                HookGateKind::Observe,
+                HookCause::Compaction {
+                    compaction_id: "forged-compaction".into(),
+                },
+            ),
+        ] {
+            assert!(!active.valid_effective_hook_gate("occurrence", event, gate, &cause));
+        }
+
+        let mut terminal = active.clone();
+        terminal.active_turn = None;
+        terminal.active_step = None;
+        terminal.open_compaction = None;
+        terminal.seen_compactions.insert("closed-compaction".into());
+        for event in [HookEventType::StopFailure, HookEventType::StopCancelled] {
+            assert!(terminal.valid_effective_hook_gate(
+                "terminal-hook",
+                event,
+                HookGateKind::Observe,
+                &HookCause::Turn { turn },
+            ));
+            assert!(!terminal.valid_effective_hook_gate(
+                "terminal-hook",
+                event,
+                HookGateKind::Observe,
+                &HookCause::Turn { turn: TurnId(8) },
+            ));
+        }
+        assert!(terminal.valid_effective_hook_gate(
+            "post-compact-hook",
+            HookEventType::PostCompact,
+            HookGateKind::Observe,
+            &HookCause::Compaction {
+                compaction_id: "closed-compaction".into(),
+            },
+        ));
+        assert!(!terminal.valid_effective_hook_gate(
+            "post-compact-hook",
+            HookEventType::PostCompact,
+            HookGateKind::Observe,
+            &HookCause::Compaction {
+                compaction_id: "open-compaction".into(),
+            },
+        ));
+
+        let mut session = LifecycleFold {
+            hook_session_id: Some("session".into()),
+            ..Default::default()
+        };
+        for event in [HookEventType::SessionStart, HookEventType::SessionEnd] {
+            assert!(session.valid_effective_hook_gate(
+                "session-hook",
+                event,
+                HookGateKind::Observe,
+                &HookCause::Session {
+                    session_id: "session".into(),
+                },
+            ));
+            assert!(!session.valid_effective_hook_gate(
+                "session-hook",
+                event,
+                HookGateKind::Observe,
+                &HookCause::Session {
+                    session_id: "forged-session".into(),
+                },
+            ));
+        }
+        assert!(session.valid_effective_hook_gate(
+            "notification-root",
+            HookEventType::Notification,
+            HookGateKind::Observe,
+            &HookCause::Notification {
+                notification_id: "notification-root".into(),
+            },
+        ));
+        assert!(!session.valid_effective_hook_gate(
+            "notification-root",
+            HookEventType::Notification,
+            HookGateKind::Observe,
+            &HookCause::Notification {
+                notification_id: "forged-notification".into(),
+            },
+        ));
+        session
+            .seen_hook_notification_causes
+            .insert("notification-root".into());
+        assert!(!session.valid_effective_hook_gate(
+            "notification-root",
+            HookEventType::Notification,
+            HookGateKind::Observe,
+            &HookCause::Notification {
+                notification_id: "notification-root".into(),
+            },
+        ));
+    }
+
+    #[test]
+    fn hook_lifecycle_requires_exact_plan_and_typed_completion() {
+        let mut timeline = Timeline::default();
+        submit_human_input(&mut timeline, "input-1", InputIntent::Prompt);
+        let occurrence_id = trigger_user_prompt(
+            &mut timeline,
+            "input-1",
+            vec![command_handler(0, "run-0"), command_handler(1, "run-1")],
+        );
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: occurrence_id.clone(),
+                decision: HookAggregateDecision::Prompt {
+                    decision: HookGateDecision::Allow,
+                },
+            })),
+            Err(TimelineError::InvalidHook)
+        ));
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunStarted {
+                occurrence_id: occurrence_id.clone(),
+                run_id: "run-0".into(),
+                handler_index: 0,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunFinished {
+                occurrence_id: occurrence_id.clone(),
+                run_id: "run-0".into(),
+                handler_index: 0,
+                elapsed_ms: 1,
+                outcome: HookRunOutcome::Blocked,
+                control: HookRunControl::Block {
+                    reason: "blocked by policy".into(),
+                },
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunSkipped {
+                occurrence_id: occurrence_id.clone(),
+                run_id: "run-1".into(),
+                handler_index: 1,
+                reason: HookRunSkipReason::PriorBlock,
+            }))
+            .unwrap();
+        let decision = HookAggregateDecision::Prompt {
+            decision: HookGateDecision::Block {
+                reason: "blocked by policy".into(),
+            },
+        };
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: occurrence_id.clone(),
+                decision: decision.clone(),
+            }))
+            .unwrap();
+        let projection = timeline.hook_projection(&occurrence_id).unwrap();
+        assert_eq!(projection.decision, Some(decision));
+        assert!(matches!(
+            projection.runs.as_slice(),
+            [
+                HookHandlerLifecycle::Finished { .. },
+                HookHandlerLifecycle::Skipped {
+                    reason: HookRunSkipReason::PriorBlock,
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn execution_plan_can_fail_closed_after_source_revalidation() {
+        let mut timeline = Timeline::default();
+        submit_human_input(&mut timeline, "input-revoked", InputIntent::Prompt);
+        let occurrence_id = trigger_user_prompt(
+            &mut timeline,
+            "input-revoked",
+            vec![command_handler(0, "revoked-run")],
+        );
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunSkipped {
+                occurrence_id: occurrence_id.clone(),
+                run_id: "revoked-run".into(),
+                handler_index: 0,
+                reason: HookRunSkipReason::PolicyDisabled,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id,
+                decision: HookAggregateDecision::Prompt {
+                    decision: HookGateDecision::Allow,
+                },
+            }))
+            .unwrap();
+    }
+
+    #[test]
+    fn blocking_failure_policy_uses_the_persisted_control_reason() {
+        let mut timeline = Timeline::default();
+        let turn = start_internal_turn(&mut timeline, 1);
+        start_tool(&mut timeline, turn, "call-1");
+        let mut handler = command_handler(0, "failure-run");
+        handler.failure_policy = HookFailurePolicy::Block;
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "failure-hook".into(),
+                event: HookEventType::PreToolUse,
+                gate: HookGateKind::Tool,
+                cause: HookCause::Tool {
+                    call_id: "call-1".into(),
+                },
+                config_generation: 1,
+                handlers: vec![handler],
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunStarted {
+                occurrence_id: "failure-hook".into(),
+                run_id: "failure-run".into(),
+                handler_index: 0,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunFinished {
+                occurrence_id: "failure-hook".into(),
+                run_id: "failure-run".into(),
+                handler_index: 0,
+                elapsed_ms: 1,
+                outcome: HookRunOutcome::Failed {
+                    message: "exit status 1".into(),
+                },
+                control: HookRunControl::Block {
+                    reason: "configured failure block".into(),
+                },
+            }))
+            .unwrap();
+        let decision = HookAggregateDecision::Tool {
+            decision: HookGateDecision::Block {
+                reason: "configured failure block".into(),
+            },
+        };
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: "failure-hook".into(),
+                decision: decision.clone(),
+            }))
+            .unwrap();
+        assert_eq!(
+            timeline.hook_projection("failure-hook").unwrap().decision,
+            Some(decision)
+        );
+    }
+
+    #[test]
+    fn stop_reason_is_decisive_but_additional_context_alone_is_not() {
+        let mut decisive = Timeline::default();
+        start_internal_turn(&mut decisive, 1);
+        decisive
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "stop-hook".into(),
+                event: HookEventType::Stop,
+                gate: HookGateKind::Stop,
+                cause: HookCause::Turn { turn: TurnId(1) },
+                config_generation: 1,
+                handlers: vec![command_handler(0, "stop-0"), command_handler(1, "stop-1")],
+            }))
+            .unwrap();
+        decisive
+            .record(TimelineEventKind::Hook(HookEvent::RunStarted {
+                occurrence_id: "stop-hook".into(),
+                run_id: "stop-0".into(),
+                handler_index: 0,
+            }))
+            .unwrap();
+        decisive
+            .record(TimelineEventKind::Hook(HookEvent::RunFinished {
+                occurrence_id: "stop-hook".into(),
+                run_id: "stop-0".into(),
+                handler_index: 0,
+                elapsed_ms: 1,
+                outcome: HookRunOutcome::Success,
+                control: HookRunControl::StopKeepWorking {
+                    reason: Some("tests still failing".into()),
+                    additional_context: None,
+                },
+            }))
+            .unwrap();
+        decisive
+            .record(TimelineEventKind::Hook(HookEvent::RunSkipped {
+                occurrence_id: "stop-hook".into(),
+                run_id: "stop-1".into(),
+                handler_index: 1,
+                reason: HookRunSkipReason::PriorBlock,
+            }))
+            .unwrap();
+
+        let mut context_only = Timeline::default();
+        start_internal_turn(&mut context_only, 2);
+        context_only
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "context-hook".into(),
+                event: HookEventType::Stop,
+                gate: HookGateKind::Stop,
+                cause: HookCause::Turn { turn: TurnId(2) },
+                config_generation: 1,
+                handlers: vec![
+                    command_handler(0, "context-0"),
+                    command_handler(1, "context-1"),
+                ],
+            }))
+            .unwrap();
+        context_only
+            .record(TimelineEventKind::Hook(HookEvent::RunStarted {
+                occurrence_id: "context-hook".into(),
+                run_id: "context-0".into(),
+                handler_index: 0,
+            }))
+            .unwrap();
+        context_only
+            .record(TimelineEventKind::Hook(HookEvent::RunFinished {
+                occurrence_id: "context-hook".into(),
+                run_id: "context-0".into(),
+                handler_index: 0,
+                elapsed_ms: 1,
+                outcome: HookRunOutcome::Success,
+                control: HookRunControl::StopKeepWorking {
+                    reason: None,
+                    additional_context: Some("remember the final report".into()),
+                },
+            }))
+            .unwrap();
+        assert!(matches!(
+            context_only.record(TimelineEventKind::Hook(HookEvent::RunSkipped {
+                occurrence_id: "context-hook".into(),
+                run_id: "context-1".into(),
+                handler_index: 1,
+                reason: HookRunSkipReason::PriorBlock,
+            })),
+            Err(TimelineError::InvalidHook)
+        ));
+    }
+
+    #[test]
+    fn synthetic_user_prompt_is_observe_only_and_source_bound() {
+        let mut timeline = Timeline::default();
+        let turn = TurnId(9);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                input_ids: Vec::new(),
+                identity: TurnIdentity {
+                    origin: "workflow_handoff".into(),
+                    turn_kind: "internal".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "resume".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "synthetic-hook".into(),
+                event: HookEventType::UserPromptSubmit,
+                gate: HookGateKind::Observe,
+                cause: HookCause::Turn { turn },
+                config_generation: 3,
+                handlers: Vec::new(),
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: "synthetic-hook".into(),
+                decision: HookAggregateDecision::Observe,
+            }))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "wrong-gate".into(),
+                event: HookEventType::UserPromptSubmit,
+                gate: HookGateKind::Prompt,
+                cause: HookCause::Turn { turn },
+                config_generation: 3,
+                handlers: Vec::new(),
+            })),
+            Err(TimelineError::InvalidHook)
+        ));
+    }
+
+    #[test]
+    fn input_inbox_routes_restores_consumes_and_dismisses_exactly_once() {
+        let mut timeline = Timeline::default();
+        submit_human_input(&mut timeline, "input-steer", InputIntent::Prompt);
+        allow_input(&mut timeline, "input-steer");
+        assert_eq!(timeline.pending_allowed_inputs()[0].route, InputRoute::Fifo);
+        let turn = TurnId(1);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                input_ids: Vec::new(),
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "running".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Rerouted {
+                input_ids: vec!["input-steer".into()],
+                route: InputRoute::Steer { target_turn: turn },
+            }))
+            .unwrap();
+        let item = ConversationItem::user("steered");
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Consumed {
+                input_ids: vec!["input-steer".into()],
+                turn,
+                item: item.clone(),
+            }))
+            .unwrap();
+        assert_eq!(timeline.surface().len(), 1);
+        assert_eq!(
+            serde_json::to_value(&timeline.surface()[0]).unwrap(),
+            serde_json::to_value(&item).unwrap()
+        );
+        assert!(timeline.pending_allowed_inputs().is_empty());
+        assert!(matches!(
+            timeline.input_state("input-steer").unwrap().state,
+            InputState::Consumed {
+                route: InputRoute::Steer { .. }
+            }
+        ));
+
+        submit_human_input(&mut timeline, "input-restore", InputIntent::Steer);
+        allow_input(&mut timeline, "input-restore");
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Rerouted {
+                input_ids: vec!["input-restore".into()],
+                route: InputRoute::Steer { target_turn: turn },
+            }))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Input(InputEvent::Rerouted {
+                input_ids: vec!["input-restore".into()],
+                route: InputRoute::Fifo,
+            })),
+            Err(TimelineError::InvalidInput)
+        ));
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: completed_terminal(),
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Rerouted {
+                input_ids: vec!["input-restore".into()],
+                route: InputRoute::Fifo,
+            }))
+            .unwrap();
+        assert_eq!(timeline.pending_allowed_inputs()[0].route, InputRoute::Fifo);
+
+        submit_human_input(&mut timeline, "input-dismiss", InputIntent::Prompt);
+        allow_input(&mut timeline, "input-dismiss");
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Dismissed {
+                input_ids: vec!["input-dismiss".into()],
+                reason: InputDismissReason::UserRemoved,
+            }))
+            .unwrap();
+        assert!(matches!(
+            timeline.input_state("input-dismiss").unwrap().state,
+            InputState::Dismissed {
+                reason: InputDismissReason::UserRemoved
+            }
+        ));
+    }
+
+    #[test]
+    fn user_turn_atomically_consumes_every_combined_fifo_input() {
+        let mut timeline = Timeline::default();
+        for input_id in ["input-first", "input-follower"] {
+            submit_human_input(&mut timeline, input_id, InputIntent::Prompt);
+            allow_input(&mut timeline, input_id);
+        }
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: TurnId(1),
+                input_ids: vec!["input-first".into(), "input-missing".into()],
+                identity: TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "hello".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            })),
+            Err(TimelineError::InputNotFound(_))
+        ));
+        assert!(matches!(
+            timeline.input_state("input-first").unwrap().state,
+            InputState::Allowed {
+                route: InputRoute::Fifo
+            }
+        ));
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: TurnId(1),
+                input_ids: vec!["input-first".into(), "input-follower".into()],
+                identity: TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "hello".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        for input_id in ["input-first", "input-follower"] {
+            assert!(matches!(
+                timeline.input_state(input_id).unwrap().state,
+                InputState::Allowed {
+                    route: InputRoute::Fifo
+                }
+            ));
+        }
+        assert!(timeline.pending_allowed_inputs().is_empty());
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Consumed {
+                input_ids: vec!["input-first".into(), "input-follower".into()],
+                turn: TurnId(1),
+                item: ConversationItem::user("hello"),
+            }))
+            .unwrap();
+        for input_id in ["input-first", "input-follower"] {
+            assert!(matches!(
+                timeline.input_state(input_id).unwrap().state,
+                InputState::Consumed {
+                    route: InputRoute::Fifo
+                }
+            ));
+        }
+        assert!(matches!(
+            Timeline::default().record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: TurnId(2),
+                input_ids: Vec::new(),
+                identity: TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "missing".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            })),
+            Err(TimelineError::InvalidInput)
+        ));
+    }
+
+    #[test]
+    fn interrupted_user_turn_releases_unconsumed_fifo_reservation() {
+        let mut timeline = Timeline::default();
+        submit_human_input(&mut timeline, "input-crash", InputIntent::Prompt);
+        allow_input(&mut timeline, "input-crash");
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: TurnId(11),
+                input_ids: vec!["input-crash".into()],
+                identity: TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "survive the crash".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+
+        assert!(timeline.pending_allowed_inputs().is_empty());
+        assert!(timeline.surface().is_empty());
+        let repairs = timeline.recover_interrupted().unwrap();
+        assert!(repairs.iter().any(|event| matches!(
+            event.kind,
+            TimelineEventKind::Turn(TurnEvent::Ended { id: TurnId(11), .. })
+        )));
+        assert_eq!(
+            timeline.pending_allowed_inputs(),
+            vec![PendingAllowedInput {
+                input_id: "input-crash".into(),
+                intent: InputIntent::Prompt,
+                payload_ref: InputPayloadRef {
+                    blake3: blake3::hash(b"input-crash").to_hex().to_string(),
+                    bytes: "input-crash".len() as u64,
+                },
+                route: InputRoute::Fifo,
+            }]
+        );
+        assert!(timeline.surface().is_empty());
+    }
+
+    #[test]
+    fn admission_atomically_supersedes_the_previous_queue_identity() {
+        let mut timeline = Timeline::default();
+        submit_human_input(&mut timeline, "input-old", InputIntent::Prompt);
+        allow_input(&mut timeline, "input-old");
+        submit_human_input(&mut timeline, "input-new", InputIntent::Prompt);
+
+        let occurrence_id = trigger_user_prompt(&mut timeline, "input-new", Vec::new());
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id,
+                decision: HookAggregateDecision::Prompt {
+                    decision: HookGateDecision::Allow,
+                },
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::AdmissionResolved {
+                input_id: "input-new".into(),
+                decision: InputAdmissionDecision::Allow,
+                route: Some(InputRoute::Fifo),
+                supersedes: vec!["input-old".into()],
+            }))
+            .unwrap();
+
+        assert!(matches!(
+            timeline.input_state("input-old").unwrap().state,
+            InputState::Dismissed {
+                reason: InputDismissReason::RouteSuperseded
+            }
+        ));
+        assert!(matches!(
+            timeline.input_state("input-new").unwrap().state,
+            InputState::Allowed {
+                route: InputRoute::Fifo
+            }
+        ));
+        assert_eq!(timeline.pending_allowed_inputs().len(), 1);
+        assert_eq!(timeline.pending_allowed_inputs()[0].input_id, "input-new");
+    }
+
+    #[test]
+    fn input_batch_transitions_validate_every_identity_before_mutating() {
+        let mut timeline = Timeline::default();
+        for input_id in ["input-first", "input-second"] {
+            submit_human_input(&mut timeline, input_id, InputIntent::Prompt);
+            allow_input(&mut timeline, input_id);
+        }
+
+        let turn = TurnId(7);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                input_ids: Vec::new(),
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "running".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Input(InputEvent::Rerouted {
+                input_ids: vec!["input-first".into(), "input-missing".into()],
+                route: InputRoute::Steer { target_turn: turn },
+            })),
+            Err(TimelineError::InputNotFound(_))
+        ));
+        for input_id in ["input-first", "input-second"] {
+            assert!(matches!(
+                timeline.input_state(input_id).unwrap().state,
+                InputState::Allowed {
+                    route: InputRoute::Fifo
+                }
+            ));
+        }
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Rerouted {
+                input_ids: vec!["input-first".into(), "input-second".into()],
+                route: InputRoute::Steer { target_turn: turn },
+            }))
+            .unwrap();
+        let item = ConversationItem::user("combined steer");
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Input(InputEvent::Consumed {
+                input_ids: vec!["input-first".into(), "input-missing".into()],
+                turn,
+                item: item.clone(),
+            })),
+            Err(TimelineError::InputNotFound(_))
+        ));
+        for input_id in ["input-first", "input-second"] {
+            assert!(matches!(
+                timeline.input_state(input_id).unwrap().state,
+                InputState::Allowed {
+                    route: InputRoute::Steer { target_turn }
+                } if target_turn == turn
+            ));
+        }
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Consumed {
+                input_ids: vec!["input-first".into(), "input-second".into()],
+                turn,
+                item,
+            }))
+            .unwrap();
+        assert_eq!(timeline.surface().len(), 1);
+
+        for input_id in ["input-third", "input-fourth"] {
+            submit_human_input(&mut timeline, input_id, InputIntent::Prompt);
+            allow_input(&mut timeline, input_id);
+        }
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Input(InputEvent::Dismissed {
+                input_ids: vec!["input-third".into(), "input-missing".into()],
+                reason: InputDismissReason::RouteSuperseded,
+            })),
+            Err(TimelineError::InputNotFound(_))
+        ));
+        assert!(matches!(
+            timeline.input_state("input-third").unwrap().state,
+            InputState::Allowed {
+                route: InputRoute::Fifo
+            }
+        ));
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Dismissed {
+                input_ids: vec!["input-third".into(), "input-fourth".into()],
+                reason: InputDismissReason::RouteSuperseded,
+            }))
+            .unwrap();
+        for input_id in ["input-third", "input-fourth"] {
+            assert!(matches!(
+                timeline.input_state(input_id).unwrap().state,
+                InputState::Dismissed {
+                    reason: InputDismissReason::RouteSuperseded
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn input_batch_rejects_empty_duplicate_and_oversized_identities() {
+        let mut timeline = Timeline::default();
+        submit_human_input(&mut timeline, "input", InputIntent::Prompt);
+        allow_input(&mut timeline, "input");
+        for input_ids in [
+            Vec::new(),
+            vec!["input".into(), "input".into()],
+            vec!["input".into(); MAX_TURN_INPUTS + 1],
+        ] {
+            assert!(matches!(
+                timeline.record(TimelineEventKind::Input(InputEvent::Rerouted {
+                    input_ids,
+                    route: InputRoute::Fifo,
+                })),
+                Err(TimelineError::InvalidInput)
+            ));
+        }
+        assert!(matches!(
+            timeline.input_state("input").unwrap().state,
+            InputState::Allowed {
+                route: InputRoute::Fifo
+            }
+        ));
+    }
+
+    #[test]
+    fn recovery_closes_hook_runs_and_fails_unresolved_human_input_closed() {
+        let mut timeline = Timeline::default();
+        submit_human_input(&mut timeline, "input-crash", InputIntent::Prompt);
+        let occurrence_id = trigger_user_prompt(
+            &mut timeline,
+            "input-crash",
+            vec![command_handler(0, "crash-0"), command_handler(1, "crash-1")],
+        );
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunStarted {
+                occurrence_id: occurrence_id.clone(),
+                run_id: "crash-0".into(),
+                handler_index: 0,
+            }))
+            .unwrap();
+        let repairs = timeline.recover_interrupted().unwrap();
+        assert!(repairs.iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::Hook(HookEvent::RunFinished {
+                outcome: HookRunOutcome::InterruptedOutcomeUnknown,
+                ..
+            })
+        )));
+        assert!(repairs.iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::Hook(HookEvent::RunSkipped {
+                reason: HookRunSkipReason::PriorBlock,
+                ..
+            })
+        )));
+        assert!(matches!(
+            timeline.input_state("input-crash").unwrap().state,
+            InputState::Blocked { .. }
+        ));
+        assert!(
+            timeline
+                .hook_projection(&occurrence_id)
+                .unwrap()
+                .decision
+                .is_some()
+        );
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert!(matches!(
+            replayed
+                .hook_projection(&occurrence_id)
+                .unwrap()
+                .runs
+                .as_slice(),
+            [
+                HookHandlerLifecycle::Finished {
+                    outcome: HookRunOutcome::InterruptedOutcomeUnknown,
+                    ..
+                },
+                HookHandlerLifecycle::Skipped {
+                    reason: HookRunSkipReason::PriorBlock,
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn schema_24_requires_explicit_turn_input_ids() {
+        let event = TimelineEvent {
+            version: TIMELINE_SCHEMA_VERSION,
+            seq: EventSeq(0),
+            at_ms: 1,
+            kind: TimelineEventKind::Turn(TurnEvent::Started {
+                id: TurnId(1),
+                input_ids: Vec::new(),
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "prompt".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }),
+        };
+        let mut value = serde_json::to_value(event).unwrap();
+        value
+            .get_mut("event")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("input_ids");
+        assert!(serde_json::from_value::<TimelineEvent>(value).is_err());
+    }
+
+    #[test]
+    fn schema_23_is_deliberately_rejected() {
+        let mut event = TimelineEvent {
+            version: TIMELINE_SCHEMA_VERSION,
+            seq: EventSeq(0),
+            at_ms: 1,
+            kind: TimelineEventKind::Input(InputEvent::Submitted {
+                input_id: "input-old-schema".into(),
+                intent: InputIntent::Prompt,
+                payload_ref: InputPayloadRef {
+                    blake3: blake3::hash(b"payload").to_hex().to_string(),
+                    bytes: 7,
+                },
+            }),
+        };
+        event.version = 23;
+        assert!(matches!(
+            Timeline::default().accept(event),
+            Err(TimelineError::UnsupportedVersion {
+                expected: TIMELINE_SCHEMA_VERSION,
+                actual: 23,
+            })
+        ));
     }
 
     #[test]
@@ -4998,6 +8238,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 2,
@@ -5106,6 +8347,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: timeline.surface().len(),
@@ -5213,6 +8455,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: timeline.surface().len(),
@@ -5277,6 +8520,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: timeline.surface().len(),
@@ -5383,6 +8627,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: TurnId(77),
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 2,
@@ -5887,6 +9132,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 1,
@@ -5926,6 +9172,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 1,
@@ -5950,6 +9197,7 @@ mod tests {
         assert!(matches!(
             timeline.record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 1,
@@ -6033,6 +9281,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 0,
@@ -6512,6 +9761,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: TurnId(1),
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 0,
@@ -6555,6 +9805,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: TurnId(1),
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: 0,
@@ -7141,6 +10392,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: TurnId(40),
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "vision-model".into(),
                 input_message_count: 0,
@@ -7559,6 +10811,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: user_identity(),
                 model_id: "model".into(),
                 input_message_count: timeline.surface().len(),
@@ -7897,6 +11150,98 @@ mod tests {
     }
 
     #[test]
+    fn child_hook_facts_cannot_be_copied_into_the_parent_timeline() {
+        let spawn_fact = subagent_spawn("sa-hook", "child-hook");
+        let mut parent = Timeline::default();
+        let spawn = parent
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                spawn_fact.clone(),
+            )))
+            .unwrap();
+        assert!(matches!(
+            parent.record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "child-stop-hook".into(),
+                event: HookEventType::SubagentStop,
+                gate: HookGateKind::Stop,
+                cause: HookCause::Subagent {
+                    subagent_id: "sa-hook".into(),
+                },
+                config_generation: 1,
+                handlers: Vec::new(),
+            })),
+            Err(TimelineError::InvalidHook)
+        ));
+
+        let mut child = Timeline::default();
+        child
+            .record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+                parent_timeline_id: "parent-hook".into(),
+                parent_spawn_seq: spawn.seq.get(),
+                subagent_id: "sa-hook".into(),
+                security_parent_session_id: "parent-session".into(),
+                context_source: SubagentContextSource::Forked,
+                source_ref: None,
+                normalized: false,
+            }))
+            .unwrap();
+        child
+            .validate_subagent_seed_link("parent-hook", spawn.seq, &spawn_fact)
+            .unwrap();
+        start_internal_turn(&mut child, 1);
+        child
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "child-stop-hook".into(),
+                event: HookEventType::SubagentStop,
+                gate: HookGateKind::Stop,
+                cause: HookCause::Subagent {
+                    subagent_id: "sa-hook".into(),
+                },
+                config_generation: 1,
+                handlers: Vec::new(),
+            }))
+            .unwrap();
+        child
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: "child-stop-hook".into(),
+                decision: HookAggregateDecision::Stop {
+                    decision: HookStopDecision::AllowStop,
+                },
+            }))
+            .unwrap();
+
+        assert!(
+            !parent
+                .events()
+                .iter()
+                .any(|event| matches!(&event.kind, TimelineEventKind::Hook(_)))
+        );
+        assert_eq!(
+            child
+                .events()
+                .iter()
+                .filter(|event| matches!(&event.kind, TimelineEventKind::Hook(_)))
+                .count(),
+            2
+        );
+        assert!(
+            !parent
+                .trajectory()
+                .rows
+                .iter()
+                .any(|row| row.producer == "hook")
+        );
+        assert_eq!(
+            child
+                .trajectory()
+                .rows
+                .iter()
+                .filter(|row| row.producer == "hook")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn one_child_timeline_can_belong_to_only_one_parent_spawn() {
         let mut parent = Timeline::default();
         parent
@@ -8126,6 +11471,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id,
+                input_ids: Vec::new(),
                 identity: TurnIdentity {
                     origin: "notification_drain".into(),
                     turn_kind: "internal".into(),
@@ -8317,6 +11663,7 @@ mod tests {
             timeline
                 .record(TimelineEventKind::Turn(TurnEvent::Started {
                     id,
+                    input_ids: Vec::new(),
                     identity: TurnIdentity {
                         origin: "goal_continuation".into(),
                         turn_kind: "internal".into(),
@@ -8432,6 +11779,7 @@ mod tests {
             timeline
                 .record(TimelineEventKind::Turn(TurnEvent::Started {
                     id,
+                    input_ids: Vec::new(),
                     identity: TurnIdentity {
                         origin: origin.into(),
                         turn_kind: "internal".into(),

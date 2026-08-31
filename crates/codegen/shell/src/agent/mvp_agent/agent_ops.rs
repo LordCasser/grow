@@ -340,8 +340,10 @@ impl MvpAgent {
         }
         Ok(ops)
     }
-    pub(crate) fn deployment_key(&self) -> Option<String> {
-        crate::agent::config::env_string("GROW_DEPLOYMENT_KEY")
+    pub(crate) fn bundle_service_credential(
+        &self,
+    ) -> Option<crate::remote::BundleServiceCredential> {
+        self.bundle_service_credential.clone()
     }
     /// Push the current, expiry-filtered local announcement configuration to
     /// connected clients. The notification is deliberately stateless: local
@@ -522,6 +524,8 @@ impl MvpAgent {
         let coordination = crate::coordination::CoordinationRuntime::new(
             crate::util::grow_home::grow_home(),
         );
+        let bundle_service_credential =
+            crate::remote::BundleServiceCredential::from_environment();
         Self {
             sessions: RefCell::new(HashMap::new()),
             active_child_sessions: Default::default(),
@@ -573,6 +577,7 @@ impl MvpAgent {
                 crate::agent::subagent::SubagentPresentation::new(),
             ),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bundle_service_credential,
             workspace_ops: RefCell::new(None),
             session_live_state: RefCell::new(HashMap::new()),
             supervisor_started: std::cell::Cell::new(false),

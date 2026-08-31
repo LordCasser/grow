@@ -2,6 +2,83 @@
 use super::support::*;
 use super::*;
 
+async fn end_active_test_turn(actor: &SessionActor) {
+    actor
+        .events
+        .emit_turn_ended(
+            crate::session::events::TurnOutcomeLabel::Completed,
+            chat_state::TurnTerminal {
+                stop_reason: "end_turn".into(),
+                completion_kind: "completed".into(),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stale_explicit_steer_is_a_durable_blocked_human_intent() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, _gateway_rx) = build_actor().await;
+
+            let error = actor
+                .admit_human_steer(
+                    "already-ended-turn",
+                    "do not lose this attempt".into(),
+                    Vec::new(),
+                    Some("stale-steer".into()),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("no longer running"));
+
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let input_id = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Input(chat_state::InputEvent::Submitted {
+                        input_id,
+                        intent: chat_state::InputIntent::Steer,
+                        ..
+                    }) => Some(input_id.clone()),
+                    _ => None,
+                })
+                .expect("the stale steer is still a submitted HumanIntent");
+            assert!(events.iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
+                    cause: chat_state::HookCause::Input { input_id: hook_input },
+                    ..
+                }) if hook_input == &input_id
+            )));
+            assert!(events.iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Input(
+                    chat_state::InputEvent::AdmissionResolved {
+                        input_id: resolved,
+                        decision: chat_state::InputAdmissionDecision::Block {
+                            reason: chat_state::InputBlockReason::StaleSteerTarget,
+                        },
+                        ..
+                    }
+                ) if resolved == &input_id
+            )));
+            assert!(!events.iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Input(chat_state::InputEvent::Rerouted {
+                    input_ids,
+                    ..
+                }) if input_ids.contains(&input_id)
+            )));
+            assert!(actor.pending_interjections.is_empty());
+            assert!(actor.state.lock().await.pending_inputs.is_empty());
+        })
+        .await;
+}
+
 /// Draining a mid-turn interjection pushes a standalone synthetic user
 /// message tagged [`SyntheticReason::Interjection`] — even when the
 /// conversation tail is a `ToolResult`. The tool result content must be
@@ -204,8 +281,18 @@ async fn terminal_boundary_requeues_an_accepted_direct_steer() {
     local
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
-            actor.queue_mid_turn_interjection("preserve me".to_string(), vec![]);
+            begin_test_active_causal_turn(&actor).await;
+            actor
+                .admit_human_steer(
+                    "test-active-turn",
+                    "preserve me".to_string(),
+                    vec![],
+                    Some("direct-steer".into()),
+                )
+                .await
+                .unwrap();
 
+            end_active_test_turn(&actor).await;
             actor.discard_residual_interjections_at_turn_end().await;
 
             assert!(actor.pending_interjections.is_empty());
@@ -214,7 +301,7 @@ async fn terminal_boundary_requeues_an_accepted_direct_steer() {
                 .pending_inputs
                 .front()
                 .expect("accepted direct steer becomes the next FIFO turn");
-            assert!(item.prompt_id.starts_with("steer-"));
+            assert_eq!(item.prompt_id, "direct-steer");
             assert_eq!(item.origin, crate::session::PromptOrigin::User);
             assert_eq!(item.turn_kind, crate::session::TurnKind::User);
             assert_eq!(
@@ -236,8 +323,10 @@ async fn terminal_boundary_requeues_auto_promoted_follow_ups_and_discards_explic
     local
         .run_until(async {
             let (actor, _gateway_rx) = build_actor().await;
+            begin_test_active_causal_turn(&actor).await;
 
             let requeue = |prompt_id: &str| super::ResidualInterjectionRequeue {
+                input_ids: vec![format!("test-input-{prompt_id}")],
                 prompt_id: prompt_id.to_string(),
                 origin: crate::session::PromptOrigin::User,
                 turn_kind: crate::session::TurnKind::User,
@@ -246,6 +335,18 @@ async fn terminal_boundary_requeues_auto_promoted_follow_ups_and_discards_explic
                 verbatim: false,
                 json_schema: None,
             };
+            for prompt_id in ["follow-up-1", "follow-up-2"] {
+                let input_ids = admit_test_human_input(&actor, prompt_id).await;
+                actor
+                    .reroute_input_ids(
+                        input_ids,
+                        chat_state::InputRoute::Steer {
+                            target_turn: actor.events.current_turn().unwrap(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
             actor.pending_interjections.push(PendingInterjection {
                 text: "first follow-up".to_string(),
                 attachments: vec![],
@@ -262,6 +363,7 @@ async fn terminal_boundary_requeues_auto_promoted_follow_ups_and_discards_explic
                 requeue: Some(requeue("follow-up-2")),
             });
 
+            end_active_test_turn(&actor).await;
             actor.discard_residual_interjections_at_turn_end().await;
 
             assert!(
@@ -317,6 +419,7 @@ async fn auto_promoted_entry_drained_at_safe_point_is_consumed_not_requeued() {
                 text: "steer me".to_string(),
                 attachments: vec![],
                 requeue: Some(super::ResidualInterjectionRequeue {
+                    input_ids: Vec::new(),
                     prompt_id: "follow-up-1".to_string(),
                     origin: crate::session::PromptOrigin::User,
                     turn_kind: crate::session::TurnKind::User,
@@ -357,26 +460,46 @@ async fn auto_promote_follow_up_uses_the_interjection_path_once() {
     local
         .run_until(async {
             let (actor, mut gateway_rx) = build_actor().await;
-            {
-                let mut state = actor.state.lock().await;
-                state.foreground = ForegroundState::RegularTurn(running_task_stub("turn-1"));
-            }
+            begin_test_active_causal_turn(&actor).await;
 
-            let (respond_to, rx) = tokio::sync::oneshot::channel();
-            let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-                "please pivot".to_string(),
-            ))];
-            actor.auto_promote_follow_up(
-                blocks,
-                "follow-up-1",
-                crate::session::PromptOrigin::User,
-                crate::session::TurnKind::User,
-                Some("pager".to_string()),
-                None,
-                false,
-                None,
-                respond_to,
-            );
+            let (mut queued, rx) = user_item_with_rx("follow-up-1", "pager");
+            let queue = queued
+                .queue_meta
+                .as_ref()
+                .expect("test input is a queue row");
+            let payload = crate::session::input_inbox::InputPayload::Prompt {
+                prompt_id: queued.prompt_id.clone(),
+                prompt_blocks: queued.prompt_blocks.clone(),
+                client_identifier: queued.client_identifier.clone(),
+                screen_mode: queued.screen_mode.clone(),
+                verbatim: queued.verbatim,
+                json_schema: queued.json_schema.clone(),
+                origin: queued.origin.clone(),
+                turn_kind: queued.turn_kind,
+                queue: Some(queue.into()),
+            };
+            let admitted = actor
+                .admit_human_input(
+                    chat_state::InputIntent::Followup,
+                    payload,
+                    Some(queued.prompt_id.clone()),
+                    chat_state::InputRoute::Fifo,
+                    Vec::new(),
+                )
+                .await
+                .expect("follow-up admission");
+            queued.input_ids = vec![admitted.input_id];
+            actor.state.lock().await.pending_inputs.push_back(queued);
+
+            actor
+                .handle_steer_queued_prompt(
+                    "test-active-turn",
+                    "follow-up-1",
+                    0,
+                    Some("pager"),
+                    None,
+                )
+                .await;
 
             // The submitting client's QueuePrompt RPC resolves as removed —
             // never as a failed turn.
@@ -396,7 +519,7 @@ async fn auto_promote_follow_up_uses_the_interjection_path_once() {
             // Exactly one entry, carrying the requeue payload.
             let entries = actor.pending_interjections.snapshot();
             assert_eq!(entries.len(), 1, "exactly one interjection");
-            assert_eq!(entries[0].text, "please pivot");
+            assert_eq!(entries[0].text, "text for follow-up-1");
             let auto = entries[0]
                 .requeue
                 .as_ref()
@@ -405,6 +528,7 @@ async fn auto_promote_follow_up_uses_the_interjection_path_once() {
             assert_eq!(auto.origin, crate::session::PromptOrigin::User);
             assert_eq!(auto.turn_kind, crate::session::TurnKind::User);
             assert_eq!(auto.client_identifier.as_deref(), Some("pager"));
+            assert_eq!(auto.input_ids.len(), 1);
 
             // FIFO and foreground untouched.
             let state = actor.state.lock().await;

@@ -331,6 +331,7 @@ async fn run_user_turn(
         std::time::Duration::from_secs(30),
         actor.handle_prompt(
             prompt_id,
+            crate::session::actor::tests::support::admit_test_human_input(&actor, prompt_id).await,
             crate::session::PromptOrigin::User,
             Vec::new(),
             crate::session::TurnKind::User,

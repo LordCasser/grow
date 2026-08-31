@@ -14,80 +14,9 @@ use std::sync::Arc;
 
 use tools::types::memory_backend::{MemoryBackend, MemorySearchResult};
 
-use super::embedding::EmbeddingProvider as _;
+use super::embedding::{EmbeddingEndpoint, EmbeddingProvider as _};
 use super::storage::MemoryStorage;
 use super::watcher::MemoryFileWatcher;
-
-/// Embedding-client credentials scoped to a trusted endpoint. Only
-/// [`Self::for_endpoint`] retains a live credential; the empty default fails closed.
-#[derive(Clone, Default)]
-pub struct EndpointScopedCredentials {
-    endpoint: Option<reqwest::Url>,
-    auth_credentials: Option<Arc<dyn auth::AuthCredentialProvider>>,
-    api_key_provider: Option<tools::types::SharedApiKeyProvider>,
-}
-
-// Manual Debug that redacts the credential handles; only their presence shows.
-impl std::fmt::Debug for EndpointScopedCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EndpointScopedCredentials")
-            .field("endpoint", &self.endpoint)
-            .field("has_auth_credentials", &self.auth_credentials.is_some())
-            .field("has_api_key_provider", &self.api_key_provider.is_some())
-            .finish()
-    }
-}
-
-impl EndpointScopedCredentials {
-    pub fn none() -> Self {
-        Self::default()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.auth_credentials.is_none() && self.api_key_provider.is_none()
-    }
-
-    /// Retains the credentials only for a trusted, parsable `endpoint`; otherwise drops them.
-    pub fn for_endpoint(
-        endpoint: &str,
-        is_trusted: impl FnOnce(&str) -> bool,
-        auth_credentials: Option<Arc<dyn auth::AuthCredentialProvider>>,
-        api_key_provider: Option<tools::types::SharedApiKeyProvider>,
-    ) -> Self {
-        if is_trusted(endpoint)
-            && let Ok(url) = reqwest::Url::parse(endpoint)
-        {
-            return Self {
-                endpoint: Some(url),
-                auth_credentials,
-                api_key_provider,
-            };
-        }
-        if auth_credentials.is_some() || api_key_provider.is_some() {
-            tracing::info!(
-                target: diagnostics::memory_log::TARGET,
-                endpoint,
-                "memory embeddings: session credentials withheld for non-first-party endpoint; its own key, if any, still applies"
-            );
-        }
-        Self::none()
-    }
-
-    fn auth_credentials(&self) -> Option<&Arc<dyn auth::AuthCredentialProvider>> {
-        self.auth_credentials.as_ref()
-    }
-
-    fn api_key_provider(&self) -> Option<&tools::types::SharedApiKeyProvider> {
-        self.api_key_provider.as_ref()
-    }
-
-    fn approved_for(&self, base_url: &str) -> bool {
-        match &self.endpoint {
-            None => self.is_empty(),
-            Some(endpoint) => reqwest::Url::parse(base_url).is_ok_and(|url| &url == endpoint),
-        }
-    }
-}
 
 /// All configuration needed to build a fully-wired [`MemoryBackendImpl`] for a live session.
 ///
@@ -101,11 +30,8 @@ pub struct MemoryBackendParams {
     pub session_id: String,
     /// Embedding provider config — `None` forces FTS-only fallback everywhere.
     pub embed_config: Option<config_types::MemoryEmbeddingConfig>,
-    /// Base URL for embedding API calls (CLI proxy). Must match the endpoint
-    /// `embedding_credentials` was scoped to; mismatch fails closed.
-    pub embed_base_url: String,
-    /// API key for embedding API calls.
-    pub embed_api_key: Option<String>,
+    /// Endpoint-bound credential capability. `None` forces FTS-only behavior.
+    pub embedding_endpoint: Option<EmbeddingEndpoint>,
     /// Hybrid search scoring config (weights, thresholds, decay, MMR).
     pub search_config: config_types::MemorySearchConfig,
     /// File watcher for sync-on-search — `None` disables external-edit detection.
@@ -119,61 +45,17 @@ pub struct MemoryBackendParams {
     /// - `"injection"` — first-turn memory context injection
     /// - `"compaction_recovery"` — post-compaction context re-injection
     pub search_source: &'static str,
-    pub embedding_credentials: EndpointScopedCredentials,
 }
 
 impl MemoryBackendParams {
     /// Async because command-backed BYOK providers resolve per request.
     pub async fn make_embedding_provider(&self) -> Option<super::embedding::ApiEmbeddingProvider> {
-        build_embedding_provider(
-            self.embed_config.as_ref(),
-            &self.embedding_credentials,
-            self.embed_api_key.as_deref(),
-            &self.embed_base_url,
-        )
-        .await
+        let config = self.embed_config.as_ref()?;
+        self.embedding_endpoint
+            .as_ref()?
+            .make_provider(config)
+            .await
     }
-}
-
-async fn build_embedding_provider(
-    config: Option<&config_types::MemoryEmbeddingConfig>,
-    credentials: &EndpointScopedCredentials,
-    static_api_key: Option<&str>,
-    base_url: &str,
-) -> Option<super::embedding::ApiEmbeddingProvider> {
-    let config = config?;
-    if config.model.as_ref().is_none_or(|m| m.is_empty()) {
-        return None;
-    }
-
-    // Enforce at runtime, in release too: a `debug_assert` would compile out of
-    // shipped binaries and let a scoped credential reach an unapproved URL.
-    let credentials_approved = credentials.approved_for(base_url);
-    if !credentials_approved {
-        tracing::error!(
-            target: diagnostics::memory_log::TARGET,
-            base_url,
-            approved = ?credentials.endpoint,
-            "memory embeddings: scoped credentials do not match the request URL; dropping them"
-        );
-    }
-
-    if credentials_approved && let Some(creds) = credentials.auth_credentials() {
-        let client = super::embedding::build_middleware_client(creds.clone());
-        return super::embedding::ApiEmbeddingProvider::from_config(
-            config,
-            base_url.to_owned(),
-            client,
-        );
-    }
-
-    let per_call_key = if credentials_approved && let Some(p) = credentials.api_key_provider() {
-        p.current_api_key_async().await
-    } else {
-        None
-    };
-    let api_key = per_call_key.or_else(|| static_api_key.map(|s| s.to_owned()))?;
-    super::embedding::ApiEmbeddingProvider::from_session(config, base_url.to_owned(), api_key)
 }
 
 /// `MemoryBackend` implementation backed by hybrid search (FTS5 + vector KNN).
@@ -185,10 +67,8 @@ pub struct MemoryBackendImpl {
     storage: MemoryStorage,
     /// Embedding config — `None` disables vector search (FTS-only fallback).
     embed_config: Option<config_types::MemoryEmbeddingConfig>,
-    /// API base URL for embedding requests (cli-chat-proxy).
-    embed_base_url: String,
-    /// API key for embedding requests.
-    embed_api_key: Option<String>,
+    /// Endpoint-bound credential capability for every embedding path.
+    embedding_endpoint: Option<EmbeddingEndpoint>,
     /// Search scoring config (weights, min_score, max_results).
     search_config: config_types::MemorySearchConfig,
     /// File watcher for detecting external memory edits.
@@ -204,7 +84,6 @@ pub struct MemoryBackendImpl {
     /// Only the ToolBridge backend's counter is shared back to the session actor;
     /// injection and compaction-recovery backends use their own local counters.
     pub search_counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    embedding_credentials: EndpointScopedCredentials,
 }
 
 impl MemoryBackendImpl {
@@ -215,14 +94,12 @@ impl MemoryBackendImpl {
             db_path,
             storage,
             embed_config: None,
-            embed_base_url: String::new(),
-            embed_api_key: None,
+            embedding_endpoint: None,
             search_config: config_types::MemorySearchConfig::default(),
             watcher: None,
             stale_claim_secs: 60,
             session_id: String::new(),
             search_source: "tool",
-            embedding_credentials: EndpointScopedCredentials::none(),
             search_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -239,12 +116,10 @@ impl MemoryBackendImpl {
     pub fn with_embedding(
         mut self,
         config: config_types::MemoryEmbeddingConfig,
-        base_url: String,
-        api_key: Option<String>,
+        endpoint: EmbeddingEndpoint,
     ) -> Self {
         self.embed_config = Some(config);
-        self.embed_base_url = base_url;
-        self.embed_api_key = api_key;
+        self.embedding_endpoint = Some(endpoint);
         self
     }
 
@@ -269,13 +144,11 @@ impl MemoryBackendImpl {
     }
 
     async fn make_embedding_provider(&self) -> Option<super::embedding::ApiEmbeddingProvider> {
-        build_embedding_provider(
-            self.embed_config.as_ref(),
-            &self.embedding_credentials,
-            self.embed_api_key.as_deref(),
-            &self.embed_base_url,
-        )
-        .await
+        let config = self.embed_config.as_ref()?;
+        self.embedding_endpoint
+            .as_ref()?
+            .make_provider(config)
+            .await
     }
 
     /// Build a fully configured backend for a live session.
@@ -292,17 +165,12 @@ impl MemoryBackendImpl {
             .with_session_id(params.session_id.clone())
             .with_search_config(params.search_config.clone());
         backend.search_source = params.search_source;
-        if let Some(ec) = &params.embed_config {
-            backend = backend.with_embedding(
-                ec.clone(),
-                params.embed_base_url.clone(),
-                params.embed_api_key.clone(),
-            );
+        if let (Some(config), Some(endpoint)) = (&params.embed_config, &params.embedding_endpoint) {
+            backend = backend.with_embedding(config.clone(), endpoint.clone());
         }
         if let Some(w) = &params.watcher {
             backend = backend.with_watcher(w.clone(), params.stale_claim_secs);
         }
-        backend.embedding_credentials = params.embedding_credentials.clone();
         backend
     }
 }
@@ -602,13 +470,11 @@ mod factory_tests {
         MemoryBackendParams {
             session_id: session_id.to_string(),
             embed_config: None,
-            embed_base_url: String::new(),
-            embed_api_key: None,
+            embedding_endpoint: None,
             search_config: MemorySearchConfig::default(),
             watcher: None,
             stale_claim_secs: 60,
             search_source: "tool",
-            embedding_credentials: EndpointScopedCredentials::none(),
         }
     }
 
@@ -913,8 +779,8 @@ mod factory_tests {
         );
     }
 
-    /// from_session_params with embed_config but no api_key gracefully falls back
-    /// to FTS-only (the embedding provider requires a key).
+    /// Production wiring with embedding config but no endpoint-bound credential
+    /// gracefully falls back to FTS-only.
     #[tokio::test]
     async fn test_factory_embed_config_without_key_falls_back_to_fts() {
         let tmp = TempDir::new().unwrap();
@@ -935,16 +801,19 @@ mod factory_tests {
 
         let params = MemoryBackendParams {
             embed_config: Some(MemoryEmbeddingConfig::default()),
-            embed_base_url: "http://localhost".to_string(),
-            embed_api_key: None, // no key → provider cannot be created
+            embedding_endpoint: None, // no credential → provider cannot be created
             ..make_params_fts_only("test-embed-no-key")
         };
+        assert!(
+            params.make_embedding_provider().await.is_none(),
+            "production params without an endpoint-bound credential must not build a provider"
+        );
         let backend = MemoryBackendImpl::from_session_params(storage, &params);
         // Must not panic; FTS results should still come back.
         let results = backend.search("rust borrow", 5, 0.0).await.unwrap();
         assert!(
             !results.is_empty(),
-            "should fall back to FTS when api_key is None"
+            "should fall back to FTS when the endpoint capability is None"
         );
     }
 
@@ -1205,19 +1074,16 @@ mod factory_tests {
                 model: Some("test-embed-model".into()),
                 ..Default::default()
             }),
-            embed_base_url: "http://example/v1".into(),
-            embed_api_key: Some("static-fallback".into()),
+            embedding_endpoint: EmbeddingEndpoint::from_live_for_trusted_endpoint(
+                "https://example.test/v1",
+                "https://example.test/v1",
+                None,
+                Some(probe),
+            ),
             search_config: MemorySearchConfig::default(),
             watcher: None,
             stale_claim_secs: 60,
             search_source: "tool",
-            // Trusted endpoint + no auth_credentials exercises the api_key_provider path.
-            embedding_credentials: EndpointScopedCredentials::for_endpoint(
-                "http://example/v1",
-                |_| true,
-                None,
-                Some(probe),
-            ),
         };
 
         let provider = params.make_embedding_provider().await;
@@ -1252,15 +1118,6 @@ mod tests {
     #[ctor::ctor]
     fn install_rustls_provider() {
         diagnostics::tls::install_ring_provider_once();
-    }
-
-    /// An api-key provider that fails the test if its key is ever resolved,
-    /// proving a scoped-away credential is never consulted.
-    struct PanicKey;
-    impl tools::types::ApiKeyProvider for PanicKey {
-        fn current_api_key(&self) -> Option<String> {
-            panic!("scoped-away credential must not be resolved");
-        }
     }
 
     fn setup_index(tmp: &TempDir) -> (PathBuf, MemoryStorage) {
@@ -1306,121 +1163,6 @@ mod tests {
     fn test_backend_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<MemoryBackendImpl>();
-    }
-
-    /// If credentials approved for one endpoint are used to build against a
-    /// different URL (a wiring bug), they are dropped at build time rather than
-    /// sent to the wrong endpoint. The session provider would panic if resolved.
-    #[tokio::test]
-    async fn test_build_drops_credentials_when_request_url_differs() {
-        let session: tools::types::SharedApiKeyProvider = Arc::new(PanicKey);
-
-        let scoped = EndpointScopedCredentials::for_endpoint(
-            "https://api.example.com/v1",
-            |_| true,
-            None,
-            Some(session),
-        );
-        assert!(!scoped.is_empty(), "trusted endpoint keeps the credential");
-
-        let config = config_types::MemoryEmbeddingConfig {
-            model: Some("test-embedding-model".to_string()),
-            ..Default::default()
-        };
-        let provider = build_embedding_provider(
-            Some(&config),
-            &scoped,
-            Some("byok-static-key"),
-            "https://other.example/v1",
-        )
-        .await;
-        assert!(
-            provider.is_some(),
-            "mismatched request URL must fall back to the static key, not the scoped credential"
-        );
-    }
-
-    /// A trusted, URL-matching endpoint uses its scoped BYOK credential and
-    /// never consults the fallback API-key provider.
-    #[tokio::test]
-    async fn test_trusted_endpoint_prefers_session_credential() {
-        struct StubAuth;
-        impl auth::HttpAuth for StubAuth {
-            fn apply(
-                &self,
-                builder: reqwest::RequestBuilder,
-                _base_url: &str,
-            ) -> reqwest::RequestBuilder {
-                builder
-            }
-        }
-        impl auth::AuthCredentialProvider for StubAuth {
-            fn snapshot(&self) -> auth::CredentialSnapshot {
-                auth::CredentialSnapshot::default()
-            }
-        }
-
-        let auth: Arc<dyn auth::AuthCredentialProvider> = Arc::new(StubAuth);
-        let api_key: tools::types::SharedApiKeyProvider = Arc::new(PanicKey);
-        let scoped = EndpointScopedCredentials::for_endpoint(
-            "https://api.example.com/v1",
-            |_| true,
-            Some(auth),
-            Some(api_key),
-        );
-        assert!(!scoped.is_empty(), "trusted endpoint keeps the credential");
-
-        let config = config_types::MemoryEmbeddingConfig {
-            model: Some("test-embedding-model".to_string()),
-            ..Default::default()
-        };
-        let provider =
-            build_embedding_provider(Some(&config), &scoped, None, "https://api.example.com/v1")
-                .await;
-        assert!(
-            provider.is_some(),
-            "trusted endpoint must build a provider from the session credential"
-        );
-    }
-
-    #[test]
-    fn endpoint_scoped_credentials_trust_gate_and_url_match() {
-        struct AnyKey;
-        impl tools::types::ApiKeyProvider for AnyKey {
-            fn current_api_key(&self) -> Option<String> {
-                None
-            }
-        }
-        let key = || Arc::new(AnyKey) as tools::types::SharedApiKeyProvider;
-
-        let denied = EndpointScopedCredentials::for_endpoint(
-            "https://byok.example/v1",
-            |_| false,
-            None,
-            Some(key()),
-        );
-        assert!(denied.is_empty(), "untrusted endpoint drops the credential");
-
-        let scoped = EndpointScopedCredentials::for_endpoint(
-            "https://api.example.com/v1",
-            |_| true,
-            None,
-            Some(key()),
-        );
-        assert!(!scoped.is_empty(), "trusted endpoint keeps the credential");
-        assert!(
-            scoped.approved_for("https://API.example.com/v1"),
-            "host casing normalizes"
-        );
-        assert!(
-            !scoped.approved_for("https://api.example.com/v2"),
-            "different path rejected"
-        );
-        assert!(
-            !scoped.approved_for("https://other.example/v1"),
-            "different host rejected"
-        );
-        assert!(!scoped.approved_for("not-a-url"), "unparsable fails closed");
     }
 
     #[tokio::test]

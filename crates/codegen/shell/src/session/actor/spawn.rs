@@ -512,6 +512,65 @@ impl TimelineBootstrap {
     }
 }
 
+fn configure_session_sampler_retry(
+    config: &mut SamplingConfig,
+    max_retries: Option<u32>,
+    task_output_budgeted: bool,
+    workflow_child_fail_closed: bool,
+) -> sampler::RetryPolicy {
+    // Budgeted and workflow-child attempts retain their stricter accounting
+    // policy: doom-loop resampling is disabled because discarded attempts can
+    // consume an output grant whose exact usage is not always recoverable.
+    if task_output_budgeted || workflow_child_fail_closed {
+        config.doom_loop_recovery = None;
+    }
+    sampler::RetryPolicy {
+        max_retries: max_retries.unwrap_or(5),
+        rate_limit_retry_threshold: 2,
+        // The primary session must not replay a transiently failed attempt
+        // after any model output has crossed the irreversible stream boundary.
+        retry_only_before_output: true,
+    }
+}
+
+#[cfg(test)]
+mod sampler_retry_policy_tests {
+    use super::configure_session_sampler_retry;
+
+    fn config_with_doom_recovery() -> sampler::SamplerConfig {
+        sampler::SamplerConfig {
+            doom_loop_recovery: Some(Default::default()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn primary_session_retries_only_before_output_and_keeps_doom_recovery() {
+        let mut config = config_with_doom_recovery();
+        let policy = configure_session_sampler_retry(&mut config, Some(7), false, false);
+
+        assert!(policy.retry_only_before_output);
+        assert_eq!(policy.max_retries, 7);
+        assert!(config.doom_loop_recovery.is_some());
+    }
+
+    #[test]
+    fn budgeted_and_workflow_children_keep_fail_closed_sampling_policy() {
+        for (task_output_budgeted, workflow_child_fail_closed) in [(true, false), (false, true)] {
+            let mut config = config_with_doom_recovery();
+            let policy = configure_session_sampler_retry(
+                &mut config,
+                None,
+                task_output_budgeted,
+                workflow_child_fail_closed,
+            );
+
+            assert!(policy.retry_only_before_output);
+            assert!(config.doom_loop_recovery.is_none());
+        }
+    }
+}
+
 #[tracing::instrument(
     name = "session.spawn",
     skip_all,
@@ -663,6 +722,15 @@ pub(crate) async fn spawn_session_actor(
             std::collections::HashMap::new(),
         ),
         TimelineBootstrap::Existing(events) => {
+            crate::session::input_inbox::validate_submitted_payloads(
+                session_directory.as_ref(),
+                &events,
+            )
+            .map_err(|error| {
+                agent::AgentBuildError::InvalidConfig(format!(
+                    "invalid persisted input payload: {error}"
+                ))
+            })?;
             let mut receipts = std::collections::HashMap::new();
             let durable_receipts =
                 crate::session::control::SessionControlSnapshot::durable_receipts_from_timeline(
@@ -708,6 +776,12 @@ pub(crate) async fn spawn_session_actor(
             )
         }
     };
+    let initial_hook_config_generation =
+        super::hooks::next_hook_config_generation(resumed_timeline.as_ref()).ok_or_else(|| {
+            agent::AgentBuildError::InvalidConfig(
+                "persisted Hook config generation is exhausted".to_string(),
+            )
+        })?;
     let mut control_receipt_error = None;
     let _ = crate::session::storage::stream_replay_grow_notifications_in(
         session_directory.as_ref(),
@@ -860,6 +934,16 @@ pub(crate) async fn spawn_session_actor(
     let primary_model_id = session_model_id.0.to_string();
     let embed_base_url = sampling_config.base_url.clone();
     let embed_api_key = sampling_config.api_key.clone();
+    let embedding_endpoint = api_key_provider
+        .clone()
+        .and_then(|provider| {
+            memory::EmbeddingEndpoint::from_live(&embed_base_url, None, Some(provider))
+        })
+        .or_else(|| {
+            embed_api_key.clone().and_then(|api_key| {
+                memory::EmbeddingEndpoint::from_static(&embed_base_url, api_key)
+            })
+        });
     let context_window_override = std::env::var("GROW_DEBUG_CONTEXT_WINDOW")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -1174,19 +1258,16 @@ pub(crate) async fn spawn_session_actor(
         } else {
             None
         };
-        let embed_credentials = memory::EndpointScopedCredentials::none();
         let params = memory::MemoryBackendParams {
             session_id: session_info.id.to_string(),
             embed_config: memory_config.as_ref().map(|mc| mc.embedding.clone()),
-            embed_base_url: embed_base_url.clone(),
-            embed_api_key: embed_api_key.clone(),
+            embedding_endpoint: embedding_endpoint.clone(),
             search_config: memory_config
                 .as_ref()
                 .map_or_else(Default::default, |mc| mc.search.clone()),
             watcher,
             stale_claim_secs: watcher_config.stale_claim_secs,
             search_source: "tool",
-            embedding_credentials: embed_credentials,
         };
         let backend = memory::MemoryBackendImpl::from_session_params(storage.clone(), &params);
         memory_search_counter = Some(backend.search_counter.clone());
@@ -1490,16 +1571,12 @@ pub(crate) async fn spawn_session_actor(
     let mut sampler_config_initial = sampling_config.clone();
     sampler_config_initial.idle_timeout_secs = Some(inference_idle_timeout_secs);
     let task_output_budgeted = tool_context.task_output_token_budget.is_some();
-    let retry_only_before_output =
-        task_output_budgeted || tool_context.sampler_retry_only_before_output;
-    if retry_only_before_output {
-        sampler_config_initial.doom_loop_recovery = None;
-    }
-    let sampler_retry_policy = sampler::RetryPolicy {
-        max_retries: max_retries.unwrap_or(5),
-        rate_limit_retry_threshold: 2,
-        retry_only_before_output,
-    };
+    let sampler_retry_policy = configure_session_sampler_retry(
+        &mut sampler_config_initial,
+        max_retries,
+        task_output_budgeted,
+        tool_context.sampler_retry_only_before_output,
+    );
     let (sampler_event_tx, sampler_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<sampler::SamplingEvent>();
     let sampler_owner = sampler::SamplerActor::spawn_owned(
@@ -2191,6 +2268,7 @@ pub(crate) async fn spawn_session_actor(
         session_dir: session_dir.clone(),
         session_directory: session_directory.clone(),
         notification_artifact_gate: TokioMutex::new(()),
+        input_artifact_gate: TokioMutex::new(()),
         auth_method_id,
         model_auth_memo: std::cell::RefCell::new(None),
         state,
@@ -2383,6 +2461,7 @@ pub(crate) async fn spawn_session_actor(
         hooks: HookSessionState {
             registry: std::cell::RefCell::new(built_hook_registry),
             client_hooks: std::cell::RefCell::new(client_hooks),
+            generation: std::cell::Cell::new(initial_hook_config_generation),
             resolved_workspace_root,
             vcs_kind: {
                 let root = std::path::Path::new(&session_info.cwd);
@@ -2418,6 +2497,28 @@ pub(crate) async fn spawn_session_actor(
             "failed to recover pending rewind transaction: {error}"
         )))
     })?;
+    // Close process-local causal scopes before reconstructing the durable input
+    // inbox. In particular, TurnEnded releases FIFO reservations and makes a
+    // steer whose target died with the process eligible for deterministic
+    // rerouting. Backend-aware subagent reconciliation runs later and may call
+    // this idempotently again after it closes surviving child scopes.
+    session
+        .chat_state_handle
+        .recover_interrupted_durably()
+        .await
+        .map_err(|error| {
+            agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                "failed to close interrupted Timeline scopes: {error}"
+            )))
+        })?;
+    session
+        .restore_pending_human_inputs()
+        .await
+        .map_err(|error| {
+            agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                "failed to restore pending human input: {error}"
+            )))
+        })?;
     let initialized_fresh_context = if let Some(session_rules) = fresh_session_rules {
         session
             .initialize_fresh_context_durably(system_prompt.clone(), session_rules)
@@ -2642,8 +2743,7 @@ pub(crate) async fn spawn_session_actor(
             .map(|mc| mc.embedding.clone())
             .unwrap_or_default();
         let embed_dims = embed_config.dimensions;
-        let sampling_base_url = embed_base_url.clone();
-        let sampling_api_key = embed_api_key.clone();
+        let background_embedding_endpoint = embedding_endpoint.clone();
         let session_id_for_reindex = session_info.id.to_string();
         let chunks_added_counter = session.memory.chunks_added.clone();
         let gc_max_age = memory_config.as_ref().map_or(30, |mc| mc.gc.max_age_days);
@@ -2717,7 +2817,7 @@ pub(crate) async fn spawn_session_actor(
             if shutdown.is_cancelled() {
                 return;
             }
-            let embedded_count = if let Some(api_key) = sampling_api_key {
+            let embedded_count = if let Some(endpoint) = background_embedding_endpoint {
                 let db_path = storage.workspace_dir().join("index.sqlite");
                 match memory::MemoryIndex::open_or_create(
                     &db_path,
@@ -2726,13 +2826,7 @@ pub(crate) async fn spawn_session_actor(
                     embed_dims,
                 ) {
                     Ok(index) => {
-                        if let Some(provider) =
-                            memory::embedding::ApiEmbeddingProvider::from_session(
-                                &embed_config,
-                                sampling_base_url,
-                                api_key,
-                            )
-                        {
+                        if let Some(provider) = endpoint.make_provider(&embed_config).await {
                             tokio::select! {
                                 biased;
                                 _ = shutdown.cancelled() => 0,
@@ -2836,12 +2930,12 @@ pub(crate) async fn spawn_session_actor(
                         biased;
                         _ = shutdown.cancelled() => false,
                         () = request.result_tx.closed() => false,
-                        _ = session.dispatch_notification_hook(
+                        result = session.dispatch_notification_hook(
                             "elicitation_dialog",
                             Some("User question requested".into()),
                             None,
                             Some("info".into()),
-                        ) => true,
+                        ) => result.is_ok(),
                     }
                 } else {
                     false
@@ -2928,7 +3022,10 @@ pub(crate) async fn spawn_session_actor(
             let Some(session) = weak_session.upgrade() else {
                 return;
             };
-            session.reconcile_notification_payloads(&shutdown).await;
+            tokio::join!(
+                session.reconcile_notification_payloads(&shutdown),
+                session.reconcile_input_payloads(&shutdown),
+            );
         });
         session.notification_reconciliation_worker.arm(worker);
     }

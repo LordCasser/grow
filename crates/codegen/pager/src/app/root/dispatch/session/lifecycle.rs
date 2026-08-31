@@ -436,8 +436,26 @@ pub(in crate::app::root::dispatch) fn dispatch_delete_current_session_answered(
 /// the workspace (writes `~/.grow/trusted_folders.toml`), mark trust resolved,
 /// then replay any deferred session startup.
 pub(in crate::app::root::dispatch) fn dispatch_trust_folder(app: &mut AppView) -> Vec<Effect> {
-    if let TrustState::Pending { workspace } = &app.trust_state {
-        workspace::folder_trust::grant_folder_trust(workspace);
+    let TrustState::Pending {
+        workspace,
+        expected_identity,
+    } = &app.trust_state
+    else {
+        return finish_trust(app);
+    };
+    let workspace = workspace.clone();
+    let expected_identity = expected_identity.clone();
+    if !workspace::folder_trust::persist_trust(
+        &mut workspace::trust::TrustStore::load(),
+        &app.cwd,
+        &workspace,
+        &expected_identity,
+    ) {
+        // The entity changed (or could not be revalidated/persisted) after the
+        // question was shown. Keep Pending so startup remains gated; accepting
+        // the old question must never authorize the replacement.
+        app.show_toast("Folder changed while awaiting trust; reopen Grow to review it again");
+        return vec![];
     }
     finish_trust(app)
 }

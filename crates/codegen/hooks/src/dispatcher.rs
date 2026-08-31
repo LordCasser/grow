@@ -1,7 +1,7 @@
-use crate::config::HookSpec;
+use crate::config::{HandlerType, HookProvenance, HookSpec, OnFailure};
 use crate::discovery::HookRegistry;
 use crate::event::{HookEventEnvelope, HookEventName};
-use crate::result::{HookDecision, HookRunResult};
+use crate::result::{HookDecision, HookRunResult, HookSkipReason};
 use crate::runner::{self, GateKind, HookRunnerResult, RunContext};
 
 fn dispatch_span(event: HookEventName, hook_count: usize) -> tracing::Span {
@@ -17,21 +17,218 @@ fn dispatch_span(event: HookEventName, hook_count: usize) -> tracing::Span {
     )
 }
 
-/// Disabled/trust-disabled specs record a `Skipped` result; a matcher miss
-/// records nothing.
-fn eligible_or_record_skip(
-    spec: &HookSpec,
-    match_value: Option<&str>,
-    results: &mut Vec<HookRunResult>,
-) -> bool {
-    if !spec.enabled || crate::trust::is_hook_disabled(&spec.name) {
-        tracing::info!(hook_name = %spec.name, "hook skipped (disabled)");
-        results.push(HookRunResult::Skipped {
-            hook_name: spec.name.clone(),
-        });
-        return false;
+/// Command/URL-free runtime identity for a planned handler. Durable adapters
+/// must still bound and opaque the name because source labels are user-owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookHandlerIdentity {
+    pub name: String,
+    pub handler_type: HandlerType,
+    pub provenance: HookProvenance,
+}
+
+#[derive(Debug, Clone)]
+pub enum HookPlanAction {
+    Execute(Box<HookSpec>),
+    Skip(HookSkipReason),
+}
+
+#[derive(Debug, Clone)]
+pub struct HookPlanEntry {
+    pub identity: HookHandlerIdentity,
+    pub action: HookPlanAction,
+}
+
+fn safe_identity(spec: &HookSpec) -> HookHandlerIdentity {
+    HookHandlerIdentity {
+        name: spec.name.clone(),
+        handler_type: spec.handler_type,
+        provenance: spec.layer,
     }
-    crate::matcher::matcher_allows(spec.matcher.as_ref(), match_value)
+}
+
+fn plan_dispatch_with_policy(
+    registry: &HookRegistry,
+    event: HookEventName,
+    envelope: &HookEventEnvelope,
+    policy_disabled: impl Fn(&str) -> bool,
+) -> Vec<HookPlanEntry> {
+    let match_value = envelope.payload.match_value();
+    registry
+        .hooks_for(event)
+        .iter()
+        .map(|spec| {
+            let reason = if spec.validate().is_err() {
+                Some(HookSkipReason::PolicyDisabled)
+            } else if !spec.enabled {
+                Some(HookSkipReason::Disabled)
+            } else if policy_disabled(&spec.name) {
+                Some(HookSkipReason::PolicyDisabled)
+            } else if !crate::matcher::matcher_allows(spec.matcher.as_ref(), match_value) {
+                Some(HookSkipReason::MatcherMiss)
+            } else {
+                None
+            };
+            HookPlanEntry {
+                identity: safe_identity(spec),
+                action: reason
+                    .map(HookPlanAction::Skip)
+                    .unwrap_or_else(|| HookPlanAction::Execute(Box::new(spec.clone()))),
+            }
+        })
+        .collect()
+}
+
+/// Deterministic, owned dispatch plan in registry order. Planning performs no
+/// hook execution, allowing a caller to durably record Triggered first.
+pub fn plan_dispatch(
+    registry: &HookRegistry,
+    event: HookEventName,
+    envelope: &HookEventEnvelope,
+) -> Vec<HookPlanEntry> {
+    plan_dispatch_with_policy(registry, event, envelope, crate::trust::is_hook_disabled)
+}
+
+fn planned_skip(identity: &HookHandlerIdentity, reason: HookSkipReason) -> HookRunResult {
+    HookRunResult::Skipped {
+        hook_name: identity.name.clone(),
+        reason,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum HookGateEffect {
+    Observe,
+    Prompt(HookDecision),
+    Tool(HookDecision),
+    Stop(StopSignals),
+}
+
+#[derive(Debug, Clone)]
+pub struct HookExecution {
+    pub result: HookRunResult,
+    pub gate: HookGateEffect,
+    /// True when an admission chain must not execute later handlers.
+    pub decisive: bool,
+}
+
+async fn run_one_hook_detailed(
+    spec: &HookSpec,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+    gate: GateKind,
+) -> HookExecution {
+    let (raw, elapsed, http_info) = runner::run_hook(spec, envelope, ctx, gate).await;
+    let result = match &raw {
+        HookRunnerResult::Decision(HookDecision::Deny { reason, .. }) => HookRunResult::Blocked {
+            hook_name: spec.name.clone(),
+            detail: format!("denied: {reason}"),
+            elapsed,
+            http_info: http_info.clone(),
+        },
+        HookRunnerResult::Stop(outcome) => match stop_outcome_detail(outcome) {
+            Some(detail) => HookRunResult::Blocked {
+                hook_name: spec.name.clone(),
+                detail,
+                elapsed,
+                http_info: http_info.clone(),
+            },
+            None => HookRunResult::Success {
+                hook_name: spec.name.clone(),
+                elapsed,
+                http_info: http_info.clone(),
+            },
+        },
+        HookRunnerResult::TimedOut => HookRunResult::TimedOut {
+            hook_name: spec.name.clone(),
+            timeout_ms: spec.timeout_ms,
+            elapsed,
+            http_info: http_info.clone(),
+        },
+        HookRunnerResult::Cancelled => HookRunResult::Cancelled {
+            hook_name: spec.name.clone(),
+            elapsed,
+            http_info: http_info.clone(),
+        },
+        HookRunnerResult::Failed(error) => HookRunResult::Failed {
+            hook_name: spec.name.clone(),
+            error: error.clone(),
+            elapsed,
+            http_info: http_info.clone(),
+        },
+        HookRunnerResult::Success | HookRunnerResult::Decision(HookDecision::Allow) => {
+            HookRunResult::Success {
+                hook_name: spec.name.clone(),
+                elapsed,
+                http_info: http_info.clone(),
+            }
+        }
+    };
+    let failed = matches!(
+        &result,
+        HookRunResult::Failed { .. }
+            | HookRunResult::TimedOut { .. }
+            | HookRunResult::Cancelled { .. }
+    );
+    let failure_decision = || {
+        if spec.on_failure == OnFailure::Block && failed {
+            HookDecision::Deny {
+                reason: crate::event::clip_text(
+                    &format!("hook '{}' failed and is configured to block", spec.name),
+                    1000,
+                ),
+                hook_name: spec.name.clone(),
+            }
+        } else {
+            HookDecision::Allow
+        }
+    };
+    let gate = match (&raw, gate) {
+        (HookRunnerResult::Decision(decision), GateKind::Prompt) => {
+            HookGateEffect::Prompt(decision.clone())
+        }
+        (HookRunnerResult::Decision(decision), GateKind::Tool) => {
+            HookGateEffect::Tool(decision.clone())
+        }
+        (HookRunnerResult::Stop(outcome), GateKind::Stop) => HookGateEffect::Stop(StopSignals {
+            block_reason: outcome.block_reason.clone(),
+            stop_reason: outcome.force_stop.as_ref().map(|force| {
+                force
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "stopped by hook".to_string())
+            }),
+            additional_context: outcome.additional_context.clone(),
+        }),
+        (_, GateKind::Prompt) => HookGateEffect::Prompt(failure_decision()),
+        (_, GateKind::Tool) => HookGateEffect::Tool(failure_decision()),
+        (_, GateKind::Stop) => HookGateEffect::Stop(StopSignals::default()),
+        (_, GateKind::Observe) => HookGateEffect::Observe,
+    };
+    let decisive = match &gate {
+        HookGateEffect::Prompt(HookDecision::Deny { .. })
+        | HookGateEffect::Tool(HookDecision::Deny { .. }) => true,
+        HookGateEffect::Stop(signals) => {
+            signals.stop_reason.is_some() || signals.block_reason.is_some()
+        }
+        HookGateEffect::Observe
+        | HookGateEffect::Prompt(HookDecision::Allow)
+        | HookGateEffect::Tool(HookDecision::Allow) => false,
+    };
+    HookExecution {
+        result,
+        gate,
+        decisive,
+    }
+}
+
+/// Execute exactly one already-planned spec.
+pub async fn run_one_hook(
+    spec: &HookSpec,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+    gate: GateKind,
+) -> HookExecution {
+    run_one_hook_detailed(spec, envelope, ctx, gate).await
 }
 
 /// Result of a `pre_tool_use` dispatch: the final decision plus per-hook
@@ -46,14 +243,10 @@ pub struct PreToolUseResult {
 /// Runs hooks sequentially in config order. Only an explicit `deny`
 /// decision from a hook stops the chain and blocks the tool call.
 ///
-/// Hook failures (timeouts, crashes, command-not-found, env-var
-/// pre-spawn refusals, malformed output) are **fail-open**: the failure
-/// is logged and surfaced in the per-hook results for the UI scrollback,
-/// but the tool call continues as if the hook had allowed it. Grow
-/// runs in protected environments where induced-failure bypass of
-/// security hooks is not part of the threat model; the previous
-/// fail-closed posture over-blocked innocent tool calls when
-/// hooks timed out or had unrelated configuration errors.
+/// Hook failures (timeouts, cancellations, crashes, command-not-found,
+/// env-var pre-spawn refusals, malformed output) follow the handler's explicit
+/// `on_failure` policy. The default is fail-open; `on_failure = block` makes
+/// that handler's failure decisive.
 ///
 /// Returns `Allow` if no hooks match, all hooks allow, or all failing
 /// hooks are non-blocking by virtue of this fail-open policy.
@@ -62,104 +255,81 @@ pub async fn dispatch_pre_tool_use(
     envelope: &HookEventEnvelope,
     ctx: &RunContext<'_>,
 ) -> PreToolUseResult {
-    let hooks = registry.hooks_for(HookEventName::PreToolUse);
-    if hooks.is_empty() {
+    let plan = plan_dispatch(registry, HookEventName::PreToolUse, envelope);
+    if plan.is_empty() {
         return PreToolUseResult {
             decision: HookDecision::Allow,
             results: Vec::new(),
         };
     }
 
-    let span = dispatch_span(HookEventName::PreToolUse, hooks.len());
+    let span = dispatch_span(HookEventName::PreToolUse, plan.len());
     let _enter = span.enter();
 
-    let match_value = envelope.payload.match_value().map(str::to_string);
     let mut run_results = Vec::new();
+    let mut decision = HookDecision::Allow;
+    let mut prior_block = false;
 
-    for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut run_results) {
+    for entry in plan {
+        if prior_block {
+            run_results.push(planned_skip(&entry.identity, HookSkipReason::PriorBlock));
             continue;
         }
-
-        let _hook_span = tracing::info_span!(
-            "hook.run",
-            hook_name = %spec.name,
-            hook_event = %HookEventName::PreToolUse,
-        )
-        .entered();
-
-        let (result, elapsed, http_info) =
-            runner::run_hook(spec, envelope, ctx, GateKind::Tool).await;
-
-        match result {
-            HookRunnerResult::Decision(HookDecision::Deny { reason, .. }) => {
-                tracing::info!(
-                    hook_name = %spec.name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    reason = %reason,
-                    "hook denied"
-                );
-                run_results.push(HookRunResult::Blocked {
-                    hook_name: spec.name.clone(),
-                    detail: format!("denied: {reason}"),
-                    elapsed,
-                    http_info,
-                });
-                record_dispatch_counts(&span, &run_results);
-                return PreToolUseResult {
-                    decision: HookDecision::Deny {
-                        reason,
-                        hook_name: spec.name.clone(),
-                    },
-                    results: run_results,
-                };
+        let spec = match entry.action {
+            HookPlanAction::Execute(spec) => spec,
+            HookPlanAction::Skip(reason) => {
+                run_results.push(planned_skip(&entry.identity, reason));
+                continue;
             }
-            HookRunnerResult::Decision(HookDecision::Allow) => {
-                tracing::info!(
-                    hook_name = %spec.name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "hook allowed"
-                );
-                run_results.push(HookRunResult::Success {
-                    hook_name: spec.name.clone(),
-                    elapsed,
-                    http_info,
-                });
-            }
-            HookRunnerResult::Failed(err) => {
-                tracing::warn!(
-                    hook_name = %spec.name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    error = %err,
-                    "hook failed; ignoring (fail-open)"
-                );
-                run_results.push(HookRunResult::Failed {
-                    hook_name: spec.name.clone(),
-                    error: err.clone(),
-                    elapsed,
-                    http_info,
-                });
-            }
-            HookRunnerResult::Success | HookRunnerResult::Stop(_) => {
-                tracing::info!(
-                    hook_name = %spec.name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "hook completed"
-                );
-                run_results.push(HookRunResult::Success {
-                    hook_name: spec.name.clone(),
-                    elapsed,
-                    http_info,
-                });
-            }
+        };
+        let execution = run_one_hook(&spec, envelope, ctx, GateKind::Tool).await;
+        if let HookGateEffect::Tool(handler_decision) = execution.gate
+            && execution.decisive
+        {
+            decision = handler_decision;
+            prior_block = true;
         }
+        run_results.push(execution.result);
     }
 
     record_dispatch_counts(&span, &run_results);
     PreToolUseResult {
-        decision: HookDecision::Allow,
+        decision,
         results: run_results,
     }
+}
+
+/// Admission dispatch for `user_prompt_submit`. Explicit deny and execution
+/// failure plus `on_failure = block` both deny the prompt.
+pub async fn dispatch_user_prompt_submit(
+    registry: &HookRegistry,
+    envelope: &HookEventEnvelope,
+    ctx: &RunContext<'_>,
+) -> PreToolUseResult {
+    let plan = plan_dispatch(registry, HookEventName::UserPromptSubmit, envelope);
+    let mut results = Vec::with_capacity(plan.len());
+    let mut decision = HookDecision::Allow;
+    let mut prior_block = false;
+    for entry in plan {
+        if prior_block {
+            results.push(planned_skip(&entry.identity, HookSkipReason::PriorBlock));
+            continue;
+        }
+        match entry.action {
+            HookPlanAction::Skip(reason) => results.push(planned_skip(&entry.identity, reason)),
+            HookPlanAction::Execute(spec) => {
+                let execution = run_one_hook(&spec, envelope, ctx, GateKind::Prompt).await;
+                if let HookGateEffect::Prompt(handler_decision) = execution.gate
+                    && execution.decisive
+                {
+                    decision = handler_decision;
+                    prior_block = true;
+                }
+                results.push(execution.result);
+            }
+        }
+    }
+    PreToolUseResult { decision, results }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,7 +379,7 @@ impl StopDispatchResult {
 
 /// One hook's stop signals, normalized for [`StopDispatchResult::absorb`].
 /// A `Some` in `stop_reason` is what marks the hook as force-stopping.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StopSignals {
     pub block_reason: Option<String>,
     pub stop_reason: Option<String>,
@@ -245,10 +415,9 @@ fn stop_outcome_detail(outcome: &crate::result::StopHookOutcome) -> Option<Strin
 
 /// Dispatch a `Stop` or `SubagentStop` gate against all matching hooks.
 ///
-/// Every hook runs (no short-circuit) so the model sees all block reasons and
-/// additional context at once. Hook failures (timeouts, crashes, malformed
-/// output) are fail-open: recorded for the UI but contribute no signal, so the
-/// agent stops normally.
+/// Runs in stable order. The first block or force-stop is decisive; remaining
+/// planned entries are recorded as `PriorBlock`. Additional context alone is
+/// not decisive.
 pub async fn dispatch_stop(
     registry: &HookRegistry,
     event: HookEventName,
@@ -260,92 +429,35 @@ pub async fn dispatch_stop(
         tracing::error!(%event, "dispatch_stop called with a non-stop event; ignoring");
         return StopDispatchResult::default();
     }
-    let hooks = registry.hooks_for(event);
-    if hooks.is_empty() {
+    let plan = plan_dispatch(registry, event, envelope);
+    if plan.is_empty() {
         return StopDispatchResult::default();
     }
 
-    let span = dispatch_span(event, hooks.len());
+    let span = dispatch_span(event, plan.len());
     let _enter = span.enter();
 
     let mut out = StopDispatchResult::default();
-    let match_value = envelope.payload.match_value().map(str::to_string);
-
-    for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut out.results) {
+    let mut prior_block = false;
+    for entry in plan {
+        if prior_block {
+            out.results
+                .push(planned_skip(&entry.identity, HookSkipReason::PriorBlock));
             continue;
         }
-
-        let _hook_span = tracing::info_span!(
-            "hook.run",
-            hook_name = %spec.name,
-            hook_event = %event,
-        )
-        .entered();
-
-        let (result, elapsed, http_info) =
-            runner::run_hook(spec, envelope, ctx, GateKind::Stop).await;
-
-        match result {
-            HookRunnerResult::Stop(outcome) => {
-                tracing::info!(
-                    hook_name = %spec.name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    block = outcome.block_reason.is_some(),
-                    additional_context = outcome.additional_context.is_some(),
-                    prevent_continuation = outcome.force_stop.is_some(),
-                    "stop hook completed"
-                );
-                match stop_outcome_detail(&outcome) {
-                    Some(detail) => {
-                        out.results.push(HookRunResult::Blocked {
-                            hook_name: spec.name.clone(),
-                            detail,
-                            elapsed,
-                            http_info,
-                        });
-                    }
-                    None => out.results.push(HookRunResult::Success {
-                        hook_name: spec.name.clone(),
-                        elapsed,
-                        http_info,
-                    }),
-                }
-                out.absorb(
-                    &spec.name,
-                    StopSignals {
-                        block_reason: outcome.block_reason,
-                        stop_reason: outcome.force_stop.map(|force| {
-                            force
-                                .reason
-                                .unwrap_or_else(|| "stopped by hook".to_string())
-                        }),
-                        additional_context: outcome.additional_context,
-                    },
-                );
+        let spec = match entry.action {
+            HookPlanAction::Skip(reason) => {
+                out.results.push(planned_skip(&entry.identity, reason));
+                continue;
             }
-            HookRunnerResult::Failed(err) => {
-                tracing::warn!(
-                    hook_name = %spec.name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    error = %err,
-                    "stop hook failed; ignoring (fail-open)"
-                );
-                out.results.push(HookRunResult::Failed {
-                    hook_name: spec.name.clone(),
-                    error: err,
-                    elapsed,
-                    http_info,
-                });
-            }
-            HookRunnerResult::Success | HookRunnerResult::Decision(_) => {
-                out.results.push(HookRunResult::Success {
-                    hook_name: spec.name.clone(),
-                    elapsed,
-                    http_info,
-                });
-            }
+            HookPlanAction::Execute(spec) => spec,
+        };
+        let execution = run_one_hook(&spec, envelope, ctx, GateKind::Stop).await;
+        if let HookGateEffect::Stop(signals) = execution.gate {
+            out.absorb(&spec.name, signals);
         }
+        prior_block = execution.decisive;
+        out.results.push(execution.result);
     }
 
     record_dispatch_counts(&span, &out.results);
@@ -359,74 +471,34 @@ pub async fn dispatch_non_blocking(
     envelope: &HookEventEnvelope,
     ctx: &RunContext<'_>,
 ) -> Vec<HookRunResult> {
+    if event == HookEventName::UserPromptSubmit {
+        return dispatch_user_prompt_submit(registry, envelope, ctx)
+            .await
+            .results;
+    }
     debug_assert!(
         event.traits().gate == GateKind::Observe,
         "dispatch_non_blocking called with gate event {event:?}"
     );
-    let hooks = registry.hooks_for(event);
-    if hooks.is_empty() {
+    let plan = plan_dispatch(registry, event, envelope);
+    if plan.is_empty() {
         return Vec::new();
     }
 
-    let span = dispatch_span(event, hooks.len());
+    let span = dispatch_span(event, plan.len());
     let _enter = span.enter();
 
-    let match_value = envelope.payload.match_value().map(str::to_string);
-    let mut results = Vec::with_capacity(hooks.len());
+    let mut results = Vec::with_capacity(plan.len());
 
-    for spec in hooks {
-        if !eligible_or_record_skip(spec, match_value.as_deref(), &mut results) {
-            continue;
-        }
-
-        let _hook_span = tracing::info_span!(
-            "hook.run",
-            hook_name = %spec.name,
-            hook_event = %event,
-        )
-        .entered();
-
-        let (result, elapsed, http_info) =
-            runner::run_hook(spec, envelope, ctx, GateKind::Observe).await;
-
-        match result {
-            HookRunnerResult::Success => {
-                tracing::info!(
-                    hook_name = %spec.name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "hook completed"
+    for entry in plan {
+        match entry.action {
+            HookPlanAction::Skip(reason) => results.push(planned_skip(&entry.identity, reason)),
+            HookPlanAction::Execute(spec) => {
+                results.push(
+                    run_one_hook(&spec, envelope, ctx, GateKind::Observe)
+                        .await
+                        .result,
                 );
-                results.push(HookRunResult::Success {
-                    hook_name: spec.name.clone(),
-                    elapsed,
-                    http_info,
-                });
-            }
-            HookRunnerResult::Failed(err) => {
-                tracing::warn!(
-                    hook_name = %spec.name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    error = %err,
-                    "hook failed"
-                );
-                results.push(HookRunResult::Failed {
-                    hook_name: spec.name.clone(),
-                    error: err,
-                    elapsed,
-                    http_info,
-                });
-            }
-            HookRunnerResult::Decision(_) | HookRunnerResult::Stop(_) => {
-                tracing::info!(
-                    hook_name = %spec.name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "hook completed"
-                );
-                results.push(HookRunResult::Success {
-                    hook_name: spec.name.clone(),
-                    elapsed,
-                    http_info,
-                });
             }
         }
     }
@@ -453,6 +525,10 @@ fn record_dispatch_counts(span: &tracing::Span, results: &[HookRunResult]) {
                 total_duration_ms += elapsed.as_millis() as i64;
             }
             HookRunResult::Failed { elapsed, .. } => {
+                num_failed += 1;
+                total_duration_ms += elapsed.as_millis() as i64;
+            }
+            HookRunResult::TimedOut { elapsed, .. } | HookRunResult::Cancelled { elapsed, .. } => {
                 num_failed += 1;
                 total_duration_ms += elapsed.as_millis() as i64;
             }
@@ -515,6 +591,15 @@ mod tests {
         }
     }
 
+    fn user_prompt_envelope() -> HookEventEnvelope {
+        let mut envelope = session_start_envelope();
+        envelope.hook_event_name = HookEventName::UserPromptSubmit;
+        envelope.payload = HookPayload::UserPromptSubmit {
+            prompt: Some("ship it".into()),
+        };
+        envelope
+    }
+
     fn run_ctx() -> RunContext<'static> {
         RunContext {
             session_id: "test-session",
@@ -543,6 +628,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            on_failure: crate::config::OnFailure::Allow,
             source_dir: PathBuf::from("/tmp"),
             extra_env: HashMap::new(),
             layer: crate::config::HookProvenance::File,
@@ -553,6 +639,111 @@ mod tests {
         let (mut registry, _) = crate::discovery::load_hooks(None, None);
         registry.append_specs(specs);
         registry
+    }
+
+    #[test]
+    fn planning_records_matcher_and_policy_skips_in_stable_order() {
+        let execute = make_command_spec("execute", Some("read_file"), true, "echo ok");
+        let miss = make_command_spec("miss", Some("write_file"), true, "echo ok");
+        let disabled = make_command_spec("disabled", None, false, "echo ok");
+        let policy = make_command_spec("policy", None, true, "echo ok");
+        let registry = registry_from_specs(vec![execute, miss, disabled, policy]);
+        let plan = plan_dispatch_with_policy(
+            &registry,
+            HookEventName::PreToolUse,
+            &pre_tool_use_envelope("read_file"),
+            |name| name == "policy",
+        );
+        assert_eq!(
+            plan.iter()
+                .map(|entry| entry.identity.name.as_str())
+                .collect::<Vec<_>>(),
+            ["execute", "miss", "disabled", "policy"]
+        );
+        assert!(matches!(&plan[0].action, HookPlanAction::Execute(_)));
+        assert!(matches!(
+            &plan[1].action,
+            HookPlanAction::Skip(HookSkipReason::MatcherMiss)
+        ));
+        assert!(matches!(
+            &plan[2].action,
+            HookPlanAction::Skip(HookSkipReason::Disabled)
+        ));
+        assert!(matches!(
+            &plan[3].action,
+            HookPlanAction::Skip(HookSkipReason::PolicyDisabled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn on_failure_block_is_decisive_and_marks_later_hooks_prior_block() {
+        let mut strict = make_command_spec("strict", None, true, "exit 1");
+        strict.on_failure = OnFailure::Block;
+        let later = make_command_spec("later", None, true, "echo '{\"decision\":\"allow\"}'");
+        let result = dispatch_pre_tool_use(
+            &registry_from_specs(vec![strict, later]),
+            &pre_tool_use_envelope("read_file"),
+            &run_ctx(),
+        )
+        .await;
+        assert!(matches!(result.decision, HookDecision::Deny { .. }));
+        assert!(matches!(result.results[0], HookRunResult::Failed { .. }));
+        assert!(matches!(
+            result.results[1],
+            HookRunResult::Skipped {
+                reason: HookSkipReason::PriorBlock,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_explicit_deny_blocks_and_skips_later_hooks() {
+        let mut deny = make_command_spec(
+            "prompt-deny",
+            None,
+            true,
+            "echo '{\"decision\":\"block\",\"reason\":\"no prompt\"}'",
+        );
+        deny.event = HookEventName::UserPromptSubmit;
+        let mut later = make_command_spec("later", None, true, "echo ok");
+        later.event = HookEventName::UserPromptSubmit;
+        let result = dispatch_user_prompt_submit(
+            &registry_from_specs(vec![deny, later]),
+            &user_prompt_envelope(),
+            &run_ctx(),
+        )
+        .await;
+        assert_eq!(
+            result.decision,
+            HookDecision::Deny {
+                reason: "no prompt".into(),
+                hook_name: "prompt-deny".into(),
+            }
+        );
+        assert!(matches!(result.results[0], HookRunResult::Blocked { .. }));
+        assert!(matches!(
+            result.results[1],
+            HookRunResult::Skipped {
+                reason: HookSkipReason::PriorBlock,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_on_failure_block_denies() {
+        let mut strict = make_command_spec("prompt-failure", None, true, "exit 1");
+        strict.event = HookEventName::UserPromptSubmit;
+        strict.on_failure = OnFailure::Block;
+        let result = dispatch_user_prompt_submit(
+            &registry_from_specs(vec![strict]),
+            &user_prompt_envelope(),
+            &run_ctx(),
+        )
+        .await;
+        assert!(matches!(result.decision, HookDecision::Deny { .. }));
+        assert!(matches!(result.results[0], HookRunResult::Failed { .. }));
     }
 
     #[test]
@@ -622,6 +813,7 @@ mod tests {
             }
             ref other => panic!("expected Deny, got {other:?}"),
         }
+        assert_eq!(result.results.len(), 1);
     }
 
     #[tokio::test]
@@ -662,6 +854,13 @@ mod tests {
         let skipped =
             dispatch_pre_tool_use(&registry, &pre_tool_use_envelope("read_file"), &run_ctx()).await;
         assert_eq!(skipped.decision, HookDecision::Allow);
+        assert!(matches!(
+            skipped.results[0],
+            HookRunResult::Skipped {
+                reason: HookSkipReason::MatcherMiss,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -692,6 +891,13 @@ mod tests {
             }
             ref other => panic!("expected Deny, got {other:?}"),
         }
+        assert!(matches!(
+            result.results[1],
+            HookRunResult::Skipped {
+                reason: HookSkipReason::PriorBlock,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -849,7 +1055,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_collects_all_blocks() {
+    async fn stop_first_block_skips_remaining_plan() {
         let registry = registry_from_specs(vec![
             stop_spec("b1", "echo '{\"decision\":\"block\",\"reason\":\"first\"}'"),
             stop_spec("allow", "echo ok"),
@@ -867,21 +1073,35 @@ mod tests {
                 .iter()
                 .map(|b| b.reason.as_str())
                 .collect::<Vec<_>>(),
-            ["first", "second"]
+            ["first"]
         );
-        assert_eq!(result.results.len(), 3, "all hooks must have run");
+        assert_eq!(result.results.len(), 3);
+        assert!(matches!(
+            result.results[1],
+            HookRunResult::Skipped {
+                reason: HookSkipReason::PriorBlock,
+                ..
+            }
+        ));
+        assert!(matches!(
+            result.results[2],
+            HookRunResult::Skipped {
+                reason: HookSkipReason::PriorBlock,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
     async fn stop_prevent_continuation_overrides_blocks() {
         let registry = registry_from_specs(vec![
             stop_spec(
-                "blocker",
-                "echo '{\"decision\":\"block\",\"reason\":\"keep going\"}'",
-            ),
-            stop_spec(
                 "stopper",
                 "echo '{\"continue\":false,\"stopReason\":\"enough\"}'",
+            ),
+            stop_spec(
+                "blocker",
+                "echo '{\"decision\":\"block\",\"reason\":\"keep going\"}'",
             ),
         ]);
         let result =
@@ -892,7 +1112,14 @@ mod tests {
             .expect("continue:false captured");
         assert_eq!(prevent.hook_name, "stopper");
         assert_eq!(prevent.reason, "enough");
-        assert_eq!(result.blocks.len(), 1);
+        assert!(result.blocks.is_empty());
+        assert!(matches!(
+            result.results[1],
+            HookRunResult::Skipped {
+                reason: HookSkipReason::PriorBlock,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -907,7 +1134,14 @@ mod tests {
         assert!(result.wants_continuation());
         assert_eq!(result.blocks.len(), 1);
         assert_eq!(result.blocks[0].reason, "fix the build");
-        assert_eq!(result.additional_context, ["note"]);
+        assert!(result.additional_context.is_empty());
+        assert!(matches!(
+            result.results[1],
+            HookRunResult::Skipped {
+                reason: HookSkipReason::PriorBlock,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -927,6 +1161,31 @@ mod tests {
         assert_eq!(result.additional_context, ["run the tests"]);
     }
 
+    #[tokio::test]
+    async fn stop_additional_context_is_not_decisive_but_later_block_is() {
+        let registry = registry_from_specs(vec![
+            stop_spec("ctx", "echo '{\"additionalContext\":\"run the tests\"}'"),
+            stop_spec(
+                "block",
+                "echo '{\"decision\":\"block\",\"reason\":\"failed\"}'",
+            ),
+            stop_spec("later", "echo ok"),
+        ]);
+        let result =
+            dispatch_stop(&registry, HookEventName::Stop, &stop_envelope(), &run_ctx()).await;
+
+        assert_eq!(result.additional_context, ["run the tests"]);
+        assert_eq!(result.blocks.len(), 1);
+        assert_eq!(result.blocks[0].reason, "failed");
+        assert!(matches!(
+            result.results[2],
+            HookRunResult::Skipped {
+                reason: HookSkipReason::PriorBlock,
+                ..
+            }
+        ));
+    }
+
     /// A timed-out stop hook fails open: stdout of a killed hook is never
     /// interpreted, so a block written before hanging is ignored.
     #[tokio::test]
@@ -944,7 +1203,7 @@ mod tests {
             "timeout must not block the stop"
         );
         assert!(
-            matches!(&result.results[0], HookRunResult::Failed { .. }),
+            matches!(&result.results[0], HookRunResult::TimedOut { .. }),
             "the timeout is recorded as a failure, got {:?}",
             result.results[0]
         );

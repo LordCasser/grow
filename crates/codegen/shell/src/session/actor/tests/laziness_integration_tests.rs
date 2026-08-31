@@ -337,6 +337,7 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
                     .await
                     .pending_inputs
                     .push_back(InputItem {
+                        input_ids: Vec::new(),
                         notification_ids: Vec::new(),
                         prompt_id: "user-real-prompt".to_string(),
                         turn_kind: crate::session::TurnKind::User,

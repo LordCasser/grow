@@ -55,7 +55,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::servers::{LivenessCheck, McpClient, McpClientEvent, McpServerName};
@@ -118,7 +117,6 @@ impl TransportLivenessHandle {
 /// - `server_name`: bound to emitted events.
 /// - `client`: `Arc<McpClient>` whose `liveness_check` we poll.
 /// - `poll_interval`: tick period.
-/// - `on_event`: sink for `TransportClosed` if observed.
 /// - `liveness_slot`: shared Arc to the owning `McpClient`'s
 ///   `liveness_handle` field. Cleared from inside the task before
 ///   exit.
@@ -128,6 +126,10 @@ impl TransportLivenessHandle {
 /// - Caller MUST have already observed the client transition to
 ///   [`crate::servers::ClientStateKind::Ready`]
 ///   ([`McpClient::arm_liveness_watcher`] enforces this).
+/// - Sender plus client/config binding are read from `client` at emission time;
+///   the transport revision is fixed when the watcher is spawned. Rebinding a
+///   dispatcher is observed, while a watcher for a replaced transport cannot
+///   impersonate its successor.
 /// - The poller exits silently on transient non-`Ready` states; only
 ///   `Ready` + closed transport produces an event.
 /// - The send may fail if the dispatcher has dropped its receiver
@@ -144,17 +146,17 @@ impl TransportLivenessHandle {
 /// `MissedTickBehavior::Skip` default is fine: the worst case under
 /// a runtime stall is "we don't poll for a while", which only
 /// delays detection.
-pub fn spawn_transport_liveness(
+pub(crate) fn spawn_transport_liveness(
     server_name: McpServerName,
     client: Arc<McpClient>,
     poll_interval: Duration,
-    on_event: UnboundedSender<McpClientEvent>,
     liveness_slot: SharedLivenessSlot,
 ) -> TransportLivenessHandle {
     let token = CancellationToken::new();
     let drop_guard = token.clone().drop_guard();
 
     let server_name_for_task = server_name.clone();
+    let transport_revision = client.current_transport_revision();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(poll_interval);
         // Skip missed ticks under runtime stall — see fn doc.
@@ -195,16 +197,13 @@ pub fn spawn_transport_liveness(
                             // `select!`; it would race this self-cancel.
                             clear_liveness_slot(&liveness_slot);
 
-                            if on_event
-                                .send(McpClientEvent::TransportClosed {
-                                    server: server_name_for_task.clone(),
-                                    // Bind the event to THIS client
-                                    // instance so the dispatcher can
-                                    // skip evicting a replacement
-                                    // registered under the same name.
-                                    client_id: client.client_id(),
-                                })
-                                .is_err()
+                            if let Some(sink) = client.event_sink_clone()
+                                && sink
+                                    .send(McpClientEvent::TransportClosed {
+                                        server: server_name_for_task.clone(),
+                                        episode: sink.episode(transport_revision),
+                                    })
+                                    .is_err()
                             {
                                 tracing::debug!(
                                     server = %server_name_for_task,
@@ -254,6 +253,10 @@ mod tests {
         Arc::new(McpClient::stub("test-server"))
     }
 
+    fn bind_sink(client: &McpClient, tx: tokio::sync::mpsc::UnboundedSender<McpClientEvent>) {
+        client.set_event_tx(Some(tx), 0);
+    }
+
     /// Contract: a watcher whose owning client never reaches
     /// `Ready+closed` (here the stub is `Empty`) exits **silently**
     /// — no `TransportClosed` event, and the slot is cleared.
@@ -263,11 +266,11 @@ mod tests {
         let (tx, mut rx) = unbounded_channel::<McpClientEvent>();
         let slot: SharedLivenessSlot = Arc::new(parking_lot::Mutex::new(None));
         let client = make_stub_client();
+        bind_sink(&client, tx);
         let handle = spawn_transport_liveness(
             "test-server".to_string(),
             client,
             Duration::from_millis(500),
-            tx,
             Arc::clone(&slot),
         );
         // Pre-populate the slot so we can assert the watcher
@@ -307,11 +310,11 @@ mod tests {
         let (tx, mut rx) = unbounded_channel::<McpClientEvent>();
         let slot: SharedLivenessSlot = Arc::new(parking_lot::Mutex::new(None));
         let client = make_stub_client();
+        bind_sink(&client, tx);
         let handle = spawn_transport_liveness(
             "test-server".to_string(),
             client,
             Duration::from_millis(500),
-            tx,
             Arc::clone(&slot),
         );
         *slot.lock() = Some(handle);
@@ -338,11 +341,11 @@ mod tests {
         let (tx, mut rx) = unbounded_channel::<McpClientEvent>();
         let slot: SharedLivenessSlot = Arc::new(parking_lot::Mutex::new(None));
         let client = make_stub_client();
+        bind_sink(&client, tx);
         let handle = spawn_transport_liveness(
             "test-server".to_string(),
             client,
             Duration::from_secs(60), // Long interval so the first tick is far away.
-            tx,
             Arc::clone(&slot),
         );
         // Drop before the tick can fire — the `DropGuard` arm

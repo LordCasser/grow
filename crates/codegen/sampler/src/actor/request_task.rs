@@ -243,34 +243,32 @@ pub(crate) async fn run_request_task(
             )
             .then(sampling_types::TokenUsage::default)
         });
-        if provider_started && let Some(usage) = outcome_usage {
-            if let Some(sink) = &usage_sink {
-                if let Err(error) = sink(AttemptUsage::Known {
-                    scope: attempt_scope.clone(),
-                    usage: usage.clone(),
-                })
-                .await
-                {
-                    finish_usage_settlement_failure(
-                        &event_tx,
-                        &request_id,
-                        &mut completion_tx,
-                        error,
-                    );
-                    return request_id;
-                }
-            }
-        } else if provider_started && let Some(sink) = &usage_sink {
-            if let Err(error) = sink(AttemptUsage::Incomplete {
+        if provider_started
+            && let Some(usage) = &outcome_usage
+            && let Some(sink) = &usage_sink
+            && let Err(error) = sink(AttemptUsage::Known {
+                scope: attempt_scope.clone(),
+                usage: usage.clone(),
+            })
+            .await
+        {
+            finish_usage_settlement_failure(&event_tx, &request_id, &mut completion_tx, error);
+            return request_id;
+        } else if provider_started
+            && outcome_usage.is_none()
+            && let Some(sink) = &usage_sink
+            && let Err(error) = sink(AttemptUsage::Incomplete {
                 scope: attempt_scope,
             })
             .await
-            {
-                finish_usage_settlement_failure(&event_tx, &request_id, &mut completion_tx, error);
-                return request_id;
-            }
+        {
+            finish_usage_settlement_failure(&event_tx, &request_id, &mut completion_tx, error);
+            return request_id;
         }
 
+        // Transport and empty-response retries are safe only while the
+        // attempt has produced no model output. Doom-loop recovery has its
+        // own discard-and-resample semantics and budget below.
         let effective_max_retries =
             if retry_policy.retry_only_before_output && output_observed.load(Ordering::Relaxed) {
                 0
@@ -351,13 +349,6 @@ pub(crate) async fn run_request_task(
                 // consult the transport classifier, so no classifier change
                 // can silently debit the transport budget for a doom failure.
                 if let SamplingError::DoomLoopDetected { .. } = &error {
-                    if retry_policy.retry_only_before_output
-                        && output_observed.load(Ordering::Relaxed)
-                    {
-                        emit_failed(&event_tx, &request_id, &error);
-                        send_completion(&mut completion_tx, Err(clone_error(&error)));
-                        return request_id;
-                    }
                     let backoff = retry_mod::doom_loop_backoff(doom_retry_count + 1);
                     doom_retry_count += 1;
                     tracing::warn!(
@@ -831,7 +822,9 @@ async fn drive_l2(
             biased;
             next = l2.next() => match next {
                 Some(SamplingEvent::Completed { response, metrics, .. }) => {
-                    output_observed.store(true, Ordering::Relaxed);
+                    if response_has_observed_output(&response) {
+                        output_observed.store(true, Ordering::Relaxed);
+                    }
                     // Doom outranks the truncation/empty classes: a confident
                     // loop poisons the attempt whatever else it looks like.
                     if let Some(policy) = doom_check {
@@ -925,6 +918,25 @@ async fn drive_l2(
             }
         }
     }
+}
+
+/// A terminal frame can carry the first complete output without any preceding
+/// delta. Treat response content, tool activity, reasoning, or billed output
+/// tokens as observed so a later transient classification cannot replay it.
+fn response_has_observed_output(response: &ConversationResponse) -> bool {
+    response
+        .assistant()
+        .is_some_and(|assistant| !assistant.content.is_empty() || !assistant.tool_calls.is_empty())
+        || response.reasoning_items().any(|reasoning| {
+            !reasoning.summary.is_empty()
+                || reasoning.content.is_some()
+                || reasoning.encrypted_content.is_some()
+        })
+        || response.backend_tool_items().next().is_some()
+        || response
+            .usage
+            .as_ref()
+            .is_some_and(|usage| usage.completion_tokens > 0 || usage.reasoning_tokens > 0)
 }
 
 /// Re-tag a forwarded event with the canonical request_id. The L2
@@ -1421,6 +1433,43 @@ mod tests {
         assert_eq!(context.finish_reason.as_deref(), Some("unexpected_state"));
     }
 
+    #[test]
+    fn terminal_response_output_classifier_covers_content_reasoning_and_tools() {
+        let response = |items| ConversationResponse {
+            items,
+            stop_reason: Some(sampling_types::StopReason::Stop),
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 0,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+            message_id: None,
+            raw_stop_reason: None,
+            stop_sequence: None,
+        };
+
+        assert!(!response_has_observed_output(&response(vec![
+            sampling_types::ConversationItem::assistant("")
+        ])));
+        assert!(response_has_observed_output(&response(vec![
+            sampling_types::ConversationItem::assistant("terminal-only output")
+        ])));
+        assert!(response_has_observed_output(&response(vec![
+            sampling_types::ConversationItem::Reasoning(
+                sampling_types::synthesized_reasoning_item("terminal-only reasoning"),
+            )
+        ])));
+        assert!(response_has_observed_output(&response(vec![
+            sampling_types::ConversationItem::assistant_tool_calls(vec![
+                sampling_types::ToolCall {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                },
+            ])
+        ])));
+    }
+
     // ── drive_l2 stop_reason classification ──────────────────────────
 
     use sampling_types::{
@@ -1434,7 +1483,7 @@ mod tests {
         stop_reason: Option<StopReason>,
         doom_signals: Vec<DoomLoopSignal>,
         doom_check: Option<DoomLoopRecoveryPolicy>,
-    ) -> AttemptOutcome {
+    ) -> (AttemptOutcome, bool) {
         let request_id = RequestId::from("drive-l2-test");
         let response = ConversationResponse {
             items: vec![ConversationItem::Assistant(AssistantItem {
@@ -1464,21 +1513,22 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let captured: ErrorCell = Arc::new(Mutex::new(None));
         let output_observed = Arc::new(AtomicBool::new(false));
-        drive_l2(
+        let outcome = drive_l2(
             l2,
             request_id,
             &event_tx,
             &cancel_token,
             captured,
             doom_check,
-            output_observed,
+            Arc::clone(&output_observed),
         )
-        .await
+        .await;
+        (outcome, output_observed.load(Ordering::Relaxed))
     }
 
     #[tokio::test]
     async fn drive_l2_length_maps_to_truncated_outcome() {
-        let outcome = drive_l2_with_stop_reason(Some(StopReason::Length), vec![], None).await;
+        let (outcome, _) = drive_l2_with_stop_reason(Some(StopReason::Length), vec![], None).await;
         match outcome {
             AttemptOutcome::Truncated {
                 partial_response, ..
@@ -1497,7 +1547,7 @@ mod tests {
 
     #[tokio::test]
     async fn drive_l2_context_window_exceeded_outcome() {
-        let outcome =
+        let (outcome, _) =
             drive_l2_with_stop_reason(Some(StopReason::ModelContextWindowExceeded), vec![], None)
                 .await;
         match outcome {
@@ -1515,7 +1565,8 @@ mod tests {
 
     #[tokio::test]
     async fn drive_l2_pause_turn_outcome() {
-        let outcome = drive_l2_with_stop_reason(Some(StopReason::PauseTurn), vec![], None).await;
+        let (outcome, _) =
+            drive_l2_with_stop_reason(Some(StopReason::PauseTurn), vec![], None).await;
         match outcome {
             AttemptOutcome::PauseTurn { response, .. } => {
                 assert_eq!(response.stop_reason, Some(StopReason::PauseTurn));
@@ -1533,7 +1584,7 @@ mod tests {
             None,
         ] {
             let label = format!("{stop:?}");
-            let outcome = drive_l2_with_stop_reason(stop, vec![], None).await;
+            let (outcome, _) = drive_l2_with_stop_reason(stop, vec![], None).await;
             assert!(
                 matches!(outcome, AttemptOutcome::Completed { .. }),
                 "{label}: expected Completed outcome"
@@ -1544,7 +1595,7 @@ mod tests {
     #[tokio::test]
     async fn drive_l2_doom_check_outranks_truncation() {
         let signals = vec![DoomLoopSignal::parse("tail_repetition:4@thinking")];
-        let outcome = drive_l2_with_stop_reason(
+        let (outcome, _) = drive_l2_with_stop_reason(
             Some(StopReason::Length),
             signals,
             Some(DoomLoopRecoveryPolicy::default()),
@@ -1556,6 +1607,67 @@ mod tests {
                 ..
             } => {}
             _ => panic!("expected Failed(DoomLoopDetected) outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drive_l2_terminal_frame_without_deltas_marks_response_output() {
+        let (_, output_observed) =
+            drive_l2_with_stop_reason(Some(StopReason::Stop), vec![], None).await;
+
+        assert!(output_observed);
+    }
+
+    #[tokio::test]
+    async fn drive_l2_buffered_terminal_outranks_simultaneous_cancel_and_preserves_usage() {
+        let request_id = RequestId::from("drive-l2-terminal-cancel-race");
+        let response = ConversationResponse {
+            items: vec![ConversationItem::assistant("finished")],
+            stop_reason: Some(StopReason::Stop),
+            usage: Some(sampling_types::TokenUsage {
+                prompt_tokens: 11,
+                completion_tokens: 7,
+                total_tokens: 18,
+                ..Default::default()
+            }),
+            cost_usd_ticks: None,
+            message_chunks_emitted: 0,
+            doom_loop_signals: Vec::new(),
+            stop_message: None,
+            message_id: None,
+            raw_stop_reason: Some("stop".into()),
+            stop_sequence: None,
+        };
+        let metrics = InferenceLatencyStats::from_timestamps(Instant::now(), &[], Instant::now());
+        let l2 = stream::iter(vec![SamplingEvent::Completed {
+            request_id: request_id.clone(),
+            response: Box::new(response),
+            metrics,
+        }]);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        let outcome = drive_l2(
+            l2,
+            request_id,
+            &event_tx,
+            &cancel_token,
+            Arc::new(Mutex::new(None)),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+
+        match outcome {
+            AttemptOutcome::Completed { response, .. } => {
+                assert_eq!(response.assistant_text(), "finished");
+                assert_eq!(
+                    response.usage.as_ref().map(|usage| usage.total_tokens),
+                    Some(18)
+                );
+            }
+            _ => panic!("buffered terminal must win over simultaneous cancellation"),
         }
     }
 }

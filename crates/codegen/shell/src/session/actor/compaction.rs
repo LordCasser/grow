@@ -161,6 +161,42 @@ pub(crate) struct AutoCompactTriggerInfo {
     pub source: &'static str,
 }
 
+fn auto_compact_trigger(
+    projected_tokens: u64,
+    context_window: std::num::NonZeroU64,
+    threshold_percent: u8,
+    source: &'static str,
+) -> Option<AutoCompactTriggerInfo> {
+    let context_window = context_window.get();
+    token_estimation::exceeds_threshold(projected_tokens, context_window, threshold_percent).then(
+        || AutoCompactTriggerInfo {
+            tokens_used: projected_tokens,
+            context_window,
+            percentage: token_estimation::usage_percentage_u8(projected_tokens, context_window),
+            source,
+        },
+    )
+}
+
+/// A model-id change alone is not a compaction reason. Reuse the ordinary
+/// pressure policy only when the new carrier has a smaller context window.
+fn model_switch_compaction_trigger(
+    previous_context_window: u64,
+    current_context_window: std::num::NonZeroU64,
+    projected_tokens: u64,
+    threshold_percent: u8,
+) -> Option<AutoCompactTriggerInfo> {
+    if previous_context_window <= current_context_window.get() {
+        return None;
+    }
+    auto_compact_trigger(
+        projected_tokens,
+        current_context_window,
+        threshold_percent,
+        "model_switch",
+    )
+}
+
 /// Stable `data.compact_error` marker on the `acp::Error` returned when
 /// compaction replaces the conversation but it still exceeds the context
 /// window. The overflow branch matches it and fails the turn instead of
@@ -666,7 +702,7 @@ impl SessionActor {
             .await;
         let terminal = if compaction_completed(&result, replacement_committed) {
             chat_state::CompactionEvent::Completed {
-                id,
+                id: id.clone(),
                 source_items,
                 result_items: self.chat_state_handle.get_conversation_len().await,
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -676,7 +712,7 @@ impl SessionActor {
                 .as_ref()
                 .expect_err("non-committed compaction must fail");
             chat_state::CompactionEvent::Failed {
-                id,
+                id: id.clone(),
                 duration_ms: started.elapsed().as_millis() as u64,
                 error: crate::util::truncate(&error.to_string(), 500).to_string(),
             }
@@ -689,6 +725,26 @@ impl SessionActor {
                     "compaction terminal was not durably recorded: {error}"
                 ))
             })?;
+        if replacement_committed {
+            let source = match trigger {
+                ::diagnostics::events::CompactionTrigger::Manual => "manual",
+                ::diagnostics::events::CompactionTrigger::Auto => "auto",
+            };
+            self.dispatch_observe_hook(
+                ::hooks::event::HookEventName::PostCompact,
+                chat_state::HookCause::Compaction { compaction_id: id },
+                ::hooks::event::HookPayload::PostCompact {
+                    source: source.into(),
+                },
+                None,
+            )
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "post-compaction hook lifecycle was not durable: {error}"
+                ))
+            })?;
+        }
         // Completed describes the committed replacement transaction. A
         // required post-commit repair may still fail closed for this turn;
         // swallowing that error would allow the next Step to sample without
@@ -743,15 +799,22 @@ impl SessionActor {
             user_context.is_some(),
         );
         let compact_source = trigger_str;
-        self.dispatch_hook(
+        self.dispatch_observe_hook(
             ::hooks::event::HookEventName::PreCompact,
+            chat_state::HookCause::Compaction {
+                compaction_id: transaction_id.to_owned(),
+            },
             ::hooks::event::HookPayload::PreCompact {
                 source: compact_source.into(),
             },
             None,
-            None,
         )
-        .await;
+        .await
+        .map_err(|error| {
+            acp::Error::internal_error().data(format!(
+                "pre-compaction hook lifecycle was not durable: {error}"
+            ))
+        })?;
         let max_retries = 3u32;
         let retry_delay_secs = 3u64;
         let Some(materialized) = self
@@ -1545,15 +1608,6 @@ impl SessionActor {
             .on_skill_discovery_compaction()
             .await;
         self.persist_announcement_state().await;
-        self.dispatch_hook(
-            ::hooks::event::HookEventName::PostCompact,
-            ::hooks::event::HookPayload::PostCompact {
-                source: compact_source.into(),
-            },
-            None,
-            None,
-        )
-        .await;
         let tokens_after = self.chat_state_handle.get_projected_tokens().await;
         {
             let span = tracing::Span::current();
@@ -1623,22 +1677,12 @@ impl SessionActor {
         context_window: std::num::NonZeroU64,
         source: &'static str,
     ) -> Option<AutoCompactTriggerInfo> {
-        let cw = context_window.get();
-        if token_estimation::exceeds_threshold(
+        auto_compact_trigger(
             projected_tokens,
-            cw,
+            context_window,
             self.compaction.threshold_percent.get(),
-        ) {
-            let percentage = token_estimation::usage_percentage_u8(projected_tokens, cw);
-            Some(AutoCompactTriggerInfo {
-                tokens_used: projected_tokens,
-                context_window: cw,
-                percentage,
-                source,
-            })
-        } else {
-            None
-        }
+            source,
+        )
     }
     /// Resolve a provider-error recovery window. Explicit provider overflow
     /// evidence outranks the local estimate; otherwise a smaller provider
@@ -1783,13 +1827,13 @@ impl SessionActor {
         self.compaction
             .auto_compact_suppressed
             .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
-        if prev.context_window <= cfg.context_window.get() {
-            return Ok(());
-        }
         let projected_tokens = self.chat_state_handle.get_projected_tokens().await;
-        let Some(trigger_info) =
-            self.should_auto_compact(projected_tokens, cfg.context_window, "model_switch")
-        else {
+        let Some(trigger_info) = model_switch_compaction_trigger(
+            prev.context_window,
+            cfg.context_window,
+            projected_tokens,
+            self.compaction.threshold_percent.get(),
+        ) else {
             return Ok(());
         };
         tracing::info!(
@@ -2148,6 +2192,26 @@ impl SessionActor {
 #[cfg(test)]
 mod context_recall_tests {
     use super::*;
+
+    #[test]
+    fn model_switch_compaction_requires_both_window_shrink_and_pressure() {
+        let current_window = std::num::NonZeroU64::new(100_000).unwrap();
+
+        assert!(
+            model_switch_compaction_trigger(100_000, current_window, 90_000, 85).is_none(),
+            "a family/model change with the same carrier capacity must not compact"
+        );
+        assert!(
+            model_switch_compaction_trigger(200_000, current_window, 84_000, 85).is_none(),
+            "a smaller carrier below the ordinary pressure threshold must not compact"
+        );
+        let trigger = model_switch_compaction_trigger(200_000, current_window, 90_000, 85)
+            .expect("a smaller carrier over the ordinary threshold must compact");
+        assert_eq!(trigger.tokens_used, 90_000);
+        assert_eq!(trigger.context_window, 100_000);
+        assert_eq!(trigger.percentage, 90);
+        assert_eq!(trigger.source, "model_switch");
+    }
 
     fn api_error(message: &str, context_window: Option<u64>) -> sampler::SamplingErrorInfo {
         sampler::SamplingErrorInfo {

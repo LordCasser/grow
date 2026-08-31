@@ -42,7 +42,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ::mcp::servers::{
-    McpClientEvent, McpClientEventKind, McpServerName, McpState, mcp_server_name, mcp_transport_str,
+    McpClientEpisode, McpClientEvent, McpClientEventKind, McpServerName, McpState, mcp_server_name,
+    mcp_transport_str,
 };
 use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
@@ -241,7 +242,7 @@ pub struct CoalescedWindow {
     pub buf: HashMap<(McpServerName, McpClientEventKind), McpClientEvent>,
     /// All `TransportClosed` client identities per server seen in the
     /// window.
-    pub closed: HashMap<McpServerName, HashSet<u64>>,
+    pub closed: HashMap<McpServerName, HashSet<McpClientEpisode>>,
 }
 
 /// Coalesce the buffered events for one window flush.
@@ -309,11 +310,11 @@ fn insert_event(win: &mut CoalescedWindow, ev: McpClientEvent) {
             }
         }
         ev => {
-            if let McpClientEvent::TransportClosed { server, client_id } = &ev {
+            if let McpClientEvent::TransportClosed { server, episode } = &ev {
                 win.closed
                     .entry(server.clone())
                     .or_default()
-                    .insert(*client_id);
+                    .insert(*episode);
             }
             let kind = kind_of(&ev);
             // server_name() returns None only for ConfigDiff which
@@ -495,7 +496,53 @@ pub struct DeadClient {
     /// Every `TransportClosed` client id observed for this server in
     /// the window. Eviction fires when the registered client's id is
     /// in this set.
-    pub closed: HashSet<u64>,
+    pub closed: HashSet<McpClientEpisode>,
+}
+
+/// Remove client-origin events whose `(client_id, config_generation)` is no
+/// longer the episode authorized by `McpState`. `TransportClosed` keeps its
+/// dedicated all-identities accumulator so a stale last-write-wins entry cannot
+/// hide a current close from the same coalesce window.
+pub async fn discard_stale_client_events(
+    mcp_state: &Arc<TokioMutex<McpState>>,
+    win: &mut CoalescedWindow,
+) {
+    let state = mcp_state.lock().await;
+
+    win.closed.retain(|server, episodes| {
+        episodes.retain(|episode| state.accepts_client_event(server, *episode));
+        !episodes.is_empty()
+    });
+
+    win.buf.retain(|(server, kind), event| {
+        if matches!(kind, McpClientEventKind::TransportClosed) {
+            return true;
+        }
+        event
+            .client_episode()
+            .is_none_or(|episode| state.accepts_client_event(server, episode))
+    });
+
+    let close_servers: Vec<_> = win
+        .buf
+        .keys()
+        .filter(|(_, kind)| matches!(kind, McpClientEventKind::TransportClosed))
+        .map(|(server, _)| server.clone())
+        .collect();
+    for server in close_servers {
+        let key = (server.clone(), McpClientEventKind::TransportClosed);
+        if let Some(episode) = win
+            .closed
+            .get(&server)
+            .and_then(|episodes| episodes.iter().next())
+            .copied()
+        {
+            win.buf
+                .insert(key, McpClientEvent::TransportClosed { server, episode });
+        } else {
+            win.buf.remove(&key);
+        }
+    }
 }
 
 /// Walk the coalesce window and return the close *candidates* — servers
@@ -588,24 +635,33 @@ pub async fn drop_dead_clients(
     }
     let mut state = mcp_state.lock().await;
     for d in dead {
-        let Some(current) = state.owned_clients.get(&d.server) else {
+        let Some(current_client_id) = state
+            .owned_clients
+            .get(&d.server)
+            .map(|client| client.client_id())
+        else {
             // Nothing registered: nothing to evict, and the death
             // status is still accurate — don't mark stale.
             continue;
         };
-        if d.closed.contains(&current.client_id()) {
+        let current_episode = d.closed.iter().copied().find(|episode| {
+            episode.client_id() == current_client_id
+                && state.accepts_client_event(&d.server, *episode)
+        });
+        if let Some(episode) = current_episode {
             state.owned_clients.remove(&d.server);
+            state.revoke_client_events(&d.server, episode);
             tracing::info!(
                 server = %d.server,
-                closed_ids = ?d.closed,
+                closed_episodes = ?d.closed,
                 "mcp status dispatcher dropped dead client from owned_clients",
             );
         } else {
             stale.push(d.server.clone());
             tracing::info!(
                 server = %d.server,
-                closed_ids = ?d.closed,
-                current_client_id = current.client_id(),
+                closed_episodes = ?d.closed,
+                current_client_id,
                 "mcp status dispatcher: stale TransportClosed for a replaced client, keeping current client",
             );
         }
@@ -658,6 +714,7 @@ pub async fn run_dispatcher(
             );
             break;
         };
+        discard_stale_client_events(&mcp_state, &mut win).await;
         if win.buf.is_empty() {
             continue;
         }
@@ -804,6 +861,112 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc::unbounded_channel;
 
+    fn episode(label: u64) -> McpClientEpisode {
+        static EPISODES: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, McpClientEpisode>>> =
+            std::sync::OnceLock::new();
+        let mut episodes = EPISODES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *episodes.entry(label).or_insert_with(|| {
+            let client = Arc::new(::mcp::servers::McpClient::stub(&format!(
+                "dispatcher-test-{label}"
+            )));
+            let mut state = McpState::new(vec![]);
+            state.bind_client_events(&client)
+        })
+    }
+
+    fn episode_for_client(client: &Arc<::mcp::servers::McpClient>) -> McpClientEpisode {
+        let mut state = McpState::new(vec![]);
+        state.bind_client_events(client)
+    }
+
+    fn client_origin_threat_events(episode: McpClientEpisode) -> Vec<McpClientEvent> {
+        vec![
+            McpClientEvent::TransportClosed {
+                server: "threat".to_string(),
+                episode,
+            },
+            McpClientEvent::HandshakeFailed {
+                server: "threat".to_string(),
+                episode,
+                reason: "stale handshake".to_string(),
+            },
+            McpClientEvent::ToolsChanged {
+                server: "threat".to_string(),
+                episode,
+            },
+            McpClientEvent::ResourcesChanged {
+                server: "threat".to_string(),
+                episode,
+            },
+            McpClientEvent::Ready {
+                server: "threat".to_string(),
+                episode,
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn dispatcher_rejects_every_stale_client_origin_event() {
+        use ::mcp::servers::McpClient;
+
+        let state = Arc::new(TokioMutex::new(McpState::new(vec![])));
+        let current = Arc::new(McpClient::stub("threat"));
+        {
+            let mut state = state.lock().await;
+            state.bind_client_events(&current);
+            state
+                .owned_clients
+                .insert("threat".to_string(), Arc::clone(&current));
+        }
+        let predecessor = Arc::new(McpClient::stub("threat"));
+        let stale_episodes = [episode_for_client(&predecessor)];
+
+        for stale_episode in stale_episodes {
+            for event in client_origin_threat_events(stale_episode) {
+                let kind = kind_of(&event);
+                let mut window = CoalescedWindow::default();
+                insert_event(&mut window, event);
+                discard_stale_client_events(&state, &mut window).await;
+                assert!(
+                    window.buf.is_empty(),
+                    "stale {kind:?} from {stale_episode:?} must be inert"
+                );
+                assert!(window.closed.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_accepts_every_current_client_origin_event() {
+        use ::mcp::servers::McpClient;
+
+        let state = Arc::new(TokioMutex::new(McpState::new(vec![])));
+        let current = Arc::new(McpClient::stub("threat"));
+        let current_episode = {
+            let mut state = state.lock().await;
+            let episode = state.bind_client_events(&current);
+            state
+                .owned_clients
+                .insert("threat".to_string(), Arc::clone(&current));
+            episode
+        };
+
+        for event in client_origin_threat_events(current_episode) {
+            let kind = kind_of(&event);
+            let mut window = CoalescedWindow::default();
+            insert_event(&mut window, event);
+            discard_stale_client_events(&state, &mut window).await;
+            assert_eq!(
+                window.buf.len(),
+                1,
+                "current {kind:?} must survive admission"
+            );
+        }
+    }
+
     /// Contract: 100 ToolsChanged events for the same server within
     /// 10 ms coalesce into exactly one buffer entry.
     #[tokio::test(start_paused = true)]
@@ -812,6 +975,7 @@ mod tests {
         for _ in 0..100 {
             tx.send(McpClientEvent::ToolsChanged {
                 server: "github".to_string(),
+                episode: episode(1),
             })
             .unwrap();
         }
@@ -838,14 +1002,17 @@ mod tests {
         let (tx, mut rx) = unbounded_channel::<McpClientEvent>();
         tx.send(McpClientEvent::ToolsChanged {
             server: "github".to_string(),
+            episode: episode(1),
         })
         .unwrap();
         tx.send(McpClientEvent::ToolsChanged {
             server: "linear".to_string(),
+            episode: episode(2),
         })
         .unwrap();
         tx.send(McpClientEvent::Ready {
             server: "github".to_string(),
+            episode: episode(1),
         })
         .unwrap();
         drop(tx);
@@ -929,7 +1096,7 @@ mod tests {
         let key = ("linear".to_string(), McpClientEventKind::TransportClosed);
         let ev = McpClientEvent::TransportClosed {
             server: "linear".to_string(),
-            client_id: 1,
+            episode: episode(1),
         };
         let payload = build_payload("sess1", &key, &ev);
         assert_eq!(payload.name, "linear");
@@ -946,6 +1113,7 @@ mod tests {
         let key = ("linear".to_string(), McpClientEventKind::HandshakeFailed);
         let ev = McpClientEvent::HandshakeFailed {
             server: "linear".to_string(),
+            episode: episode(1),
             // Internal service names and full length must pass through
             // untouched — the UI shows the raw error.
             reason: "cli-chat-proxy returned 502".to_string(),
@@ -966,6 +1134,7 @@ mod tests {
         let key = ("github".to_string(), McpClientEventKind::HandshakeFailed);
         let event = McpClientEvent::HandshakeFailed {
             server: "github".to_string(),
+            episode: episode(1),
             reason: "401 Unauthorized".to_string(),
         };
         let payload = build_payload("sess1", &key, &event);
@@ -982,7 +1151,7 @@ mod tests {
         let key = ("github".to_string(), McpClientEventKind::TransportClosed);
         let ev = McpClientEvent::TransportClosed {
             server: "github".to_string(),
-            client_id: 1,
+            episode: episode(1),
         };
         let payload = build_payload("sess-1", &key, &ev);
         let json = serde_json::to_value(&payload).unwrap();
@@ -1005,6 +1174,7 @@ mod tests {
         let key = ("github".to_string(), McpClientEventKind::Ready);
         let ev = McpClientEvent::Ready {
             server: "github".to_string(),
+            episode: episode(1),
         };
         let payload = build_payload("sess-1", &key, &ev);
         assert_eq!(payload.status, McpServerStatus::Ready);
@@ -1025,28 +1195,34 @@ mod tests {
         let mcp_state = StdArc::new(TokioMutex::new(McpState::new(vec![])));
         // Pre-populate with a stub client so we have something to remove.
         let github = StdArc::new(McpClient::stub("github"));
-        let github_id = github.client_id();
-        {
+        let linear = StdArc::new(McpClient::stub("linear"));
+        let (github_episode, linear_episode) = {
             let mut guard = mcp_state.lock().await;
-            guard.owned_clients.insert("github".to_string(), github);
+            let github_episode = guard.bind_client_events(&github);
+            let linear_episode = guard.bind_client_events(&linear);
             guard
                 .owned_clients
-                .insert("linear".to_string(), StdArc::new(McpClient::stub("linear")));
+                .insert("github".to_string(), StdArc::clone(&github));
+            guard
+                .owned_clients
+                .insert("linear".to_string(), StdArc::clone(&linear));
             assert_eq!(guard.owned_clients.len(), 2);
-        }
+            (github_episode, linear_episode)
+        };
 
         let mut win = CoalescedWindow::default();
         insert_event(
             &mut win,
             McpClientEvent::TransportClosed {
                 server: "github".to_string(),
-                client_id: github_id,
+                episode: github_episode,
             },
         );
         insert_event(
             &mut win,
             McpClientEvent::ToolsChanged {
                 server: "linear".to_string(),
+                episode: linear_episode,
             },
         );
 
@@ -1056,7 +1232,7 @@ mod tests {
             dead,
             vec![DeadClient {
                 server: "github".to_string(),
-                closed: HashSet::from([github_id]),
+                closed: HashSet::from([github_episode]),
             }]
         );
         let stale = drop_dead_clients(&mcp_state, &dead).await;
@@ -1080,7 +1256,7 @@ mod tests {
             &mut win,
             McpClientEvent::TransportClosed {
                 server: "a".to_string(),
-                client_id: 7,
+                episode: episode(7),
             },
         );
         insert_event(
@@ -1094,12 +1270,14 @@ mod tests {
             &mut win,
             McpClientEvent::ToolsChanged {
                 server: "c".to_string(),
+                episode: episode(8),
             },
         );
         insert_event(
             &mut win,
             McpClientEvent::Ready {
                 server: "d".to_string(),
+                episode: episode(9),
             },
         );
 
@@ -1108,7 +1286,7 @@ mod tests {
             dead,
             vec![DeadClient {
                 server: "a".to_string(),
-                closed: HashSet::from([7]),
+                closed: HashSet::from([episode(7)]),
             }],
             "only TransportClosed collects; ConfigRemoved/ToolsChanged/Ready must not",
         );
@@ -1126,11 +1304,14 @@ mod tests {
         let current = StdArc::new(McpClient::stub("demo-mcp"));
 
         let mcp_state = StdArc::new(TokioMutex::new(McpState::new(vec![])));
-        mcp_state
-            .lock()
-            .await
-            .owned_clients
-            .insert("demo-mcp".to_string(), StdArc::clone(&current));
+        let current_episode = {
+            let mut state = mcp_state.lock().await;
+            let episode = state.bind_client_events(&current);
+            state
+                .owned_clients
+                .insert("demo-mcp".to_string(), StdArc::clone(&current));
+            episode
+        };
 
         // The CURRENT client's close arrives first; the STALE one
         // arrives last and wins the buffer's last-write-wins slot.
@@ -1139,14 +1320,14 @@ mod tests {
             &mut win,
             McpClientEvent::TransportClosed {
                 server: "demo-mcp".to_string(),
-                client_id: current.client_id(),
+                episode: current_episode,
             },
         );
         insert_event(
             &mut win,
             McpClientEvent::TransportClosed {
                 server: "demo-mcp".to_string(),
-                client_id: old_client.client_id(),
+                episode: episode_for_client(&old_client),
             },
         );
         assert_eq!(
@@ -1190,15 +1371,17 @@ mod tests {
         // The config diff already removed `old_client` and the
         // background handshake inserted the replacement under the
         // same name — the state the dispatcher observes at flush time.
-        mcp_state
-            .lock()
-            .await
-            .owned_clients
-            .insert("demo-mcp".to_string(), StdArc::clone(&replacement));
+        {
+            let mut state = mcp_state.lock().await;
+            state.bind_client_events(&replacement);
+            state
+                .owned_clients
+                .insert("demo-mcp".to_string(), StdArc::clone(&replacement));
+        }
 
         let dead = vec![DeadClient {
             server: "demo-mcp".to_string(),
-            closed: HashSet::from([old_id]),
+            closed: HashSet::from([episode_for_client(&old_client)]),
         }];
         let stale = drop_dead_clients(&mcp_state, &dead).await;
         assert_eq!(
@@ -1230,14 +1413,14 @@ mod tests {
             &mut win,
             McpClientEvent::TransportClosed {
                 server: "http-mcp-server".to_string(),
-                client_id: 1,
+                episode: episode(1),
             },
         );
         insert_event(
             &mut win,
             McpClientEvent::TransportClosed {
                 server: "local_stdio".to_string(),
-                client_id: 2,
+                episode: episode(2),
             },
         );
         insert_event(
@@ -1257,7 +1440,7 @@ mod tests {
             dead,
             vec![DeadClient {
                 server: "local_stdio".to_string(),
-                closed: HashSet::from([2]),
+                closed: HashSet::from([episode(2)]),
             }],
         );
 
@@ -1325,14 +1508,14 @@ mod tests {
             &mut win,
             McpClientEvent::TransportClosed {
                 server: "admin_off".to_string(),
-                client_id: 3,
+                episode: episode(3),
             },
         );
         assert_eq!(
             collect_close_candidates(&win, &http_servers),
             vec![DeadClient {
                 server: "admin_off".to_string(),
-                closed: HashSet::from([3]),
+                closed: HashSet::from([episode(3)]),
             }],
             "disabled HTTP server must be evicted",
         );
@@ -1438,9 +1621,18 @@ mod tests {
     /// Deterministic under loaded CI.
     #[tokio::test(start_paused = true, flavor = "current_thread")]
     async fn run_dispatcher_schedules_restart_on_transport_closed() {
-        use ::mcp::servers::McpState;
+        use ::mcp::servers::{McpClient, McpState};
 
         let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
+        let client = Arc::new(McpClient::stub("svr"));
+        let current_episode = {
+            let mut state = mcp_state.lock().await;
+            let episode = state.bind_client_events(&client);
+            state
+                .owned_clients
+                .insert("svr".to_string(), Arc::clone(&client));
+            episode
+        };
         let shutdown = new_shutdown_state();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let gateway = discard_gateway();
@@ -1471,7 +1663,7 @@ mod tests {
                 // Send the event the C1 bug suppressed.
                 tx.send(McpClientEvent::TransportClosed {
                     server: "svr".to_string(),
-                    client_id: 1,
+                    episode: current_episode,
                 })
                 .unwrap();
 
@@ -1517,11 +1709,13 @@ mod tests {
         let old_client = StdArc::new(McpClient::stub("svr"));
         let replacement = StdArc::new(McpClient::stub("svr"));
         let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
-        mcp_state
-            .lock()
-            .await
-            .owned_clients
-            .insert("svr".to_string(), StdArc::clone(&replacement));
+        {
+            let mut state = mcp_state.lock().await;
+            state.bind_client_events(&replacement);
+            state
+                .owned_clients
+                .insert("svr".to_string(), StdArc::clone(&replacement));
+        }
 
         let shutdown = new_shutdown_state();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1554,7 +1748,7 @@ mod tests {
 
                 tx.send(McpClientEvent::TransportClosed {
                     server: "svr".to_string(),
-                    client_id: old_client.client_id(),
+                    episode: episode_for_client(&old_client),
                 })
                 .unwrap();
 
@@ -1609,7 +1803,7 @@ mod tests {
             ("crashed".to_string(), McpClientEventKind::TransportClosed),
             McpClientEvent::TransportClosed {
                 server: "crashed".to_string(),
-                client_id: 1,
+                episode: episode(1),
             },
         );
         flush_window("s", buf, &shutdown, &gateway);
@@ -1638,6 +1832,7 @@ mod tests {
             ("removed".to_string(), McpClientEventKind::Ready),
             McpClientEvent::Ready {
                 server: "removed".to_string(),
+                episode: episode(1),
             },
         );
         flush_window("s", buf, &shutdown, &gateway);

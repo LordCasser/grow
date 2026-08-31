@@ -31,7 +31,9 @@ use std::sync::LazyLock;
 
 use acp_transport::protocol as acp;
 use parking_lot::Mutex;
-use workspace::trust::{TrustStore, is_unsafe_trust_root, workspace_key};
+use workspace::trust::{
+    TrustStore, WorkspaceIdentity, is_unsafe_trust_root, workspace_identity_for_cwd, workspace_key,
+};
 
 // Decision-side (scan/decide/prompt/store) relocated to `workspace`
 // (client crate). `grant_folder_trust` is the ONLY moved item referenced from
@@ -43,8 +45,8 @@ use workspace::trust::{TrustStore, is_unsafe_trust_root, workspace_key};
 // `revoke_folder_trust` wrapper, inviting a stale-untrust security bug.
 pub use workspace::folder_trust::grant_folder_trust;
 use workspace::folder_trust::{
-    DecideInputs, TrustOutcome, decide, decide_inputs, feature_enabled, folder_trust_inert,
-    persist_trust, prompt_for_trust,
+    DecideInputs, TrustOutcome, decide, decide_inputs_with_expected_identity, feature_enabled,
+    folder_trust_inert, persist_trust, prompt_for_trust,
 };
 
 use crate::session::mcp_catalog::mcp_server_name;
@@ -58,8 +60,48 @@ use crate::util::config::{MCP_SCOPE_PROJECT, RemoteSettings};
 // Unifying them is a tracked follow-up (out of scope for this PR).
 
 /// Per-workspace resolved decision: `true` = repo-local (project-scoped)
-/// servers are allowed to spawn. Keyed by canonical workspace key.
-static DECISIONS: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
+/// servers are allowed to spawn. A pathname is insufficient identity: a repo
+/// replaced in-place must never inherit the old process's cached grant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DecisionKey {
+    path: PathBuf,
+    identity: WorkspaceIdentity,
+}
+
+impl DecisionKey {
+    fn resolve(cwd: &Path, path: &Path) -> Option<Self> {
+        let identity = match workspace_identity_for_cwd(cwd, path) {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "folder trust: cannot identify workspace entity; bypassing decision cache"
+                );
+                return None;
+            }
+        };
+        Some(Self {
+            path: path.to_path_buf(),
+            identity,
+        })
+    }
+
+    /// Store records are compared to the identity captured for this decision,
+    /// then the path is revalidated. This second observation prevents a
+    /// replacement between `resolve` and the store read from authorizing either
+    /// the predecessor or successor through a mixed snapshot.
+    fn is_currently_trusted(&self, cwd: &Path) -> bool {
+        TrustStore::load().is_trusted_identity(&self.path, &self.identity)
+            && self.still_names_same_entity(cwd)
+    }
+
+    fn still_names_same_entity(&self, cwd: &Path) -> bool {
+        workspace_identity_for_cwd(cwd, &self.path).is_ok_and(|current| current == self.identity)
+    }
+}
+
+static DECISIONS: LazyLock<Mutex<HashMap<DecisionKey, bool>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Revoke trust for `cwd`'s workspace: downgrade the in-process decision cache
@@ -92,13 +134,16 @@ pub fn revoke_folder_trust(cwd: &Path) -> bool {
         );
         return false;
     }
+    let decision_key = DecisionKey::resolve(cwd, &key);
     let was_trusted = workspace::folder_trust::revoke_folder_trust_store(cwd);
     // Always downgrade the in-process cache so a mid-session untrust takes effect
     // immediately for this process, even for a cached grant with no backing store
     // record (e.g. a kill-switch / feature-off resolve). A later legitimate grant
     // reconciles it: the `Some(false)` arm of `resolve_and_record_inner` re-checks
     // the store.
-    record(&key, false);
+    if let Some(decision_key) = decision_key {
+        record(&decision_key, false);
+    }
     was_trusted
 }
 
@@ -124,16 +169,25 @@ pub fn revoke_folder_trust(cwd: &Path) -> bool {
 /// fail OPEN on a poisoned lock.
 pub fn project_scope_allowed(cwd: &Path) -> bool {
     let key = workspace_key(cwd);
+    let Some(decision_key) = DecisionKey::resolve(cwd, &key) else {
+        // No stable entity means there is no safe durable/cached trust grant.
+        // Recompute the non-cache decision: dangerous configs remain blocked,
+        // while the existing feature-off/no-config provisional allows remain.
+        return compute(cwd, &key, None, false, None).0;
+    };
     // Copy out of the lock so the Some(false) reconcile can re-acquire it
     // (parking_lot mutexes are not re-entrant).
-    let cached = DECISIONS.lock().get(&key).copied();
+    let cached = DECISIONS.lock().get(&decision_key).copied();
     match cached {
-        Some(true) => true,
+        // A positive cache entry authorizes only the captured filesystem
+        // entity. Re-observe it at the use boundary so an in-place replacement
+        // between key resolution and cache lookup cannot inherit the grant.
+        Some(true) => decision_key.still_names_same_entity(cwd),
         // Re-read the store so a grant issued after the untrusted resolve is
         // honored without a restart (mirrors `resolve_and_record_inner`).
         Some(false) => {
-            if TrustStore::load().is_trusted(&key) {
-                record(&key, true);
+            if decision_key.is_currently_trusted(cwd) {
+                record(&decision_key, true);
                 true
             } else {
                 false
@@ -161,10 +215,10 @@ pub(crate) fn agent_inline_hooks_allowed(
     scope != agent::config::AgentScope::Project || trusted()
 }
 
-fn record(workspace_key: &Path, allowed: bool) {
-    DECISIONS
-        .lock()
-        .insert(workspace_key.to_path_buf(), allowed);
+fn record(key: &DecisionKey, allowed: bool) {
+    let mut decisions = DECISIONS.lock();
+    decisions.retain(|existing, _| existing.path != key.path || existing == key);
+    decisions.insert(key.clone(), allowed);
 }
 
 /// Test-only: force the recorded decision for `cwd`'s workspace key.
@@ -175,7 +229,10 @@ fn record(workspace_key: &Path, allowed: bool) {
 /// Consumed by the MCP project-scope gate tests here and in `mcp_catalog`.
 #[cfg(test)]
 pub(crate) fn record_for_test(cwd: &Path, allowed: bool) {
-    record(&workspace_key(cwd), allowed);
+    let key = workspace_key(cwd);
+    let decision_key =
+        DecisionKey::resolve(cwd, &key).expect("test workspace must be identifiable");
+    record(&decision_key, allowed);
 }
 
 /// Resolve the trust decision for `cwd` ONCE and record it for the loaders.
@@ -199,10 +256,21 @@ pub fn resolve_and_record(cwd: &Path, remote: Option<&RemoteSettings>, allow_pro
         return true;
     }
     let key = workspace_key(cwd);
+    let Some(decision_key) = DecisionKey::resolve(cwd, &key) else {
+        return compute(cwd, &key, remote, allow_prompt, None).0;
+    };
     resolve_and_record_inner(
-        &key,
-        || TrustStore::load().is_trusted(&key),
-        || compute(cwd, &key, remote, allow_prompt),
+        &decision_key,
+        || decision_key.is_currently_trusted(cwd),
+        || {
+            compute(
+                cwd,
+                &key,
+                remote,
+                allow_prompt,
+                Some(decision_key.identity.clone()),
+            )
+        },
     )
 }
 
@@ -216,10 +284,11 @@ pub fn resolve_and_record(cwd: &Path, remote: Option<&RemoteSettings>, allow_pro
 /// `ensure_local_workspace_ops`) each gather independently, and the provisional
 /// "no repo configs" allow is non-durable (never absorbed by the `DECISIONS`
 /// cache), so without memoization the launch dir is scanned multiple times
-/// during init. This gathers [`decide_inputs`] (store read + `repo_configs_present`
-/// scan) ONCE and derives the verdict through the same [`resolve_and_record_inner`]
-/// cache contract, so durable verdicts are recorded into `DECISIONS` and the
-/// provisional allows (no-configs, unrecordable key) are left uncached.
+/// during init. This gathers [`decide_inputs_with_expected_identity`] (identity,
+/// store read, and `repo_configs_present` scan) ONCE and derives the verdict
+/// through the same [`resolve_and_record_inner`] cache contract, so durable
+/// verdicts are recorded into `DECISIONS` and the provisional allows
+/// (no-configs, unrecordable key) are left uncached.
 ///
 /// TOCTOU: this records ONLY what [`resolve_and_record`] records, so a later
 /// per-session `resolve_and_record(session_cwd)` still re-scans the provisional
@@ -233,17 +302,21 @@ pub fn resolve_launch_dir_trust(cwd: &Path, remote: Option<&RemoteSettings>) -> 
         return true;
     }
     let key = workspace_key(cwd);
+    let Some(decision_key) = DecisionKey::resolve(cwd, &key) else {
+        return compute(cwd, &key, remote, false, None).0;
+    };
     let feature = feature_enabled(remote);
-    let inputs = decide_inputs(cwd, &key);
+    let inputs =
+        decide_inputs_with_expected_identity(cwd, &key, Some(decision_key.identity.clone()));
     // Re-read the store for the cached-untrusted reconciliation EXACTLY as
     // resolve_and_record does (so a `--trust` granted after a parallel resolve
     // recorded untrusted is still honored), and reuse the gathered inputs only
     // for the recompute — keeping the DECISIONS cache contract identical to
     // resolve_and_record without repeating the expensive repo_configs scan.
     resolve_and_record_inner(
-        &key,
-        || TrustStore::load().is_trusted(&key),
-        || compute_from_inputs(&inputs, feature, &key, false),
+        &decision_key,
+        || decision_key.is_currently_trusted(cwd),
+        || compute_from_inputs(cwd, &inputs, feature, &key, false),
     )
 }
 
@@ -262,7 +335,7 @@ pub fn resolve_launch_dir_trust(cwd: &Path, remote: Option<&RemoteSettings>) -> 
 ///   and every resolve re-checks for code-exec config that appeared after the
 ///   folder was first opened (TOCTOU).
 fn resolve_and_record_inner(
-    key: &Path,
+    key: &DecisionKey,
     store_trusted: impl FnOnce() -> bool,
     recompute: impl FnOnce() -> (bool, bool),
 ) -> bool {
@@ -305,17 +378,19 @@ fn compute(
     key: &Path,
     remote: Option<&RemoteSettings>,
     allow_prompt: bool,
+    expected_identity: Option<WorkspaceIdentity>,
 ) -> (bool, bool) {
     let feature = feature_enabled(remote);
-    let inputs = decide_inputs(cwd, key);
-    compute_from_inputs(&inputs, feature, key, allow_prompt)
+    let inputs = decide_inputs_with_expected_identity(cwd, key, expected_identity);
+    compute_from_inputs(cwd, &inputs, feature, key, allow_prompt)
 }
 
 /// [`compute`] split at the gather: derive `(allowed, durable)` from an
 /// already-gathered [`DecideInputs`] so a caller needing more than one verdict
-/// (see [`resolve_launch_dir_trust`]) pays for the expensive `decide_inputs`
+/// (see [`resolve_launch_dir_trust`]) pays for the expensive decision-input
 /// gather (store read + `repo_configs_present` scan) only ONCE.
 fn compute_from_inputs(
+    cwd: &Path,
     inputs: &DecideInputs,
     feature: bool,
     key: &Path,
@@ -335,8 +410,10 @@ fn compute_from_inputs(
             if prompt_for_trust(key) {
                 // Reload the store (the inputs gather dropped its copy) to
                 // persist the accepted prompt grant.
-                persist_trust(&mut TrustStore::load(), key);
-                (true, true)
+                let persisted = inputs.expected_identity.as_ref().is_some_and(|identity| {
+                    persist_trust(&mut TrustStore::load(), cwd, key, identity)
+                });
+                (persisted, true)
             } else {
                 (false, true)
             }
@@ -478,18 +555,20 @@ mod tests {
     fn cached_grant_short_circuits_and_cached_deny_reconciles() {
         let granted = tempfile::tempdir().unwrap();
         let granted_key = workspace_key(granted.path());
-        record(&granted_key, true);
+        let granted_decision_key = DecisionKey::resolve(granted.path(), &granted_key).unwrap();
+        record(&granted_decision_key, true);
         assert!(resolve_and_record_inner(
-            &granted_key,
+            &granted_decision_key,
             || panic!("grant must not read store"),
             || panic!("grant must not recompute"),
         ));
 
         let denied = tempfile::tempdir().unwrap();
         let denied_key = workspace_key(denied.path());
-        record(&denied_key, false);
+        let denied_decision_key = DecisionKey::resolve(denied.path(), &denied_key).unwrap();
+        record(&denied_decision_key, false);
         assert!(resolve_and_record_inner(
-            &denied_key,
+            &denied_decision_key,
             || true,
             || { panic!("cached deny must not recompute") }
         ));
@@ -499,8 +578,41 @@ mod tests {
     fn provisional_result_is_not_cached() {
         let tmp = tempfile::tempdir().unwrap();
         let key = workspace_key(tmp.path());
-        assert!(resolve_and_record_inner(&key, || false, || (true, false)));
-        assert!(!DECISIONS.lock().contains_key(&key));
+        let decision_key = DecisionKey::resolve(tmp.path(), &key).unwrap();
+        assert!(resolve_and_record_inner(
+            &decision_key,
+            || false,
+            || (true, false)
+        ));
+        assert!(!DECISIONS.lock().contains_key(&decision_key));
+    }
+
+    #[test]
+    fn cached_grant_does_not_follow_same_path_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git2::Repository::init(&repo).unwrap();
+
+        let path = workspace_key(&repo);
+        let original = DecisionKey::resolve(&repo, &path).unwrap();
+        record(&original, true);
+
+        std::fs::rename(&repo, tmp.path().join("old-repo")).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        let replacement_path = workspace_key(&repo);
+        let replacement = DecisionKey::resolve(&repo, &replacement_path).unwrap();
+        assert_ne!(original.identity, replacement.identity);
+        assert!(
+            !original.still_names_same_entity(&repo),
+            "a decision identity captured before store I/O must be revalidated"
+        );
+
+        assert!(
+            !resolve_and_record_inner(&replacement, || false, || (false, true)),
+            "a cached grant for the old entity must miss after same-path replacement"
+        );
     }
 
     #[test]

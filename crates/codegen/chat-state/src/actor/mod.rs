@@ -352,11 +352,53 @@ impl ChatStateActor {
                 };
                 let _ = reply.send(result);
             }
+            ChatStateCommand::SubmitInputDurably {
+                input_id,
+                intent,
+                payload_ref,
+                reply,
+            } => {
+                let existing = self
+                    .state
+                    .timeline
+                    .submitted_input_event(&input_id)
+                    .and_then(|event| match &event.kind {
+                        TimelineEventKind::Input(crate::InputEvent::Submitted {
+                            input_id: existing_id,
+                            intent: existing_intent,
+                            payload_ref: existing_payload,
+                        }) => Some((
+                            event.clone(),
+                            existing_id == &input_id
+                                && existing_intent == &intent
+                                && existing_payload == &payload_ref,
+                        )),
+                        _ => None,
+                    });
+                let result = match existing {
+                    Some((event, true)) => Ok(event),
+                    Some((_, false)) => Err(crate::commands::TimelineWriteError::Invalid(
+                        crate::TimelineError::InvalidInput,
+                    )),
+                    None => match self.state.timeline.prepare(TimelineEventKind::Input(
+                        crate::InputEvent::Submitted {
+                            input_id,
+                            intent,
+                            payload_ref,
+                        },
+                    )) {
+                        Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
+                        Ok(event) => self.commit_timeline_event(event).await,
+                    },
+                };
+                let _ = reply.send(result);
+            }
             ChatStateCommand::RecoverInterruptedDurably { reply } => {
-                let result = match (|| {
+                let prepared = {
                     let mut candidate = self.state.timeline.clone();
                     candidate.recover_interrupted()
-                })() {
+                };
+                let result = match prepared {
                     Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
                     Ok(events) => {
                         let mut committed = Vec::with_capacity(events.len());
@@ -376,10 +418,11 @@ impl ChatStateActor {
                 let _ = reply.send(result);
             }
             ChatStateCommand::SettleOpenCompactionDurably { reason, reply } => {
-                let result = match (|| {
+                let prepared = {
                     let mut candidate = self.state.timeline.clone();
                     candidate.settle_open_compaction(&reason)
-                })() {
+                };
+                let result = match prepared {
                     Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
                     Ok(None) => Ok(None),
                     Ok(Some(event)) => self.commit_timeline_event(event).await.map(Some),
@@ -591,11 +634,23 @@ impl ChatStateActor {
             ChatStateCommand::GetTrajectory { reply } => {
                 let _ = reply.send(self.state.timeline.trajectory());
             }
+            ChatStateCommand::GetHookProjection {
+                occurrence_id,
+                reply,
+            } => {
+                let _ = reply.send(self.state.timeline.hook_projection(&occurrence_id));
+            }
             ChatStateCommand::GetTimelineEvents { reply } => {
                 let _ = reply.send(self.state.timeline.events().to_vec());
             }
             ChatStateCommand::GetPendingNotifications { reply } => {
                 let _ = reply.send(self.state.timeline.pending_notifications());
+            }
+            ChatStateCommand::GetPendingAllowedInputs { reply } => {
+                let _ = reply.send(self.state.timeline.pending_allowed_inputs());
+            }
+            ChatStateCommand::GetSubmittedInputPayloadHashes { reply } => {
+                let _ = reply.send(self.state.timeline.submitted_input_payload_hashes());
             }
             ChatStateCommand::GetReceivedNotificationId {
                 source,

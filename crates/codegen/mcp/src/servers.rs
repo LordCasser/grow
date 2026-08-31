@@ -38,8 +38,6 @@ use tools::types::{
 use tty_utils::{ProcessGroup, ProcessScope};
 use workspace_types::MCP_TOOL_NAME_DELIMITER;
 
-/// MCP tool name delimiter: server names are qualified as `"server__tool"`.
-
 /// Regex for strictest cross-provider tool name validation.
 ///
 /// Requirements across providers:
@@ -386,17 +384,23 @@ pub struct McpState {
     /// duplicating event flow into a subagent would just double-push
     /// every event.
     ///
-    /// Populated by [`Self::set_client_event_tx`], which fans the
-    /// sender into every existing client's `notify_tx` slot.
+    /// Populated by [`Self::install_client_event_channel`], which creates the
+    /// channel internally and fans its sender into every existing client's
+    /// `notify_tx` slot.
     ///
     /// **Private on purpose.** Callers MUST go through
-    /// [`Self::set_client_event_tx`] so the sender is fanned out into
+    /// [`Self::install_client_event_channel`] so the sender is fanned out into
     /// every existing `owned_clients` entry; a direct field write
     /// (`state.client_event_tx = Some(tx)`) would leave all
     /// already-owned clients with `notify_tx = None`, silently
     /// dropping `tools/list_changed`, `Ready`, and `HandshakeFailed`
-    /// emits for them. Read access is via [`Self::client_event_tx`].
+    /// emits for them. The raw sender is never exposed after installation;
+    /// host-originated events use the typed emit methods on [`McpState`].
     client_event_tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>,
+    /// Current client episode allowed to publish lifecycle/catalog events for
+    /// each server. This includes clients whose handshake is in flight and
+    /// therefore are not in `owned_clients` yet.
+    active_client_event_authorities: HashMap<McpServerName, McpClientEventAuthority>,
     /// Live parent-session transport and eligibility authority published to
     /// inherited subagents. Both membership and client incarnation are checked
     /// at discovery and dispatch boundaries.
@@ -489,7 +493,10 @@ impl McpEligibilityAuthority {
         if same_clients && snapshot.qualified_tools == qualified_tools {
             return;
         }
-        snapshot.generation = snapshot.generation.wrapping_add(1);
+        snapshot.generation = snapshot
+            .generation
+            .checked_add(1)
+            .expect("MCP eligibility generation exhausted");
         snapshot.clients = clients;
         snapshot.qualified_tools = qualified_tools;
     }
@@ -640,48 +647,184 @@ impl McpState {
             mcp_server_max_access: std::collections::HashMap::new(),
             disabled_tool_registrations: HashMap::new(),
             client_event_tx: None,
+            active_client_event_authorities: HashMap::new(),
             eligibility: McpEligibilityAuthority::default(),
             inherited_eligibility: None,
         }
     }
 
-    /// Install (or remove) the [`McpClientEvent`] sender owned by the
-    /// session-actor `StatusDispatcher`.
+    /// Create and install the sole client-event channel for this state.
+    ///
+    /// Only the receiver crosses the crate boundary. Keeping the sender inside
+    /// `McpState` and its bound clients prevents a host caller from retaining a
+    /// raw ingress that could relabel arbitrary events as the current episode.
+    pub fn install_client_event_channel(
+        &mut self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<McpClientEvent> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.set_client_event_tx(Some(tx));
+        rx
+    }
+
+    /// Revoke the state-owned client-event channel during session teardown.
+    pub fn close_client_event_channel(&mut self) {
+        self.set_client_event_tx(None);
+    }
+
+    /// Install (or remove) the internal [`McpClientEvent`] sender.
     ///
     /// Synchronous: the per-client slot is a `parking_lot::Mutex`, so
     /// the iteration no longer holds `&mut McpState` across `.await`.
     ///
     /// Side effect: clones the sender into every existing client's
     /// shared `notify_tx` slot. New clients added later (e.g. on a
-    /// config diff that re-spawns a server) MUST be wired by the
-    /// caller post-construction — typically by calling
-    /// [`McpClient::set_event_tx`] **before**
-    /// `get_tool_registrations` (so `ensure_initialized`'s
-    /// `Ready`/`HandshakeFailed` emit fires with `Some(tx)` and the
-    /// `GrowClientHandler` cloned during `try_handshake` reads
-    /// through the same Arc).
-    pub fn set_client_event_tx(
+    /// config diff that re-spawns a server) MUST be wired through
+    /// [`Self::bind_client_events`], which installs the sender and records the
+    /// sole episode the dispatcher will accept for that server.
+    fn set_client_event_tx(
         &mut self,
         tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>,
     ) {
         self.client_event_tx = tx.clone();
+        let config_generation = self.generation;
+        let authorities = &mut self.active_client_event_authorities;
         for client in self.owned_clients.values() {
-            client.set_event_tx(tx.clone());
+            let authority = authorities
+                .get(client.server_name())
+                .filter(|authority| authority.client_id == client.client_id())
+                .cloned()
+                .unwrap_or_else(|| client.event_authority(config_generation));
+            client.set_event_tx(tx.clone(), authority.config_generation);
+            authorities.insert(client.server_name().to_owned(), authority);
         }
         // Shared clients are intentionally NOT wired here: see the
         // `client_event_tx` doc-comment for why a subagent must not
         // duplicate the parent's event flow.
     }
 
-    /// Read-only access to the installed [`McpClientEvent`] sender.
+    /// Publish one config-origin diff through the installed dispatcher.
     ///
-    /// Returns a clone of the sender wired by
-    /// [`Self::set_client_event_tx`], or `None` if no dispatcher is
-    /// attached (subagent / shared-pool snapshot). Exposed as a getter
-    /// rather than a `pub` field so the fan-out contract documented on
-    /// `client_event_tx` cannot be bypassed by a direct assignment.
-    pub fn client_event_tx(&self) -> Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>> {
-        self.client_event_tx.clone()
+    /// Config events intentionally carry no client episode. Keeping this as a
+    /// typed operation prevents host callers from obtaining the raw sender and
+    /// manufacturing client-origin lifecycle/catalog events.
+    fn emit_config_diff(&self, diff: &McpConfigDiff) -> bool {
+        if diff.added.is_empty() && diff.removed.is_empty() {
+            return false;
+        }
+        self.client_event_tx.as_ref().is_some_and(|tx| {
+            tx.send(McpClientEvent::ConfigDiff {
+                added: diff.added.clone(),
+                removed: diff.removed.clone(),
+            })
+            .is_ok()
+        })
+    }
+
+    /// Apply a config transition and publish exactly the diff produced by that
+    /// transition. Callers cannot inject a free-standing config lifecycle event.
+    pub fn update_configs_diff_and_emit(
+        &mut self,
+        new_configs: Vec<acp::McpServer>,
+    ) -> Option<McpConfigDiff> {
+        let diff = self.update_configs_diff(new_configs)?;
+        self.emit_config_diff(&diff);
+        Some(diff)
+    }
+
+    /// Publish a tools-catalog change stamped with the currently authorized
+    /// client/config/transport episode for `server`.
+    ///
+    /// Callers choose only the server and event intent; they cannot supply or
+    /// relabel an episode. Returns false when no dispatcher or current episode
+    /// exists, or when the dispatcher has closed.
+    pub fn emit_current_tools_changed(&self, server: &str) -> bool {
+        let Some(tx) = self.client_event_tx.as_ref() else {
+            return false;
+        };
+        let Some(episode) = self.current_client_episode(server) else {
+            return false;
+        };
+        tx.send(McpClientEvent::ToolsChanged {
+            server: server.to_owned(),
+            episode,
+        })
+        .is_ok()
+    }
+
+    /// Publish a transport-close observation stamped with the currently
+    /// authorized episode. Primarily useful to hosts that own an out-of-band
+    /// transport monitor; the caller cannot select an episode.
+    pub fn emit_current_transport_closed(&self, server: &str) -> bool {
+        let Some(tx) = self.client_event_tx.as_ref() else {
+            return false;
+        };
+        let Some(episode) = self.current_client_episode(server) else {
+            return false;
+        };
+        tx.send(McpClientEvent::TransportClosed {
+            server: server.to_owned(),
+            episode,
+        })
+        .is_ok()
+    }
+
+    /// Publish a handshake failure stamped with the currently authorized
+    /// episode. The diagnostic reason is payload only; it cannot affect which
+    /// client binding the event belongs to.
+    pub fn emit_current_handshake_failed(&self, server: &str, reason: String) -> bool {
+        let Some(tx) = self.client_event_tx.as_ref() else {
+            return false;
+        };
+        let Some(episode) = self.current_client_episode(server) else {
+            return false;
+        };
+        tx.send(McpClientEvent::HandshakeFailed {
+            server: server.to_owned(),
+            episode,
+            reason,
+        })
+        .is_ok()
+    }
+
+    /// Make `client` the sole event-producing episode for its server in the
+    /// current config generation, and wire the session dispatcher sender into
+    /// it. Call this before starting a handshake so `Ready`,
+    /// `HandshakeFailed`, and list-change notifications are identity-bound
+    /// even before the client is inserted into `owned_clients`.
+    pub fn bind_client_events(&mut self, client: &McpClient) -> McpClientEpisode {
+        let authority = client.event_authority(self.generation);
+        let episode = authority.current_episode();
+        self.active_client_event_authorities
+            .insert(client.server_name().to_owned(), authority);
+        client.set_event_tx(self.client_event_tx.clone(), self.generation);
+        episode
+    }
+
+    /// Revoke an event episode only if it is still the current one. A failed
+    /// predecessor must never revoke a replacement installed under the same
+    /// server name.
+    pub fn revoke_client_events(&mut self, server: &str, episode: McpClientEpisode) {
+        if self
+            .active_client_event_authorities
+            .get(server)
+            .is_some_and(|authority| authority.current_episode() == episode)
+        {
+            self.active_client_event_authorities.remove(server);
+        }
+    }
+
+    /// Dispatcher admission for client-origin lifecycle/catalog events.
+    pub fn accepts_client_event(&self, server: &str, episode: McpClientEpisode) -> bool {
+        self.active_client_event_authorities
+            .get(server)
+            .is_some_and(|authority| authority.current_episode() == episode)
+    }
+
+    /// Current authorized client/config/transport episode for `server`.
+    fn current_client_episode(&self, server: &str) -> Option<McpClientEpisode> {
+        self.active_client_event_authorities
+            .get(server)
+            .map(McpClientEventAuthority::current_episode)
     }
 
     /// Register the session's in-process SDK MCP servers (`name -> serverId`) plus the
@@ -766,11 +909,19 @@ impl McpState {
 
         // Clear owned clients only — shared (inherited) clients are untouched.
         self.owned_clients.clear();
+        self.active_client_event_authorities.clear();
         self.mcp_tool_meta.clear();
         self.disabled_tool_registrations.clear();
         self.configs = new_configs;
         self.init_progress.cancel();
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("MCP config generation exhausted");
+        // Config mutation and inherited-agent revocation are one synchronous
+        // state transition. Tool names may remain in the catalog briefly, but
+        // SharedMcpEligibility also requires a current transport.
+        self.publish_transports();
         true
     }
 
@@ -837,6 +988,7 @@ impl McpState {
 
         for name in &removed {
             self.owned_clients.remove(name);
+            self.active_client_event_authorities.remove(name);
             self.init_progress.mark_handshake_complete(name);
             let prefix = format!("{}{}", name, MCP_TOOL_NAME_DELIMITER);
             self.mcp_tool_meta.retain(|k, _| !k.starts_with(&prefix));
@@ -856,7 +1008,20 @@ impl McpState {
 
         self.configs = new_configs;
         self.init_progress.cancel();
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("MCP config generation exhausted");
+
+        // A retained owned client keeps its existing episode: its own config
+        // and transport did not change. In-flight (not-yet-owned) clients are
+        // revoked because the global init generation gate will discard them.
+        for name in &retained {
+            if !self.owned_clients.contains_key(name) {
+                self.active_client_event_authorities.remove(name);
+            }
+        }
+        self.publish_transports();
 
         Some(McpConfigDiff {
             added,
@@ -1552,13 +1717,12 @@ impl tool_runtime::Tool for McpErasedTool {
         let qualified_name = format!("{}{}{}", server, MCP_TOOL_NAME_DELIMITER, tool);
         let client = {
             let state = self.tool.mcp_state.lock().await;
-            let c = Arc::clone(state.get_client(&self.tool.server_name).ok_or_else(|| {
+            Arc::clone(state.get_client(&self.tool.server_name).ok_or_else(|| {
                 tool_runtime::ToolError::custom(
                     "process_manager",
                     format!("MCP server '{}' not found", self.tool.server_name),
                 )
-            })?);
-            c
+            })?)
         };
         let mut reconnect_attempted = false;
         let mut is_timeout = false;
@@ -2260,6 +2424,68 @@ pub enum LivenessCheck {
     Transient,
 }
 
+/// Identity of one transport inside one client/config binding. `client_id` is
+/// process-global and never reused; `config_generation` changes when the
+/// server binding is replaced; `transport_revision` changes whenever a
+/// transport is invalidated and for every handshake attempt, including
+/// in-place HTTP/SSE recovery on the same client.
+///
+/// The identity is intentionally opaque outside this crate. Host code may
+/// inspect it for diagnostics, but cannot mint or relabel one:
+///
+/// ```compile_fail
+/// let forged = mcp::servers::McpClientEpisode::new(1, 2, 3);
+/// ```
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+pub struct McpClientEpisode {
+    client_id: u64,
+    config_generation: u64,
+    transport_revision: u64,
+}
+
+impl McpClientEpisode {
+    fn new(client_id: u64, config_generation: u64, transport_revision: u64) -> Self {
+        Self {
+            client_id,
+            config_generation,
+            transport_revision,
+        }
+    }
+
+    /// Process-global client instance identity.
+    pub const fn client_id(self) -> u64 {
+        self.client_id
+    }
+
+    /// Configuration generation that bound the client to its server name.
+    pub const fn config_generation(self) -> u64 {
+        self.config_generation
+    }
+
+    /// Transport attempt owned by this event source.
+    pub const fn transport_revision(self) -> u64 {
+        self.transport_revision
+    }
+}
+
+#[derive(Debug, Clone)]
+struct McpClientEventAuthority {
+    client_id: u64,
+    config_generation: u64,
+    transport_revision: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl McpClientEventAuthority {
+    fn current_episode(&self) -> McpClientEpisode {
+        McpClientEpisode::new(
+            self.client_id,
+            self.config_generation,
+            self.transport_revision
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
+    }
+}
+
 /// Events emitted by a live MCP client to its session-side dispatcher.
 ///
 /// Produced by three sources:
@@ -2273,6 +2499,11 @@ pub enum LivenessCheck {
 /// 3. The session config-reload layer when a server is added, removed,
 ///    or successfully (re-)initialized.
 ///
+/// Every client-origin event carries a [`McpClientEpisode`]. Consumers must
+/// reject an event unless both its client id and config generation match the
+/// episode currently authorized by [`McpState`]. Config-origin events are not
+/// tied to a client episode.
+///
 /// Consumers fan these out to ACP `grow/mcp/server_status` after 50 ms
 /// of tumbling-window coalescing keyed by `(server, kind)`; see the
 /// session-actor `StatusDispatcher`.
@@ -2282,30 +2513,39 @@ pub enum McpClientEvent {
     /// usable for tool calls and must be torn down (or restarted).
     TransportClosed {
         server: McpServerName,
-        /// Identity of the client whose transport closed (see
-        /// [`McpClient::client_id`]). A mismatch with the client
-        /// currently registered under `server` marks the event stale —
-        /// it must not tear down the replacement. Every emitter holds the
-        /// closing `McpClient`, so the id is always known.
-        client_id: u64,
+        /// Identity of the client and config generation whose transport
+        /// closed. A mismatch with the currently authorized episode marks the
+        /// event stale, so it cannot tear down a replacement or a client
+        /// retained across a newer config generation.
+        episode: McpClientEpisode,
     },
     /// `ensure_initialized` returned `Err(_)`; `reason` is the full
     /// stringified error, surfaced verbatim to the client (no
     /// sanitization) so failures are easy to debug.
     HandshakeFailed {
         server: McpServerName,
+        episode: McpClientEpisode,
         reason: String,
     },
     /// Server pushed `notifications/tools/list_changed`.
-    ToolsChanged { server: McpServerName },
+    ToolsChanged {
+        server: McpServerName,
+        episode: McpClientEpisode,
+    },
     /// Server pushed `notifications/resources/list_changed`.
-    ResourcesChanged { server: McpServerName },
+    ResourcesChanged {
+        server: McpServerName,
+        episode: McpClientEpisode,
+    },
     /// Client transitioned to [`ClientState::Ready`]; dispatcher uses
     /// this to surface "ready" status without polling. Emitted from
     /// `ensure_initialized`; the dispatcher maps it to
     /// `reason=initialized` (NOT `reason=restart_succeeded`, which is
     /// reserved for the restart path).
-    Ready { server: McpServerName },
+    Ready {
+        server: McpServerName,
+        episode: McpClientEpisode,
+    },
     /// Managed/local config diff resolved. The dispatcher fans this
     /// out into one [`Self::ConfigAdded`] / [`Self::ConfigRemoved`]
     /// event per affected server before buffering.
@@ -2346,6 +2586,19 @@ pub enum McpClientEventKind {
 }
 
 impl McpClientEvent {
+    /// Identity carried by events emitted from a client instance. Config
+    /// lifecycle events have no client episode and are admitted separately.
+    pub fn client_episode(&self) -> Option<McpClientEpisode> {
+        match self {
+            Self::TransportClosed { episode, .. }
+            | Self::HandshakeFailed { episode, .. }
+            | Self::ToolsChanged { episode, .. }
+            | Self::ResourcesChanged { episode, .. }
+            | Self::Ready { episode, .. } => Some(*episode),
+            Self::ConfigDiff { .. } | Self::ConfigAdded { .. } | Self::ConfigRemoved { .. } => None,
+        }
+    }
+
     /// Server name carried by the event, if any.
     ///
     /// Returns `None` only for [`McpClientEvent::ConfigDiff`] — that
@@ -2356,9 +2609,9 @@ impl McpClientEvent {
         match self {
             Self::TransportClosed { server, .. }
             | Self::HandshakeFailed { server, .. }
-            | Self::ToolsChanged { server }
-            | Self::ResourcesChanged { server }
-            | Self::Ready { server }
+            | Self::ToolsChanged { server, .. }
+            | Self::ResourcesChanged { server, .. }
+            | Self::Ready { server, .. }
             | Self::ConfigAdded { server }
             | Self::ConfigRemoved { server } => Some(server.as_str()),
             Self::ConfigDiff { .. } => None,
@@ -2448,12 +2701,22 @@ fn restorable_transport(pending: &PendingTransport) -> Option<PendingTransport> 
 static NEXT_CLIENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn next_client_id() -> u64 {
-    NEXT_CLIENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    NEXT_CLIENT_ID
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| current.checked_add(1),
+        )
+        .expect("MCP client identity space exhausted")
 }
 
 pub struct McpClient {
     /// Unique identity of this client *instance*. See [`Self::client_id`].
     client_id: u64,
+    /// Monotonic identity of the transport handshake attempt currently owned by
+    /// this client. HTTP/SSE recovery keeps the same `client_id`, so client id
+    /// alone cannot distinguish delayed events from the replaced transport.
+    transport_revision: Arc<std::sync::atomic::AtomicU64>,
     server_name: McpServerName,
     state: Mutex<ClientState>,
     /// Wakes [`Self::ensure_initialized`] callers that observed
@@ -2537,10 +2800,27 @@ pub struct McpClient {
 /// and the [`GrowClientHandler`] it constructs during
 /// [`McpClient::try_handshake`]. Mutating the slot via
 /// [`McpClient::set_event_tx`] is observed by the live rmcp service
-/// loop on the next notification, so there's no "snapshot at
-/// handshake" hazard.
-pub type SharedEventTx =
-    Arc<parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>>>;
+/// loop on the next notification. The slot intentionally carries only the
+/// sender and client/config binding; each handler/watcher supplies the fixed
+/// revision of the transport it belongs to.
+#[derive(Debug, Clone)]
+pub(crate) struct BoundEventSink {
+    tx: tokio::sync::mpsc::UnboundedSender<McpClientEvent>,
+    client_id: u64,
+    config_generation: u64,
+}
+
+impl BoundEventSink {
+    pub(crate) fn send(&self, event: McpClientEvent) -> Result<(), McpClientEvent> {
+        self.tx.send(event).map_err(|error| error.0)
+    }
+
+    pub(crate) fn episode(&self, transport_revision: u64) -> McpClientEpisode {
+        McpClientEpisode::new(self.client_id, self.config_generation, transport_revision)
+    }
+}
+
+pub(crate) type SharedEventTx = Arc<parking_lot::Mutex<Option<BoundEventSink>>>;
 
 /// External-config overrides for an MCP server, surfaced to mcp
 /// from whatever loader the host crate uses (e.g. the host's `config.toml` parser).
@@ -2636,6 +2916,7 @@ impl McpClient {
         let expose_image_base64 = Self::load_expose_image_base64(overrides, meta_config);
         Self {
             client_id: next_client_id(),
+            transport_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_name,
             state: Mutex::new(ClientState::Pending(transport)),
             init_done: Notify::new(),
@@ -2667,6 +2948,10 @@ impl McpClient {
         let Some(t) = self.reconnect.as_ref().and_then(restorable_transport) else {
             return false;
         };
+        // Invalidate handlers/watchers belonging to the old transport before
+        // yielding through the state replacement. The subsequent handshake
+        // advances again and owns the next event-producing revision.
+        self.advance_transport_revision();
         self.replace_state(ClientState::Pending(t)).await;
         tracing::info!(
             server = %self.server_name,
@@ -2717,7 +3002,7 @@ impl McpClient {
             .arm_liveness_watcher(crate::liveness::DEFAULT_POLL_INTERVAL)
             .await
             && !self.is_acp()
-            && self.event_tx_clone().is_some()
+            && self.event_sink_clone().is_some()
         {
             tracing::warn!(
                 server = %self.server_name,
@@ -2801,11 +3086,35 @@ impl McpClient {
 
     /// Unique identity of this client *instance*. Two clients for the
     /// same server name (e.g. a dead client and its replacement after
-    /// a config remove+re-add) have different ids. Carried on
-    /// [`McpClientEvent::TransportClosed`] so consumers can tell a
-    /// death event for the current client from a stale predecessor's.
+    /// a config remove+re-add) have different ids. Carried on every
+    /// client-origin [`McpClientEvent`] so consumers can reject events from a
+    /// stale predecessor.
     pub fn client_id(&self) -> u64 {
         self.client_id
+    }
+
+    fn event_authority(&self, config_generation: u64) -> McpClientEventAuthority {
+        McpClientEventAuthority {
+            client_id: self.client_id,
+            config_generation,
+            transport_revision: Arc::clone(&self.transport_revision),
+        }
+    }
+
+    pub(crate) fn current_transport_revision(&self) -> u64 {
+        self.transport_revision
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn advance_transport_revision(&self) -> u64 {
+        self.transport_revision
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |current| current.checked_add(1),
+            )
+            .map(|previous| previous + 1)
+            .expect("MCP transport revision exhausted")
     }
 
     pub fn startup_timeout_sec(&self) -> u64 {
@@ -2974,8 +3283,9 @@ impl McpClient {
             restore: restore_for_guard,
         };
 
+        let transport_revision = self.advance_transport_revision();
         let handshake_start = std::time::Instant::now();
-        let result = self.try_handshake(pending).await;
+        let result = self.try_handshake(pending, transport_revision).await;
 
         let handshake_elapsed = handshake_start.elapsed().as_micros() as u64;
         tracing::info!(target: diagnostics::instrumentation::TARGET, event = "timing", name = "mcp_try_handshake", elapsed_us = handshake_elapsed);
@@ -2995,7 +3305,7 @@ impl McpClient {
         // BEFORE invoking `get_tool_registrations` (the pattern in
         // the session actor), this snapshot picks up the sender even
         // for the very first handshake.
-        let event_tx = self.event_tx_clone();
+        let event_sink = self.event_sink_clone();
 
         let outcome = {
             let mut guard = self.state.lock().await;
@@ -3033,16 +3343,18 @@ impl McpClient {
         // wiring) the send fails silently. The dispatcher is the only
         // path that turns these into ACP pushes — see the
         // `client_event_tx` field on `McpState`.
-        if let Some(tx) = &event_tx {
+        if let Some(sink) = &event_sink {
             match &outcome {
                 Ok(_) => {
-                    let _ = tx.send(McpClientEvent::Ready {
+                    let _ = sink.send(McpClientEvent::Ready {
                         server: self.server_name.clone(),
+                        episode: sink.episode(transport_revision),
                     });
                 }
                 Err(e) => {
-                    let _ = tx.send(McpClientEvent::HandshakeFailed {
+                    let _ = sink.send(McpClientEvent::HandshakeFailed {
                         server: self.server_name.clone(),
+                        episode: sink.episode(transport_revision),
                         reason: e.to_string(),
                     });
                 }
@@ -3055,13 +3367,14 @@ impl McpClient {
     async fn try_handshake(
         &self,
         pending: PendingTransport,
+        transport_revision: u64,
     ) -> Result<rmcp::service::RunningService<RoleClient, GrowClientHandler>, McpError> {
         let timeout = std::time::Duration::from_secs(self.startup_timeout_sec);
         let name = &self.server_name;
 
         match pending {
             PendingTransport::Stdio(process) => {
-                let handler = self.make_client_handler();
+                let handler = self.make_client_handler(transport_revision);
                 tokio::time::timeout(timeout, handler.serve(*process))
                     .await
                     .map_err(|_| McpError::timeout(name, timeout))?
@@ -3073,7 +3386,7 @@ impl McpClient {
             PendingTransport::Http(config) => {
                 let transport =
                     Self::build_http_transport(&config, name, self.warn_budget.clone())?;
-                let handler = self.make_client_handler();
+                let handler = self.make_client_handler(transport_revision);
                 tokio::time::timeout(timeout, handler.serve(transport))
                     .await
                     .map_err(|_| McpError::timeout(name, timeout))?
@@ -3094,7 +3407,7 @@ impl McpClient {
                 );
                 let transport =
                     crate::acp_transport::acp_bridge_transport(server_id, invoker, invoke_timeout);
-                let handler = self.make_client_handler();
+                let handler = self.make_client_handler(transport_revision);
                 tokio::time::timeout(timeout, handler.serve(transport))
                     .await
                     .map_err(|_| McpError::timeout(name, timeout))?
@@ -3132,14 +3445,15 @@ impl McpClient {
 
     /// Build the [`GrowClientHandler`] that drives `client.serve(...)`.
     ///
-    /// The handler holds a **clone of `Arc<Mutex<Option<Sender>>>`**,
-    /// not a snapshot — so any subsequent call to
-    /// [`Self::set_event_tx`] is observed by the live rmcp service
-    /// loop on its next notification.
-    fn make_client_handler(&self) -> GrowClientHandler {
+    /// The handler reads sender plus client/config binding from the shared slot
+    /// on each event, while retaining the immutable transport revision passed
+    /// here. Rebinding a dispatcher is observed live; recovering a transport
+    /// cannot relabel delayed notifications from the old handler as current.
+    fn make_client_handler(&self, transport_revision: u64) -> GrowClientHandler {
         GrowClientHandler {
             info: Self::make_client_info(&self.server_name),
             server_name: self.server_name.clone(),
+            transport_revision,
             notify_tx: Arc::clone(&self.notify_tx),
         }
     }
@@ -3151,17 +3465,24 @@ impl McpClient {
     /// `client.serve`, the [`crate::liveness::spawn_transport_liveness`]
     /// task) read through the same Arc, so this is observed
     /// session-wide on the next event.
-    pub fn set_event_tx(&self, tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>) {
-        *self.notify_tx.lock() = tx;
+    pub(crate) fn set_event_tx(
+        &self,
+        tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>,
+        config_generation: u64,
+    ) {
+        *self.notify_tx.lock() = tx.map(|tx| BoundEventSink {
+            tx,
+            client_id: self.client_id,
+            config_generation,
+        });
     }
 
-    /// Snapshot the current event sender, if any.
+    /// Snapshot the current episode-bound event sink, if any.
     ///
-    /// Used by [`crate::liveness::spawn_transport_liveness`] (which
-    /// captures a `Sender` clone at spawn time) and by
-    /// [`Self::ensure_initialized`]'s post-handshake emit. Synchronous
+    /// Used by [`crate::liveness::spawn_transport_liveness`] at emission time
+    /// and by [`Self::ensure_initialized`]'s post-handshake emit. Synchronous
     /// because the shared slot is a `parking_lot::Mutex`.
-    pub fn event_tx_clone(&self) -> Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>> {
+    pub(crate) fn event_sink_clone(&self) -> Option<BoundEventSink> {
         self.notify_tx.lock().clone()
     }
 
@@ -3212,9 +3533,9 @@ impl McpClient {
         if self.is_acp() {
             return false;
         }
-        let Some(event_tx) = self.event_tx_clone() else {
+        if self.event_sink_clone().is_none() {
             return false;
-        };
+        }
         if !matches!(self.state_kind().await, ClientStateKind::Ready) {
             return false;
         }
@@ -3226,7 +3547,6 @@ impl McpClient {
             self.server_name.clone(),
             Arc::clone(self),
             poll_interval,
-            event_tx,
             Arc::clone(&self.liveness_handle),
         );
         *slot = Some(handle);
@@ -3947,6 +4267,10 @@ pub struct GrowClientHandler {
     /// MCP server name this handler is bound to. Cloned into emitted
     /// events so the dispatcher can route per-server.
     server_name: McpServerName,
+    /// Immutable identity of the transport handshake that constructed this
+    /// handler. A delayed notification from a replaced HTTP transport retains
+    /// the old revision even though it reads the live shared sender slot.
+    transport_revision: u64,
     /// **Shared** event sink — the same Arc lives on the owning
     /// [`McpClient`]. Mutating the slot via [`McpClient::set_event_tx`]
     /// is observed here on the next read, so wiring the sender
@@ -3962,10 +4286,10 @@ impl GrowClientHandler {
     /// the receiver is gone, the consumer has shut down and there's
     /// nothing useful to do here. Splitting this out keeps the trait
     /// methods short.
-    fn emit(&self, ev: McpClientEvent) {
-        let sender = self.notify_tx.lock().clone();
-        if let Some(tx) = sender {
-            let _ = tx.send(ev);
+    fn emit(&self, make_event: impl FnOnce(McpClientEpisode) -> McpClientEvent) {
+        let sink = self.notify_tx.lock().clone();
+        if let Some(sink) = sink {
+            let _ = sink.send(make_event(sink.episode(self.transport_revision)));
         }
     }
 }
@@ -3979,14 +4303,16 @@ impl ClientHandler for GrowClientHandler {
     // See the [`GrowClientHandler`] doc-comment for the full RPIT
     // contract.
     async fn on_tool_list_changed(&self, _context: NotificationContext<RoleClient>) {
-        self.emit(McpClientEvent::ToolsChanged {
+        self.emit(|episode| McpClientEvent::ToolsChanged {
             server: self.server_name.clone(),
+            episode,
         });
     }
 
     async fn on_resource_list_changed(&self, _context: NotificationContext<RoleClient>) {
-        self.emit(McpClientEvent::ResourcesChanged {
+        self.emit(|episode| McpClientEvent::ResourcesChanged {
             server: self.server_name.clone(),
+            episode,
         });
     }
 
@@ -4792,6 +5118,24 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "MCP config generation exhausted")]
+    fn config_generation_exhaustion_fails_closed_instead_of_reusing_identity() {
+        let mut state = McpState::new(vec![make_stdio_server("a", "/bin/a")]);
+        state.generation = u64::MAX;
+        let _ = state.update_configs_diff(vec![make_stdio_server("b", "/bin/b")]);
+    }
+
+    #[test]
+    #[should_panic(expected = "MCP transport revision exhausted")]
+    fn transport_revision_exhaustion_fails_closed_instead_of_reusing_identity() {
+        let client = McpClient::stub("a");
+        client
+            .transport_revision
+            .store(u64::MAX, std::sync::atomic::Ordering::Release);
+        let _ = client.advance_transport_revision();
+    }
+
+    #[test]
     fn test_update_configs_diff_added() {
         let configs = vec![make_stdio_server("a", "/bin/a")];
         let mut state = McpState::new(configs);
@@ -4862,6 +5206,100 @@ mod tests {
         assert!(diff.retained.is_empty());
         assert!(diff.added.is_empty());
         assert_eq!(diff.removed, vec!["a"]);
+    }
+
+    #[test]
+    fn config_diff_revokes_removed_transport_and_event_episode_immediately() {
+        let mut state = McpState::new(vec![make_stdio_server("a", "/bin/a")]);
+        let client = Arc::new(McpClient::stub("a"));
+        let old_episode = state.bind_client_events(&client);
+        state
+            .owned_clients
+            .insert("a".to_string(), Arc::clone(&client));
+        state.publish_eligibility(std::collections::HashSet::from(["a__search".to_string()]));
+        let inherited = SharedMcpPool::from_state(&state).eligibility();
+        assert!(inherited.contains_tool("a__search"));
+
+        state
+            .update_configs_diff(vec![make_stdio_server("a", "/bin/a-v2")])
+            .expect("same-name replacement is a config change");
+
+        assert!(
+            !inherited.contains_server("a"),
+            "config mutation must revoke the published transport before re-init"
+        );
+        assert!(
+            !state.accepts_client_event("a", old_episode),
+            "the replaced client's buffered events must be stale immediately"
+        );
+    }
+
+    #[test]
+    fn unrelated_config_change_preserves_retained_client_episode() {
+        let mut state = McpState::new(vec![make_stdio_server("keep", "/bin/keep")]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        state.set_client_event_tx(Some(tx));
+        let client = Arc::new(McpClient::stub("keep"));
+        let old_episode = state.bind_client_events(&client);
+        state
+            .owned_clients
+            .insert("keep".to_string(), Arc::clone(&client));
+
+        state
+            .update_configs_diff(vec![
+                make_stdio_server("keep", "/bin/keep"),
+                make_stdio_server("new", "/bin/new"),
+            ])
+            .expect("adding another server advances config generation");
+
+        let current_episode = state
+            .current_client_episode("keep")
+            .expect("retained client remains authorized");
+        assert_eq!(current_episode, old_episode);
+        assert!(state.accepts_client_event("keep", old_episode));
+        assert_eq!(
+            client
+                .event_sink_clone()
+                .map(|sink| sink.episode(client.current_transport_revision())),
+            Some(current_episode),
+            "an unrelated config change must not churn the retained client's episode"
+        );
+    }
+
+    #[test]
+    fn typed_state_emitters_stamp_authority_and_separate_config_events() {
+        let mut state = McpState::new(vec![]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state.set_client_event_tx(Some(tx));
+        let client = Arc::new(McpClient::stub("typed"));
+        let episode = state.bind_client_events(&client);
+
+        assert!(state.emit_current_tools_changed("typed"));
+        match rx.try_recv().expect("typed client event") {
+            McpClientEvent::ToolsChanged {
+                server,
+                episode: emitted,
+            } => {
+                assert_eq!(server, "typed");
+                assert_eq!(emitted, episode);
+            }
+            other => panic!("expected ToolsChanged, got {other:?}"),
+        }
+        assert!(!state.emit_current_tools_changed("missing"));
+
+        let diff = McpConfigDiff {
+            added: vec!["added".to_string()],
+            removed: vec!["removed".to_string()],
+            retained: vec![],
+        };
+        assert!(state.emit_config_diff(&diff));
+        match rx.try_recv().expect("typed config event") {
+            McpClientEvent::ConfigDiff { added, removed } => {
+                assert_eq!(added, vec!["added"]);
+                assert_eq!(removed, vec!["removed"]);
+            }
+            other => panic!("expected ConfigDiff, got {other:?}"),
+        }
     }
 
     /// Two MCP servers exposing a tool with the same raw name must produce
@@ -6345,6 +6783,7 @@ mod tests {
             let handler = GrowClientHandler {
                 info: McpClient::make_client_info("dead"),
                 server_name: "dead".to_string(),
+                transport_revision: 0,
                 notify_tx: Arc::new(parking_lot::Mutex::new(None)),
             };
             let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleClient, _, _>::new(
@@ -7061,19 +7500,54 @@ mod tests {
     #[tokio::test]
     async fn client_handler_routes_tools_changed() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
-        let handler = GrowClientHandler {
-            info: McpClient::make_client_info("test"),
-            server_name: "test".to_string(),
-            notify_tx: Arc::new(parking_lot::Mutex::new(Some(tx))),
-        };
-        handler.emit(McpClientEvent::ToolsChanged {
+        let client = McpClient::stub("test");
+        client.set_event_tx(Some(tx), 7);
+        let handler = client.make_client_handler(0);
+        handler.emit(|episode| McpClientEvent::ToolsChanged {
             server: handler.server_name.clone(),
+            episode,
         });
         let ev = rx.recv().await.expect("event arrived");
         match ev {
-            McpClientEvent::ToolsChanged { server } => assert_eq!(server, "test"),
+            McpClientEvent::ToolsChanged { server, episode } => {
+                assert_eq!(server, "test");
+                assert_eq!(episode, McpClientEpisode::new(client.client_id(), 7, 0));
+            }
             other => panic!("expected ToolsChanged, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn recovered_transport_rejects_delayed_old_handler_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
+        let mut state = McpState::new(vec![]);
+        state.set_client_event_tx(Some(tx));
+        let client = McpClient::stub("test");
+        state.bind_client_events(&client);
+
+        let old_handler = client.make_client_handler(client.current_transport_revision());
+        let current_revision = client.advance_transport_revision();
+        let current_handler = client.make_client_handler(current_revision);
+
+        old_handler.emit(|episode| McpClientEvent::ToolsChanged {
+            server: "test".to_string(),
+            episode,
+        });
+        current_handler.emit(|episode| McpClientEvent::ToolsChanged {
+            server: "test".to_string(),
+            episode,
+        });
+
+        let old_event = rx.recv().await.expect("old transport event");
+        let current_event = rx.recv().await.expect("current transport event");
+        assert!(
+            !state.accepts_client_event("test", old_event.client_episode().unwrap()),
+            "a delayed notification from the replaced transport must be stale"
+        );
+        assert!(
+            state.accepts_client_event("test", current_event.client_episode().unwrap()),
+            "the current transport revision must remain eligible"
+        );
     }
 
     /// Contract: when `notify_tx` is `None` (subagent snapshot,
@@ -7084,10 +7558,12 @@ mod tests {
         let handler = GrowClientHandler {
             info: McpClient::make_client_info("test"),
             server_name: "test".to_string(),
+            transport_revision: 0,
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
         };
-        handler.emit(McpClientEvent::ToolsChanged {
+        handler.emit(|episode| McpClientEvent::ToolsChanged {
             server: "test".to_string(),
+            episode,
         });
         // No assertion needed — reaching this line means no panic.
     }
@@ -7099,6 +7575,7 @@ mod tests {
         let handler = GrowClientHandler {
             info: info.clone(),
             server_name: "test-srv".to_string(),
+            transport_revision: 0,
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
         };
         let got = handler.get_info();
@@ -7124,7 +7601,7 @@ mod tests {
         // the production flow where `make_client_handler` is called
         // during `try_handshake` and the dispatcher is wired
         // separately.
-        let handler = client.make_client_handler();
+        let handler = client.make_client_handler(0);
 
         // Confirm the slot is `None` at handler-construction time.
         assert!(handler.notify_tx.lock().is_none());
@@ -7132,14 +7609,18 @@ mod tests {
         // Now wire the sender on the client. Because the handler
         // holds a CLONE OF THE SAME ARC, this mutation is observed
         // by the handler's next `emit`.
-        client.set_event_tx(Some(tx));
+        client.set_event_tx(Some(tx), 11);
 
-        handler.emit(McpClientEvent::ToolsChanged {
+        handler.emit(|episode| McpClientEvent::ToolsChanged {
             server: "test".to_string(),
+            episode,
         });
         let ev = rx.recv().await.expect("event arrived");
         match ev {
-            McpClientEvent::ToolsChanged { server } => assert_eq!(server, "test"),
+            McpClientEvent::ToolsChanged { server, episode } => {
+                assert_eq!(server, "test");
+                assert_eq!(episode, McpClientEpisode::new(client.client_id(), 11, 0));
+            }
             other => panic!("expected ToolsChanged, got {other:?}"),
         }
     }
@@ -7150,14 +7631,19 @@ mod tests {
     // SAME shared Arc, so wiring `set_event_tx` BEFORE the handshake is
     // sufficient to capture these events.
     #[tokio::test]
-    async fn event_tx_clone_observes_set_event_tx() {
+    async fn event_sink_clone_observes_set_event_tx() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
         let client = McpClient::stub("test");
-        assert!(client.event_tx_clone().is_none());
-        client.set_event_tx(Some(tx));
-        assert!(client.event_tx_clone().is_some());
-        client.set_event_tx(None);
-        assert!(client.event_tx_clone().is_none());
+        assert!(client.event_sink_clone().is_none());
+        client.set_event_tx(Some(tx), 13);
+        assert_eq!(
+            client
+                .event_sink_clone()
+                .map(|sink| sink.episode(client.current_transport_revision())),
+            Some(McpClientEpisode::new(client.client_id(), 13, 0))
+        );
+        client.set_event_tx(None, 13);
+        assert!(client.event_sink_clone().is_none());
     }
 
     // An `ensure_initialized`-emitted `Ready` event must NOT be

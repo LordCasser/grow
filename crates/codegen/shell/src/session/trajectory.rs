@@ -4718,10 +4718,11 @@ mod tests {
             .record(chat_state::TimelineEventKind::Turn(
                 chat_state::TurnEvent::Started {
                     id: turn,
+                    input_ids: Vec::new(),
                     identity: chat_state::TurnIdentity {
                         goal_definition_revision: None,
                         origin: "user".into(),
-                        turn_kind: "user".into(),
+                        turn_kind: "internal".into(),
                         goal_id: None,
                         stage_id: None,
                     },

@@ -1,6 +1,96 @@
 //! Seccomp: child network filter (pre_exec) and process-wide namespace lockdown.
 
 #[cfg(target_os = "linux")]
+mod child_network {
+    use libc::sock_filter;
+
+    pub(super) const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+    pub(super) const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+    pub(super) const EPERM_VAL: u32 = 1;
+    pub(super) const OFF_NR: u32 = 0;
+    pub(super) const OFF_ARCH: u32 = 4;
+
+    #[cfg(target_arch = "x86_64")]
+    pub(super) const EXPECTED_ARCH: u32 = 0xc000_003e; // AUDIT_ARCH_X86_64
+    #[cfg(target_arch = "aarch64")]
+    pub(super) const EXPECTED_ARCH: u32 = 0xc000_00b7; // AUDIT_ARCH_AARCH64
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    pub(super) const EXPECTED_ARCH: u32 = 0;
+
+    #[cfg(target_arch = "x86_64")]
+    pub(super) const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+
+    const BLOCKED_SYSCALLS: &[u32] = &[
+        libc::SYS_connect as u32,
+        libc::SYS_bind as u32,
+        libc::SYS_sendto as u32,
+        libc::SYS_sendmsg as u32,
+        // A datagram destination can be supplied independently in every
+        // mmsghdr, so blocking sendmsg without sendmmsg leaves a native UDP
+        // egress bypass.
+        libc::SYS_sendmmsg as u32,
+        libc::SYS_listen as u32,
+        libc::SYS_accept as u32,
+        libc::SYS_accept4 as u32,
+        // io_uring can perform network operations after the filter has admitted
+        // the setup call, so all three entry points are denied as a unit.
+        libc::SYS_io_uring_setup as u32,
+        libc::SYS_io_uring_enter as u32,
+        libc::SYS_io_uring_register as u32,
+    ];
+
+    fn stmt(code: u32, k: u32) -> sock_filter {
+        sock_filter {
+            code: code as u16,
+            jt: 0,
+            jf: 0,
+            k,
+        }
+    }
+
+    fn jump(code: u32, k: u32, jt: u8, jf: u8) -> sock_filter {
+        sock_filter {
+            code: code as u16,
+            jt,
+            jf,
+            k,
+        }
+    }
+
+    /// Classic BPF child-network filter.
+    ///
+    /// The audit architecture is checked before the syscall number. An
+    /// unexpected/compat architecture is denied rather than interpreting its
+    /// syscall table as the native one. x86_64 additionally rejects the x32
+    /// syscall marker before exact syscall comparisons.
+    pub(super) fn build_child_network_filter() -> Vec<sock_filter> {
+        use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_RET, BPF_W};
+
+        let mut filter = Vec::with_capacity(4 + BLOCKED_SYSCALLS.len() * 2 + 3);
+        filter.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARCH));
+        filter.push(jump(BPF_JMP | BPF_JEQ | BPF_K, EXPECTED_ARCH, 1, 0));
+        filter.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM_VAL));
+        filter.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR));
+        #[cfg(target_arch = "x86_64")]
+        {
+            filter.push(jump(BPF_JMP | BPF_JSET | BPF_K, X32_SYSCALL_BIT, 0, 1));
+            filter.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM_VAL));
+        }
+        for &syscall in BLOCKED_SYSCALLS {
+            filter.push(jump(BPF_JMP | BPF_JEQ | BPF_K, syscall, 0, 1));
+            filter.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM_VAL));
+        }
+        filter.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+        filter
+    }
+
+    #[cfg(test)]
+    pub(super) fn blocked_syscalls() -> &'static [u32] {
+        BLOCKED_SYSCALLS
+    }
+}
+
+#[cfg(target_os = "linux")]
 mod ns_lockdown {
     use libc::sock_filter;
 
@@ -142,54 +232,9 @@ mod ns_lockdown {
 /// After fork / before exec.
 #[cfg(target_os = "linux")]
 pub unsafe fn install_child_network_filter() -> std::io::Result<()> {
-    use libc::{
-        BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W, PR_SET_NO_NEW_PRIVS,
-        PR_SET_SECCOMP, SECCOMP_MODE_FILTER, SYS_accept, SYS_accept4, SYS_bind, SYS_connect,
-        SYS_listen, SYS_sendmsg, SYS_sendto, prctl, sock_filter, sock_fprog,
-    };
+    use libc::{PR_SET_NO_NEW_PRIVS, PR_SET_SECCOMP, SECCOMP_MODE_FILTER, prctl, sock_fprog};
 
-    const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
-    const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
-    const EPERM_VAL: u32 = 1;
-
-    let blocked: &[i64] = &[
-        SYS_connect,
-        SYS_bind,
-        SYS_sendto,
-        SYS_sendmsg,
-        SYS_listen,
-        SYS_accept,
-        SYS_accept4,
-    ];
-    let mut filter: Vec<sock_filter> = Vec::new();
-    filter.push(sock_filter {
-        code: (BPF_LD | BPF_W | BPF_ABS) as u16,
-        jt: 0,
-        jf: 0,
-        k: 0,
-    });
-    let n = blocked.len();
-    for (i, &sys) in blocked.iter().enumerate() {
-        let remaining = n - i - 1;
-        filter.push(sock_filter {
-            code: (BPF_JMP | BPF_JEQ | BPF_K) as u16,
-            jt: remaining as u8 + 1,
-            jf: 0,
-            k: sys as u32,
-        });
-    }
-    filter.push(sock_filter {
-        code: (BPF_RET | BPF_K) as u16,
-        jt: 0,
-        jf: 0,
-        k: SECCOMP_RET_ALLOW,
-    });
-    filter.push(sock_filter {
-        code: (BPF_RET | BPF_K) as u16,
-        jt: 0,
-        jf: 0,
-        k: SECCOMP_RET_ERRNO | EPERM_VAL,
-    });
+    let mut filter = child_network::build_child_network_filter();
     let prog = sock_fprog {
         len: filter.len() as u16,
         filter: filter.as_mut_ptr(),
@@ -224,22 +269,139 @@ pub unsafe fn install_namespace_lockdown_filter() -> std::io::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
+/// No-op on platforms where the Linux seccomp filter is unavailable.
+///
+/// # Safety
+/// Kept unsafe to preserve the cross-platform process-setup contract; callers
+/// must invoke it only at the same pre-exec boundary as the Linux variant.
 pub unsafe fn install_child_network_filter() -> std::io::Result<()> {
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
+/// No-op on platforms where the Linux namespace filter is unavailable.
+///
+/// # Safety
+/// Kept unsafe to preserve the cross-platform process-setup contract; callers
+/// must invoke it only at the same pre-exec boundary as the Linux variant.
 pub unsafe fn install_namespace_lockdown_filter() -> std::io::Result<()> {
     Ok(())
 }
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use super::child_network;
     use super::ns_lockdown::*;
     use libc::{SYS_clone, SYS_setns, SYS_unshare, sock_filter};
 
+    fn child_filter_is_eperm(filter: &[sock_filter], arch: u32, nr: u32) -> bool {
+        eval_filter(filter, arch, nr, 0)
+            == (child_network::SECCOMP_RET_ERRNO | child_network::EPERM_VAL)
+    }
+
+    #[test]
+    fn child_network_filter_denies_socket_syscalls_but_allows_unrelated_syscalls() {
+        let filter = child_network::build_child_network_filter();
+        let threats = [
+            ("connect", libc::SYS_connect as u32),
+            ("bind", libc::SYS_bind as u32),
+            ("sendto", libc::SYS_sendto as u32),
+            ("sendmsg", libc::SYS_sendmsg as u32),
+            (
+                "sendmmsg per-message UDP destination",
+                libc::SYS_sendmmsg as u32,
+            ),
+            ("listen", libc::SYS_listen as u32),
+            ("accept", libc::SYS_accept as u32),
+            ("accept4", libc::SYS_accept4 as u32),
+        ];
+
+        for (name, nr) in threats {
+            assert!(
+                child_filter_is_eperm(&filter, child_network::EXPECTED_ARCH, nr),
+                "{name} must be denied"
+            );
+        }
+        assert_eq!(
+            eval_filter(
+                &filter,
+                child_network::EXPECTED_ARCH,
+                libc::SYS_read as u32,
+                0,
+            ),
+            child_network::SECCOMP_RET_ALLOW,
+            "an unrelated syscall must remain allowed"
+        );
+    }
+
+    #[test]
+    fn child_network_filter_denies_io_uring_async_io_bypass() {
+        let filter = child_network::build_child_network_filter();
+        let threats = [
+            ("io_uring_setup", libc::SYS_io_uring_setup as u32),
+            ("io_uring_enter", libc::SYS_io_uring_enter as u32),
+            ("io_uring_register", libc::SYS_io_uring_register as u32),
+        ];
+
+        for (name, nr) in threats {
+            assert!(
+                child_filter_is_eperm(&filter, child_network::EXPECTED_ARCH, nr),
+                "{name} must be denied"
+            );
+        }
+        assert_eq!(
+            child_network::blocked_syscalls().len(),
+            11,
+            "the deny table must contain the eight socket and three io_uring entry points"
+        );
+    }
+
+    #[test]
+    fn child_network_filter_denies_unexpected_arch_and_compat_socketcall() {
+        const AUDIT_ARCH_I386: u32 = 0x4000_0003;
+        const AUDIT_ARCH_ARM: u32 = 0x4000_0028;
+        const I386_SYS_SOCKETCALL: u32 = 102;
+
+        let filter = child_network::build_child_network_filter();
+        let threats = [
+            ("unknown audit arch", 0xdead_beef, libc::SYS_read as u32),
+            (
+                "i386 socketcall compat ABI",
+                AUDIT_ARCH_I386,
+                I386_SYS_SOCKETCALL,
+            ),
+            ("ARM compat ABI", AUDIT_ARCH_ARM, libc::SYS_connect as u32),
+        ];
+
+        for (name, arch, nr) in threats {
+            assert!(
+                child_filter_is_eperm(&filter, arch, nr),
+                "{name} must fail closed before syscall-table interpretation"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn child_network_filter_denies_x32_socket_number_mask_bypass() {
+        let filter = child_network::build_child_network_filter();
+        let threats = [
+            libc::SYS_connect as u32 | child_network::X32_SYSCALL_BIT,
+            libc::SYS_sendmsg as u32 | child_network::X32_SYSCALL_BIT,
+            libc::SYS_sendmmsg as u32 | child_network::X32_SYSCALL_BIT,
+            libc::SYS_read as u32 | child_network::X32_SYSCALL_BIT,
+        ];
+
+        for nr in threats {
+            assert!(
+                child_filter_is_eperm(&filter, child_network::EXPECTED_ARCH, nr),
+                "x32-marked syscall {nr:#x} must be denied before exact comparisons"
+            );
+        }
+    }
+
     /// Minimal classic-BPF interpreter over synthetic seccomp_data fields.
-    fn eval(filter: &[sock_filter], arch: u32, nr: u32, arg0_lo: u32) -> u32 {
+    fn eval_filter(filter: &[sock_filter], arch: u32, nr: u32, arg0_lo: u32) -> u32 {
         use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_RET, BPF_W};
         let mut pc = 0usize;
         let mut a = 0u32;
@@ -303,19 +465,19 @@ mod tests {
     fn bpf_eval_ordinary_clone_allowed_namespace_clone_denied() {
         let f = build_namespace_lockdown_filter();
         // Ordinary clone/fork flags (no NEW*)
-        assert!(is_allow(eval(
+        assert!(is_allow(eval_filter(
             &f,
             EXPECTED_ARCH,
             SYS_clone as u32,
             0x11 /* SIGCHLD | CLONE_VM-ish low bits without NEW* */
         )));
-        assert!(is_eperm(eval(
+        assert!(is_eperm(eval_filter(
             &f,
             EXPECTED_ARCH,
             SYS_clone as u32,
             libc::CLONE_NEWUSER as u32
         )));
-        assert!(is_eperm(eval(
+        assert!(is_eperm(eval_filter(
             &f,
             EXPECTED_ARCH,
             SYS_clone as u32,
@@ -326,20 +488,30 @@ mod tests {
     #[test]
     fn bpf_eval_clone3_enosys_unshare_setns_eperm_read_allowed() {
         let f = build_namespace_lockdown_filter();
-        assert!(is_enosys(eval(&f, EXPECTED_ARCH, SYS_CLONE3, 0)));
-        assert!(is_eperm(eval(&f, EXPECTED_ARCH, SYS_unshare as u32, 0)));
-        assert!(is_eperm(eval(&f, EXPECTED_ARCH, SYS_setns as u32, 0)));
-        assert!(is_allow(eval(&f, EXPECTED_ARCH, 0, 0)));
+        assert!(is_enosys(eval_filter(&f, EXPECTED_ARCH, SYS_CLONE3, 0)));
+        assert!(is_eperm(eval_filter(
+            &f,
+            EXPECTED_ARCH,
+            SYS_unshare as u32,
+            0
+        )));
+        assert!(is_eperm(eval_filter(
+            &f,
+            EXPECTED_ARCH,
+            SYS_setns as u32,
+            0
+        )));
+        assert!(is_allow(eval_filter(&f, EXPECTED_ARCH, 0, 0)));
     }
 
     #[test]
     fn bpf_eval_wrong_arch_and_x32_denied() {
         let f = build_namespace_lockdown_filter();
-        assert!(is_eperm(eval(&f, 0xdead_beef, SYS_clone as u32, 0)));
+        assert!(is_eperm(eval_filter(&f, 0xdead_beef, SYS_clone as u32, 0)));
         #[cfg(target_arch = "x86_64")]
         {
             // x32: nr has high bit set
-            assert!(is_eperm(eval(
+            assert!(is_eperm(eval_filter(
                 &f,
                 EXPECTED_ARCH,
                 (SYS_unshare as u32) | X32_SYSCALL_BIT,

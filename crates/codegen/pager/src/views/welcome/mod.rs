@@ -316,7 +316,7 @@ pub fn render_welcome(
     };
     render_top_bar(top_bar_inner, buf, &theme, None);
 
-    let mut result = if let TrustState::Pending { workspace } = params.trust_state {
+    let mut result = if let TrustState::Pending { workspace, .. } = params.trust_state {
         render_welcome_trust(
             content_area,
             buf,

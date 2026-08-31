@@ -822,33 +822,66 @@ read_write = ["/tmp/ci-artifacts"]
     }
 
     #[test]
-    fn project_cannot_redefine_global_profile() {
-        // Global "secure" with a real deny list must win over a project hollow-out.
-        let mut config = SandboxConfig {
-            profiles: HashMap::from([(
-                "secure".to_string(),
-                ProfileConfig {
-                    extends: Some("workspace".to_string()),
-                    restrict_network: Some(true),
-                    read_only: vec![],
-                    read_write: vec![],
-                    deny: vec!["/home/user/.ssh".to_string()],
-                },
-            )]),
+    fn project_config_threat_table_cannot_redefine_global_profile() {
+        let global_profile = ProfileConfig {
+            extends: Some("workspace".to_string()),
+            restrict_network: Some(true),
+            read_only: vec![],
+            read_write: vec![],
+            deny: vec!["/home/user/.ssh".to_string()],
         };
-        let project = SandboxConfig {
-            profiles: HashMap::from([
-                (
-                    "secure".to_string(),
-                    ProfileConfig {
-                        extends: Some("workspace".to_string()),
-                        restrict_network: Some(false),
-                        read_only: vec![],
-                        read_write: vec!["/".to_string()],
-                        deny: vec![],
-                    },
-                ),
-                (
+        let threats = [
+            (
+                "clear the global deny list",
+                ProfileConfig {
+                    deny: vec![],
+                    ..global_profile.clone()
+                },
+            ),
+            (
+                "disable the global network restriction",
+                ProfileConfig {
+                    restrict_network: Some(false),
+                    ..global_profile.clone()
+                },
+            ),
+            (
+                "widen the global writable roots",
+                ProfileConfig {
+                    read_write: vec!["/".to_string()],
+                    ..global_profile.clone()
+                },
+            ),
+            (
+                "replace the global base profile",
+                ProfileConfig {
+                    extends: Some("devbox".to_string()),
+                    ..global_profile.clone()
+                },
+            ),
+        ];
+
+        for (threat, project_profile) in threats {
+            let mut config = SandboxConfig {
+                profiles: HashMap::from([("secure".to_string(), global_profile.clone())]),
+            };
+            merge_project_profiles(
+                &mut config,
+                SandboxConfig {
+                    profiles: HashMap::from([("secure".to_string(), project_profile)]),
+                },
+            );
+            assert_eq!(
+                config.profiles["secure"], global_profile,
+                "project config must not {threat}"
+            );
+        }
+
+        let mut config = SandboxConfig::default();
+        merge_project_profiles(
+            &mut config,
+            SandboxConfig {
+                profiles: HashMap::from([(
                     "project-only".to_string(),
                     ProfileConfig {
                         extends: Some("workspace".to_string()),
@@ -857,21 +890,8 @@ read_write = ["/tmp/ci-artifacts"]
                         read_write: vec![],
                         deny: vec!["./secrets".to_string()],
                     },
-                ),
-            ]),
-        };
-
-        merge_project_profiles(&mut config, project);
-
-        assert_eq!(
-            config.profiles["secure"].deny,
-            vec!["/home/user/.ssh".to_string()],
-            "global deny must be preserved"
-        );
-        assert_eq!(config.profiles["secure"].restrict_network, Some(true));
-        assert!(
-            config.profiles["secure"].read_write.is_empty(),
-            "project must not widen global read_write"
+                )]),
+            },
         );
         assert!(
             config.profiles.contains_key("project-only"),

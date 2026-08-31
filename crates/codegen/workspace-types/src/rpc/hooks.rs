@@ -37,6 +37,7 @@ pub struct HookSpecWire {
     pub url: Option<String>,
     pub url_raw: Option<String>,
     pub timeout_ms: u64,
+    pub on_failure: String,
     pub source_dir: PathBuf,
     pub extra_env: HashMap<String, String>,
     pub layer: String,

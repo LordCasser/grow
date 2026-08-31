@@ -296,6 +296,7 @@ mod tests {
             url: url.map(str::to_string),
             url_raw: url_raw.map(str::to_string),
             timeout_ms: 5000,
+            on_failure: ::hooks::config::OnFailure::Block,
             source_dir: PathBuf::from("/tmp"),
             extra_env: HashMap::new(),
             layer: ::hooks::config::HookProvenance::File,

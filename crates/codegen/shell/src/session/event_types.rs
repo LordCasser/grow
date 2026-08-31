@@ -13,6 +13,7 @@ pub enum Event {
     TurnStarted {
         session_id: String,
         turn_number: u64,
+        input_ids: Vec<String>,
         identity: chat_state::TurnIdentity,
         model_id: String,
         permission_mode: diagnostics::enums::PermissionMode,
@@ -370,6 +371,7 @@ mod tests {
         let with_kind = serde_json::to_value(Event::TurnStarted {
             session_id: "s".into(),
             turn_number: 2,
+            input_ids: Vec::new(),
             identity: user_identity(),
             model_id: "grow-4".into(),
             permission_mode: diagnostics::enums::PermissionMode::Ask,
@@ -388,6 +390,7 @@ mod tests {
         let normal = serde_json::to_value(Event::TurnStarted {
             session_id: "s".into(),
             turn_number: 1,
+            input_ids: Vec::new(),
             identity: user_identity(),
             model_id: "grow-4".into(),
             permission_mode: diagnostics::enums::PermissionMode::Ask,

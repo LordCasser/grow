@@ -12,6 +12,24 @@
 - `SyntheticReason::TruncationContinue` 已加入会话层，持久化部分输出并注入继续提示（见 shell `session/actor/tests/truncation_recovery_tests.rs`）。
 - D8 `chat-state` 使用功能命名，并继承 workspace 版本 `1.0.0`。
 
+## 0. 2026-08-31 恢复行为复核
+
+这一轮只按 provider-neutral 语义复核现状，不把上游 backend 分支变成 Grow 的内部状态。结论如下：
+
+| 场景 | 权威行为 | 当前证据 | 结论 |
+|---|---|---|---|
+| `Length + text` | 先持久化清洗后的部分文本，再沿同一 turn lineage continuation | `drive_l2` 返回携带原响应的 `AttemptOutcome::Truncated`；`truncation_auto_continue_e2e`、`truncation_multiple_continues` 验证同一 turn loop 内持久化、继续和多段拼接 | covered |
+| 未完成 reasoning/tool call | 不进入后续请求，不执行 | Messages stream 只提交已经闭合的 block；`truncated_incomplete_thinking_block_discarded`、`truncation_tool_use_incomplete` 验证不完整载体被丢弃且不进入下一请求 | covered |
+| 完整 tool call + `Length` | 完整调用优先并恰好执行一次 | 三个 stream backend 都以非空完整 tool calls 覆盖 wire length；`complete_tool_use_with_length_truncation_keeps_tool_calls`、`truncation_tool_use_complete_wins_over_length` 验证执行路径不进入 continue | covered |
+| context overflow | compact 后仍超限则 typed terminal，不进入 length continuation 循环 | `AttemptOutcome::ContextWindowExceeded` 与 turn 级 `context_overflow_recovery_pending` 分离输入溢出和输出截断；`context_window_exceeded_triggers_compaction`、`context_window_exceeded_converged_over_window_fails_turn`、`repeated_api_context_window_error_after_compaction_is_terminal` | covered |
+| `pause_turn` | 保存完整 assistant 输出，无合成 prompt 地 resample | `AttemptOutcome::PauseTurn` 直接回传完整 response；`pause_turn_resend`、`pause_turn_completes_with_pause_turn_stop_reason` 验证两次采样之间没有 `TruncationContinue` | covered |
+| provider stop reason | 同时保留 provider raw reason 与 Grow typed reason | Messages 保留原始 stop reason；Chat Completions 保留 known/unknown `finish_reason`；Responses 保留 status，并把 incomplete detail 组合为 `incomplete:<reason>`；`known_finish_reasons_preserve_raw_wire_value_beside_typed_reason`、`complete_tool_call_overrides_typed_length_but_preserves_raw_length`、`unknown_finish_reason_preserves_content_usage_and_raw_reason`、`incomplete_status_and_detail_are_preserved_beside_typed_length` | covered |
+| transient failure | 只有尚无模型输出时才能沿同一 lineage 重试 | `output_observed` 覆盖 text/reasoning/tool delta 与 terminal-only output，session 的 `RetryPolicy` 固定 `retry_only_before_output=true`；`retries_on_500_then_succeeds`、`transient_stream_failure_after_output_is_terminal`、`empty_response_before_output_retries_then_succeeds`、`empty_response_after_reasoning_output_is_terminal` | covered |
+| Empty/cancel/late completion/replay | 保持独立终态；恢复不得复制工具调用或输出 | sampler 使用独立 `AttemptOutcome::{Empty,Cancelled}`，`drive_l2` 的 biased select 让已缓冲 terminal 优先于 cancel；`drive_l2_buffered_terminal_outranks_simultaneous_cancel_and_preserves_usage` 固定该竞态；Timeline `recover_interrupted` / `recover_surface_integrity` 追加闭合并去重或补齐 tool result | covered |
+| model family switch | 不因 family 标签变化主动 compact；只有新 carrier 容量压力达到既有门槛才允许 compact | `model_switch_compaction_trigger` 复用普通 pressure policy，并额外要求 context window 缩小；`model_switch_compaction_requires_both_window_shrink_and_pressure` 覆盖 family-only、缩小但低于阈值、缩小且越过阈值三分支 | covered |
+
+本轮对照已经闭环。raw provider reason 只作为 `ConversationResponse` 的诊断伴随字段，内部 continuation、tool execution、compaction 和 terminal 仍只读取 provider-neutral `StopReason`。primary、普通 child 与 budgeted/workflow child 共用只在尚无模型输出时重试的 session policy；doom-loop 使用独立重采样预算，budgeted/workflow child 仍关闭 doom-loop recovery。
+
 ## 1. Problem Statement
 
 ### 1.1 Current Behavior

@@ -193,6 +193,11 @@ fn explicit_image_400_without_description_fails_without_lossy_resubmission() {
                 std::time::Duration::from_secs(30),
                 actor.handle_prompt(
                     "image-400-recovery",
+                    crate::session::actor::tests::support::admit_test_human_input(
+                        &actor,
+                        "image-400-recovery",
+                    )
+                    .await,
                     crate::session::PromptOrigin::User,
                     Vec::new(),
                     crate::session::TurnKind::User,
@@ -310,6 +315,11 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
             actor
                 .handle_prompt(
                     "image-400-aux-recovery",
+                    crate::session::actor::tests::support::admit_test_human_input(
+                        &actor,
+                        "image-400-aux-recovery",
+                    )
+                    .await,
                     crate::session::PromptOrigin::User,
                     Vec::new(),
                     crate::session::TurnKind::User,
@@ -426,6 +436,11 @@ fn auxiliary_image_400_fails_without_installing_a_lossy_shadow() {
             actor
                 .handle_prompt(
                     "image-400-aux-400",
+                    crate::session::actor::tests::support::admit_test_human_input(
+                        &actor,
+                        "image-400-aux-400",
+                    )
+                    .await,
                     crate::session::PromptOrigin::User,
                     Vec::new(),
                     crate::session::TurnKind::User,

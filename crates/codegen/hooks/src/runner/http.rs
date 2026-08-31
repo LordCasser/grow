@@ -173,13 +173,17 @@ pub async fn run_http_hook(
         Duration::from_millis(spec.timeout_ms),
         validate_hook_url(url),
     )
-    .await
-    .unwrap_or_else(|_| {
-        Err(format!(
-            "URL validation timed out after {}ms",
-            spec.timeout_ms
-        ))
-    });
+    .await;
+    let validation = match validation {
+        Ok(validation) => validation,
+        Err(_) => {
+            return (
+                HookRunnerResult::TimedOut,
+                start.elapsed(),
+                Some(make_info(None, None)),
+            );
+        }
+    };
     if let Err(reason) = validation {
         tracing::warn!(
             hook_name = %spec.name,
@@ -221,11 +225,14 @@ pub async fn run_http_hook(
             // may embed an `env`-map secret and leak into `Failed.error` and
             // pager scrollback. `e.without_url()` strips it so we substitute
             // `log_url` (the raw source form).
-            let error = if e.is_timeout() {
-                format!("timed out after {}ms", spec.timeout_ms)
-            } else {
-                format!("HTTP request failed for {}: {}", log_url, e.without_url())
-            };
+            if e.is_timeout() {
+                return (
+                    HookRunnerResult::TimedOut,
+                    elapsed,
+                    Some(make_info(None, None)),
+                );
+            }
+            let error = format!("HTTP request failed for {}: {}", log_url, e.without_url());
             return (
                 HookRunnerResult::Failed(error),
                 elapsed,
@@ -262,6 +269,13 @@ pub async fn run_http_hook(
         Ok(t) => t,
         Err(e) => {
             // SECURITY: scrub the URL as in the send-failure branch above.
+            if e.is_timeout() {
+                return (
+                    HookRunnerResult::TimedOut,
+                    elapsed,
+                    Some(make_info(Some(status_code), None)),
+                );
+            }
             return (
                 HookRunnerResult::Failed(format!(
                     "failed to read response body for {}: {}",
@@ -283,7 +297,9 @@ pub async fn run_http_hook(
     let http_info = Some(make_info(Some(status_code), response_preview.clone()));
 
     let result = match mode {
-        GateKind::Tool => parse_http_blocking_result(&response_text, status, &spec.name),
+        GateKind::Prompt | GateKind::Tool => {
+            parse_http_blocking_result(&response_text, status, &spec.name)
+        }
         GateKind::Stop => parse_http_stop_result(&response_text, status, &spec.name),
         GateKind::Observe => HookRunnerResult::Success,
     };
@@ -655,6 +671,7 @@ mod tests {
             url: Some(raw.to_string()),
             url_raw: Some(raw.to_string()),
             timeout_ms: 1000,
+            on_failure: crate::config::OnFailure::Allow,
             source_dir: std::env::temp_dir(),
             extra_env,
             layer: crate::config::HookProvenance::File,
@@ -735,6 +752,7 @@ mod tests {
             // Short but long enough to attempt the connection, so we exercise
             // the Err(e) branch of `send().await` rather than a timeout.
             timeout_ms: 500,
+            on_failure: crate::config::OnFailure::Allow,
             source_dir: std::env::temp_dir(),
             extra_env,
             layer: crate::config::HookProvenance::File,
@@ -768,18 +786,19 @@ mod tests {
         // Either a timeout or a connection error is fine; both previously risked
         // embedding the raw URL via `format!("...{e}")`.
         let error_text = match result {
-            crate::runner::HookRunnerResult::Failed(reason) => reason,
-            other => panic!("expected Failed, got {other:?}"),
+            crate::runner::HookRunnerResult::Failed(reason) => Some(reason),
+            crate::runner::HookRunnerResult::TimedOut => None,
+            other => panic!("expected Failed or TimedOut, got {other:?}"),
         };
 
-        assert!(
-            !error_text.contains(secret),
-            "secret leaked into error text: {error_text}"
-        );
+        if let Some(error_text) = error_text.as_deref() {
+            assert!(
+                !error_text.contains(secret),
+                "secret leaked into error text: {error_text}"
+            );
 
-        // The connection-error branch must reference the raw URL form (so users
-        // see which hook failed), never the resolved secret-bearing form.
-        if !error_text.contains("timed out") {
+            // The connection-error branch must reference the raw URL form (so users
+            // see which hook failed), never the resolved secret-bearing form.
             assert!(
                 error_text.contains("${RUNTIME_HOST}") || error_text.contains("${MY_TOKEN}"),
                 "expected error to reference the raw URL form, got: {error_text}"

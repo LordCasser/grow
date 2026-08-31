@@ -18,6 +18,7 @@ pub(crate) use tools::interjection::format_interjection;
 /// identity; direct steering receives a new fallback prompt identity.
 #[derive(Debug, Clone)]
 pub(crate) struct ResidualInterjectionRequeue {
+    pub input_ids: Vec<String>,
     pub prompt_id: String,
     pub origin: crate::session::PromptOrigin,
     pub turn_kind: crate::session::TurnKind,
@@ -43,45 +44,120 @@ pub(crate) type InterjectionBuffer<Attachment> =
     tools::interjection::EventQueue<PendingInterjection<Attachment>>;
 
 impl SessionActor {
-    pub(super) async fn admit_mid_turn_interjection(
+    pub(super) async fn admit_human_steer(
         &self,
         expected_turn_id: &str,
         text: String,
-        attachments: Vec<acp::ImageContent>,
-    ) -> bool {
-        let state = self.state.lock().await;
-        let admitted = state.foreground.regular().is_some_and(|task| {
-            task.prompt_id == expected_turn_id && !task.is_finished() && task.steering_open
-        });
-        if admitted {
-            // The terminal path closes this admission gate under the same state
-            // lock before its final drain.
-            self.queue_mid_turn_interjection(text, attachments);
+        images: Vec<acp::ImageContent>,
+        interjection_id: Option<String>,
+    ) -> Result<(), String> {
+        let prompt_id = interjection_id
+            .clone()
+            .unwrap_or_else(|| format!("steer-{}", uuid::Uuid::now_v7()));
+        // Capture the server-minted durable identity before the potentially
+        // slow Hook. The client prompt id is presentation identity and may be
+        // reused; it cannot by itself prevent an ABA target replacement.
+        let captured_turn = {
+            let _control_gate = self.step_control_gate.lock().await;
+            let state = self.state.lock().await;
+            state
+                .foreground
+                .regular()
+                .filter(|task| {
+                    task.prompt_id == expected_turn_id && !task.is_finished() && task.steering_open
+                })
+                .and_then(|_| self.events.current_turn())
+        };
+        let mut blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text.clone()))];
+        blocks.extend(images.iter().cloned().map(acp::ContentBlock::Image));
+        let payload = crate::session::input_inbox::InputPayload::Prompt {
+            prompt_id: prompt_id.clone(),
+            prompt_blocks: blocks,
+            client_identifier: None,
+            screen_mode: None,
+            verbatim: false,
+            json_schema: None,
+            origin: crate::session::PromptOrigin::User,
+            turn_kind: crate::session::TurnKind::User,
+            queue: None,
+        };
+        let (input_id, hook_decision) = self
+            .run_human_input_admission_hook(
+                chat_state::InputIntent::Steer,
+                payload,
+                Some(prompt_id.clone()),
+            )
+            .await?;
+        if !matches!(&hook_decision, chat_state::InputAdmissionDecision::Allow) {
+            return self
+                .resolve_human_input_admission(input_id, hook_decision, None, Vec::new())
+                .await
+                .map(|_| ());
         }
-        admitted
-    }
 
-    /// Common same-turn steering buffer shared by direct and queued input.
-    /// Supplemental user input joins the running turn; only explicit Goal
-    /// lifecycle commands can replace or stop the durable objective.
-    pub(super) fn queue_mid_turn_interjection(
-        &self,
-        text: String,
-        attachments: Vec<acp::ImageContent>,
-    ) {
-        self.pending_interjections.push(PendingInterjection {
-            text,
-            attachments,
-            requeue: Some(ResidualInterjectionRequeue {
-                prompt_id: format!("steer-{}", uuid::Uuid::now_v7()),
-                origin: crate::session::PromptOrigin::User,
-                turn_kind: crate::session::TurnKind::User,
-                client_identifier: None,
-                screen_mode: None,
-                verbatim: false,
-                json_schema: None,
-            }),
-        });
+        let _control_gate = self.step_control_gate.lock().await;
+        let target_turn = {
+            let state = self.state.lock().await;
+            captured_turn.filter(|captured_turn| {
+                state.foreground.regular().is_some_and(|task| {
+                    task.prompt_id == expected_turn_id && !task.is_finished() && task.steering_open
+                }) && self.events.current_turn() == Some(*captured_turn)
+            })
+        };
+        let Some(target_turn) = target_turn else {
+            return self
+                .resolve_human_input_admission(
+                    input_id,
+                    chat_state::InputAdmissionDecision::Block {
+                        reason: chat_state::InputBlockReason::StaleSteerTarget,
+                    },
+                    None,
+                    Vec::new(),
+                )
+                .await
+                .map(|_| ());
+        };
+        let admitted = self
+            .resolve_human_input_admission(
+                input_id,
+                hook_decision,
+                Some(chat_state::InputRoute::Steer { target_turn }),
+                Vec::new(),
+            )
+            .await?;
+        let requeue = ResidualInterjectionRequeue {
+            input_ids: vec![admitted.input_id.clone()],
+            prompt_id,
+            origin: crate::session::PromptOrigin::User,
+            turn_kind: crate::session::TurnKind::User,
+            client_identifier: None,
+            screen_mode: None,
+            verbatim: false,
+            json_schema: None,
+        };
+        {
+            let state = self.state.lock().await;
+            let exact = state.foreground.regular().is_some_and(|task| {
+                task.prompt_id == expected_turn_id
+                    && !task.is_finished()
+                    && task.steering_open
+                    && self.events.current_turn() == Some(target_turn)
+            });
+            if !exact {
+                tracing::error!(
+                    expected_turn_id,
+                    ?target_turn,
+                    "steer target changed behind the control fence"
+                );
+                return Err("the target turn changed behind its control fence".into());
+            }
+            self.pending_interjections.push(PendingInterjection {
+                text,
+                attachments: images,
+                requeue: Some(requeue),
+            });
+        }
+        Ok(())
     }
 
     /// Enqueue a plain-Enter follow-up that [`SessionActor::queue_input`]
@@ -130,9 +206,25 @@ impl SessionActor {
         }
         if !to_requeue.is_empty() {
             let requeued = to_requeue.len();
+            let mut durable = Vec::with_capacity(to_requeue.len());
+            for entry in to_requeue {
+                let mut rerouted = true;
+                if let Some(requeue) = &entry.requeue {
+                    if let Err(error) = self
+                        .reroute_input_ids(requeue.input_ids.clone(), chat_state::InputRoute::Fifo)
+                        .await
+                    {
+                        tracing::error!(%error, input_ids = ?requeue.input_ids, "residual steer reroute was not durable");
+                        rerouted = false;
+                    }
+                }
+                if rerouted {
+                    durable.push(entry);
+                }
+            }
             let mut state = self.state.lock().await;
             // Reverse so the oldest drained entry lands at the FIFO front.
-            for entry in to_requeue.into_iter().rev() {
+            for entry in durable.into_iter().rev() {
                 state
                     .pending_inputs
                     .push_front(Self::requeue_auto_promoted(entry));
@@ -159,6 +251,7 @@ impl SessionActor {
         let owner = requeue.client_identifier.clone();
         let (respond_to, _completion_rx) = tokio::sync::oneshot::channel();
         InputItem {
+            input_ids: requeue.input_ids,
             prompt_id: requeue.prompt_id.clone(),
             turn_kind: requeue.turn_kind,
             prompt_blocks,
@@ -231,6 +324,18 @@ impl SessionActor {
         notify_pager: bool,
         images: &[acp::ImageContent],
     ) {
+        self.publish_synthetic_user_message(text, item, notify_pager, images, true)
+            .await;
+    }
+
+    async fn publish_synthetic_user_message(
+        &self,
+        text: &str,
+        item: ConversationItem,
+        notify_pager: bool,
+        images: &[acp::ImageContent],
+        append_to_chat: bool,
+    ) {
         let model_id = self.current_catalog_model_id();
         let permission_evidence = match &item {
             ConversationItem::User(user) => user.permission_evidence.clone(),
@@ -283,7 +388,9 @@ impl SessionActor {
         }
 
         // Add to conversation context
-        self.chat_state_handle.push_user_message(item);
+        if append_to_chat {
+            self.chat_state_handle.push_user_message(item);
+        }
     }
 
     /// Expand skill slash references in interjection text.
@@ -355,7 +462,9 @@ impl SessionActor {
         entries: Vec<PendingInterjection<acp::ImageContent>>,
     ) {
         for PendingInterjection {
-            text, attachments, ..
+            text,
+            attachments,
+            requeue,
         } in entries
         {
             // Sanitizer drops `[Image #N: <path>]` → `[Image #N]` before the
@@ -388,8 +497,28 @@ impl SessionActor {
             for img in &images {
                 item.add_image(pick_user_image_url(img));
             }
-            self.inject_synthetic_user_message(&wrapped, item, false, &images)
-                .await;
+            let input_ids = requeue
+                .as_ref()
+                .map(|requeue| requeue.input_ids.as_slice())
+                .unwrap_or_default();
+            if input_ids.is_empty() {
+                self.inject_synthetic_user_message(&wrapped, item, false, &images)
+                    .await;
+            } else {
+                let Some(turn) = self.events.current_turn() else {
+                    tracing::error!("accepted steer lost its durable Turn before consumption");
+                    continue;
+                };
+                if let Err(error) = self
+                    .consume_steer_inputs(input_ids.to_vec(), turn, item.clone())
+                    .await
+                {
+                    tracing::error!(%error, ?input_ids, "steer consumption was not durable");
+                    continue;
+                }
+                self.publish_synthetic_user_message(&wrapped, item, false, &images, false)
+                    .await;
+            }
             tracing::info!("Injected mid-turn interjection as standalone synthetic user message");
         }
         // An interjection never cancels the turn, so it leaves no marker on the
@@ -403,6 +532,7 @@ impl SessionActor {
     /// and injected into a successor step, or observes the closed gate and is
     /// rejected. It cannot be acknowledged behind the final drain.
     pub(super) async fn close_steering_and_drain(&self, prompt_id: &str) -> bool {
+        let _control_gate = self.step_control_gate.lock().await;
         let entries = {
             let mut state = self.state.lock().await;
             let Some(task) = state.foreground.regular_mut() else {
@@ -446,16 +576,26 @@ mod tests {
                 begin_test_causal_turn(&actor).await;
                 install_test_foreground(&actor, "turn-1").await;
 
-                assert!(
-                    actor
-                        .admit_mid_turn_interjection("turn-1", "accepted".into(), Vec::new())
-                        .await
-                );
+                actor
+                    .admit_human_steer(
+                        "turn-1",
+                        "accepted".into(),
+                        Vec::new(),
+                        Some("steer-accepted".into()),
+                    )
+                    .await
+                    .unwrap();
                 assert!(actor.close_steering_and_drain("turn-1").await);
                 assert!(
-                    !actor
-                        .admit_mid_turn_interjection("turn-1", "too late".into(), Vec::new())
+                    actor
+                        .admit_human_steer(
+                            "turn-1",
+                            "too late".into(),
+                            Vec::new(),
+                            Some("steer-late".into()),
+                        )
                         .await
+                        .is_err()
                 );
                 assert!(actor.pending_interjections.is_empty());
                 let conversation = actor.chat_state_handle.get_conversation().await;

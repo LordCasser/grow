@@ -203,12 +203,15 @@ impl SessionActor {
                 }
             }
             HooksAction::Disable { hook_name } => match ::hooks::trust::disable_hook(&hook_name) {
-                Ok(()) => ActionOutcome {
-                    status: OutcomeStatus::Success,
-                    message: format!("Disabled hook: {hook_name}"),
-                    requires_reload: false,
-                    requires_restart: false,
-                },
+                Ok(()) => {
+                    self.mark_hook_registry_changed();
+                    ActionOutcome {
+                        status: OutcomeStatus::Success,
+                        message: format!("Disabled hook: {hook_name}"),
+                        requires_reload: false,
+                        requires_restart: false,
+                    }
+                }
                 Err(e) => ActionOutcome {
                     status: OutcomeStatus::InternalError,
                     message: format!("Failed to disable hook: {e}"),
@@ -217,12 +220,15 @@ impl SessionActor {
                 },
             },
             HooksAction::Enable { hook_name } => match ::hooks::trust::enable_hook(&hook_name) {
-                Ok(true) => ActionOutcome {
-                    status: OutcomeStatus::Success,
-                    message: format!("Enabled hook: {hook_name}"),
-                    requires_reload: false,
-                    requires_restart: false,
-                },
+                Ok(true) => {
+                    self.mark_hook_registry_changed();
+                    ActionOutcome {
+                        status: OutcomeStatus::Success,
+                        message: format!("Enabled hook: {hook_name}"),
+                        requires_reload: false,
+                        requires_restart: false,
+                    }
+                }
                 Ok(false) => ActionOutcome {
                     status: OutcomeStatus::NotFound,
                     message: format!("Hook was not disabled: {hook_name}"),
@@ -250,6 +256,9 @@ impl SessionActor {
                     if ok {
                         toggled += 1;
                     }
+                }
+                if toggled > 0 {
+                    self.mark_hook_registry_changed();
                 }
                 let action = if disable { "Disabled" } else { "Enabled" };
                 ActionOutcome {
@@ -667,14 +676,7 @@ impl SessionActor {
             }
         }
         let hook_count = registry.len();
-        {
-            let mut reg = self.hooks.registry.borrow_mut();
-            if registry.is_empty() {
-                *reg = None;
-            } else {
-                *reg = Some(std::sync::Arc::new(registry));
-            }
-        }
+        self.replace_hook_registry((!registry.is_empty()).then(|| std::sync::Arc::new(registry)));
         tracing::info!(hook_count, "hooks reloaded mid-session");
 
         // Notify pager about hooks change.
@@ -886,6 +888,7 @@ impl SessionActor {
                     *reg = Some(Arc::new(new_reg));
                 }
             }
+            self.mark_hook_registry_changed();
         }
 
         ::diagnostics::unified_log::info(
@@ -911,21 +914,11 @@ impl SessionActor {
             session_cwd,
             new_registry_snapshot.as_deref(),
         );
-        let (mcp_diff, dispatch_event_tx) = {
+        let mcp_diff = {
             let mut mcp_state = self.mcp_state.lock().await;
-            let diff = mcp_state.update_configs_diff(new_mcp_servers);
-            let tx = mcp_state.client_event_tx();
-            (diff, tx)
+            mcp_state.update_configs_diff_and_emit(new_mcp_servers)
         };
         let mcp_changed = if let Some(diff) = mcp_diff {
-            if (!diff.added.is_empty() || !diff.removed.is_empty())
-                && let Some(tx) = &dispatch_event_tx
-            {
-                let _ = tx.send(::mcp::servers::McpClientEvent::ConfigDiff {
-                    added: diff.added.clone(),
-                    removed: diff.removed.clone(),
-                });
-            }
             for name in &diff.removed {
                 let prefix = format!("{}{}", name, workspace_types::MCP_TOOL_NAME_DELIMITER);
                 let removed_count = self

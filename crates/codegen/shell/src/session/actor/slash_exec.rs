@@ -170,11 +170,15 @@ pub(super) struct GoalControlCancellation {
 }
 
 impl SessionActor {
-    async fn queue_host_command(&self, invocation: crate::session::HostCommandInvocation) {
+    pub(super) async fn queue_host_command(
+        &self,
+        invocation: crate::session::HostCommandInvocation,
+    ) {
         let prompt_id = format!("host-command-{}", uuid::Uuid::now_v7());
         let (respond_to, _) = tokio::sync::oneshot::channel();
         let command = invocation.command.clone();
         self.state.lock().await.pending_inputs.push_back(InputItem {
+            input_ids: Vec::new(),
             prompt_id,
             turn_kind: crate::session::TurnKind::Internal,
             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(command))],

@@ -25,17 +25,33 @@ structured projection arrives.
 
 ## Input classes
 
-1. Plain Enter sends `QueuePrompt`. While idle the common gate may start it; while running it remains in the user FIFO. Under the non-default `follow_up_behavior = "steer"`, a plain-Enter follow-up that arrives while a regular turn is running is auto-promoted into that turn through the same mid-turn interjection entry point as Ctrl+Enter; only a regular foreground turn is promotable — idle or compaction states, synthetic prompts, and bash or structured prompts are not promoted and stay on the FIFO.
-2. Ctrl+Enter sends a steer request for the current regular turn.
-3. Double Enter atomically converts the just-queued first row to steer.
-4. Queue-row “Send now” invokes the same steer request.
-5. Leading slash input is a Grow command and runs through the command plane. Control commands mutate state synchronously and never wait for model work or their own actor mailbox.
+所有真实 `HumanIntent` 共用一个 durable admission 入口；Pager 的 UI 动作只决定 intent，不直接决定执行：
+
+```text
+immutable artifacts/inputs/<blake3>.json
+  → InputSubmitted(input_id, intent, payload_ref)
+  → UserPromptSubmit Hook lifecycle
+  → InputAdmissionResolved {
+      Block
+      | Allow + initial route (Fifo | Steer{TurnId}) + superseded input ids
+    }
+  → Fifo: TurnStarted reserves input ids
+  → InputConsumed{item} | InputHandled | InputRerouted | InputDismissed
+```
+
+payload 必须先以 content-addressed immutable JSON 发布，Timeline 再提交 `Submitted`。Hook 完整闭合且 durable `Allow` 之前，输入不能出现在队列、Surface、interjection buffer、host command 执行或 provider request 中。同一 `input_id` 只运行一次 Hook；排队、Send now、double Enter、自动提升、turn 终止后的回退和进程恢复都只能改变 route，不能重复 admission。Hook block 只终止该输入，不冻结已有 FIFO 或 active turn。Goal、Workflow、Notification 等 synthetic prompt 没有 `Input` lifecycle，只产生 source-bound、observe-only Hook occurrence。
+
+1. Plain Enter 产生 Prompt intent。idle 时进入 FIFO admission；busy 时仍先进入同一 FIFO。`follow_up_behavior = "steer"` 只允许把已获准的 plain prompt 从 FIFO 重路由到当前 exact `TurnId`。
+2. Ctrl+Enter 产生 Steer intent。Hook 完成后在 `step_control_gate` 内复核 exact foreground；目标已经关闭时提交 typed `StaleSteerTarget` block 并向客户端返回失败，不能把显式指定旧 Turn 的内容擅自交给 FIFO 或新 Turn。已经 `Allow + Steer{TurnId}` 的输入若错过最终 safe point，则在该 Turn 的 terminal fence 后以同一 `input_id` 回到 FIFO。
+3. Double Enter 和 queue-row “Send now”都在 `step_control_gate` 内执行 `Fifo → Steer{exact TurnId}`；目标、row 或版本在取得栅栏前已变化时保持原 FIFO 不动，持久路由提交后内存 row 必须在同一栅栏内转移，不存在向活跃 Turn 做 `Steer → Fifo` 的非法回滚。
+4. leading slash / bash 仍先以普通 Prompt intent 完成 Hook admission 并进入 FIFO。`TurnStarted` 取得预留后，若命令在 host plane 内闭合而没有生成模型消息，则以 `InputHandled` 终止；命令产生的内部 prompt 不再冒充第二个 HumanIntent。
+5. 仅内部 synthetic/test interjection 可以没有 input identity；生产用户 steer 一律携带可回退 payload。turn 的最后安全点未消费的 residual steer 在目标 turn 结束后 durable `Steer → Fifo`，再以原始 input identity 回到队首，绝不能泄漏进 successor 的 interjection buffer。
 
 A successful Goal control that invalidates the running context (set/edit/enter/pause/clear) ends that exact foreground turn through normal cancellation. Read-only or non-invalidating controls (status/restart/budget), and rejected mutations, leave it running.
 
-Steering includes `expected_turn_id`. The shell accepts it only if the identified regular turn is still foreground, then moves the queued payload into that same turn's input buffer. It never creates a replacement turn or another terminal. Compaction and idle state are not steerable.
+Steering 的客户端 `expected_turn_id` 先定位 foreground，Shell 再把当前 Timeline `TurnId` 写入 durable route。消费时必须同时复核该 `TurnId` 仍是 foreground；prompt id、队列位置或文本相等都不能代替这一身份。它只向同一 turn 的 safe-point buffer 追加输入，不创建 replacement turn 或另一个 terminal。Compaction 和 idle state 不可 steer。
 
-The turn terminal is also a steering-scope fence. A residual steer that missed the sampler's final safe-point drain is discarded on completion or cancellation; it can never leak into a later user turn or Goal continuation merely because Goal remains active. The fence is decided by turn identity: an explicit steer's residual is still discarded, because an explicit steer belongs to the exact turn it named; an auto-promoted follow-up's residual returns to the front of the user FIFO at the terminal boundary as a brand-new turn (keeping its original prompt identity) instead of silently dropping user input. Neither kind ever leaks into a successor turn's steering buffer.
+Queue combine 不制造新的输入事实：组合后的 row 保存全部 `input_ids`，且永不超过 Timeline 的单 Turn identity 上限。user `TurnStarted` 在一个 transition 中校验并预留这些仍为 Fifo/Allowed 的 identities；只有 canonical user `ConversationItem` 同时进入 Timeline 时才以一个 `InputConsumed` 原子消费全部 identity。若进程在两者之间中断，recovery 先闭合旧 Turn 并释放预留，再重建 FIFO，不会丢输入或复制 Surface。queue edit 是新内容，因此必须创建新 payload、新 `input_id` 和新 Hook admission；`AdmissionResolved` 在同一个事件中让新版本进入 FIFO 并 dismiss 旧 identities，失败则旧 row 和旧 admission 原样保留。remove、session close 和孤儿清理都以 typed `Dismissed` 终止已 Allow 但未消费的输入。
 
 ## Idle admission
 
@@ -52,7 +68,7 @@ The notification inbox is the only cross-turn completion path. During an active 
 
 ## Message identity
 
-Each user submission has a stable `messageId` carried by the queue row, optimistic bubble, running notification, and ACP user-message echo. Pager reconciliation is keyed only by this identity:
+Each user submission has a stable `messageId` carried by the queue row, optimistic bubble, running notification, ACP user-message echo, and Shell `input_id` lifecycle. Pager reconciliation is keyed only by this identity:
 
 - an optimistic bubble followed by an echo stays one bubble;
 - replayed or duplicate echoes are idempotent;
@@ -60,6 +76,8 @@ Each user submission has a stable `messageId` carried by the queue row, optimist
 - unrelated messages with identical or trim-equivalent text remain distinct.
 
 No `skip_next_user_echo`, text matching, or adoption stash participates in routing.
+
+启动恢复先关闭中断的旧 Turn 以释放未消费预留，再从 Timeline 查询 pending Allowed inputs，并按 payload reference 校验、读取和重建 FIFO；旧 Turn 已结束的 Steer 会先持久化重路由为 Fifo。缺失、超限、哈希不符或类型不匹配的 payload 会拒绝会话加载，不能把坏输入静默丢掉。未被任何 `Submitted` 引用的 input artifact 只由有界 orphan sweep 删除。恢复不重跑已经闭合的 Hook，也不把 Allow 之前崩溃的输入自动升级为允许；Timeline recovery 会给它明确的 interrupted block 终态。
 
 ## Goal interaction
 

@@ -221,7 +221,15 @@ impl SamplingError {
             || normalized.contains("insufficient_quota")
         {
             StatusCode::PAYMENT_REQUIRED
-        } else if normalized.contains("permission") || normalized.contains("forbidden") {
+        } else if normalized.contains("permission")
+            || normalized.contains("forbidden")
+            || normalized.contains("denied")
+            || normalized.contains("sandbox")
+            || (normalized.contains("network")
+                && (normalized.contains("policy")
+                    || normalized.contains("blocked")
+                    || normalized.contains("not_allowed")))
+        {
             StatusCode::FORBIDDEN
         } else if normalized.contains("not_found") {
             StatusCode::NOT_FOUND
@@ -889,6 +897,28 @@ mod tests {
             }
         ));
         assert!(!invalid.is_retryable());
+    }
+
+    #[test]
+    fn typed_stream_policy_taxonomy_does_not_retry_explicit_denials() {
+        for (error_type, expected_status, retryable) in [
+            ("sandbox_denied", StatusCode::FORBIDDEN, false),
+            ("permission_denied", StatusCode::FORBIDDEN, false),
+            ("network_policy_error", StatusCode::FORBIDDEN, false),
+            ("network_access_blocked", StatusCode::FORBIDDEN, false),
+            ("insufficient_quota", StatusCode::PAYMENT_REQUIRED, false),
+            ("billing_error", StatusCode::PAYMENT_REQUIRED, false),
+            ("overloaded_error", StatusCode::from_u16(529).unwrap(), true),
+            ("rate_limit_error", StatusCode::TOO_MANY_REQUESTS, true),
+            ("network_error", StatusCode::INTERNAL_SERVER_ERROR, true),
+        ] {
+            let error = SamplingError::from_stream_error(error_type, "fixture");
+            let SamplingError::Api { status, .. } = &error else {
+                panic!("{error_type}: expected typed Api error, got {error:?}");
+            };
+            assert_eq!(*status, expected_status, "{error_type}");
+            assert_eq!(error.is_retryable(), retryable, "{error_type}");
+        }
     }
 
     #[test]

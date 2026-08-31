@@ -154,11 +154,10 @@ impl RestartActions for E2eActions {
         // into `owned_clients` so the next crash cycle starts from an
         // "available" state without the test manually re-seeding.
         if outcome.is_ok() {
-            self.mcp_state
-                .lock()
-                .await
-                .owned_clients
-                .insert(server.to_string(), Arc::new(McpClient::stub(server)));
+            let client = Arc::new(McpClient::stub(server));
+            let mut state = self.mcp_state.lock().await;
+            state.bind_client_events(&client);
+            state.owned_clients.insert(server.to_string(), client);
         }
         outcome
     }
@@ -216,9 +215,9 @@ async fn settle() {
 async fn seed_clients(state: &Arc<TokioMutex<McpState>>, names: &[&str]) {
     let mut guard = state.lock().await;
     for n in names {
-        guard
-            .owned_clients
-            .insert((*n).to_string(), Arc::new(McpClient::stub(n)));
+        let client = Arc::new(McpClient::stub(n));
+        guard.bind_client_events(&client);
+        guard.owned_clients.insert((*n).to_string(), client);
     }
 }
 
@@ -233,18 +232,18 @@ async fn send_transport_closed(
     state: &Arc<TokioMutex<McpState>>,
     name: &str,
 ) {
-    let client_id = state
-        .lock()
-        .await
+    let mut state = state.lock().await;
+    let client = state
         .owned_clients
         .get(name)
-        .map(|c| c.client_id())
-        .unwrap_or_else(|| panic!("send_transport_closed: no client registered for {name}"));
+        .cloned()
+        .expect("test client must be registered");
+    let episode = state.bind_client_events(&client);
     tx.send(McpClientEvent::TransportClosed {
         server: name.to_string(),
-        client_id,
+        episode,
     })
-    .unwrap();
+    .expect("dispatcher test channel must be open");
 }
 
 /// Scenario 1 — server crashes and recovers.
@@ -441,11 +440,21 @@ async fn e2e_handshake_failed_schedules_restart_without_dropping_client() {
                 std::path::PathBuf::from("."),
             ));
 
-            tx.send(McpClientEvent::HandshakeFailed {
-                server: "svr".to_string(),
-                reason: "boom".to_string(),
-            })
-            .unwrap();
+            {
+                let mut state = mcp_state.lock().await;
+                let client = state
+                    .owned_clients
+                    .get("svr")
+                    .cloned()
+                    .expect("test client must be registered");
+                let episode = state.bind_client_events(&client);
+                tx.send(McpClientEvent::HandshakeFailed {
+                    server: "svr".to_string(),
+                    episode,
+                    reason: "boom".to_string(),
+                })
+                .expect("dispatcher test channel must be open");
+            }
             tokio::task::yield_now().await;
             tokio::time::advance(PAST_WINDOW).await;
             settle().await;
@@ -1045,11 +1054,14 @@ async fn e2e_remove_readd_race_keeps_replacement_client() {
     let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![])));
     let old_client = Arc::new(McpClient::stub("demo-mcp"));
     let old_id = old_client.client_id();
-    mcp_state
-        .lock()
-        .await
-        .owned_clients
-        .insert("demo-mcp".to_string(), Arc::clone(&old_client));
+    let old_episode = {
+        let mut state = mcp_state.lock().await;
+        let episode = state.bind_client_events(&old_client);
+        state
+            .owned_clients
+            .insert("demo-mcp".to_string(), Arc::clone(&old_client));
+        episode
+    };
     let shutdown = new_shutdown_state();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
 
@@ -1091,7 +1103,7 @@ async fn e2e_remove_readd_race_keeps_replacement_client() {
             //    death rattle, stamped with the OLD client's id.
             tx.send(McpClientEvent::TransportClosed {
                 server: "demo-mcp".to_string(),
-                client_id: old_id,
+                episode: old_episode,
             })
             .unwrap();
 
@@ -1099,11 +1111,13 @@ async fn e2e_remove_readd_race_keeps_replacement_client() {
             //    window flushes (16 ms in the incident).
             let replacement = Arc::new(McpClient::stub("demo-mcp"));
             assert_ne!(replacement.client_id(), old_id);
-            mcp_state
-                .lock()
-                .await
-                .owned_clients
-                .insert("demo-mcp".to_string(), Arc::clone(&replacement));
+            {
+                let mut state = mcp_state.lock().await;
+                state.bind_client_events(&replacement);
+                state
+                    .owned_clients
+                    .insert("demo-mcp".to_string(), Arc::clone(&replacement));
+            }
 
             // 4. Flush.
             tokio::task::yield_now().await;

@@ -11,7 +11,7 @@ use acp::SessionNotification as AcpSessionNotification;
 /// debounced + merged, and emerges through `emit_buffered` without
 /// firing per-chunk hooks or persistence writes.
 ///
-/// One-shot Grow events (RetryState, ImageCompressed, HookExecution,
+/// One-shot Grow events (RetryState, ImageCompressed,
 /// etc.) take the direct `send_grow_notification` path for per-event hooks and persistence.
 #[derive(Debug, Clone)]
 pub(crate) enum SessionNotification {

@@ -116,9 +116,10 @@ async fn record_prompt(handle: &crate::handle::ChatStateHandle, text: impl Into<
     let prompt_index = handle.get_prompt_index().await;
     handle.record_timeline_event(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
         id,
+        input_ids: Vec::new(),
         identity: crate::TurnIdentity {
             origin: "user".into(),
-            turn_kind: "user".into(),
+            turn_kind: "internal".into(),
             goal_id: None,
             goal_definition_revision: None,
             stage_id: None,
@@ -5602,5 +5603,63 @@ async fn durable_notification_receive_is_idempotent_and_rejects_payload_conflict
     assert!(matches!(
         conflict,
         crate::commands::TimelineWriteError::Invalid(crate::TimelineError::InvalidNotification)
+    ));
+}
+
+#[tokio::test]
+async fn durable_input_submission_is_idempotent_and_rejects_payload_conflicts() {
+    let h = TestHarness::new();
+    let payload = crate::InputPayloadRef {
+        blake3: blake3::hash(b"hello").to_hex().to_string(),
+        bytes: 5,
+    };
+    let first = h
+        .handle
+        .submit_input_durably(
+            "input-1".into(),
+            crate::InputIntent::Prompt,
+            payload.clone(),
+        )
+        .await
+        .expect("first input submission commits");
+    let duplicate = h
+        .handle
+        .submit_input_durably(
+            "input-1".into(),
+            crate::InputIntent::Prompt,
+            payload.clone(),
+        )
+        .await
+        .expect("exact retry is idempotent");
+    assert_eq!(duplicate.seq, first.seq);
+    assert_eq!(
+        h.handle
+            .timeline_events()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                crate::TimelineEventKind::Input(crate::InputEvent::Submitted { .. })
+            ))
+            .count(),
+        1
+    );
+
+    let conflict = h
+        .handle
+        .submit_input_durably(
+            "input-1".into(),
+            crate::InputIntent::Prompt,
+            crate::InputPayloadRef {
+                blake3: blake3::hash(b"changed").to_hex().to_string(),
+                bytes: 7,
+            },
+        )
+        .await
+        .expect_err("an input ID cannot change payload");
+    assert!(matches!(
+        conflict,
+        crate::commands::TimelineWriteError::Invalid(crate::TimelineError::InvalidInput)
     ));
 }

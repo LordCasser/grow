@@ -189,10 +189,7 @@ pub async fn run_command_hook(
         // A closed scope means the session is gone and `register` already killed
         // the child, so stop rather than write stdin to a corpse.
         if !scope.register(&group) {
-            return (
-                HookRunnerResult::Failed("session closed before the hook ran".to_string()),
-                start.elapsed(),
-            );
+            return (HookRunnerResult::Cancelled, start.elapsed());
         }
         hook_group = Some(group);
     }
@@ -223,10 +220,7 @@ pub async fn run_command_hook(
     }
 
     match result {
-        Err(_) => (
-            HookRunnerResult::Failed(format!("timed out after {}ms", spec.timeout_ms)),
-            elapsed,
-        ),
+        Err(_) => (HookRunnerResult::TimedOut, elapsed),
         Ok(Err(e)) => (
             HookRunnerResult::Failed(format!("command execution failed: {e}")),
             elapsed,
@@ -272,7 +266,9 @@ pub async fn run_command_hook(
                         elapsed,
                     )
                 }
-                GateKind::Tool => parse_blocking_result(&stdout, exit_code, &spec.name, elapsed),
+                GateKind::Prompt | GateKind::Tool => {
+                    parse_blocking_result(&stdout, exit_code, &spec.name, elapsed)
+                }
                 GateKind::Stop => {
                     parse_stop_result(&stdout, &stderr, exit_code, &spec.name, elapsed)
                 }
@@ -874,6 +870,7 @@ mod tests {
                 url: None,
                 url_raw: None,
                 timeout_ms: 5000,
+                on_failure: crate::config::OnFailure::Allow,
                 source_dir: std::path::PathBuf::from(source),
                 extra_env: std::collections::HashMap::new(),
                 layer: crate::config::HookProvenance::File,
@@ -917,6 +914,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            on_failure: crate::config::OnFailure::Allow,
             source_dir: std::env::temp_dir(),
             extra_env: std::collections::HashMap::new(),
             layer: crate::config::HookProvenance::File,
@@ -969,7 +967,7 @@ mod tests {
         let ctx = make_ctx();
         let (result, _) = run_command_hook(&spec, &envelope, &ctx, GateKind::Observe).await;
         assert!(
-            matches!(&result, HookRunnerResult::Failed(msg) if msg.contains("timed out")),
+            matches!(&result, HookRunnerResult::TimedOut),
             "expected a timeout failure, got {result:?}"
         );
     }
@@ -1088,6 +1086,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            on_failure: crate::config::OnFailure::Allow,
             source_dir: tmp.path().to_path_buf(),
             extra_env,
             layer: crate::config::HookProvenance::File,
@@ -1215,6 +1214,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            on_failure: crate::config::OnFailure::Allow,
             source_dir: std::env::temp_dir(),
             extra_env,
             layer: crate::config::HookProvenance::File,
@@ -1288,6 +1288,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            on_failure: crate::config::OnFailure::Allow,
             source_dir: std::env::temp_dir(),
             extra_env,
             layer: crate::config::HookProvenance::File,
@@ -1354,6 +1355,7 @@ mod tests {
             url: None,
             url_raw: None,
             timeout_ms: 5000,
+            on_failure: crate::config::OnFailure::Allow,
             source_dir: tmp.path().to_path_buf(),
             extra_env: std::collections::HashMap::new(),
             layer: crate::config::HookProvenance::File,
@@ -1412,7 +1414,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn command_hook_fails_fast_when_scope_already_closed() {
+    async fn command_hook_is_cancelled_when_scope_already_closed() {
         let scope = tty_utils::ProcessScope::new();
         scope.kill_all();
         let mut spec = make_shell_spec("sleep 600");
@@ -1431,7 +1433,7 @@ mod tests {
         .expect("a closed scope must fail the hook immediately, not run to its 60s timeout");
 
         assert!(
-            matches!(result, HookRunnerResult::Failed(_)),
+            matches!(result, HookRunnerResult::Cancelled),
             "got {result:?}"
         );
     }

@@ -107,6 +107,16 @@ Workflow Definition 使用同一 Agent capability、MCP binding 与 PermissionMa
 
 权限拒绝是子 Agent 的工具级结果，不是 turn 级终止：Auto deny/unavailable、人工 Reject/TimedOut 和 stale permit 都让当前工具 fail closed，并把可操作的失败结果交回下一次子模型采样；只有明确 Cancel、父任务终止或 session teardown 可以取消子 turn。最终 `PermissionEvent` 是审计事实源，经 primary session 的 audit bridge 持久化为 UI-only update。Pager 将同一主 Agent turn 内到达的事件保留在一个带 epoch 的稳定结构化权限块中；status、tool 等中间消息不会拆组，只有真实 `TurnCompleted` 推进 epoch 并封口。展开成员始终单行，双击成员读取完整 live 请求和 classifier reason；持久化 replay 只恢复脱敏安全摘要。该块不复用 tool-verb 分类或其设置，也不进入模型上下文。
 
+## Security authority boundaries
+
+跨异步边界传递的不是“已经检查过”的布尔值，而是冻结且不可拆分的 identity/capability：
+
+- Folder Trust 绑定当前 checkout 的 canonical path、filesystem object identity 和 Git common-dir identity。managed source 只能作为额外 provenance conjunct，不能代替当前 checkout；linked worktree、后来 clone 的目录与同路径 replacement 都是新 identity。Pager 在展示前冻结 identity，确认写入前后都重验；任一次 current/source 读取失败或 CAS 漂移都保持 Pending/fail closed，不启动 Session。store 与进程 cache 也只按完整 identity 精确命中。
+- Hook occurrence 在 Timeline `Triggered` 中冻结 config generation、来源层级与有序 handler plan。session resume 从历史最大 generation 的下一代开始，不能复用旧代；未知来源不能执行，project/agent file 在 `Triggered` durable 后、外部副作用前重新验证当前 Folder Trust。低权限来源只能贡献其 provenance 层允许的 handler，不能覆盖高权层的 policy。每个 cause 必须引用当时合法的 active/terminal Tool、Turn、Compaction、Subagent、Notification 或 Session identity。
+- Memory embedding 与 Bundle download 都把 endpoint authority 和 credential 封装成同一个 opaque capability。Memory 的 live credential 只绑定进程拥有的 exact non-loopback HTTPS service URL；用户静态 key 也只随其 exact endpoint 使用。Bundle 使用独立的 `GROW_BUNDLE_SERVICE_BASE_URL`，绝不回退到 chat/model proxy；缺 URL 或 deployment key 就禁用同步。两条 HTTP 路径都禁止 redirect，错误正文与展开 URL 不进入持久化诊断。
+- MCP client event 只由 `McpState` 为当前 `{client_id, config_generation, transport_revision}` episode 签发。config diff 与 transport-origin event 走不同 typed API；caller 不能构造 episode 或取得 raw sender。remove/replacement 立即撤销旧 eligibility，旧 transport 的 ready/liveness/tools/resources/handshake/closed 事件都不能污染新实例或 permit。
+- Sandbox 与 sampling 保留 typed denial。permission/sandbox/network-policy/quota 拒绝不能降级成可重试的普通采样错误。Linux child filter 的威胁回归覆盖 socket family/type mask、`sendmmsg`、x32/非 native arch 与 async I/O/io_uring 入口；进程创建时已经继承的 connected FD 仍是独立的长期边界，记录在 ROADMAP，不通过扩大本次 syscall filter 掩盖。
+
 ## 原子 Timeline Control 事件
 
 Timeline 的 `control` 事件包含单调 control revision，以及 Behavior snapshot、Plan phase/approval/artifact revision/hash 与 Goal state/receipt。它是唯一持久控制事实；不存在 control sidecar。

@@ -76,9 +76,9 @@ impl MvpAgent {
             let active_subagents = self.active_subagent_count(id.0.as_ref()).await;
             snapshots.push(crate::coordination::LocalSessionSnapshot {
                 session_id: id.0.to_string(),
-                canonical_cwd: crate::coordination::canonical_cwd(
-                    std::path::Path::new(&handle.info.cwd),
-                ),
+                canonical_cwd: crate::coordination::canonical_cwd(std::path::Path::new(
+                    &handle.info.cwd,
+                )),
                 main_agent: handle.agent_profile.name(),
                 activity: self.resident_activity(&id),
                 subagents: crate::coordination::SubagentStats {
@@ -125,7 +125,8 @@ impl MvpAgent {
         &self,
         source_session_id: &str,
     ) -> Result<(), String> {
-        self.require_coordination_source(source_session_id).map(|_| ())
+        self.require_coordination_source(source_session_id)
+            .map(|_| ())
     }
 
     pub(crate) async fn ask_coordination_session(
@@ -295,24 +296,23 @@ impl tools::implementations::grow_build::coordination::CoordinationBackend
 {
     async fn list_active_sessions(
         &self,
-    ) -> Result<
-        Vec<tools::implementations::grow_build::coordination::ActiveSession>,
-        String,
-    > {
+    ) -> Result<Vec<tools::implementations::grow_build::coordination::ActiveSession>, String> {
         Ok(self
             .list_active_sessions()
             .await?
             .into_iter()
-            .map(|session| tools::implementations::grow_build::coordination::ActiveSession {
-                session_id: session.session_id,
-                canonical_cwd: session.canonical_cwd,
-                main_agent: session.main_agent,
-                activity: enum_label(session.activity),
-                active_subagents: session.subagents.active,
-                started_at: session.started_at,
-                process_started_at: session.process_started_at,
-                last_heartbeat: session.last_heartbeat,
-            })
+            .map(
+                |session| tools::implementations::grow_build::coordination::ActiveSession {
+                    session_id: session.session_id,
+                    canonical_cwd: session.canonical_cwd,
+                    main_agent: session.main_agent,
+                    activity: enum_label(session.activity),
+                    active_subagents: session.subagents.active,
+                    started_at: session.started_at,
+                    process_started_at: session.process_started_at,
+                    last_heartbeat: session.last_heartbeat,
+                },
+            )
             .collect())
     }
 
@@ -442,11 +442,11 @@ fn source_terminal_notice(
 }
 
 fn reject_unavailable(inquiry: crate::coordination::InboundInquiry) {
-    let _ = inquiry.respond_to.send(
-        crate::coordination::InquiryOutcome::terminal(
+    let _ = inquiry
+        .respond_to
+        .send(crate::coordination::InquiryOutcome::terminal(
             inquiry.inquiry_id,
             crate::coordination::InquiryStatus::Unavailable,
             "target session is unavailable",
-        ),
-    );
+        ));
 }

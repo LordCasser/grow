@@ -504,6 +504,7 @@ impl SessionActor {
         // (e.g. `rewindable`) without overlapping borrows.
         let (
             persist_ack,
+            input_ids,
             prompt_id,
             prompt_blocks,
             client_identifier,
@@ -522,6 +523,7 @@ impl SessionActor {
             let running_display = SessionActor::running_display_from_item(front);
             (
                 front.persist_ack.take(),
+                front.input_ids.clone(),
                 front.prompt_id.clone(),
                 front.prompt_blocks.clone(),
                 front.client_identifier.clone(),
@@ -573,6 +575,7 @@ impl SessionActor {
         state.foreground = ForegroundState::RegularTurn(AgentTask::new_prompt(
             self.clone(),
             prompt_id.clone(),
+            input_ids,
             origin.clone(),
             host_command,
             notification_ids,
@@ -859,6 +862,7 @@ impl SessionActor {
                 return;
             }
             state.pending_inputs.push_back(InputItem {
+                input_ids: Vec::new(),
                 prompt_id: format!("notifications-{}", uuid::Uuid::now_v7()),
                 turn_kind,
                 prompt_blocks,

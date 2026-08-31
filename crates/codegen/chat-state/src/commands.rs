@@ -129,6 +129,16 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
     },
 
+    /// Idempotently append one durable input submission. Re-delivery of the
+    /// same immutable input returns its original fact; conflicting reuse of
+    /// an input ID fails closed before any Hook can run twice.
+    SubmitInputDurably {
+        input_id: String,
+        intent: crate::InputIntent,
+        payload_ref: crate::InputPayloadRef,
+        reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
+    },
+
     /// Re-run deterministic local recovery after external entities have been
     /// reconciled, then durably append every newly admissible terminal fact.
     RecoverInterruptedDurably {
@@ -323,6 +333,12 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<TrajectorySnapshot>,
     },
 
+    /// Read one Hook occurrence from the authoritative Timeline fold.
+    GetHookProjection {
+        occurrence_id: String,
+        reply: oneshot::Sender<Option<crate::HookLifecycleProjection>>,
+    },
+
     /// Clone the canonical event ledger for recovery/reconciliation logic.
     GetTimelineEvents {
         reply: oneshot::Sender<Vec<crate::TimelineEvent>>,
@@ -330,6 +346,14 @@ pub enum ChatStateCommand {
 
     GetPendingNotifications {
         reply: oneshot::Sender<Vec<crate::PendingNotification>>,
+    },
+
+    GetPendingAllowedInputs {
+        reply: oneshot::Sender<Vec<crate::PendingAllowedInput>>,
+    },
+
+    GetSubmittedInputPayloadHashes {
+        reply: oneshot::Sender<BTreeSet<String>>,
     },
 
     /// Resolve an immutable at-least-once receipt by producer identity,

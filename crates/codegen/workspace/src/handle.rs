@@ -2352,6 +2352,7 @@ pub(crate) mod tests {
                 url: None,
                 url_raw: None,
                 timeout_ms: 10_000,
+                on_failure: hooks::config::OnFailure::Allow,
                 source_dir: std::path::PathBuf::from("/tmp"),
                 extra_env: std::collections::HashMap::new(),
                 layer: hooks::config::HookProvenance::File,

@@ -93,6 +93,7 @@ impl AgentTask {
     pub(super) fn new_prompt(
         session: Arc<SessionActor>,
         prompt_id: String,
+        input_ids: Vec<String>,
         origin: PromptOrigin,
         host_command: Option<crate::session::HostCommandInvocation>,
         notification_ids: Vec<String>,
@@ -143,6 +144,7 @@ impl AgentTask {
                             verbatim,
                             json_schema,
                             pid,
+                            input_ids,
                             origin,
                             notification_ids,
                             turn_kind,
@@ -343,6 +345,7 @@ async fn run_task(
     verbatim: bool,
     json_schema: Option<serde_json::Value>,
     prompt_id: String,
+    input_ids: Vec<String>,
     origin: PromptOrigin,
     notification_ids: Vec<String>,
     turn_kind: crate::session::TurnKind,
@@ -351,6 +354,7 @@ async fn run_task(
 ) {
     let result = std::panic::AssertUnwindSafe(session.handle_prompt(
         &prompt_id,
+        input_ids,
         origin,
         notification_ids,
         turn_kind,
@@ -1003,9 +1007,10 @@ impl SessionActor {
             "trigger": trigger.as_deref(),
             "pristine": rewound_input.is_some(),
         }));
-        let had_active_turn = self.events.current_turn().is_some();
+        let cancelled_turn = self.events.current_turn();
+        let had_active_turn = cancelled_turn.is_some();
         let current_prompt_index = self.current_turn_number.get() as usize;
-        let terminal_error = self
+        let mut terminal_error = self
             .emit_turn_ended(
                 crate::session::events::TurnOutcomeLabel::Cancelled,
                 chat_state::TurnTerminal {
@@ -1017,6 +1022,24 @@ impl SessionActor {
             )
             .await
             .err();
+        if terminal_error.is_none()
+            && rewound_input.is_none()
+            && let (Some(prompt_id), Some(turn)) =
+                (stop_cancelled_prompt_id.as_deref(), cancelled_turn)
+            && let Err(error) = self
+                .dispatch_observe_hook(
+                    ::hooks::event::HookEventName::StopCancelled,
+                    chat_state::HookCause::Turn { turn },
+                    ::hooks::event::HookPayload::StopCancelled {
+                        reason: crate::session::events::CancellationCategory::MidTurnAbort,
+                        trigger: trigger.as_deref().map(::hooks::event::clip_cancel_trigger),
+                    },
+                    Some(prompt_id.to_owned()),
+                )
+                .await
+        {
+            terminal_error = Some(error);
+        }
         if terminal_error.is_none()
             && rewound_input.is_none()
             && let Some(prompt_id) = cancelled_prompt_id.as_ref()
@@ -1196,6 +1219,21 @@ impl SessionActor {
         for (idx, input) in pending_inputs.into_iter().enumerate() {
             // Running turn is idx 0; queued prompts never spent tokens.
             let is_running_turn = idx == 0;
+            if !is_running_turn
+                && let Err(error) = self
+                    .dismiss_input_ids(
+                        input.input_ids.clone(),
+                        chat_state::InputDismissReason::SessionClosing,
+                    )
+                    .await
+            {
+                let _ = input
+                    .respond_to
+                    .send(Err(acp::Error::internal_error().data(format!(
+                        "cancel could not durably dismiss queued input: {error}"
+                    ))));
+                continue;
+            }
             let _ = input
                 .respond_to
                 .send(Ok(PromptTurnOk {
@@ -1229,26 +1267,6 @@ impl SessionActor {
                 .ok();
         }
 
-        // Observe-only `StopCancelled` hook: fired after the turn task is
-        // aborted and every client-facing `Cancelled` response is sent, so a
-        // hook can never delay or alter the cancel itself (its output is
-        // ignored and a failing observer is only logged). Skipped when no turn
-        // was actually cancelled (an idle cancel has no prompt id) and on the
-        // rewind path, which returns above. The category is `MidTurnAbort` —
-        // the same single classification every explicit cancel stamps on
-        // `turn_ended`; the trigger (esc / ctrl_c / …) rides alongside it.
-        if let Some(prompt_id) = stop_cancelled_prompt_id.as_deref() {
-            self.dispatch_hook(
-                ::hooks::event::HookEventName::StopCancelled,
-                ::hooks::event::HookPayload::StopCancelled {
-                    reason: crate::session::events::CancellationCategory::MidTurnAbort,
-                    trigger: trigger.as_deref().map(::hooks::event::clip_cancel_trigger),
-                },
-                Some(prompt_id),
-                None,
-            )
-            .await;
-        }
         Ok(())
     }
 }

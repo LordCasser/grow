@@ -67,14 +67,17 @@ impl IdlePromptExtension {
             let Some(actor) = actor.upgrade() else {
                 return;
             };
-            actor
+            if let Err(error) = actor
                 .dispatch_notification_hook(
                     "idle_prompt",
                     Some("Turn complete".into()),
                     None,
                     Some("info".into()),
                 )
-                .await;
+                .await
+            {
+                tracing::error!(%error, "idle notification hook lifecycle was not durable");
+            }
         });
         self.timer.arm(handle);
     }

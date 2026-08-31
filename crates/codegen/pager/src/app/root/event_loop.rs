@@ -225,7 +225,12 @@ fn seed_trust_state(app: &mut AppView, remote: Option<&shell::util::config::Remo
     // otherwise fail closed (no prompt).
     let inputs = decide_inputs_with_interactive(&cwd, &key, std::io::stdin().is_terminal());
     app.trust_state = match decide(feature, &inputs) {
-        TrustOutcome::Prompt => TrustState::Pending { workspace: key },
+        TrustOutcome::Prompt => TrustState::Pending {
+            workspace: key,
+            expected_identity: inputs
+                .expected_identity
+                .expect("Prompt requires an identifiable workspace"),
+        },
         TrustOutcome::Trusted | TrustOutcome::Untrusted => TrustState::Done,
     };
 }

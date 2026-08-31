@@ -247,7 +247,10 @@ impl SessionActor {
             };
             match prepared {
                 ToolPreflight::Dispatch(prepared) => approved.push(prepared),
-                ToolPreflight::Resolved { loop_result } => {
+                ToolPreflight::Resolved {
+                    loop_result,
+                    post_terminal_hook,
+                } => {
                     self.events
                         .tool_completed_durably(
                             &call_id,
@@ -263,6 +266,20 @@ impl SessionActor {
                                 "undispatched tool call was not durably closed: {error}"
                             ))
                         })?;
+                    if let Some(hook) = post_terminal_hook {
+                        self.dispatch_observe_hook(
+                            hook.event,
+                            hook.cause,
+                            hook.payload,
+                            hook.prompt_id,
+                        )
+                        .await
+                        .map_err(|error| {
+                            acp::Error::internal_error().data(format!(
+                                "post-terminal hook lifecycle was not durable: {error}"
+                            ))
+                        })?;
+                    }
                     retain_batch_terminal_result(final_result, loop_result);
                 }
             }
@@ -534,12 +551,10 @@ impl SessionActor {
                     if tool_result.output.is_error() {
                         post_tool_use_failure = Some(tool_result.prompt_text.clone());
                     } else {
-                        post_tool_use_result = self
-                            .hook_event_active(::hooks::event::HookEventName::PostToolUse)
-                            .then(|| {
-                                serde_json::to_value(&tool_result.output)
-                                    .unwrap_or(serde_json::Value::Null)
-                            });
+                        post_tool_use_result = Some(
+                            serde_json::to_value(&tool_result.output)
+                                .unwrap_or(serde_json::Value::Null),
+                        );
                     }
                     let followups = self
                         .handle_bridge_tool_success(
@@ -597,65 +612,6 @@ impl SessionActor {
                     ToolLoop::Continue
                 }
             };
-            {
-                let bridge = self.agent.borrow().tool_bridge().clone();
-                if let Some(effects) = bridge.apply_pending_skill_update().await {
-                    if let Some(item) = self.wrap_skill_reminder(&effects) {
-                        deferred_followups.push(item);
-                    }
-                    if effects.send_available_commands {
-                        self.send_available_commands_update().await;
-                    }
-                }
-            }
-            if let Some(error) = post_tool_use_failure
-                && self.hook_event_active(::hooks::event::HookEventName::PostToolUseFailure)
-            {
-                let raw_input: serde_json::Value = serde_json::from_str(&prepared.raw_arguments)
-                    .unwrap_or(serde_json::Value::Null);
-                let (tool_input_value, tool_input_truncated) =
-                    ::hooks::event::truncate_payload(raw_input);
-                let hook_tool_name = prepared.hook_tool_name();
-                self.dispatch_hook(
-                    ::hooks::event::HookEventName::PostToolUseFailure,
-                    ::hooks::event::HookPayload::PostToolUseFailure {
-                        tool_name: hook_tool_name.to_owned(),
-                        tool_use_id: prepared.call_id.clone(),
-                        tool_input: tool_input_value,
-                        tool_input_truncated,
-                        error,
-                        subagent_type: self.subagent_type_label(),
-                    },
-                    None,
-                    Some(hook_tool_name),
-                )
-                .await;
-            } else if let Some(tool_result_value) = post_tool_use_result {
-                let raw_input: serde_json::Value = serde_json::from_str(&prepared.raw_arguments)
-                    .unwrap_or(serde_json::Value::Null);
-                let (tool_input_value, tool_input_truncated) =
-                    ::hooks::event::truncate_payload(raw_input);
-                let (tool_result_val, tool_result_truncated) =
-                    ::hooks::event::truncate_payload(tool_result_value);
-                let hook_tool_name = prepared.hook_tool_name();
-                self.dispatch_hook(
-                    ::hooks::event::HookEventName::PostToolUse,
-                    ::hooks::event::HookPayload::PostToolUse {
-                        tool_name: hook_tool_name.to_owned(),
-                        tool_use_id: prepared.call_id.clone(),
-                        tool_input: tool_input_value,
-                        tool_result: tool_result_val,
-                        tool_input_truncated,
-                        tool_result_truncated,
-                        duration_ms: None,
-                        is_backgrounded: false,
-                        subagent_type: self.subagent_type_label(),
-                    },
-                    None,
-                    Some(hook_tool_name),
-                )
-                .await;
-            }
             let tool_outcome = match &tool_loop {
                 _ if tool_failed => crate::session::events::ToolOutcome::Error,
                 ToolLoop::Continue | ToolLoop::Control(_) => {
@@ -674,11 +630,8 @@ impl SessionActor {
                     crate::session::events::ToolOutcome::InvalidTool
                 }
             };
-            self.signals_handle().record_tool_duration(
-                &prepared.tool_name,
-                &tool_call_id,
-                duration_ms,
-            );
+            // The external tool result is the source fact for PostToolUse. It
+            // must be durable before the hook occurrence can be triggered.
             self.events
                 .tool_completed_durably(
                     &tool_call_id,
@@ -690,6 +643,81 @@ impl SessionActor {
                     acp::Error::internal_error()
                         .data(format!("tool completion was not durably recorded: {error}"))
                 })?;
+            {
+                let bridge = self.agent.borrow().tool_bridge().clone();
+                if let Some(effects) = bridge.apply_pending_skill_update().await {
+                    if let Some(item) = self.wrap_skill_reminder(&effects) {
+                        deferred_followups.push(item);
+                    }
+                    if effects.send_available_commands {
+                        self.send_available_commands_update().await;
+                    }
+                }
+            }
+            if let Some(error) = post_tool_use_failure {
+                let raw_input: serde_json::Value = serde_json::from_str(&prepared.raw_arguments)
+                    .unwrap_or(serde_json::Value::Null);
+                let (tool_input_value, tool_input_truncated) =
+                    ::hooks::event::truncate_payload(raw_input);
+                let hook_tool_name = prepared.hook_tool_name();
+                self.dispatch_observe_hook(
+                    ::hooks::event::HookEventName::PostToolUseFailure,
+                    chat_state::HookCause::Tool {
+                        call_id: prepared.call_id.clone(),
+                    },
+                    ::hooks::event::HookPayload::PostToolUseFailure {
+                        tool_name: hook_tool_name.to_owned(),
+                        tool_use_id: prepared.call_id.clone(),
+                        tool_input: tool_input_value,
+                        tool_input_truncated,
+                        error,
+                        subagent_type: self.subagent_type_label(),
+                    },
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error().data(format!(
+                        "post-tool-failure hook lifecycle was not durable: {error}"
+                    ))
+                })?;
+            } else if let Some(tool_result_value) = post_tool_use_result {
+                let raw_input: serde_json::Value = serde_json::from_str(&prepared.raw_arguments)
+                    .unwrap_or(serde_json::Value::Null);
+                let (tool_input_value, tool_input_truncated) =
+                    ::hooks::event::truncate_payload(raw_input);
+                let (tool_result_val, tool_result_truncated) =
+                    ::hooks::event::truncate_payload(tool_result_value);
+                let hook_tool_name = prepared.hook_tool_name();
+                self.dispatch_observe_hook(
+                    ::hooks::event::HookEventName::PostToolUse,
+                    chat_state::HookCause::Tool {
+                        call_id: prepared.call_id.clone(),
+                    },
+                    ::hooks::event::HookPayload::PostToolUse {
+                        tool_name: hook_tool_name.to_owned(),
+                        tool_use_id: prepared.call_id.clone(),
+                        tool_input: tool_input_value,
+                        tool_result: tool_result_val,
+                        tool_input_truncated,
+                        tool_result_truncated,
+                        duration_ms: None,
+                        is_backgrounded: false,
+                        subagent_type: self.subagent_type_label(),
+                    },
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("post-tool hook lifecycle was not durable: {error}"))
+                })?;
+            }
+            self.signals_handle().record_tool_duration(
+                &prepared.tool_name,
+                &tool_call_id,
+                duration_ms,
+            );
             ::diagnostics::session_ctx::log_event(::diagnostics::events::ToolCallCompleted {
                 tool_name: prepared.tool_name.clone(),
                 outcome: tool_outcome.into(),
@@ -745,7 +773,12 @@ impl SessionActor {
             None,
             Some("info".into()),
         )
-        .await;
+        .await
+        .map_err(|error| {
+            acp::Error::internal_error().data(format!(
+                "plan approval notification hook lifecycle was not durable: {error}"
+            ))
+        })?;
         debug_assert!(self.behavior.lock().approval_pending());
         let resp = {
             let _pending_guard = crate::session::pending_interaction::PendingInteractionGuard::new(

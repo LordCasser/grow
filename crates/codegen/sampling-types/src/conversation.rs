@@ -918,7 +918,7 @@ fn replace_compaction_reference_tokens(
         let mut next = text.to_string();
         for reference in references {
             if next.contains(reference) {
-                next = next.replace(reference, &replacement);
+                next = next.replace(reference, replacement);
                 changed = true;
             }
         }
@@ -1499,10 +1499,12 @@ pub struct ConversationResponse {
     /// Provider message id (Messages `message.id`); `None` on backends that do
     /// not carry one (OAI Chat Completions / Responses).
     pub message_id: Option<String>,
-    /// Verbatim wire stop reason before it collapses into [`StopReason`]
-    /// (e.g. `end_turn`, `tool_use`, `pause_turn`). Chat Completions records
-    /// provider extensions here when they require normalization; known OpenAI
-    /// reasons remain omitted. `None` when unreported.
+    /// Wire termination reason before it collapses into [`StopReason`]
+    /// (e.g. `end_turn`, `tool_use`, `pause_turn`). Responses API terminal
+    /// status is recorded as-is; when it also carries an incomplete reason,
+    /// both raw values are retained as `incomplete:<reason>`. This field is
+    /// diagnostic only and must never drive provider-neutral control flow.
+    /// `None` when the provider reported no terminal reason.
     pub raw_stop_reason: Option<String>,
     /// The provider's matched stop sequence (Messages API
     /// `message_delta.stop_sequence`), present only when the model stopped on a

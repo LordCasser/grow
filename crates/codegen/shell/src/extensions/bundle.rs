@@ -6,7 +6,7 @@
 use super::{ExtResult, parse_params, to_ext_response};
 use crate::agent::MvpAgent;
 use crate::bundle::{self, BundleManifest};
-use crate::remote::fetch_bundle;
+use crate::remote::{BundleServiceCredential, fetch_bundle};
 use acp_transport::protocol as acp;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -18,11 +18,8 @@ pub(crate) const BUNDLE_SYNC_TTL: Duration = Duration::from_secs(60 * 60);
 ///
 /// Hoisted to a constant so the user-facing wording stays in lockstep
 /// across `sync_bundle`, `sync_bundle_to_root`, and any future call sites.
-pub(crate) const NO_BUNDLE_CREDENTIALS_ERROR: &str = "bundle sync requires a deployment key";
-#[inline]
-pub(crate) fn has_bundle_credentials(deployment_key: Option<&str>) -> bool {
-    deployment_key.is_some_and(|key| !key.is_empty())
-}
+pub(crate) const NO_BUNDLE_CREDENTIALS_ERROR: &str =
+    "bundle sync requires GROW_DEPLOYMENT_KEY and an HTTPS GROW_BUNDLE_SERVICE_BASE_URL";
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BundleSyncRequest {
@@ -80,17 +77,10 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 async fn sync_bundle(agent: &MvpAgent, req: BundleSyncRequest) -> anyhow::Result<BundleSyncResult> {
-    let deployment_key = agent.deployment_key();
-    if !has_bundle_credentials(deployment_key.as_deref()) {
+    let Some(credential) = agent.bundle_service_credential() else {
         anyhow::bail!(NO_BUNDLE_CREDENTIALS_ERROR);
-    }
-    sync_bundle_to_root(
-        &bundle::bundled_root(),
-        &agent.cli_chat_proxy_base_url(),
-        deployment_key.as_deref(),
-        req.force,
-    )
-    .await
+    };
+    sync_bundle_to_root(&bundle::bundled_root(), &credential, req.force).await
 }
 /// `true` when `<root>/manifest.json` exists, was written within `ttl`, and
 /// is parseable as a [`BundleManifest`].
@@ -128,15 +118,10 @@ pub(crate) fn bundle_cache_is_fresh(root: &Path, ttl: Duration) -> bool {
 /// - `Err(_)` when sync was attempted but the network call or extract failed.
 pub(crate) async fn maybe_sync_bundle_to_root(
     root: &Path,
-    proxy_base_url: &str,
-    deployment_key: Option<&str>,
+    credential: &BundleServiceCredential,
     force: bool,
     ttl: Duration,
 ) -> anyhow::Result<Option<BundleSyncResult>> {
-    if !has_bundle_credentials(deployment_key) {
-        tracing::debug!("proactive bundle sync skipped: no deployment key");
-        return Ok(None);
-    }
     if !force && bundle_cache_is_fresh(root, ttl) {
         tracing::debug!(
             ttl_secs = ttl.as_secs(),
@@ -144,20 +129,14 @@ pub(crate) async fn maybe_sync_bundle_to_root(
         );
         return Ok(None);
     }
-    sync_bundle_to_root(root, proxy_base_url, deployment_key, force)
-        .await
-        .map(Some)
+    sync_bundle_to_root(root, credential, force).await.map(Some)
 }
 pub(crate) async fn sync_bundle_to_root(
     root: &Path,
-    proxy_base_url: &str,
-    deployment_key: Option<&str>,
+    credential: &BundleServiceCredential,
     _force: bool,
 ) -> anyhow::Result<BundleSyncResult> {
-    if !has_bundle_credentials(deployment_key) {
-        anyhow::bail!(NO_BUNDLE_CREDENTIALS_ERROR);
-    }
-    let bytes = fetch_bundle(proxy_base_url, deployment_key).await?;
+    let bytes = fetch_bundle(credential).await?;
     let root_owned = root.to_path_buf();
     let manifest =
         tokio::task::spawn_blocking(move || bundle::extract_bundle_archive(&root_owned, &bytes))
@@ -325,12 +304,5 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("manifest.json"), "not json").unwrap();
         assert!(!bundle_cache_is_fresh(root.path(), Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn credentials_must_be_nonempty() {
-        assert!(!has_bundle_credentials(None));
-        assert!(!has_bundle_credentials(Some("")));
-        assert!(has_bundle_credentials(Some("key")));
     }
 }

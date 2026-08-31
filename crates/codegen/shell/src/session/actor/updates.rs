@@ -160,7 +160,7 @@ impl SessionActor {
     /// extension payload. Routes through `event_tx` -> `ReplayBuffer` ->
     /// `emit_buffered` so chunks get merged + debounced + emitted.
     ///
-    /// For one-shot Grow events (RetryState, ImageCompressed, HookExecution,
+    /// For one-shot Grow events (RetryState, ImageCompressed,
     /// AutoCompactCompleted, etc.), use `send_grow_notification` instead.
     ///
     /// The frequency-based split (`send_buffered_grow_update` vs `send_grow_notification`)
@@ -465,7 +465,7 @@ impl SessionActor {
     pub(super) async fn handle_grow_session_notification(
         self: &std::sync::Arc<Self>,
         mut notification: GrowSessionNotification,
-    ) {
+    ) -> Result<(), chat_state::TimelineWriteError> {
         if !matches!(
             notification.update,
             GrowSessionUpdate::SubagentProgress { .. }
@@ -480,14 +480,35 @@ impl SessionActor {
             crate::util::event_id::ensure_event_id_meta(&self.session_info.id.0, &mut meta_map);
             notification.meta = meta_map.map(serde_json::Value::Object);
         }
+        let _ = self
+            .notifications
+            .persistence_tx
+            .send(PersistenceMsg::Update(
+                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
+            ));
+        if let GrowSessionUpdate::SubagentSpawned {
+            subagent_id,
+            subagent_type,
+            description,
+            ..
+        } = &notification.update
+        {
+            self.dispatch_observe_hook(
+                ::hooks::event::HookEventName::SubagentStart,
+                chat_state::HookCause::Subagent {
+                    subagent_id: subagent_id.clone(),
+                },
+                ::hooks::event::HookPayload::SubagentStart {
+                    subagent_id: subagent_id.clone(),
+                    subagent_type: subagent_type.clone(),
+                    description: Some(description.clone()),
+                },
+                None,
+            )
+            .await?;
+        }
         match &notification.update {
-            GrowSessionUpdate::SubagentSpawned {
-                subagent_id,
-                subagent_type,
-                description,
-                goal_id,
-                ..
-            } => {
+            GrowSessionUpdate::SubagentSpawned { goal_id, .. } => {
                 let goal_owned = goal_id.as_deref().is_some_and(|owner_goal_id| {
                     self.goal_tracker
                         .lock()
@@ -499,41 +520,16 @@ impl SessionActor {
                     let notify = self.goal_notify_sender();
                     notify.emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
                 }
-                let envelope = self.fire_hook(
-                    ::hooks::event::HookEventName::SubagentStart,
-                    None,
-                    ::hooks::event::HookPayload::SubagentStart {
-                        subagent_id: subagent_id.clone(),
-                        subagent_type: subagent_type.clone(),
-                        description: Some(description.clone()),
-                    },
-                );
-                let hook_registry_snapshot = self.hooks.registry.borrow().clone();
-                if let Some(registry) = hook_registry_snapshot {
-                    let ctx = self.hook_run_ctx();
-                    let _ = ::hooks::dispatcher::dispatch_non_blocking(
-                        &registry,
-                        ::hooks::event::HookEventName::SubagentStart,
-                        &envelope,
-                        &ctx,
-                    )
-                    .await;
-                }
             }
             GrowSessionUpdate::SubagentProgress { .. } => {
                 // Progress reports current child context pressure and remains
                 // a transient UI hint. Model-settlement usage is delivered by
                 // the shared Goal usage window instead.
-                return;
+                return Ok(());
             }
             _ => {}
         }
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Grow(Box::new(notification)),
-            ));
+        Ok(())
     }
     /// Persist an Grow extension notification to `updates.jsonl` **without** sending it
     /// to the gateway/UI. `RewindMarker` preserves the UI replay branch; it
@@ -562,29 +558,21 @@ impl SessionActor {
         message: Option<String>,
         title: Option<String>,
         level: Option<String>,
-    ) {
-        let envelope = self.fire_hook(
+    ) -> Result<(), chat_state::TimelineWriteError> {
+        self.dispatch_observe_hook(
             ::hooks::event::HookEventName::Notification,
-            None,
+            chat_state::HookCause::Notification {
+                notification_id: uuid::Uuid::now_v7().to_string(),
+            },
             ::hooks::event::HookPayload::Notification {
                 notification_type: notification_type.to_string(),
                 message,
                 title,
                 level,
             },
-        );
-        let hook_registry_snapshot = self.hooks.registry.borrow().clone();
-        let Some(registry) = hook_registry_snapshot else {
-            return;
-        };
-        let ctx = self.hook_run_ctx();
-        let _ = ::hooks::dispatcher::dispatch_non_blocking(
-            &registry,
-            ::hooks::event::HookEventName::Notification,
-            &envelope,
-            &ctx,
+            None,
         )
-        .await;
+        .await
     }
     /// Send an Grow extension notification to the client
     #[tracing::instrument(skip_all)]
@@ -611,6 +599,22 @@ impl SessionActor {
             meta.insert("transient".to_string(), serde_json::Value::Bool(true));
         }
         self.forward_grow_notification(notification).await;
+    }
+
+    /// Forward a transient projection produced by a Hook occurrence without
+    /// recursively treating that projection as a fresh Notification Hook.
+    pub(super) async fn send_transient_hook_notification(&self, update: GrowSessionUpdate) {
+        self.close_rewind_window().await;
+        let mut notification = self.build_grow_notification(update, None);
+        if let Some(meta) = notification
+            .meta
+            .as_mut()
+            .and_then(|meta| meta.as_object_mut())
+        {
+            meta.remove("eventId");
+            meta.insert("transient".to_string(), serde_json::Value::Bool(true));
+        }
+        self.forward_grow_notification_unhooked(notification);
     }
 
     /// Persist and forward a passive UI/audit update without changing rewind
@@ -760,6 +764,19 @@ impl SessionActor {
     }
 
     pub(super) async fn forward_grow_notification(&self, notification: GrowSessionNotification) {
+        if let Some((notification_type, message, title, level)) =
+            notification_hook_for_update(&notification.update)
+            && let Err(error) = self
+                .dispatch_notification_hook(&notification_type, message, title, level)
+                .await
+        {
+            tracing::error!(%error, "notification hook lifecycle was not durable; withholding notification");
+            return;
+        }
+        self.forward_grow_notification_unhooked(notification);
+    }
+
+    fn forward_grow_notification_unhooked(&self, notification: GrowSessionNotification) {
         let params = serde_json::to_value(&notification)
             .and_then(|v| serde_json::value::to_raw_value(&v))
             .ok();
@@ -769,12 +786,6 @@ impl SessionActor {
             self.notifications
                 .gateway
                 .forward_fire_and_forget(ext_notification);
-        }
-        if let Some((notification_type, message, title, level)) =
-            notification_hook_for_update(&notification.update)
-        {
-            self.dispatch_notification_hook(&notification_type, message, title, level)
-                .await;
         }
     }
 }
@@ -877,7 +888,8 @@ mod grow_event_id_stamping_tests {
                         },
                         meta: None,
                     })
-                    .await;
+                    .await
+                    .unwrap();
                 let inbound_id = persisted_grow_event_id(&mut prx).await;
                 assert!(inbound_id.starts_with("test-actor-"));
                 assert_ne!(own_id, inbound_id);
@@ -1393,6 +1405,7 @@ mod synthetic_prompt_behavior_tests {
                         actor
                             .handle_prompt(
                                 "subagent-completed-sa-1",
+                                Vec::new(),
                                 crate::session::PromptOrigin::SubagentCompleted {
                                     subagent_id: "sa-1".to_string(),
                                 },
@@ -1481,6 +1494,7 @@ mod synthetic_prompt_behavior_tests {
                         actor
                             .handle_prompt(
                                 "subagent-completed-sa-2",
+                                Vec::new(),
                                 crate::session::PromptOrigin::SubagentCompleted {
                                     subagent_id: "sa-2".to_string(),
                                 },

@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CompactionEvent, ControlContextLayer, ControlEvent, MessageEvent, NotificationEvent,
-    NotificationSource, ObservationEvent, RecoveryEvent, RequestEvent, SessionTitleEvent,
-    SessionTitleSource, SidebandSpawnEvent, StepEvent, SubagentEvent, SubagentResultEvent,
-    SubagentSeedEvent, SurfaceId, SurfaceOp, Timeline, TimelineEvent, TimelineEventKind, ToolEvent,
-    TurnEvent, WorkflowEvent,
+    CompactionEvent, ControlContextLayer, ControlEvent, HookEvent, InputAdmissionDecision,
+    InputEvent, MessageEvent, NotificationEvent, NotificationSource, ObservationEvent,
+    RecoveryEvent, RequestEvent, SessionTitleEvent, SessionTitleSource, SidebandSpawnEvent,
+    StepEvent, SubagentEvent, SubagentResultEvent, SubagentSeedEvent, SurfaceId, SurfaceOp,
+    Timeline, TimelineEvent, TimelineEventKind, ToolEvent, TurnEvent, WorkflowEvent,
 };
 
 /// Wire schema for the read-only Trajectory projection.
@@ -197,9 +197,20 @@ impl TrajectoryProjector {
                 );
                 1
             }
+            TimelineEventKind::Input(InputEvent::Consumed { .. }) => {
+                self.surface_rows.insert(
+                    SurfaceId {
+                        event: event.seq,
+                        item: 0,
+                    },
+                    row_index,
+                );
+                1
+            }
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: None, ..
             }) => 0,
+            TimelineEventKind::Input(InputEvent::Handled { .. }) => 0,
             TimelineEventKind::Notification(NotificationEvent::Dismissed { .. }) => 0,
             TimelineEventKind::Control(ControlEvent { model_contexts, .. }) => {
                 let mut current = 0;
@@ -374,6 +385,8 @@ fn dimensions(
 ) -> (String, String, String, String) {
     match event {
         TimelineEventKind::Messages(message) => message_dimensions(message, tool_scopes),
+        TimelineEventKind::Input(_) => coordinates("meta", "governance", "user", "input", state),
+        TimelineEventKind::Hook(_) => coordinates("meta", "governance", "hook", "hook", state),
         TimelineEventKind::Turn(_) => coordinates("meta", "lifecycle", "core", "turn", state),
         TimelineEventKind::Step(_) => coordinates("meta", "lifecycle", "core", "step", state),
         TimelineEventKind::Request(_) => {
@@ -626,6 +639,156 @@ fn describe(
 ) {
     match kind {
         TimelineEventKind::Messages(event) => describe_message(event),
+        TimelineEventKind::Input(event) => match event {
+            InputEvent::Submitted {
+                input_id,
+                intent,
+                payload_ref,
+            } => tuple(
+                "input",
+                "submitted",
+                "pending",
+                None,
+                None,
+                Some(input_id.clone()),
+                None,
+                format!("{intent:?} · {} bytes", payload_ref.bytes),
+            ),
+            InputEvent::AdmissionResolved {
+                input_id,
+                decision,
+                route,
+                supersedes,
+            } => tuple(
+                "input",
+                "admission",
+                match decision {
+                    InputAdmissionDecision::Allow => "allowed",
+                    InputAdmissionDecision::Block { .. } => "blocked",
+                },
+                None,
+                None,
+                Some(input_id.clone()),
+                None,
+                format!("{decision:?} · route={route:?} · supersedes={supersedes:?}"),
+            ),
+            InputEvent::Rerouted { input_ids, route } => tuple(
+                "input",
+                "rerouted",
+                "projected",
+                None,
+                None,
+                Some(input_ids.join(",")),
+                None,
+                format!("input projected to {route:?}"),
+            ),
+            InputEvent::Consumed {
+                input_ids, turn, ..
+            } => tuple(
+                "input",
+                "consumed",
+                "consumed",
+                Some(turn.0.to_string()),
+                None,
+                Some(input_ids.join(",")),
+                None,
+                "input consumed exactly once".into(),
+            ),
+            InputEvent::Handled { input_ids, turn } => tuple(
+                "input",
+                "handled",
+                "consumed",
+                Some(turn.0.to_string()),
+                None,
+                Some(input_ids.join(",")),
+                None,
+                "input completed without entering model context".into(),
+            ),
+            InputEvent::Dismissed { input_ids, reason } => tuple(
+                "input",
+                "dismissed",
+                "dismissed",
+                None,
+                None,
+                Some(input_ids.join(",")),
+                None,
+                format!("{reason:?}"),
+            ),
+        },
+        TimelineEventKind::Hook(event) => match event {
+            HookEvent::Triggered {
+                occurrence_id,
+                event,
+                handlers,
+                ..
+            } => tuple(
+                "hook",
+                "triggered",
+                "planned",
+                None,
+                None,
+                Some(occurrence_id.clone()),
+                None,
+                format!("{event:?} · {} handler(s)", handlers.len()),
+            ),
+            HookEvent::RunStarted {
+                occurrence_id,
+                run_id,
+                ..
+            } => tuple(
+                "hook",
+                "run",
+                "started",
+                None,
+                None,
+                Some(run_id.clone()),
+                None,
+                occurrence_id.clone(),
+            ),
+            HookEvent::RunFinished {
+                occurrence_id,
+                run_id,
+                outcome,
+                ..
+            } => tuple(
+                "hook",
+                "run",
+                "finished",
+                None,
+                None,
+                Some(run_id.clone()),
+                None,
+                format!("{occurrence_id} · {outcome:?}"),
+            ),
+            HookEvent::RunSkipped {
+                occurrence_id,
+                run_id,
+                reason,
+                ..
+            } => tuple(
+                "hook",
+                "run",
+                "skipped",
+                None,
+                None,
+                Some(run_id.clone()),
+                None,
+                format!("{occurrence_id} · {reason:?}"),
+            ),
+            HookEvent::Completed {
+                occurrence_id,
+                decision,
+            } => tuple(
+                "hook",
+                "completed",
+                "completed",
+                None,
+                None,
+                Some(occurrence_id.clone()),
+                None,
+                format!("{decision:?}"),
+            ),
+        },
         TimelineEventKind::Turn(event) => match event {
             TurnEvent::Started {
                 id,
@@ -1665,6 +1828,88 @@ mod tests {
     }
 
     #[test]
+    fn hook_rows_are_an_exact_projection_of_timeline_hook_facts() {
+        let mut timeline = Timeline::default();
+        timeline
+            .record(TimelineEventKind::Observation(ObservationEvent {
+                scope: "test".into(),
+                name: "before_hook".into(),
+                turn: None,
+                step: None,
+                data: None,
+            }))
+            .unwrap();
+        let handler = crate::HookHandlerPlan {
+            index: 0,
+            run_id: "trajectory-run".into(),
+            name: "trajectory-handler".into(),
+            provenance: crate::HookHandlerProvenance::ProjectFile,
+            kind: crate::HookHandlerKind::Command,
+            failure_policy: crate::HookFailurePolicy::Allow,
+            action: crate::HookHandlerPlanAction::Execute,
+        };
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "trajectory-hook".into(),
+                event: crate::HookEventType::Notification,
+                gate: crate::HookGateKind::Observe,
+                cause: crate::HookCause::Notification {
+                    notification_id: "trajectory-hook".into(),
+                },
+                config_generation: 9,
+                handlers: vec![handler],
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunStarted {
+                occurrence_id: "trajectory-hook".into(),
+                run_id: "trajectory-run".into(),
+                handler_index: 0,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunFinished {
+                occurrence_id: "trajectory-hook".into(),
+                run_id: "trajectory-run".into(),
+                handler_index: 0,
+                elapsed_ms: 7,
+                outcome: crate::HookRunOutcome::Success,
+                control: crate::HookRunControl::None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: "trajectory-hook".into(),
+                decision: crate::HookAggregateDecision::Observe,
+            }))
+            .unwrap();
+
+        let snapshot = timeline.trajectory();
+        assert_eq!(snapshot.rows.len(), timeline.events().len());
+        for (event, row) in timeline.events().iter().zip(&snapshot.rows) {
+            let is_hook_fact = matches!(&event.kind, TimelineEventKind::Hook(_));
+            assert_eq!(row.producer == "hook", is_hook_fact);
+            if is_hook_fact {
+                assert_eq!(row.layer, "meta");
+                assert_eq!(row.class, "governance");
+                assert_eq!(
+                    row.details,
+                    serde_json::to_value(&event.kind).expect("Hook fact serializes")
+                );
+            }
+        }
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .filter(|row| row.producer == "hook")
+                .map(|row| row.state.as_str())
+                .collect::<Vec<_>>(),
+            ["planned", "started", "finished", "completed"]
+        );
+    }
+
+    #[test]
     fn projector_stamps_every_in_turn_row_with_stable_scope() {
         let mut timeline = Timeline::from_seed(vec![ConversationItem::user("task")]).unwrap();
         let turn = crate::TurnId(42);
@@ -1672,9 +1917,10 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: crate::TurnIdentity {
                     origin: "user".into(),
-                    turn_kind: "user".into(),
+                    turn_kind: "internal".into(),
                     goal_id: None,
                     goal_definition_revision: None,
                     stage_id: None,
@@ -1803,9 +2049,10 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: crate::TurnIdentity {
                     origin: "user".into(),
-                    turn_kind: "user".into(),
+                    turn_kind: "internal".into(),
                     goal_id: None,
                     goal_definition_revision: None,
                     stage_id: None,
@@ -1874,9 +2121,10 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: crate::TurnIdentity {
                     origin: "user".into(),
-                    turn_kind: "user".into(),
+                    turn_kind: "internal".into(),
                     goal_id: None,
                     goal_definition_revision: None,
                     stage_id: None,
@@ -2083,9 +2331,10 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: crate::TurnIdentity {
                     origin: "user".into(),
-                    turn_kind: "user".into(),
+                    turn_kind: "internal".into(),
                     goal_id: None,
                     goal_definition_revision: None,
                     stage_id: None,
@@ -2178,9 +2427,10 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id: turn,
+                input_ids: Vec::new(),
                 identity: crate::TurnIdentity {
                     origin: "user".into(),
-                    turn_kind: "user".into(),
+                    turn_kind: "internal".into(),
                     goal_id: None,
                     goal_definition_revision: None,
                     stage_id: None,

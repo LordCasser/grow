@@ -132,6 +132,7 @@ mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
 mod coordination;
 mod idle_arbitration;
+mod input_admission;
 mod recap;
 mod rewind;
 mod run_loop;
@@ -151,6 +152,9 @@ pub(crate) use spawn::*;
 /// Client-registered hook gates (the `grow/hooks/run` reverse request).
 mod hooks;
 pub(crate) struct InputItem {
+    /// Human input identities atomically consumed by this turn. Empty for all
+    /// synthetic and host-owned internal turns.
+    pub(crate) input_ids: Vec<String>,
     pub(crate) prompt_id: String,
     pub(crate) turn_kind: super::TurnKind,
     pub(crate) prompt_blocks: Vec<ContentBlock>,
@@ -1318,13 +1322,41 @@ pub(crate) struct PreparedToolCall {
 #[derive(Debug)]
 pub(crate) enum ToolPreflight {
     Dispatch(PreparedToolCall),
-    Resolved { loop_result: ToolLoop },
+    Resolved {
+        loop_result: ToolLoop,
+        /// Observe-only lifecycle that is causally downstream of the
+        /// undispatched tool's durable terminal fact.  PermissionDenied is
+        /// the current producer: emitting it during preflight would point at
+        /// an open Tool and violate the Timeline's post-tool contract.
+        post_terminal_hook: Option<DeferredObserveHook>,
+    },
 }
 
 impl ToolPreflight {
     fn resolved(loop_result: ToolLoop) -> Self {
-        Self::Resolved { loop_result }
+        Self::Resolved {
+            loop_result,
+            post_terminal_hook: None,
+        }
     }
+
+    fn resolved_with_post_terminal_hook(
+        loop_result: ToolLoop,
+        post_terminal_hook: DeferredObserveHook,
+    ) -> Self {
+        Self::Resolved {
+            loop_result,
+            post_terminal_hook: Some(post_terminal_hook),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct DeferredObserveHook {
+    event: ::hooks::event::HookEventName,
+    cause: chat_state::HookCause,
+    payload: ::hooks::event::HookPayload,
+    prompt_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1402,6 +1434,10 @@ struct McpSessionState {
 struct HookSessionState {
     registry: std::cell::RefCell<Option<Arc<::hooks::discovery::HookRegistry>>>,
     client_hooks: std::cell::RefCell<crate::extensions::hooks::ClientHooks>,
+    /// Monotonic identity of the file + client handler configuration. Every
+    /// occurrence captures this together with its cloned handler plan, so a
+    /// mid-dispatch reload cannot change membership or ordering.
+    generation: std::cell::Cell<u64>,
     resolved_workspace_root: String,
     vcs_kind: workspace::session::git::VcsKind,
     load_errors: std::cell::RefCell<Vec<String>>,
@@ -1426,6 +1462,8 @@ pub(crate) struct SessionActor {
     /// and post-commit reclamation so a same-content receipt cannot race an
     /// in-flight content-addressed payload deletion.
     pub(crate) notification_artifact_gate: TokioMutex<()>,
+    /// Serializes immutable input artifacts with admission and orphan sweep.
+    pub(crate) input_artifact_gate: TokioMutex<()>,
     /// ACP method selected for this BYOK-only session.
     pub(crate) auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
     /// Memoized per-model auth state, read through

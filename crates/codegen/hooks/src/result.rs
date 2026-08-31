@@ -45,7 +45,16 @@ pub struct HttpInfo {
 }
 
 /// The outcome of a single hook execution.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookSkipReason {
+    MatcherMiss,
+    Disabled,
+    PolicyDisabled,
+    PriorBlock,
+    ProcessInterrupted,
+}
+
+#[derive(Debug, Clone)]
 pub enum HookRunResult {
     Success {
         hook_name: String,
@@ -54,6 +63,7 @@ pub enum HookRunResult {
     },
     Skipped {
         hook_name: String,
+        reason: HookSkipReason,
     },
     /// Ran and blocked: a stop-gate decision, not a failure (distinct from `Failed`).
     Blocked {
@@ -62,10 +72,22 @@ pub enum HookRunResult {
         elapsed: Duration,
         http_info: Option<HttpInfo>,
     },
-    /// Hook failed (timeout, crash, bad output): fail-open.
+    /// Hook failed for a reason other than timeout or cancellation. Admission
+    /// gates apply the handler's `on_failure` policy to this result.
     Failed {
         hook_name: String,
         error: String,
+        elapsed: Duration,
+        http_info: Option<HttpInfo>,
+    },
+    TimedOut {
+        hook_name: String,
+        timeout_ms: u64,
+        elapsed: Duration,
+        http_info: Option<HttpInfo>,
+    },
+    Cancelled {
+        hook_name: String,
         elapsed: Duration,
         http_info: Option<HttpInfo>,
     },

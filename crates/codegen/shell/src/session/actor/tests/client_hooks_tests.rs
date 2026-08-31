@@ -128,6 +128,8 @@ async fn pre_tool_use_resolves_meta_dispatch_tool_name_end_to_end() {
             *actor.hooks.client_hooks.borrow_mut() = client_hooks;
             spawn_deny_responder(gateway_rx, "nope");
 
+            begin_test_causal_turn(&actor).await;
+
             let call = ToolCallResponse {
                 id: "call_1".to_string(),
                 kind: "function".to_string(),
@@ -136,6 +138,15 @@ async fn pre_tool_use_resolves_meta_dispatch_tool_name_end_to_end() {
                     r#"{"tool_name":"linear__save_issue","tool_input":{}}"#,
                 ),
             };
+            actor
+                .events
+                .tool_started(
+                    call.function.name.clone(),
+                    call.id.clone(),
+                    serde_json::from_str(&call.function.arguments).ok(),
+                )
+                .await
+                .expect("the direct preflight test must durably open its causal tool");
 
             let mut deferred = Vec::new();
             let result = tokio::time::timeout(
@@ -149,7 +160,8 @@ async fn pre_tool_use_resolves_meta_dispatch_tool_name_end_to_end() {
                 matches!(
                     result,
                     ToolPreflight::Resolved {
-                        loop_result: ToolLoop::HookDenied { .. }
+                        loop_result: ToolLoop::HookDenied { .. },
+                        ..
                     }
                 ),
                 "a hook matched on the resolved tool must gate the use_tool dispatch; \
@@ -262,8 +274,8 @@ async fn subagent_inherits_parent_pre_tool_use_client_hook() {
 }
 
 /// A slow/hung callback must not starve a later deny: with the first-registered callback
-/// never replying and the second denying, the gate returns `HookDenied` quickly (a
-/// sequential gate would block on the hung one's full timeout). Pins the concurrency claim.
+/// never replying and the second denying, the durable production dispatcher resolves
+/// the Tool gate quickly (a sequential gate would block on the hung one's full timeout).
 #[tokio::test(flavor = "current_thread")]
 async fn pre_tool_use_slow_callback_does_not_starve_a_deny() {
     let local = tokio::task::LocalSet::new();
@@ -280,6 +292,7 @@ async fn pre_tool_use_slow_callback_does_not_starve_a_deny() {
                 ::hooks::event::HookEventName::PreToolUse,
                 &["slow_cb", "deny_cb"],
             );
+            begin_test_causal_turn(&actor).await;
 
             tokio::task::spawn_local(async move {
                 let mut held = Vec::new();
@@ -316,7 +329,15 @@ async fn pre_tool_use_slow_callback_does_not_starve_a_deny() {
                     "{}",
                 ),
             };
-            let tool_call_id = acp::ToolCallId::new("call_1");
+            actor
+                .events
+                .tool_started(
+                    call.function.name.clone(),
+                    call.id.clone(),
+                    serde_json::from_str(&call.function.arguments).ok(),
+                )
+                .await
+                .expect("the production hook dispatcher requires an open causal tool");
             let envelope = actor.make_hook_envelope(
                 ::hooks::event::HookEventName::PreToolUse,
                 None,
@@ -333,12 +354,22 @@ async fn pre_tool_use_slow_callback_does_not_starve_a_deny() {
             // pass proves the deny was not serialized behind the slow callback.
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                actor.run_pre_tool_use_client_hook(&call, &tool_call_id, &envelope),
+                actor.dispatch_hook_occurrence(
+                    ::hooks::event::HookEventName::PreToolUse,
+                    chat_state::HookCause::Tool {
+                        call_id: call.id.clone(),
+                    },
+                    envelope,
+                    ::hooks::event::GateKind::Tool,
+                ),
             )
             .await
             .expect("a deny must resolve without waiting on the hung callback")
-            .expect("the gate must not error");
-            assert!(matches!(result, Some(ToolLoop::HookDenied { .. })));
+            .expect("the hook lifecycle must remain durable");
+            assert!(matches!(
+                result.into_tool_decision(),
+                ::hooks::result::HookDecision::Deny { .. }
+            ));
         })
         .await;
 }
@@ -651,6 +682,7 @@ async fn run_stop_gate_keep_working_and_cap() {
             let (persistence_tx, _persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            begin_test_causal_turn(&actor).await;
 
             let decision = actor.run_stop_gate("prompt-1", 0).await;
             assert!(matches!(decision, StopGateDecision::AllowStop));
@@ -693,7 +725,7 @@ fn file_registry_with_stop_spec(
 ) -> ::hooks::discovery::HookRegistry {
     let (mut registry, _) = ::hooks::discovery::load_hooks(None, None);
     registry.append_specs(vec![::hooks::config::HookSpec {
-        name: "test/stop-hook".into(),
+        name: "global/test-stop-hook".into(),
         event,
         handler_type: ::hooks::config::HandlerType::Command,
         configured_matcher: None,
@@ -704,6 +736,7 @@ fn file_registry_with_stop_spec(
         url: None,
         url_raw: None,
         timeout_ms: 5000,
+        on_failure: ::hooks::config::OnFailure::Allow,
         source_dir: std::path::PathBuf::from("/tmp"),
         extra_env: std::collections::HashMap::new(),
         layer: ::hooks::config::HookProvenance::File,
@@ -724,6 +757,7 @@ async fn file_force_stop_skips_client_gate_but_notifies() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor.hooks.resolved_workspace_root = "/tmp".to_string();
+            begin_test_causal_turn(&actor).await;
 
             *actor.hooks.registry.borrow_mut() =
                 Some(std::sync::Arc::new(file_registry_with_stop_spec(
@@ -883,6 +917,22 @@ async fn subagent_session_gates_on_subagent_stop() {
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor.startup_hints.is_subagent = true;
             actor.hooks.resolved_workspace_root = "/tmp".to_string();
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::SubagentSeed(
+                    chat_state::SubagentSeedEvent {
+                        parent_timeline_id: "test-parent-timeline".into(),
+                        parent_spawn_seq: 1,
+                        subagent_id: actor.session_id_string(),
+                        security_parent_session_id: "test-parent-session".into(),
+                        context_source: chat_state::SubagentContextSource::New,
+                        source_ref: None,
+                        normalized: false,
+                    },
+                ))
+                .await
+                .expect("the subagent stop test must durably seed its child identity");
+            begin_test_causal_turn(&actor).await;
 
             *actor.hooks.registry.borrow_mut() =
                 Some(std::sync::Arc::new(file_registry_with_stop_spec(

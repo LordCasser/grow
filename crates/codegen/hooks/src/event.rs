@@ -83,7 +83,7 @@ hook_events! {
     },
     UserPromptSubmit {
         key: "user_prompt_submit",
-        traits: (Observe, Ignored),
+        traits: (Prompt, Ignored),
     },
     PreToolUse {
         key: "pre_tool_use",
@@ -148,6 +148,8 @@ hook_events! {
 pub enum GateKind {
     /// Hook output recorded, decisions ignored.
     Observe,
+    /// User prompt admission decision control.
+    Prompt,
     Tool,
     /// Stop decision control (`block`, `continue: false`, `additionalContext`).
     Stop,
@@ -601,6 +603,10 @@ mod tests {
         use super::{GateKind, MatcherPolicy};
 
         assert_eq!(HookEventName::PreToolUse.traits().gate, GateKind::Tool);
+        assert_eq!(
+            HookEventName::UserPromptSubmit.traits().gate,
+            GateKind::Prompt
+        );
         assert_eq!(HookEventName::Stop.traits().gate, GateKind::Stop);
         assert_eq!(HookEventName::SubagentStop.traits().gate, GateKind::Stop);
         assert_eq!(HookEventName::PostToolUse.traits().gate, GateKind::Observe);

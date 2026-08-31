@@ -938,6 +938,7 @@ fn handle_session_notification_inner(
             true
         }
         GrowSessionUpdate::HookExecution {
+            occurrence_id: _,
             event_name,
             tool_name: _tool_name,
             prompt_id: batch_prompt_id,

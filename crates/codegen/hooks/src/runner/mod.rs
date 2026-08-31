@@ -10,8 +10,8 @@ use serde::Deserialize;
 use crate::result::{HookDecision, HttpInfo, StopHookOutcome};
 
 /// How a hook's output is interpreted, per the event's [`GateKind`]: `Observe`
-/// ignores output, `Tool` parses the allow/deny vocabulary, `Stop` the stop
-/// vocabulary.
+/// ignores output, `Prompt` and `Tool` parse the allow/deny vocabulary, and
+/// `Stop` parses the stop vocabulary.
 pub use crate::event::GateKind;
 
 pub struct RunContext<'a> {
@@ -21,17 +21,19 @@ pub struct RunContext<'a> {
 }
 
 /// Result of running a single hook (any handler type).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HookRunnerResult {
     Decision(HookDecision),
     Stop(StopHookOutcome),
     Success,
-    /// Failed: the caller fails open.
+    TimedOut,
+    Cancelled,
+    /// An execution or output failure distinct from timeout and cancellation.
     Failed(String),
 }
 
 /// JSON from `PreToolUse` gate hooks:
-/// `{"decision": "allow" | "deny", "reason": "…"}`.
+/// `{"decision": "allow" | "deny" | "block", "reason": "…"}`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GateHookJson {
@@ -47,7 +49,7 @@ pub(crate) fn gate_json_to_decision(
     hook_name: &str,
 ) -> Result<HookDecision, String> {
     match json.decision.as_str() {
-        "deny" => Ok(HookDecision::Deny {
+        "deny" | "block" => Ok(HookDecision::Deny {
             reason: json
                 .reason
                 .unwrap_or_else(|| format!("denied by hook '{hook_name}'")),

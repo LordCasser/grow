@@ -539,38 +539,13 @@ impl SessionActor {
     /// step. `tools/list_changed` notifications from the respawned
     /// server flow through the normal dispatcher path.
     ///
-    /// ## Event-tx wiring order
+    /// ## Event identity binding
     ///
-    /// Unlike the first-time handshake path (which wires
-    /// `set_event_tx` BEFORE `ensure_initialized` so the dispatcher
-    /// gets the `Ready → Initialized` push), the **restart** path
-    /// wires `set_event_tx` AFTER `ensure_initialized`. Reason: the
-    /// auto-restart task is the SOLE emitter of restart status —
-    /// it pushes `Reason::RestartSucceeded` directly. Letting
-    /// `ensure_initialized` also emit `McpClientEvent::Ready` would
-    /// produce two wire pushes for one restart (one
-    /// `Reason::Initialized` from the dispatcher's mapping, one
-    /// `Reason::RestartSucceeded` from the restart task).
-    ///
-    /// The `GrowClientHandler` constructed inside `try_handshake`
-    /// holds the SHARED `Arc<Mutex<Option<Sender>>>` slot
-    /// (`SharedEventTx`), so wiring the sender AFTER the handshake
-    /// still routes subsequent `tools/list_changed` /
-    /// `resources/list_changed` server pushes through the
-    /// dispatcher — the handler re-reads the slot on every emit.
-    ///
-    /// **Contract:**
-    /// [`::mcp::servers`] test
-    /// `client_handler_observes_post_handshake_set_event_tx`
-    /// builds a handler from a
-    /// client whose slot is `None`, then installs a sender via
-    /// `client.set_event_tx(Some(_))` and verifies the next emit
-    /// reaches the new receiver. If that test regresses — i.e. a
-    /// future refactor snapshots `notify_tx` at handler
-    /// construction instead of re-reading via the `Arc<Mutex<_>>` —
-    /// the restart path here will silently fail to deliver
-    /// `tools/list_changed` for respawned servers. Keep that test
-    /// and this comment together.
+    /// The restart path binds the replacement only after its handshake. This
+    /// preserves the existing single status owner: the restart task reports
+    /// success/failure, so `ensure_initialized` must not also emit an
+    /// `Initialized` event for the same restart. Once bound, liveness and
+    /// list-change events carry one non-reusable client episode.
     ///
     /// ## TOCTOU re-check
     ///
@@ -580,12 +555,12 @@ impl SessionActor {
     /// that window must not result in a freshly-installed client for
     /// a server the user just disabled. After `ensure_initialized`
     /// succeeds and BEFORE the `owned_clients.insert`, this function
-    /// re-checks [`Self::is_stdio_server_configured`]. On `false` it
-    /// drops the new `Arc<McpClient>` — `kill_on_drop(true)` then
-    /// SIGKILLs the spawned child — and returns an explicit error so
-    /// the auto-restart loop can emit `Reason::Disabled`.
+    /// re-checks the exact config value and generation before binding the
+    /// episode and inserting the client. On mismatch it drops the new
+    /// `Arc<McpClient>` — `kill_on_drop(true)` then SIGKILLs the spawned child
+    /// — and returns an explicit error.
     pub(crate) async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
-        let (server_config, meta_config, event_tx) = {
+        let (server_config, meta_config, config_generation) = {
             let mcp_state = self.mcp_state.lock().await;
             let server_config = mcp_state
                 .configs
@@ -596,8 +571,7 @@ impl SessionActor {
                 .cloned()
                 .ok_or_else(|| format!("no stdio config entry for server '{server}'"))?;
             let meta_config = mcp_state.meta_config_map.get(server).cloned();
-            let event_tx = mcp_state.client_event_tx();
-            (server_config, meta_config, event_tx)
+            (server_config, meta_config, mcp_state.generation())
         };
         let cwd = std::path::Path::new(&self.session_info.cwd);
         let session_id = self.session_info.id.0.as_ref();
@@ -613,55 +587,51 @@ impl SessionActor {
         )
         .await
         .map_err(|e| e.to_string())?;
+        {
+            let mcp_state = self.mcp_state.lock().await;
+            if mcp_state.generation() != config_generation {
+                return Err(format!(
+                    "config for server '{server}' changed while respawn was starting"
+                ));
+            }
+        }
         new_client
             .ensure_initialized()
             .await
-            .map_err(|e| e.to_string())?;
-        if !self.is_stdio_server_configured(server).await {
-            drop(new_client);
-            return Err(format!(
-                "server '{server}' was disabled or removed during respawn"
-            ));
-        }
-        let current_config = {
-            let mcp_state = self.mcp_state.lock().await;
-            mcp_state
-                .configs
-                .iter()
-                .find(|c| {
-                    matches!(c, acp::McpServer::Stdio(acp::McpServerStdio { name, .. }) if name == server)
-                })
-                .cloned()
-        };
-        let config_unchanged = match (
-            serde_json::to_string(&server_config),
-            current_config.as_ref().map(serde_json::to_string),
-        ) {
-            (Ok(snapshot), Some(Ok(current))) => snapshot == current,
-            _ => false,
-        };
-        if !config_unchanged {
-            drop(new_client);
-            return Err(format!(
-                "config for server '{server}' changed during respawn"
-            ));
-        }
-        if let Some(tx) = event_tx {
-            new_client.set_event_tx(Some(tx.clone()));
-            let _ = tx.send(::mcp::servers::McpClientEvent::ToolsChanged {
-                server: server.to_string(),
-            });
-        }
+            .map_err(|error| error.to_string())?;
         let arc_client = std::sync::Arc::new(new_client);
+        {
+            let mut mcp_state = self.mcp_state.lock().await;
+            let current_config = mcp_state.configs.iter().find(|config| {
+                matches!(config, acp::McpServer::Stdio(acp::McpServerStdio { name, .. }) if name == server)
+            });
+            let config_unchanged = mcp_state.generation() == config_generation
+                && match (
+                    serde_json::to_string(&server_config),
+                    current_config.map(serde_json::to_string),
+                ) {
+                    (Ok(snapshot), Some(Ok(current))) => snapshot == current,
+                    _ => false,
+                };
+            if !config_unchanged {
+                drop(mcp_state);
+                drop(arc_client);
+                return Err(format!(
+                    "server '{server}' was disabled or changed during respawn"
+                ));
+            }
+            mcp_state.bind_client_events(&arc_client);
+            mcp_state
+                .owned_clients
+                .insert(server.to_string(), std::sync::Arc::clone(&arc_client));
+        }
         let _ = arc_client
             .arm_liveness_watcher(::mcp::liveness::DEFAULT_POLL_INTERVAL)
             .await;
-        {
-            let mut mcp_state = self.mcp_state.lock().await;
-            mcp_state
-                .owned_clients
-                .insert(server.to_string(), arc_client);
-        }
+        self.mcp_state
+            .lock()
+            .await
+            .emit_current_tools_changed(server);
         Ok(())
     }
     pub(super) async fn maybe_inject_mcp_connecting_reminder(&self) {
@@ -945,7 +915,15 @@ impl SessionActor {
         let init_total_bg = init_total;
         let initialization = tokio::task::spawn_local(async move {
             let handshake_start = std::time::Instant::now();
-            let dispatcher_event_tx = mcp_state_bg.lock().await.client_event_tx();
+            {
+                let mut mcp_state = mcp_state_bg.lock().await;
+                if mcp_state.generation() != generation {
+                    return;
+                }
+                for client in &mcp_clients {
+                    mcp_state.bind_client_events(client);
+                }
+            }
             use futures::stream::StreamExt;
             let mut futs = futures::stream::FuturesUnordered::new();
             for client in mcp_clients.iter() {
@@ -959,14 +937,10 @@ impl SessionActor {
                     .get(client.server_name())
                     .cloned()
                     .unwrap_or_default();
-                let task_event_tx = dispatcher_event_tx.clone();
                 futs.push(async move {
                     let server_name = client.server_name().to_string();
                     let server_start = std::time::Instant::now();
                     let timeout_sec = client.startup_timeout_sec();
-                    if let Some(tx) = task_event_tx {
-                        client.set_event_tx(Some(tx));
-                    }
                     let init_budget = std::time::Duration::from_secs(
                         timeout_sec.saturating_mul(2).saturating_add(5),
                     );
