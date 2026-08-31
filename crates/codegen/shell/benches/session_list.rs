@@ -496,7 +496,7 @@ fn write_summary(
         created_at: active_at - ChronoDuration::minutes(5),
         updated_at: active_at,
         num_messages: 8 + ordinal % 24,
-        current_model_id: crate::agent::models::ModelId::new("benchmark-model"),
+        current_model_id: shell::agent::models::ModelId::new("benchmark-model"),
         parent_session_id: None,
         forked_at: None,
         session_format_version: shell::session::persistence::SESSION_FORMAT_VERSION,

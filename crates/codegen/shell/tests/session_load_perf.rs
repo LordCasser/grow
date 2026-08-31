@@ -75,7 +75,7 @@ async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, 
         cwd: cwd.to_string_lossy().to_string(),
     };
     adapter
-        .init_session(&info, crate::agent::models::ModelId::new("test-model"))
+        .init_session(&info, shell::agent::models::ModelId::new("test-model"))
         .await
         .expect("init_session");
     let dir = synth::locate_session_dir(root, &id);

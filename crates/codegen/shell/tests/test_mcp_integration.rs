@@ -1,114 +1,30 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use serde::Deserialize;
 use serde_json::json;
 // rmcp is quarantined in mcp; see that crate's docs.
 use mcp::rmcp;
-use mcp::rmcp::ServerHandler;
-use mcp::rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, ErrorData as McpError, JsonObject,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
-};
+use mcp::rmcp::model::{JsonObject, Tool};
 
-#[derive(Clone)]
-struct TestMcpServer {
-    tools: Arc<Vec<Tool>>,
-}
-
-impl TestMcpServer {
-    fn new() -> Self {
-        let tools = vec![Self::echo_tool()];
-        Self {
-            tools: Arc::new(tools),
-        }
-    }
-
-    fn echo_tool() -> Tool {
-        let schema: JsonObject = serde_json::from_value(json!({
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "Message to echo back"
-                }
-            },
-            "required": ["message"],
-            "additionalProperties": false
-        }))
-        .unwrap();
-
-        Tool::new(
-            Cow::Borrowed("echo"),
-            Cow::Borrowed("Echo back the provided message"),
-            Arc::new(schema),
-        )
-    }
-}
-
-#[derive(Deserialize)]
-struct EchoArgs {
-    message: String,
-}
-
-impl ServerHandler for TestMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
-        info.capabilities = ServerCapabilities::builder().enable_tools().build();
-        info
-    }
-
-    fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        let tools = self.tools.clone();
-        async move {
-            Ok(ListToolsResult {
-                tools: (*tools).clone(),
-                next_cursor: None,
-                meta: None,
-            })
-        }
-    }
-
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
-        match request.name.as_ref() {
-            "echo" => {
-                let args: EchoArgs = match request.arguments {
-                    Some(arguments) => serde_json::from_value(serde_json::Value::Object(
-                        arguments.into_iter().collect(),
-                    ))
-                    .map_err(|err| {
-                        McpError::invalid_params(
-                            format!("'message' is a required property: {}", err),
-                            None,
-                        )
-                    })?,
-                    None => {
-                        return Err(McpError::invalid_params(
-                            "'message' is a required property",
-                            None,
-                        ));
-                    }
-                };
-
-                Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                    "ECHO: {}",
-                    args.message
-                ))]))
+fn echo_tool() -> Tool {
+    let schema: JsonObject = serde_json::from_value(json!({
+        "type": "object",
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "Message to echo back"
             }
-            other => Err(McpError::invalid_params(
-                format!("unknown tool: {other}"),
-                None,
-            )),
-        }
-    }
+        },
+        "required": ["message"],
+        "additionalProperties": false
+    }))
+    .unwrap();
+
+    Tool::new(
+        Cow::Borrowed("echo"),
+        Cow::Borrowed("Echo back the provided message"),
+        Arc::new(schema),
+    )
 }
 
 #[cfg(test)]
@@ -142,13 +58,11 @@ mod tests {
 
     #[test]
     fn test_echo_tool_schema_has_required_field() {
-        let server = TestMcpServer::new();
-        let tools = server.tools.clone();
+        let tool = echo_tool();
 
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "echo");
+        assert_eq!(tool.name, "echo");
 
-        let schema_value = serde_json::to_value(tools[0].input_schema.as_ref()).unwrap();
+        let schema_value = serde_json::to_value(tool.input_schema.as_ref()).unwrap();
 
         let required = schema_value["required"].as_array().unwrap();
         assert_eq!(required.len(), 1);
