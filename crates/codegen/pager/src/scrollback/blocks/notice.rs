@@ -69,6 +69,7 @@ impl fmt::Display for UiFeedback {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeCategory {
     Command,
+    Coordination,
     Lifecycle,
     Control,
     Subagent,
@@ -79,6 +80,7 @@ impl NoticeCategory {
     fn label(self) -> &'static str {
         match self {
             Self::Command => "COMMAND",
+            Self::Coordination => "COORDINATION",
             Self::Lifecycle => "LIFECYCLE",
             Self::Control => "CONTROL",
             Self::Subagent => "SUBAGENT",

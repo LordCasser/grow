@@ -3,12 +3,13 @@ license = "Apache-2.0"
 name = "mcp"
 version.workspace = true
 edition.workspace = true
-description = "MCP integration crate. Quarantines rmcp + reqwest 0.13 (rmcp 2.1 requires reqwest >= 0.13.2 while the rest of the workspace uses reqwest 0.12) and owns MCP transports and lifecycle."
+description = "MCP integration crate. Owns rmcp 2.2 MCP transports and lifecycle."
 authors = ["Grow contributors"]
 
 [dependencies]
-rmcp = { version = "2.1", features = [
+rmcp = { version = "2.2", default-features = false, features = [
     "client",
+    "reqwest-tls-no-provider",
     "transport-async-rw",
     "transport-streamable-http-client-reqwest",
 ] }
@@ -43,7 +44,7 @@ tracing = { workspace = true }
 tty-utils = { workspace = true }
 config = { workspace = true }
 
-# For mcp_grow_http.rs (rmcp trait signatures). Must match rmcp 2.1's own
+# For mcp_grow_http.rs (rmcp trait signatures). Must match rmcp 2.2's own
 # versions or the trait types won't unify.
 http = { workspace = true }
 sse-stream = "0.2"

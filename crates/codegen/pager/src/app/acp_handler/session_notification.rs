@@ -14,6 +14,9 @@ fn ui_notice_block(
     };
     let category = match notice.category {
         shell::extensions::notification::UiNoticeCategory::Command => NoticeCategory::Command,
+        shell::extensions::notification::UiNoticeCategory::Coordination => {
+            NoticeCategory::Coordination
+        }
         shell::extensions::notification::UiNoticeCategory::Lifecycle => NoticeCategory::Lifecycle,
     };
     let mut metadata = Vec::new();

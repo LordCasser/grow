@@ -193,7 +193,7 @@ fn collect_files_git2(root_path: &Path, registry: &LanguageRegistry) -> Vec<std:
     if let Ok(statuses) = repo.statuses(Some(&mut status_opts)) {
         for status_entry in statuses.iter() {
             if status_entry.status().is_wt_new()
-                && let Some(path_str) = status_entry.path()
+                && let Ok(path_str) = status_entry.path()
                 && registry.is_supported(Path::new(path_str))
             {
                 files.push(root_path.join(path_str));

@@ -7,7 +7,9 @@ description = "Filesystem-aware SQLite journal-mode selection: WAL on local disk
 
 [dependencies]
 # Matches the pinned rusqlite of every consumer (bundled = self-contained SQLite).
-rusqlite = { version = "0.37", features = ["bundled"] }
+# Keep the pre-0.40 default feature set (`cache`) while excluding its new
+# WebAssembly-only SQLite FFI default; all consumers use the bundled native SQLite.
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache"] }
 tracing = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

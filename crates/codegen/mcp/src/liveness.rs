@@ -44,7 +44,7 @@
 //!
 //! ## Why polling, not a `JoinHandle`-on-the-service-loop?
 //!
-//! rmcp 2.1's `RunningService` does not expose a future that
+//! rmcp 2.2's `RunningService` does not expose a future that
 //! resolves on transport shutdown. The closest signal is
 //! `Peer::is_transport_closed()` (a state inspection), which is the
 //! same one [`McpClient::is_healthy`] reads. A `select!` on a

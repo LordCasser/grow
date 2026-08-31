@@ -269,6 +269,7 @@ pub(crate) fn bridge_channels(
 mod tests {
     use super::*;
     use acp_transport::acp_send;
+    use acp_transport::protocol as acp;
 
     #[tokio::test]
     async fn forward_outbound_line_delivers_on_live_channel() {
@@ -374,7 +375,7 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "protocolVersion": "1",
+                    "protocolVersion": 1,
                     "serverCapabilities": {},
                     "authMethods": []
                 }

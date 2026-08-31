@@ -24,6 +24,10 @@ use config_types::MemoryIndexConfig;
 
 static SQLITE_VEC_INIT: Once = Once::new();
 
+fn sqlite_integer(value: usize) -> Result<i64, rusqlite::Error> {
+    i64::try_from(value).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
 /// Register the sqlite-vec extension globally. Must be called before any
 /// `MemoryIndex::open_or_create()`. Safe to call multiple times (Once guard).
 pub fn init_sqlite_vec() {
@@ -254,6 +258,8 @@ impl MemoryIndex {
         for (i, chunk) in new_chunks.iter().enumerate() {
             let chunk_id = format!("{}:{}", path_str, i);
             let hash = chunk_hash(&chunk.text);
+            let start_line = sqlite_integer(chunk.start_line)?;
+            let end_line = sqlite_integer(chunk.end_line)?;
             seen_ids.insert(chunk_id.clone());
 
             match existing.get(&chunk_id) {
@@ -265,14 +271,7 @@ impl MemoryIndex {
                     tx.execute(
                         "UPDATE chunks SET text = ?1, hash = ?2, start_line = ?3, \
                          end_line = ?4, updated_at = ?5 WHERE id = ?6",
-                        params![
-                            chunk.text,
-                            hash,
-                            chunk.start_line,
-                            chunk.end_line,
-                            now,
-                            chunk_id
-                        ],
+                        params![chunk.text, hash, start_line, end_line, now, chunk_id],
                     )?;
                     // Delete old FTS entry and insert new one
                     tx.execute(
@@ -307,15 +306,8 @@ impl MemoryIndex {
                         "INSERT INTO chunks (id, path, start_line, end_line, text, hash, source, \
                          created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
-                            chunk_id,
-                            path_str,
-                            chunk.start_line,
-                            chunk.end_line,
-                            chunk.text,
-                            hash,
-                            source,
-                            now,
-                            now,
+                            chunk_id, path_str, start_line, end_line, chunk.text, hash, source,
+                            now, now,
                         ],
                     )?;
                     let rowid = tx.last_insert_rowid();
@@ -416,6 +408,7 @@ impl MemoryIndex {
             "SELECT rowid, rank FROM chunks_fts WHERE chunks_fts MATCH ?1 \
              ORDER BY rank LIMIT ?2",
         )?;
+        let limit = sqlite_integer(limit)?;
         let rows = stmt
             .query_map(params![fts_query, limit], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?))
@@ -567,6 +560,7 @@ impl MemoryIndex {
             "SELECT chunk_id, distance FROM chunks_vec \
              WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance",
         )?;
+        let k = sqlite_integer(k)?;
         let results = stmt
             .query_map(params![query_bytes, k], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, f32>(1)?))

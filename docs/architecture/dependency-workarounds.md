@@ -73,20 +73,17 @@ the files byte-identical to the upstream tag (see
 **Unblock condition**: a crates.io release that both contains the musl fix and
 packages every included C file.
 
-## 5. mcp's reqwest 0.13 quarantine
+## 5. rmcp's reqwest 0.13 integration
 
-**Why**: rmcp 2.1 (the MCP protocol client used by the mcp crate) requires
-`reqwest >= 0.13.2`, while the rest of the workspace (11 crates) used reqwest
-0.12. The mcp crate intentionally quarantined 0.13 (see its `description`).
+**Why**: rmcp 2.2 (the MCP protocol client used by the mcp crate) requires
+`reqwest >= 0.13.2`.
 
-**Status (2026-08-04): RESOLVED.** The async-openai fork was rebased onto
+**Status (2026-08-31): RESOLVED.** The async-openai fork was rebased onto
 upstream 0.41.3 (which uses `reqwest = "0.13"`) with the `ReasoningEffort::Max`
 patch re-applied (fork: `https://github.com/LordCasser/async-openai`, rev
 `a2bae99`); the workspace's 13 reqwest crates migrated to reqwest 0.13.4 with
 `rustls-no-provider` (see §1), and `reqwest-middleware` moved 0.4.x → 0.5.x.
-`Cargo.lock` now contains a single reqwest 0.13.4. The only remaining
-`reqwest 0.12.28` entry is jsonschema 0.30's dev-dependency (locked but never
-compiled; disappears when jsonschema is upgraded).
+`Cargo.lock` contains a single reqwest 0.13.4.
 
 **Note**: the fork upgrade does NOT remove `rand 0.9` (async-openai 0.41.3
 still requires `rand = "0.9"`) or `nom 7.1` (still `eventsource-stream =

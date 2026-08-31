@@ -75,6 +75,36 @@
     }
 
     #[test]
+    fn coordination_notice_keeps_its_category_and_audit_details() {
+        let mut app = make_app_with_agent("s1");
+        let update = GrowSessionUpdate::UiNotice(
+            shell::extensions::notification::UiNotice {
+                correlation_id: "inquiry-1".into(),
+                category: shell::extensions::notification::UiNoticeCategory::Coordination,
+                subject: Some("incoming inquiry".into()),
+                description: Some("Another local Grow session requested information".into()),
+                message: "Session peer asked this session a question".into(),
+                tone: shell::extensions::notification::UiNoticeTone::Info,
+                details: Some("Source session: peer\nQuestion:\nStatus?".into()),
+            },
+        );
+        assert!(handle(make_ext_session_notification("s1", update), &mut app));
+        let entry = app.agents.get_mut(&AgentId(0)).unwrap()
+            .scrollback.entries_mut().last().expect("coordination notice");
+        match &entry.block {
+            RenderBlock::Notice(notice) => {
+                assert_eq!(
+                    notice.category,
+                    crate::scrollback::blocks::NoticeCategory::Coordination
+                );
+                assert!(notice.details.as_deref().is_some_and(|details|
+                    details.contains("Source session: peer")));
+            }
+            other => panic!("expected coordination Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn control_projection_keeps_transients_live_and_commits_only_latest_terminal() {
         use shell::extensions::notification::{
             ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,

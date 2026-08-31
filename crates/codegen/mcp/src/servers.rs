@@ -2188,7 +2188,7 @@ enum PendingTransport {
 
 /// A connected MCP service (rmcp's RunningService wrapped in Arc).
 /// Uses [`GrowClientHandler`] rather than rmcp's default `ClientInfo`
-/// handler: rmcp 2.1 parameterizes `RunningService` over the handler
+/// handler: rmcp 2.2 parameterizes `RunningService` over the handler
 /// type, and `ClientInfo` is only a `ClientHandler` impl with no
 /// notification routing. The custom handler keeps the same protocol
 /// behavior (same `get_info`) while plumbing
@@ -3281,7 +3281,7 @@ impl McpClient {
     /// Semantics:
     /// - `Ready(service)` with an open transport → `true`.
     /// - `Ready(service)` whose receiver-side has been dropped (typically
-    ///   because the rmcp service loop terminated) → `false`. rmcp 2.1
+    ///   because the rmcp service loop terminated) → `false`. rmcp 2.2
     ///   `Peer::is_transport_closed` reports `self.tx.is_closed()` at
     ///   `service.rs:703-705`; `RunningService` derefs to `Peer` at
     ///   `service.rs:716-722`.
@@ -3919,9 +3919,9 @@ impl McpClient {
 ///
 /// ## RPIT, not `#[async_trait]`
 ///
-/// rmcp 2.1's [`ClientHandler`] declares its async methods as
+/// rmcp 2.2's [`ClientHandler`] declares its async methods as
 /// return-position `impl Future` (see
-/// `~/.cargo/registry/src/.../rmcp-2.1.0/src/handler/client.rs`,
+/// `~/.cargo/registry/src/.../rmcp-2.2.0/src/handler/client.rs`,
 /// lines 202–217). Applying `#[async_trait]` here would produce
 /// methods whose signature mismatches the trait, and the impl would
 /// not satisfy the bound. The macro path is also unnecessary — the
@@ -3973,7 +3973,7 @@ impl GrowClientHandler {
 impl ClientHandler for GrowClientHandler {
     // NOTE: `async fn` here is sugar for the trait's
     // `-> impl Future<Output = ()> + Send + '_`. We INTENTIONALLY do
-    // not use `#[async_trait]` — rmcp 2.1's `ClientHandler` declares
+    // not use `#[async_trait]` — rmcp 2.2's `ClientHandler` declares
     // its notification methods as return-position `impl Future`, and
     // async_trait would produce a different (incompatible) signature.
     // See the [`GrowClientHandler`] doc-comment for the full RPIT
@@ -6972,7 +6972,7 @@ mod tests {
     // exercise the `Ready` arm indirectly: the cheap predicate is a
     // single `match` on the state mutex plus
     // `Peer::is_transport_closed`, which is upstream-tested in rmcp
-    // itself (`rmcp-2.1.0/tests/test_close_connection.rs`).
+    // itself (`rmcp-2.2.0/tests/test_close_connection.rs`).
 
     #[tokio::test]
     async fn is_healthy_empty_returns_false() {
