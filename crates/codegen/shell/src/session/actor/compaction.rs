@@ -1447,54 +1447,6 @@ impl SessionActor {
             }
         }
 
-        let plan = {
-            use crate::session::behavior::{BehaviorState, PlanPhase};
-            let controller = self.behavior.lock();
-            match controller.state() {
-                BehaviorState::Plan(PlanPhase::Executing) => Some((
-                    crate::session::behavior::plan_execution_reminder_template(),
-                    controller.plan_artifact_hash().map(str::to_owned),
-                )),
-                BehaviorState::Plan(_) => Some((
-                    crate::session::behavior::plan_mode_reminder_full_template(),
-                    controller.plan_artifact_hash().map(str::to_owned),
-                )),
-                _ => None,
-            }
-        };
-        if let Some((template, artifact_hash)) = plan {
-            let plan_content = match artifact_hash {
-                Some(hash) => {
-                    let session = self.session_directory.clone();
-                    tokio::task::spawn_blocking(move || {
-                        crate::session::behavior::read_plan_artifact(&session, &hash)
-                    })
-                    .await
-                    .map_err(|error| {
-                        acp::Error::internal_error()
-                            .data(format!("failed to join Plan artifact read: {error}"))
-                    })?
-                    .map_err(|error| {
-                        acp::Error::internal_error().data(format!(
-                            "active Plan artifact failed validation during compaction: {error}"
-                        ))
-                    })?
-                }
-                None => String::new(),
-            };
-            if let Some(plan_section) = self.render_plan_template(template, &plan_content).await {
-                system_reminder = append_system_reminder_section(
-                    system_reminder,
-                    reminder_wrapper,
-                    &plan_section,
-                );
-            } else {
-                tracing::warn!(
-                    session_id = %self.session_info.id.0,
-                    "compaction: plan mode active but template render failed"
-                );
-            }
-        }
         if let Some(ref recovery_backend) = memory_backend_impl {
             let n = recovery_backend
                 .search_counter
@@ -1593,14 +1545,6 @@ impl SessionActor {
             .on_skill_discovery_compaction()
             .await;
         self.persist_announcement_state().await;
-        self.behavior.lock().reset_after_compaction();
-        self.record_control_snapshot_durably()
-            .await
-            .map_err(|error| {
-                acp::Error::internal_error().data(format!(
-                    "post-compaction Behavior state was not persisted: {error}"
-                ))
-            })?;
         self.dispatch_hook(
             ::hooks::event::HookEventName::PostCompact,
             ::hooks::event::HookPayload::PostCompact {

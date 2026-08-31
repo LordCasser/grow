@@ -1152,72 +1152,10 @@ impl SessionActor {
     /// artifact. The phase itself is the edit gate—there is no hidden pending
     /// or re-entry state.
     pub(super) async fn inject_behavior_reminders(&self) -> Result<(), acp::Error> {
-        use crate::session::behavior::{
-            BehaviorState, PlanPhase, plan_execution_reminder_template,
-            plan_mode_reminder_full_template, plan_mode_reminder_sparse_template,
-        };
         let admitted = *self.turn_behavior.lock();
         if admitted == tool_types::BehaviorId::Workflow {
             let context = self.workflow_behavior_context()?;
             self.push_system_reminder_with_tag(&context, self.reminder_wrapper_tag());
-            return Ok(());
-        }
-        if admitted != tool_types::BehaviorId::Plan {
-            return Ok(());
-        }
-        let push_reminder = |this: &Self, content: &str| {
-            this.push_system_reminder_with_tag(content, this.reminder_wrapper_tag());
-        };
-        let plan = {
-            let controller = self.behavior.lock();
-            match controller.state() {
-                BehaviorState::Plan(PlanPhase::Executing) => Some((
-                    plan_execution_reminder_template(),
-                    controller.plan_artifact_hash().map(str::to_owned),
-                )),
-                BehaviorState::Plan(
-                    PlanPhase::Drafting | PlanPhase::AwaitingApproval | PlanPhase::Amending,
-                ) => {
-                    let template = if controller.should_use_full_reminder() {
-                        plan_mode_reminder_full_template()
-                    } else {
-                        plan_mode_reminder_sparse_template()
-                    };
-                    Some((template, controller.plan_artifact_hash().map(str::to_owned)))
-                }
-                _ => None,
-            }
-        };
-        let Some((template, artifact_hash)) = plan else {
-            return Ok(());
-        };
-        let plan_content = match artifact_hash {
-            Some(hash) => {
-                let session = self.session_directory.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::session::behavior::read_plan_artifact(&session, &hash)
-                })
-                .await
-                .map_err(|error| {
-                    acp::Error::internal_error()
-                        .data(format!("failed to join Plan artifact read: {error}"))
-                })?
-                .map_err(|error| {
-                    acp::Error::internal_error()
-                        .data(format!("active Plan artifact failed validation: {error}"))
-                })?
-            }
-            None => String::new(),
-        };
-        if let Some(rendered) = self.render_plan_template(template, &plan_content).await {
-            push_reminder(self, &rendered);
-            self.behavior.lock().record_reminder_injected();
-            self.record_control_snapshot_durably()
-                .await
-                .map_err(|error| {
-                    acp::Error::internal_error()
-                        .data(format!("Plan reminder state was not persisted: {error}"))
-                })?;
         }
         Ok(())
     }
@@ -1281,6 +1219,8 @@ impl SessionActor {
         let selection_changed = previous.behavior() != next.behavior();
         let persisted = if selection_changed {
             self.persist_behavior_transition_durably(next, goal).await
+        } else if next.behavior() == tool_types::BehaviorId::Plan && previous != next {
+            self.persist_plan_phase_transition_durably(next, goal).await
         } else {
             self.persist_control_snapshot_durably(next, goal).await
         };

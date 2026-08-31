@@ -344,7 +344,7 @@ impl SessionActor {
         &self,
         call: crate::sampling::types::ToolCallResponse,
         deferred_followups: &mut Vec<ConversationItem>,
-    ) -> Result<Result<PreparedToolCall, ToolLoop>, acp::Error> {
+    ) -> Result<ToolPreflight, acp::Error> {
         let tool_call_id = acp::ToolCallId::new(Arc::from(call.id.clone()));
         let model_id_str = self.current_catalog_model_id();
         tracing::info!(
@@ -410,7 +410,7 @@ impl SessionActor {
                         )
                         .await;
                     deferred_followups.extend(followups);
-                    return Ok(Err(ToolLoop::NonExistingTool));
+                    return Ok(ToolPreflight::resolved(ToolLoop::NonExistingTool));
                 }
             }
         }
@@ -487,7 +487,7 @@ impl SessionActor {
                     &model_id_str,
                 )
                 .await?;
-                return Ok(Err(ToolLoop::ToolParsingError));
+                return Ok(ToolPreflight::resolved(ToolLoop::ToolParsingError));
             }
         };
         let access_kind = AccessKind::from_tool_call(&call.function.name, &tool_input);
@@ -510,7 +510,7 @@ impl SessionActor {
             );
             self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                 .await?;
-            return Ok(Err(ToolLoop::Continue));
+            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
         }
         let within_capability_fence = if let Some(capabilities) = &self.subagent_capabilities {
             let mcp_target = match &tool_input {
@@ -526,7 +526,7 @@ impl SessionActor {
                 let message = "Rejected: this exact tool identity is outside the subagent's authored eligibility ceiling or its inherited MCP transport is no longer eligible.";
                 self.handle_tool_not_executed(&call.id, &tool_call_id, message.to_owned())
                     .await?;
-                return Ok(Err(ToolLoop::Continue));
+                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
             }
             mcp_target.map_or_else(
                 || capabilities.native_call_available(&call.function.name, required_access),
@@ -553,7 +553,7 @@ impl SessionActor {
             );
             self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                 .await?;
-            return Ok(Err(ToolLoop::Continue));
+            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
         }
         if (saved_workflow_write || workflow_draft_write)
             && (admitted_behavior != tool_types::BehaviorId::Workflow
@@ -563,21 +563,21 @@ impl SessionActor {
                 .to_string();
             self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                 .await?;
-            return Ok(Err(ToolLoop::Continue));
+            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
         }
         if saved_workflow_write {
             let message = "Rejected: saved Workflow Definitions are replaced only by publishing a validated session draft. Derive the saved Definition into the Workflow workspace, edit the draft, then publish it; the saved Definition remains usable until then."
                 .to_string();
             self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                 .await?;
-            return Ok(Err(ToolLoop::Continue));
+            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
         }
         if workflow_run_snapshot_write(&access_kind, &session_dir, cwd, display_cwd) {
             let message = "Rejected: Workflow Run scripts, args, and journals are immutable snapshots. Modify or derive the Definition and start a new Run instead."
                 .to_string();
             self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                 .await?;
-            return Ok(Err(ToolLoop::Continue));
+            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
         }
         // Lock order: resolve the read-only MCP classification from the
         // (async) `mcp_state` BEFORE taking the `behavior` lock — never hold
@@ -609,7 +609,7 @@ impl SessionActor {
             };
             self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
                 .await?;
-            return Ok(Err(ToolLoop::Continue));
+            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
         }
         let tool_call_display = self
             .send_tool_call_start(
@@ -664,22 +664,23 @@ impl SessionActor {
                 if let ::hooks::result::HookDecision::Deny { reason, hook_name } =
                     pre_result.decision
                 {
-                    return Ok(Err(self
-                        .deny_tool(
+                    return Ok(ToolPreflight::resolved(
+                        self.deny_tool(
                             &call.id,
                             &tool_call_id,
                             resolved_tool_name.clone(),
                             hook_name,
                             reason,
                         )
-                        .await?));
+                        .await?,
+                    ));
                 }
             }
             if let Some(denied) = self
                 .run_pre_tool_use_client_hook(&call, &tool_call_id, &envelope)
                 .await?
             {
-                return Ok(Err(denied));
+                return Ok(ToolPreflight::resolved(denied));
             }
         }
         {
@@ -950,7 +951,7 @@ impl SessionActor {
                             reason: reason.clone(),
                         }
                     };
-                    return Ok(Err(loop_action));
+                    return Ok(ToolPreflight::resolved(loop_action));
                 }
                 Decision::Cancelled => {
                     let message = format!(
@@ -959,7 +960,7 @@ impl SessionActor {
                     );
                     self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                         .await?;
-                    return Ok(Err(ToolLoop::Cancelled));
+                    return Ok(ToolPreflight::resolved(ToolLoop::Cancelled));
                 }
                 Decision::TimedOut => {
                     let child_nonterminal = self.startup_hints.is_subagent;
@@ -980,9 +981,9 @@ impl SessionActor {
                     self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                         .await?;
                     if child_nonterminal {
-                        return Ok(Err(ToolLoop::Continue));
+                        return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                     }
-                    return Ok(Err(ToolLoop::PermissionTimedOut {
+                    return Ok(ToolPreflight::resolved(ToolLoop::PermissionTimedOut {
                         tool_name: call.function.name.clone(),
                     }));
                 }
@@ -994,27 +995,30 @@ impl SessionActor {
                     );
                     self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                         .await?;
-                    return Ok(Err(ToolLoop::FollowupMessage(followup_message)));
+                    return Ok(ToolPreflight::resolved(ToolLoop::FollowupMessage(
+                        followup_message,
+                    )));
                 }
                 Decision::Allow | Decision::Ask => {}
             }
         }
         if let ToolInput::PlanControl(input) = &tool_input {
-            use tools::implementations::grow_build::plan_control::PlanControlAction;
+            use tools::implementations::grow_build::plan_control::{
+                PlanApprovalOutcome, PlanControlAction,
+            };
+            if let Err(message) = input.validate() {
+                self.handle_tool_not_executed(
+                    &call.id,
+                    &tool_call_id,
+                    format!("Rejected: {message}."),
+                )
+                .await?;
+                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+            }
             if matches!(
                 input.action,
                 PlanControlAction::Complete | PlanControlAction::Cancel
             ) {
-                if input.plan.is_some() {
-                    self.handle_tool_not_executed(
-                        &call.id,
-                        &tool_call_id,
-                        "Rejected: plan_control complete/cancel must not include `plan`."
-                            .to_owned(),
-                    )
-                    .await?;
-                    return Ok(Err(ToolLoop::Continue));
-                }
                 let valid = match input.action {
                     PlanControlAction::Complete => {
                         self.behavior.lock().state()
@@ -1035,12 +1039,7 @@ impl SessionActor {
                         ),
                     )
                     .await?;
-                    return Ok(Err(ToolLoop::Continue));
-                }
-                if let Err(message) = self.finish_plan_to_default().await {
-                    self.handle_tool_not_executed(&call.id, &tool_call_id, message)
-                        .await?;
-                    return Ok(Err(ToolLoop::Continue));
+                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                 }
             } else {
                 let valid = match input.action {
@@ -1066,19 +1065,14 @@ impl SessionActor {
                         ),
                     )
                     .await?;
-                    return Ok(Err(ToolLoop::Continue));
+                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                 }
-                let plan_content = input.plan.as_deref().unwrap_or_default().trim().to_owned();
-                if plan_content.is_empty() {
-                    self.handle_tool_not_executed(
-                        &call.id,
-                        &tool_call_id,
-                        "Rejected: plan_control submit/amend requires a non-empty `plan` argument."
-                            .to_owned(),
-                    )
-                    .await?;
-                    return Ok(Err(ToolLoop::Continue));
-                }
+                let plan_content = input
+                    .plan
+                    .as_deref()
+                    .expect("validated submit/amend plan")
+                    .trim()
+                    .to_owned();
 
                 // Persist the control-plane artifact before opening approval UI.
                 // This is not a workspace edit and does not grant the Agent an
@@ -1101,7 +1095,7 @@ impl SessionActor {
                             format!("Failed to persist the plan artifact: {error}"),
                         )
                         .await?;
-                        return Ok(Err(ToolLoop::Continue));
+                        return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                     }
                 };
                 let previous_behavior = self.behavior.lock().snapshot();
@@ -1122,7 +1116,7 @@ impl SessionActor {
                     "Rejected: a plan can only be submitted while drafting or while executing an approved plan that needs amendment.".to_owned(),
                 )
                 .await?;
-                    return Ok(Err(ToolLoop::Continue));
+                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                 }
                 if let Err(message) = self
                     .commit_behavior_mutation_or_restore(previous_behavior)
@@ -1130,7 +1124,7 @@ impl SessionActor {
                 {
                     self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                         .await?;
-                    return Ok(Err(ToolLoop::Continue));
+                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                 }
                 let approval_snapshot = self.behavior.lock().snapshot();
 
@@ -1142,7 +1136,7 @@ impl SessionActor {
                     .request_plan_approval(&tool_call_id, plan_content.clone())
                     .await;
                 match resp {
-                    Ok(parsed) => match PlanApprovalOutcome::from_response(&parsed) {
+                    Ok(parsed) => match parsed.outcome {
                         PlanApprovalOutcome::Abandoned => {
                             tracing::info!("plan_control: user abandoned Plan");
                             match self.finish_plan_to_default_if(&approval_snapshot).await {
@@ -1155,12 +1149,12 @@ impl SessionActor {
                                         "Plan approval was stale and was discarded.".to_owned(),
                                     )
                                     .await?;
-                                    return Ok(Err(ToolLoop::Continue));
+                                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                                 }
                                 Err(message) => {
                                     self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                                         .await?;
-                                    return Ok(Err(ToolLoop::Continue));
+                                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                                 }
                             }
                             let message = format!(
@@ -1181,15 +1175,16 @@ impl SessionActor {
                                 .await;
                             let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
                             self.chat_state_handle.push_tool_result(tool_chat);
-                            return Ok(Err(ToolLoop::Continue));
+                            return Ok(ToolPreflight::resolved(ToolLoop::Control(
+                                ControlDisposition::EndTurn,
+                            )));
                         }
                         PlanApprovalOutcome::Cancelled => {
                             let previous_behavior = self.behavior.lock().snapshot();
-                            if !self
-                                .behavior
-                                .lock()
-                                .reject_submitted_plan_if(&approval_snapshot)
-                            {
+                            if !self.behavior.lock().reject_submitted_plan_if_with_feedback(
+                                &approval_snapshot,
+                                parsed.feedback.clone(),
+                            ) {
                                 tracing::info!(
                                     "plan_control: dropping stale request-changes decision"
                                 );
@@ -1199,7 +1194,7 @@ impl SessionActor {
                                     "Plan approval was stale and was discarded.".to_owned(),
                                 )
                                 .await?;
-                                return Ok(Err(ToolLoop::Continue));
+                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                             }
                             if let Err(message) = self
                                 .commit_behavior_mutation_or_restore(previous_behavior)
@@ -1207,10 +1202,13 @@ impl SessionActor {
                             {
                                 self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                                     .await?;
-                                return Ok(Err(ToolLoop::Continue));
+                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                             }
-                            let message =
-                                revise_plan_message(parsed.feedback.as_deref().unwrap_or(""));
+                            let next = self.behavior.lock().snapshot();
+                            if let Err(error) = self.admit_plan_handoff_notification(&next).await {
+                                tracing::warn!(%error, "Plan revision handoff receipt will be reconciled after restore");
+                            }
+                            let message = "The Plan is now in the revision phase.".to_owned();
                             let tool_update = acp::ToolCallUpdate::new(
                                 tool_call_id.clone(),
                                 acp::ToolCallUpdateFields::new()
@@ -1225,14 +1223,19 @@ impl SessionActor {
                                 .await;
                             let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
                             self.chat_state_handle.push_tool_result(tool_chat);
-                            return Ok(Err(ToolLoop::Continue));
+                            return Ok(ToolPreflight::resolved(ToolLoop::Control(
+                                ControlDisposition::ResampleStep,
+                            )));
                         }
                         PlanApprovalOutcome::Approved => {
                             let previous_behavior = self.behavior.lock().snapshot();
                             if !self
                                 .behavior
                                 .lock()
-                                .approve_submitted_plan_if(&approval_snapshot)
+                                .approve_submitted_plan_if_with_feedback(
+                                    &approval_snapshot,
+                                    parsed.feedback.clone(),
+                                )
                             {
                                 self.handle_tool_not_executed(
                                     &call.id,
@@ -1240,7 +1243,7 @@ impl SessionActor {
                                     "Plan approval arrived in an invalid phase.".to_owned(),
                                 )
                                 .await?;
-                                return Ok(Err(ToolLoop::Continue));
+                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                             }
                             if let Err(message) = self
                                 .commit_behavior_mutation_or_restore(previous_behavior)
@@ -1248,7 +1251,11 @@ impl SessionActor {
                             {
                                 self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                                     .await?;
-                                return Ok(Err(ToolLoop::Continue));
+                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                            }
+                            let next = self.behavior.lock().snapshot();
+                            if let Err(error) = self.admit_plan_handoff_notification(&next).await {
+                                tracing::warn!(%error, "Plan execution handoff receipt will be reconciled after restore");
                             }
                             self.enqueue_current_mode_update(acp::SessionModeId::new(
                                 tools::types::BehaviorId::Plan.as_id(),
@@ -1263,7 +1270,7 @@ impl SessionActor {
                             if !self
                                 .behavior
                                 .lock()
-                                .reject_submitted_plan_if(&approval_snapshot)
+                                .fail_pending_plan_approval_if(&approval_snapshot)
                             {
                                 tracing::info!("plan_control: dropping stale no-client decision");
                                 self.handle_tool_not_executed(
@@ -1272,7 +1279,7 @@ impl SessionActor {
                                     "Plan approval was stale and was discarded.".to_owned(),
                                 )
                                 .await?;
-                                return Ok(Err(ToolLoop::Continue));
+                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                             }
                             if let Err(message) = self
                                 .commit_behavior_mutation_or_restore(previous_behavior)
@@ -1280,7 +1287,7 @@ impl SessionActor {
                             {
                                 self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                                     .await?;
-                                return Ok(Err(ToolLoop::Continue));
+                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                             }
                             self.handle_tool_not_executed(
                             &call.id,
@@ -1288,8 +1295,11 @@ impl SessionActor {
                             "Plan approval requires an interactive user. No approval client is connected, so execution remains blocked.".to_owned(),
                         )
                         .await?;
-                            return Ok(Err(ToolLoop::Continue));
-                        } else {
+                            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                        } else if matches!(
+                            acp_transport::acp_channel_failure(&err),
+                            Some(acp_transport::AcpChannelFailure::RecvFailed)
+                        ) {
                             tracing::info!(
                                 %err,
                                 "plan_control: client disconnected mid-approval; Plan stays active"
@@ -1300,7 +1310,16 @@ impl SessionActor {
                                 .to_string();
                             self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                                 .await?;
-                            return Ok(Err(ToolLoop::Cancelled));
+                            return Ok(ToolPreflight::resolved(ToolLoop::Cancelled));
+                        } else {
+                            tracing::warn!(
+                                %err,
+                                "plan_control: client returned an invalid approval response"
+                            );
+                            let message = "Plan approval could not be completed because the client returned an invalid response. Plan mode remains active and no approval decision was applied.".to_string();
+                            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                                .await?;
+                            return Ok(ToolPreflight::resolved(ToolLoop::Cancelled));
                         }
                     }
                 }
@@ -1322,8 +1341,36 @@ impl SessionActor {
             Err(message) => {
                 self.handle_tool_not_executed(&call.id, &tool_call_id, message)
                     .await?;
-                return Ok(Err(ToolLoop::Continue));
+                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
             }
+        };
+        let success_control = match &tool_input {
+            ToolInput::PlanControl(input) => {
+                use tools::implementations::grow_build::plan_control::PlanControlAction;
+                Some(match input.action {
+                    PlanControlAction::Submit | PlanControlAction::Amend => {
+                        ControlDisposition::ResampleStep
+                    }
+                    PlanControlAction::Complete | PlanControlAction::Cancel => {
+                        ControlDisposition::EndTurn
+                    }
+                })
+            }
+            // Preserve the existing Goal lifecycle fence explicitly. Goal may
+            // refine its per-action continuation independently of Plan.
+            ToolInput::CreateGoal(_) | ToolInput::UpdateGoal(_) => {
+                Some(ControlDisposition::EndTurn)
+            }
+            _ => None,
+        };
+        let plan_exit_on_success = match &tool_input {
+            ToolInput::PlanControl(input)
+                if matches!(
+                    input.action,
+                    tools::implementations::grow_build::plan_control::PlanControlAction::Complete
+                        | tools::implementations::grow_build::plan_control::PlanControlAction::Cancel
+                ) => Some(self.behavior.lock().snapshot()),
+            _ => None,
         };
         self.send_update(
             acp::SessionUpdate::ToolCallUpdate(
@@ -1352,7 +1399,9 @@ impl SessionActor {
             required_access,
             permit,
             workflow_draft_write,
+            success_control,
+            plan_exit_on_success,
         };
-        Ok(Ok(prepared))
+        Ok(ToolPreflight::Dispatch(prepared))
     }
 }

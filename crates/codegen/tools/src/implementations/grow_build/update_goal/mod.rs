@@ -217,7 +217,7 @@ fn channel_error() -> tool_runtime::ToolError {
 }
 
 macro_rules! goal_metadata {
-    ($tool:ty, $kind:expr, $description:literal) => {
+    ($tool:ty, $kind:expr, $description:literal, $isolates_batch_preflight:expr) => {
         impl crate::types::tool_metadata::ToolMetadata for $tool {
             fn kind(&self) -> ToolKind {
                 $kind
@@ -230,6 +230,9 @@ macro_rules! goal_metadata {
             }
             fn requires_expr(&self) -> Expr<ToolRequirement> {
                 Expr::True
+            }
+            fn isolates_batch_preflight(&self) -> bool {
+                $isolates_batch_preflight
             }
         }
     };
@@ -260,7 +263,8 @@ pub struct GetGoalTool;
 goal_metadata!(
     GetGoalTool,
     ToolKind::GoalRead,
-    "Read the current long-lived Goal, including status, budget, usage, and elapsed time."
+    "Read the current long-lived Goal, including status, budget, usage, and elapsed time.",
+    false
 );
 
 impl tool_runtime::Tool for GetGoalTool {
@@ -316,7 +320,8 @@ pub struct CreateGoalTool;
 goal_metadata!(
     CreateGoalTool,
     ToolKind::GoalLifecycleUpdate,
-    "Create a long-lived Goal only when the user explicitly asks to start one. Omit token_budget unless explicitly requested."
+    "Create a long-lived Goal only when the user explicitly asks to start one. Omit token_budget unless explicitly requested.",
+    true
 );
 
 impl tool_runtime::Tool for CreateGoalTool {
@@ -367,7 +372,8 @@ pub struct UpdateGoalTool;
 goal_metadata!(
     UpdateGoalTool,
     ToolKind::GoalLifecycleUpdate,
-    "Mark the current Goal complete only when authoritative current evidence proves the entire objective is achieved. Mark it blocked only after the same genuine impasse recurs for at least three consecutive Goal turns and no meaningful progress is possible without user input or an external-state change. After a blocked Goal is restarted, count those three turns afresh from the resumed run. Pause, resume, edit, budget, and clear are user-owned controls."
+    "Mark the current Goal complete only when authoritative current evidence proves the entire objective is achieved. Mark it blocked only after the same genuine impasse recurs for at least three consecutive Goal turns and no meaningful progress is possible without user input or an external-state change. After a blocked Goal is restarted, count those three turns afresh from the resumed run. Pause, resume, edit, budget, and clear are user-owned controls.",
+    true
 );
 
 impl tool_runtime::Tool for UpdateGoalTool {

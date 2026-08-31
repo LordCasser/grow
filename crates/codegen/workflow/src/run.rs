@@ -42,6 +42,7 @@ impl std::str::FromStr for PauseKind {
 pub enum WorkflowOutcome {
     Completed { result: serde_json::Value },
     Paused { kind: PauseKind, message: String },
+    AwaitingUser { kind: PauseKind, message: String },
     BudgetExceeded { message: String },
     Cancelled,
     Failed { error: String },

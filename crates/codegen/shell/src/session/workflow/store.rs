@@ -11,7 +11,7 @@ use crate::session::persistence::PersistenceMsg;
 
 use super::tracker::WorkflowRunState;
 
-pub(crate) const WORKFLOW_RUN_MANIFEST_VERSION: u8 = 5;
+pub(crate) const WORKFLOW_RUN_MANIFEST_VERSION: u8 = 6;
 pub(crate) const MAX_RESTORED_WORKFLOW_RUNS: usize = 128;
 pub(crate) const MAX_WORKFLOW_MANIFEST_BYTES: u64 = 512 * 1024;
 pub(crate) const MAX_WORKFLOW_ARGS_BYTES: u64 = 1024 * 1024;
@@ -94,9 +94,10 @@ impl WorkflowRunStore {
                     continue;
                 }
                 let mut state = run.manifest.state;
-                let (status, message, execution_was_open) = if lifecycle.open {
+                let (status, turn_handoff, message, execution_was_open) = if lifecycle.open {
                     (
                         super::tracker::WorkflowRunStatus::Interrupted,
+                        chat_state::WorkflowTurnHandoff::Completion,
                         Some("process_interrupted".into()),
                         true,
                     )
@@ -106,6 +107,9 @@ impl WorkflowRunStore {
                         .expect("a closed Workflow execution has a terminal status");
                     (
                         super::tracker::WorkflowRunStatus::from_timeline(status),
+                        lifecycle
+                            .handoff
+                            .expect("a closed Workflow execution has a turn handoff"),
                         lifecycle.message.clone(),
                         false,
                     )
@@ -113,6 +117,7 @@ impl WorkflowRunStore {
                 let was_repaired = state.reconcile_lifecycle_after_restore(
                     lifecycle.execution_epoch,
                     status,
+                    turn_handoff,
                     message,
                     execution_was_open,
                 );
@@ -358,6 +363,32 @@ fn encode_workflow_manifest(manifest: &WorkflowRunManifest) -> io::Result<Vec<u8
     Ok(json)
 }
 
+/// Decode the version envelope before the typed body. This keeps the v6
+/// schema strict while making an older manifest fail with the architectural
+/// incompatibility, rather than a misleading missing-field error.
+pub(crate) fn decode_workflow_manifest(bytes: &[u8]) -> io::Result<WorkflowRunManifest> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Workflow manifest has no valid version",
+            )
+        })?;
+    if version != u64::from(WORKFLOW_RUN_MANIFEST_VERSION) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "unsupported Workflow manifest version {version}; expected {WORKFLOW_RUN_MANIFEST_VERSION}"
+            ),
+        ));
+    }
+    serde_json::from_value(value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 #[cfg(test)]
 pub(crate) fn write_workflow_run_manifest(
     session_dir: &Path,
@@ -404,8 +435,7 @@ pub(crate) fn write_workflow_run_manifest_in_directory(
         MAX_WORKFLOW_MANIFEST_BYTES,
     ) {
         Ok(existing) => {
-            let on_disk: WorkflowRunManifest = serde_json::from_slice(&existing)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let on_disk = decode_workflow_manifest(&existing)?;
             if on_disk.state.run_id != *run_id {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -777,6 +807,10 @@ mod tests {
             state.status,
             crate::session::workflow::tracker::WorkflowRunStatus::Interrupted
         );
+        assert_eq!(
+            state.turn_handoff,
+            chat_state::WorkflowTurnHandoff::Completion
+        );
         assert!(state.revision > original_revision);
         assert!(state.agent_usage_incomplete);
         assert!(
@@ -785,6 +819,56 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message == "process_interrupted")
         );
+    }
+
+    #[test]
+    fn restore_uses_timeline_attention_handoff_instead_of_stale_manifest_projection() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let state = WorkflowTracker::default().start_run(
+            "wf_attention".into(),
+            "review".into(),
+            "objective".into(),
+            Vec::new(),
+            Some(8),
+            Some("workflows/wf_attention/journal.jsonl".into()),
+            crate::session::workflow::tracker::test_runtime_route(),
+        );
+        let original_revision = state.revision;
+        let restored = RestoredWorkflowRun {
+            manifest: WorkflowRunManifest {
+                version: WORKFLOW_RUN_MANIFEST_VERSION,
+                state,
+                script_revision: 0,
+            },
+            script: "await_user(\"back_off\", \"review\");".into(),
+            args: serde_json::json!({}),
+        };
+        let mut timeline = timeline_with_workflow("wf_attention", "review", "objective");
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Ended {
+                    run_id: "wf_attention".into(),
+                    execution_epoch: 0,
+                    status: chat_state::WorkflowExecutionStatus::BackOffPaused,
+                    handoff: chat_state::WorkflowTurnHandoff::AttentionRequired,
+                    duration_ms: 1,
+                    message: Some("review".into()),
+                },
+            ))
+            .unwrap();
+
+        let (_store, states) =
+            WorkflowRunStore::from_restored(None, tx, vec![restored], Some(&timeline));
+        assert_eq!(states.len(), 1);
+        assert_eq!(
+            states[0].status,
+            crate::session::workflow::tracker::WorkflowRunStatus::BackOffPaused
+        );
+        assert_eq!(
+            states[0].turn_handoff,
+            chat_state::WorkflowTurnHandoff::AttentionRequired
+        );
+        assert!(states[0].revision > original_revision);
     }
 
     #[test]
@@ -815,6 +899,7 @@ mod tests {
                     run_id: "wf_resume".into(),
                     execution_epoch: 0,
                     status: chat_state::WorkflowExecutionStatus::Failed,
+                    handoff: chat_state::WorkflowTurnHandoff::Completion,
                     duration_ms: 1,
                     message: Some("retry".into()),
                 },
@@ -911,5 +996,19 @@ mod tests {
 
         let (_store, states) = WorkflowRunStore::from_restored(None, tx, vec![restored], None);
         assert!(states.is_empty());
+    }
+
+    #[test]
+    fn legacy_manifest_reports_version_before_decoding_the_v6_body() {
+        let error = decode_workflow_manifest(
+            br#"{"version":5,"state":{"run_id":"wf_legacy"},"script_revision":0}"#,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Workflow manifest version 5; expected 6")
+        );
     }
 }

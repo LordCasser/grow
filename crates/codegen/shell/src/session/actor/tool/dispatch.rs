@@ -150,6 +150,8 @@ mod permit_tests {
                 consumed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
             workflow_draft_write: false,
+            success_control: None,
+            plan_exit_on_success: None,
         }
     }
 

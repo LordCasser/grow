@@ -2450,6 +2450,14 @@ pub(crate) async fn spawn_session_actor(
     // child wiring and cannot infer this lifecycle distinction by id alone.
     session.sync_goal_usage_window();
     session
+        .reconcile_restored_plan_handoff_notification()
+        .await
+        .map_err(|error| {
+            agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                "restored Plan handoff notification was not reconciled: {error}"
+            )))
+        })?;
+    session
         .reconcile_restored_public_workflow_notifications()
         .await
         .map_err(|error| {

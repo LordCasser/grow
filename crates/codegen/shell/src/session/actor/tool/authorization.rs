@@ -2,27 +2,6 @@
 
 use super::*;
 
-pub(super) fn is_plan_control_kind(kind: Option<tools::types::tool::ToolKind>) -> bool {
-    matches!(kind, Some(tools::types::tool::ToolKind::PlanControl))
-}
-
-pub(super) fn is_state_control_kind(kind: Option<tools::types::tool::ToolKind>) -> bool {
-    matches!(
-        kind,
-        Some(
-            tools::types::tool::ToolKind::PlanControl
-                | tools::types::tool::ToolKind::GoalLifecycleUpdate
-        )
-    )
-}
-
-pub(super) fn is_goal_lifecycle_kind(kind: Option<tools::types::tool::ToolKind>) -> bool {
-    matches!(
-        kind,
-        Some(tools::types::tool::ToolKind::GoalLifecycleUpdate)
-    )
-}
-
 pub(super) fn public_workflow_conflict(
     admitted: tool_types::BehaviorId,
     current: tool_types::BehaviorId,
@@ -541,16 +520,16 @@ pub(super) fn workflow_run_snapshot_write(
 /// Select the first lifecycle mutation as the batch barrier. Every other call
 /// is a sibling sampled against the pre-transition state and must be durably
 /// cancelled; this applies even when the provider emitted a sibling first.
-pub(super) fn split_state_control_barrier(
+pub(super) fn split_control_preflight_barrier(
     mut calls: Vec<crate::sampling::types::ToolCallResponse>,
-    kind_of: impl Fn(&str) -> Option<tools::types::tool::ToolKind>,
+    isolates_batch_preflight: impl Fn(&str) -> bool,
 ) -> (
     Option<crate::sampling::types::ToolCallResponse>,
     Vec<crate::sampling::types::ToolCallResponse>,
 ) {
     let Some(index) = calls
         .iter()
-        .position(|call| is_state_control_kind(kind_of(&call.function.name)))
+        .position(|call| isolates_batch_preflight(&call.function.name))
     else {
         return (None, calls);
     };
@@ -652,28 +631,7 @@ pub(super) async fn mcp_call_max_access(
     )
 }
 
-/// Typed view of a Plan approval decision. The wire type carries `outcome` as
-/// a string; both the mid-turn
-/// intercept and the resume re-park match on this enum instead. Unknown /
-/// unrecognized outcomes map to [`Cancelled`](Self::Cancelled) so the session
-/// fails CLOSED (stays in plan mode) rather than auto-approving.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PlanApprovalOutcome {
-    Approved,
-    Cancelled,
-    Abandoned,
-}
-impl PlanApprovalOutcome {
-    pub(super) fn from_response(
-        resp: &tools::implementations::grow_build::plan_control::PlanApprovalExtResponse,
-    ) -> Self {
-        match resp.outcome.as_str() {
-            "approved" => Self::Approved,
-            "abandoned" => Self::Abandoned,
-            _ => Self::Cancelled,
-        }
-    }
-}
+pub(super) use tools::implementations::grow_build::plan_control::PlanApprovalOutcome;
 /// Classify an `ext_method` failure: `true` when the reverse-request could not
 /// be DELIVERED to any client (no interactive client wired — headless / SDK),
 /// `false` when it was delivered but the client went away before answering
@@ -691,22 +649,6 @@ pub(super) fn ext_method_no_client(err: &acp::Error) -> bool {
         Some(acp_transport::AcpChannelFailure::SendFailed)
     )
 }
-/// Model-facing turn injected after a resumed plan is approved.
-pub(super) const PLAN_APPROVED_IMPLEMENT_MESSAGE: &str =
-    "The user approved the submitted plan. Proceed using the approved plan in context.";
-/// Shared "revise the plan" message for the request-changes outcome, used by
-/// both the mid-turn intercept and the resume re-park.
-pub(super) fn revise_plan_message(feedback: &str) -> String {
-    let feedback = feedback.trim();
-    if feedback.is_empty() {
-        "The user wants to revise the plan. \
-         Ask the user what changes they would like to make."
-            .to_string()
-    } else {
-        format!("The user wants to revise the plan. The user said:\n{feedback}")
-    }
-}
-
 pub(super) async fn write_plan_artifact_async(
     session: std::sync::Arc<crate::session::storage::ContainedDirectory>,
     markdown: String,
@@ -727,28 +669,4 @@ pub(super) async fn read_plan_artifact_async(
     })
     .await
     .map_err(std::io::Error::other)?
-}
-/// What the resume re-park does with the user's decision. Extracted
-/// from `resume_plan_approval` so the branch logic is unit-testable without
-/// driving a real turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ResumeAction {
-    /// Approved: leave plan mode and start an implement turn (Agent mode).
-    LeaveAndImplement,
-    /// Request changes: stay in plan mode and start a revise turn (Plan mode).
-    StayAndRevise(String),
-    /// Abandoned: leave plan mode and wait for the user (no turn).
-    LeaveOnly,
-}
-pub(super) fn resume_action_for(
-    outcome: PlanApprovalOutcome,
-    feedback: Option<String>,
-) -> ResumeAction {
-    match outcome {
-        PlanApprovalOutcome::Approved => ResumeAction::LeaveAndImplement,
-        PlanApprovalOutcome::Cancelled => {
-            ResumeAction::StayAndRevise(revise_plan_message(feedback.as_deref().unwrap_or("")))
-        }
-        PlanApprovalOutcome::Abandoned => ResumeAction::LeaveOnly,
-    }
 }

@@ -7,7 +7,7 @@
 
 pub mod types;
 
-pub use types::{PlanApprovalExtRequest, PlanApprovalExtResponse};
+pub use types::{PlanApprovalExtRequest, PlanApprovalExtResponse, PlanApprovalOutcome};
 
 use crate::types::output::PlanControlOutput;
 use crate::types::tool::{ToolKind, ToolNamespace};
@@ -22,10 +22,53 @@ pub enum PlanControlAction {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PlanControlInput {
     pub action: PlanControlAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+}
+
+impl PlanControlInput {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match self.action {
+            PlanControlAction::Submit | PlanControlAction::Amend => {
+                if !self
+                    .plan
+                    .as_deref()
+                    .is_some_and(|plan| !plan.trim().is_empty())
+                {
+                    return Err("`plan` is required for submit/amend");
+                }
+                if self.report.is_some() {
+                    return Err("`report` is forbidden for submit/amend");
+                }
+            }
+            PlanControlAction::Complete => {
+                if self.plan.is_some() {
+                    return Err("`plan` is forbidden for complete");
+                }
+                if !self
+                    .report
+                    .as_deref()
+                    .is_some_and(|report| !report.trim().is_empty())
+                {
+                    return Err("a non-empty `report` is required for complete");
+                }
+            }
+            PlanControlAction::Cancel => {
+                if self.plan.is_some() {
+                    return Err("`plan` is forbidden for cancel");
+                }
+                if self.report.is_some() {
+                    return Err("`report` is forbidden for cancel");
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -41,7 +84,11 @@ impl crate::types::tool_metadata::ToolMetadata for PlanControlTool {
     }
 
     fn description_template(&self) -> &str {
-        r#"Control the active Plan lifecycle. Use action=`submit` with the complete initial plan to request approval; action=`amend` with a complete replacement plan when execution must materially deviate; action=`complete` only after every approved step and verification has finished; or action=`cancel` to abandon the Plan. `plan` is required only for submit/amend. Approval is always explicit and execution remains blocked until the user approves."#
+        r#"Control the active Plan lifecycle. Use action=`submit` with the complete initial plan to request approval; action=`amend` with a complete replacement plan when execution must materially deviate; action=`complete` only after every approved step and verification has finished, with `report` containing the final user-facing result; or action=`cancel` to abandon the Plan. `plan` is required only for submit/amend. `report` is required only for complete. Approval is always explicit and execution remains blocked until the user approves."#
+    }
+
+    fn isolates_batch_preflight(&self) -> bool {
+        true
     }
 }
 
@@ -72,25 +119,25 @@ impl tool_runtime::Tool for PlanControlTool {
         _ctx: tool_runtime::ToolCallContext,
         input: PlanControlInput,
     ) -> Result<PlanControlOutput, tool_runtime::ToolError> {
-        let valid_plan_argument = match input.action {
-            PlanControlAction::Submit | PlanControlAction::Amend => input
-                .plan
-                .as_deref()
-                .is_some_and(|plan| !plan.trim().is_empty()),
-            PlanControlAction::Complete | PlanControlAction::Cancel => input.plan.is_none(),
-        };
-        if !valid_plan_argument {
-            return Err(tool_runtime::ToolError::invalid_arguments(
-                "`plan` is required for submit/amend and forbidden for complete/cancel",
-            ));
-        }
+        input
+            .validate()
+            .map_err(tool_runtime::ToolError::invalid_arguments)?;
 
         let message = match input.action {
             PlanControlAction::Submit | PlanControlAction::Amend => {
                 "The plan was approved and is now the frozen execution contract."
             }
             PlanControlAction::Complete => {
-                "The approved Plan was completed and the session returned to Normal."
+                return Ok(PlanControlOutput {
+                    message: format!(
+                        "The approved Plan is complete.\n\n{}",
+                        input
+                            .report
+                            .as_deref()
+                            .expect("validated complete report")
+                            .trim()
+                    ),
+                });
             }
             PlanControlAction::Cancel => {
                 "The Plan was cancelled and the session returned to Normal."
@@ -117,5 +164,64 @@ mod tests {
     #[test]
     fn input_requires_action() {
         assert!(serde_json::from_value::<PlanControlInput>(serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn complete_requires_only_a_non_empty_report() {
+        let valid: PlanControlInput = serde_json::from_value(serde_json::json!({
+            "action": "complete",
+            "report": "Implemented and verified."
+        }))
+        .unwrap();
+        assert!(valid.validate().is_ok());
+
+        for invalid in [
+            serde_json::json!({"action": "complete"}),
+            serde_json::json!({"action": "complete", "report": "  "}),
+            serde_json::json!({"action": "complete", "report": "done", "plan": "# stale"}),
+        ] {
+            let input: PlanControlInput = serde_json::from_value(invalid).unwrap();
+            assert!(input.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn each_action_rejects_fields_owned_by_another_action() {
+        for invalid in [
+            serde_json::json!({"action": "submit", "plan": "# Plan", "report": "done"}),
+            serde_json::json!({"action": "amend", "plan": "# Plan", "report": "done"}),
+            serde_json::json!({"action": "cancel", "plan": "# stale"}),
+            serde_json::json!({"action": "cancel", "report": "done"}),
+        ] {
+            let input: PlanControlInput = serde_json::from_value(invalid).unwrap();
+            assert!(input.validate().is_err());
+        }
+        assert!(
+            serde_json::from_value::<PlanControlInput>(serde_json::json!({
+                "action": "complete",
+                "report": "done",
+                "unexpected": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_returns_the_final_report_verbatim_after_trimming() {
+        let output = tool_runtime::Tool::run(
+            &PlanControlTool,
+            tool_runtime::ToolCallContext::default(),
+            PlanControlInput {
+                action: PlanControlAction::Complete,
+                plan: None,
+                report: Some("  Implemented and verified.  ".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            output.message,
+            "The approved Plan is complete.\n\nImplemented and verified."
+        );
     }
 }

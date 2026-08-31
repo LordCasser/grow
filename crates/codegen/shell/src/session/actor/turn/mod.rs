@@ -354,7 +354,7 @@ impl SessionActor {
         loop {
             let outcome = match &result {
                 Ok(TurnOutcome::Completed { .. }) => "completed",
-                Ok(TurnOutcome::ControlBoundary { .. }) => "control_boundary",
+                Ok(TurnOutcome::ControlEnded { .. }) => "control_boundary",
                 Ok(TurnOutcome::GoalSpendingStopped { .. }) => "goal_spending_stopped",
                 Ok(TurnOutcome::Cancelled { .. }) => "cancelled",
                 Ok(TurnOutcome::MaxTurnsReached { .. }) => "max_turns",
@@ -393,7 +393,7 @@ impl SessionActor {
             if behavior_changed {
                 let snapshot = match result {
                     Ok(TurnOutcome::Completed { snapshot, .. })
-                    | Ok(TurnOutcome::ControlBoundary { snapshot })
+                    | Ok(TurnOutcome::ControlEnded { snapshot })
                     | Ok(TurnOutcome::GoalSpendingStopped { snapshot })
                     | Ok(TurnOutcome::StationarityEnded { snapshot }) => snapshot,
                     Ok(TurnOutcome::Cancelled { .. })
@@ -405,11 +405,11 @@ impl SessionActor {
                 // StepEnded, it must not inherit that result (most notably an
                 // old Normal error must not auto-pause a newly reactivated
                 // Goal during settlement).
-                return Ok(TurnOutcome::ControlBoundary { snapshot });
+                return Ok(TurnOutcome::ControlEnded { snapshot });
             }
             if matches!(
                 result,
-                Ok(TurnOutcome::ControlBoundary { .. })
+                Ok(TurnOutcome::ControlEnded { .. })
                     | Ok(TurnOutcome::GoalSpendingStopped { .. })
                     | Ok(TurnOutcome::Cancelled { .. })
                     | Ok(TurnOutcome::MaxTurnsReached { .. })
@@ -855,6 +855,7 @@ impl SessionActor {
         let mut structured_output_retries: u32 = 0;
         let mut image_projection_retries: u8 = 0;
         let mut pending_forced_compaction: Option<compaction::AutoCompactTriggerInfo> = None;
+        let mut plan_handoff_resample_pending = false;
         // True only between a provider overflow and the first successful
         // non-overflow response after its forced compaction. Long Goal turns
         // may legitimately compact again after later successful Steps grow
@@ -921,9 +922,19 @@ impl SessionActor {
                             model_fingerprint.clone(),
                         )
                         .await;
-                    return Ok(TurnOutcome::ControlBoundary {
+                    return Ok(TurnOutcome::ControlEnded {
                         snapshot: Box::new(snapshot),
                     });
+                }
+                if plan_handoff_resample_pending {
+                    self.consume_live_plan_handoff_for_next_step()
+                        .await
+                        .map_err(|error| {
+                            acp::Error::internal_error().data(format!(
+                                "failed to consume the live Plan handoff before resampling: {error}"
+                            ))
+                        })?;
+                    plan_handoff_resample_pending = false;
                 }
                 if model_changed || agent_changed {
                     if let Some(stale) = pending_forced_compaction.take() {
@@ -1751,7 +1762,7 @@ impl SessionActor {
                 })
                 .collect();
             let execute_tool_calls_result = self.execute_tool_calls(tool_call_responses).await;
-            match execute_tool_calls_result {
+            let resample_after_control = match execute_tool_calls_result {
                 Ok(ToolLoop::PermissionReject { tool_name, reason }) => {
                     return Ok(TurnOutcome::Cancelled {
                         category: Some(
@@ -1763,8 +1774,9 @@ impl SessionActor {
                         })),
                     });
                 }
-                Ok(ToolLoop::HookDenied { .. }) => {}
-                Ok(ToolLoop::ControlBoundary) => {
+                Ok(ToolLoop::HookDenied { .. }) => false,
+                Ok(ToolLoop::Control(ControlDisposition::ResampleStep)) => true,
+                Ok(ToolLoop::Control(ControlDisposition::EndTurn)) => {
                     let snapshot = self
                         .finalize_turn_bookkeeping(
                             req_id,
@@ -1773,7 +1785,7 @@ impl SessionActor {
                             model_fingerprint.clone(),
                         )
                         .await;
-                    return Ok(TurnOutcome::ControlBoundary {
+                    return Ok(TurnOutcome::ControlEnded {
                         snapshot: Box::new(snapshot),
                     });
                 }
@@ -1801,8 +1813,8 @@ impl SessionActor {
                         .await;
                     continue;
                 }
-                _ => {}
-            }
+                _ => false,
+            };
             let next_turn = tool_turn_count + 1;
             if let Some(limit) = self.max_turns
                 && next_turn > limit
@@ -1816,6 +1828,12 @@ impl SessionActor {
                 return Ok(TurnOutcome::MaxTurnsReached { limit });
             }
             tool_turn_count = next_turn;
+            if resample_after_control {
+                // Plan phase transitions stay inside the admitted Plan Turn,
+                // but the next Step must see the newly active phase contract.
+                plan_handoff_resample_pending = true;
+                self.inject_behavior_reminders().await?;
+            }
             if self.tool_context.task_output_token_budget.is_none()
                 && let Some(trigger_info) = self.check_preflight_overflow().await
             {

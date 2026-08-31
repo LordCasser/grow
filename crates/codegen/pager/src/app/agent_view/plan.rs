@@ -151,20 +151,17 @@ impl AgentView {
         let Some(mut pav) = self.plan_approval_view.take() else {
             return InputOutcome::Changed;
         };
-        let review_comments = if !pav.comments.is_empty() {
+        let review_feedback = if !pav.comments.is_empty() {
             let formatted = pav.format_feedback(None);
             if formatted.trim().is_empty() {
                 None
             } else {
-                Some(format!(
-                    "The user approved the plan with the following review comments:\n\n{}",
-                    formatted
-                ))
+                Some(formatted)
             }
         } else {
             None
         };
-        pav.send_approved();
+        pav.send_approved(review_feedback);
         self.plan_next_comment_id = pav.next_comment_id;
         self.prompt.restore(pav.stashed_prompt);
         self.line_viewer = None;
@@ -175,12 +172,6 @@ impl AgentView {
             use diagnostics::session_ctx::log_event;
             log_event(PlanSubmit {
                 action: "build".to_string(),
-            });
-        }
-        if let Some(text) = review_comments {
-            return InputOutcome::Action(Action::Interject {
-                text,
-                images: vec![],
             });
         }
         InputOutcome::Changed
@@ -922,6 +913,54 @@ mod plan_approval_enter_tests {
             Some("Plan revision sent.")
         );
     }
+
+    #[test]
+    fn approving_with_comments_carries_feedback_in_the_approval_response() {
+        let mut agent = make_agent();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::PlanApprovalExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-with-comments".into(),
+            plan_content: "# Plan\n\nDo something".into(),
+        };
+        let mut pav = crate::views::plan_approval_view::PlanApprovalViewState::new(
+            request,
+            crate::views::prompt_widget::StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        );
+        pav.comments.push(PlanComment {
+            id: 1,
+            line_range: 2..3,
+            text: "keep the public API stable".into(),
+        });
+        agent.plan_approval_view = Some(pav);
+
+        assert!(matches!(agent.approve_plan(), InputOutcome::Changed));
+        let response = rx
+            .try_recv()
+            .expect("approval response should be sent synchronously")
+            .expect("approval response should succeed");
+        let parsed: crate::views::plan_approval_view::PlanApprovalExtResponse =
+            serde_json::from_str(response.0.get()).expect("typed approval response");
+        assert_eq!(
+            parsed.outcome,
+            crate::views::plan_approval_view::PlanApprovalOutcome::Approved
+        );
+        assert!(
+            parsed
+                .feedback
+                .as_deref()
+                .is_some_and(|feedback| feedback.contains("keep the public API stable"))
+        );
+    }
+
     #[test]
     fn a_with_pending_comments_does_not_approve() {
         let mut agent = agent_with_revise_prompt();

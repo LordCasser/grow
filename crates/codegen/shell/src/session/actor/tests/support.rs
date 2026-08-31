@@ -13,19 +13,31 @@ pub(crate) fn test_auth_method_id(id: &str) -> crate::agent::auth_method::Shared
 /// these buffered start events.
 #[cfg(test)]
 pub(crate) async fn begin_test_causal_turn(actor: &SessionActor) {
+    begin_test_causal_turn_with_identity(
+        actor,
+        chat_state::TurnIdentity {
+            origin: "test".into(),
+            turn_kind: "internal".into(),
+            goal_id: None,
+            goal_definition_revision: None,
+            stage_id: None,
+        },
+    )
+    .await;
+}
+
+#[cfg(test)]
+async fn begin_test_causal_turn_with_identity(
+    actor: &SessionActor,
+    identity: chat_state::TurnIdentity,
+) {
     actor.events.begin_turn();
     actor
         .events
         .start_turn(crate::session::events::Event::TurnStarted {
             session_id: actor.session_id_string(),
             turn_number: 1,
-            identity: chat_state::TurnIdentity {
-                origin: "test".into(),
-                turn_kind: "internal".into(),
-                goal_id: None,
-                goal_definition_revision: None,
-                stage_id: None,
-            },
+            identity,
             model_id: "test".into(),
             permission_mode: actor.permissions.mode(),
             conversation_message_count: 0,
@@ -54,6 +66,20 @@ pub(crate) async fn begin_test_active_causal_turn(actor: &SessionActor) {
     begin_test_causal_turn(actor).await;
     actor.state.lock().await.foreground =
         ForegroundState::RegularTurn(running_task_stub("test-active-turn"));
+}
+
+#[cfg(test)]
+pub(crate) async fn begin_test_active_causal_turn_with_origin(
+    actor: &SessionActor,
+    prompt_id: &str,
+    origin: crate::session::PromptOrigin,
+    turn_kind: crate::session::TurnKind,
+) {
+    begin_test_causal_turn_with_identity(actor, origin.turn_identity(turn_kind)).await;
+    let mut task = running_task_stub(prompt_id);
+    task.origin = origin;
+    task.turn_kind = turn_kind;
+    actor.state.lock().await.foreground = ForegroundState::RegularTurn(task);
 }
 
 /// Seed a test Surface and its branch-local prompt coordinates through the

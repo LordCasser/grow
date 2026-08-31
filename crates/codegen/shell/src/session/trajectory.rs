@@ -1918,7 +1918,7 @@ impl SessionTrajectoryCache {
                         "Trajectory Workflow manifest",
                     )?;
                     budget.admit_file(&manifest_file, "Workflow manifest")?;
-                    serde_json::from_slice::<super::workflow::store::WorkflowRunManifest>(&bytes)?
+                    super::workflow::store::decode_workflow_manifest(&bytes)?
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     match run_dir.open_regular(
@@ -4127,6 +4127,7 @@ mod tests {
                     run_id: "wf_debug".into(),
                     execution_epoch: 0,
                     status: chat_state::WorkflowExecutionStatus::Complete,
+                    handoff: chat_state::WorkflowTurnHandoff::Completion,
                     duration_ms: 9,
                     message: None,
                 },

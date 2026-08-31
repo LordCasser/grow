@@ -288,6 +288,7 @@ impl WorkflowManager {
                     run_id: run_id.to_owned(),
                     execution_epoch,
                     status: chat_state::WorkflowExecutionStatus::Interrupted,
+                    handoff: interrupted.turn_handoff,
                     duration_ms: elapsed,
                     message: interrupted.pause_message.clone(),
                 },
@@ -511,6 +512,10 @@ impl WorkflowManager {
                     format!("workflow journal could not prepare resume: {message}"),
                 )
             };
+            let turn_handoff = interrupted
+                .as_ref()
+                .map(|state| state.turn_handoff)
+                .unwrap_or(chat_state::WorkflowTurnHandoff::Completion);
             if let Some(interrupted) = interrupted {
                 let _ = self.store.persist_ack(&interrupted).await;
             }
@@ -521,6 +526,7 @@ impl WorkflowManager {
                         run_id: run_id.clone(),
                         execution_epoch,
                         status: chat_state::WorkflowExecutionStatus::Interrupted,
+                        handoff: turn_handoff,
                         duration_ms: 0,
                         message: Some(message.clone()),
                     },
@@ -551,6 +557,7 @@ impl WorkflowManager {
                             run_id: run_id.clone(),
                             execution_epoch,
                             status: chat_state::WorkflowExecutionStatus::Interrupted,
+                            handoff: interrupted.turn_handoff,
                             duration_ms: 0,
                             message: Some(error.to_string()),
                         },
@@ -716,7 +723,9 @@ impl WorkflowManager {
                 } else if pause_intent.load(Ordering::Relaxed)
                     && matches!(
                         outcome,
-                        WorkflowOutcome::Cancelled | WorkflowOutcome::Paused { .. }
+                        WorkflowOutcome::Cancelled
+                            | WorkflowOutcome::Paused { .. }
+                            | WorkflowOutcome::AwaitingUser { .. }
                     )
                 {
                     tracker.pause_user(&watcher_run_id, None)
@@ -790,6 +799,7 @@ impl WorkflowManager {
                             run_id: watcher_run_id.clone(),
                             execution_epoch,
                             status: state.status.to_timeline(),
+                            handoff: state.turn_handoff,
                             duration_ms: elapsed,
                             message: state.pause_message.clone(),
                         },
@@ -810,8 +820,8 @@ impl WorkflowManager {
                     return;
                 }
                 notify.broadcast(&state, elapsed, 0, true);
-                if state.status.is_completion_reportable() {
-                    tokio::spawn(deliver_workflow_completion_acknowledged(
+                if state.turn_handoff != chat_state::WorkflowTurnHandoff::None {
+                    tokio::spawn(deliver_workflow_handoff_acknowledged(
                         session_cmd_tx.clone(),
                         state.clone(),
                     ));
@@ -923,10 +933,13 @@ impl WorkflowManager {
         run.cancel.cancel();
         let _ = self.cancel_children_for_run(run_id);
         let state = Self::await_terminal_barrier(run_id, run.done).await?;
-        if state.status != WorkflowRunStatus::UserPaused {
+        if state.status != WorkflowRunStatus::UserPaused
+            || state.turn_handoff != chat_state::WorkflowTurnHandoff::None
+        {
             return Err(format!(
-                "workflow {run_id} settled as {} instead of user_paused",
-                state.status.as_str()
+                "workflow {run_id} settled as {} with {:?} handoff instead of an explicit user pause",
+                state.status.as_str(),
+                state.turn_handoff
             ));
         }
         Ok(state)
@@ -968,6 +981,7 @@ impl WorkflowManager {
                     run_id: run_id.to_owned(),
                     execution_epoch,
                     status: chat_state::WorkflowExecutionStatus::Cancelled,
+                    handoff: chat_state::WorkflowTurnHandoff::None,
                     duration_ms: elapsed,
                     message: Some("cancelled while no execution was active".into()),
                 },
@@ -1004,10 +1018,12 @@ impl WorkflowManager {
                     )
                 };
                 self.notify.emit(&state, elapsed, 0);
-                tokio::spawn(deliver_workflow_completion_acknowledged(
-                    self.session_cmd_tx.clone(),
-                    state.clone(),
-                ));
+                if state.turn_handoff != chat_state::WorkflowTurnHandoff::None {
+                    tokio::spawn(deliver_workflow_handoff_acknowledged(
+                        self.session_cmd_tx.clone(),
+                        state.clone(),
+                    ));
+                }
                 Ok(state)
             }
             None => Err(format!("workflow {run_id} could not be closed")),
@@ -1089,6 +1105,7 @@ impl WorkflowManager {
                             run_id: run_id.clone(),
                             execution_epoch: state.execution_epoch,
                             status: chat_state::WorkflowExecutionStatus::Interrupted,
+                            handoff: state.turn_handoff,
                             duration_ms: elapsed,
                             message: state.pause_message.clone(),
                         },
@@ -1145,29 +1162,32 @@ impl WorkflowManager {
     }
 }
 
-/// Give SessionActor a bounded opportunity to durably admit the model-visible
-/// receipt. The Workflow lifecycle barrier is deliberately independent:
+/// Retry until SessionActor durably admits the model-visible receipt or its
+/// mailbox closes. The Workflow lifecycle barrier is deliberately independent:
 /// waiting for the actor here would deadlock a pause/cancel command that is
 /// itself awaiting the manager's terminal barrier. A restored session replays
 /// the same immutable run/epoch identity when this handoff cannot complete.
-async fn deliver_workflow_completion_acknowledged(
+async fn deliver_workflow_handoff_acknowledged(
     session_cmd_tx: mpsc::UnboundedSender<crate::session::commands::SessionCommand>,
     state: WorkflowRunState,
 ) {
-    const MAX_ATTEMPTS: usize = 3;
+    const INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+    const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
 
-    for attempt in 1..=MAX_ATTEMPTS {
+    let mut attempt = 1_usize;
+    let mut backoff = INITIAL_BACKOFF;
+    loop {
         let (respond_to, admitted) = oneshot::channel();
         if session_cmd_tx
             .send(
-                crate::session::commands::SessionCommand::WorkflowCompleted {
+                crate::session::commands::SessionCommand::WorkflowHandoffReady {
                     state: state.clone(),
                     respond_to,
                 },
             )
             .is_err()
         {
-            tracing::warn!(run_id = %state.run_id, "workflow completion delivery stopped because the session mailbox closed");
+            tracing::warn!(run_id = %state.run_id, "workflow handoff delivery stopped because the session mailbox closed");
             return;
         }
         let error = match admitted.await {
@@ -1175,23 +1195,16 @@ async fn deliver_workflow_completion_acknowledged(
             Ok(Err(error)) => error,
             Err(error) => format!("acknowledgement dropped: {error}"),
         };
-        if attempt == MAX_ATTEMPTS {
-            tracing::error!(
-                run_id = %state.run_id,
-                %error,
-                attempts = MAX_ATTEMPTS,
-                "workflow completion receipt admission exhausted; durable run remains recoverable"
-            );
-            return;
-        }
         tracing::warn!(
             run_id = %state.run_id,
             %error,
             attempt,
-            max_attempts = MAX_ATTEMPTS,
-            "workflow completion receipt admission failed; retrying"
+            retry_delay_ms = backoff.as_millis() as u64,
+            "workflow handoff receipt admission failed; retrying"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(backoff).await;
+        backoff = std::cmp::min(backoff.saturating_mul(2), MAX_BACKOFF);
+        attempt = attempt.saturating_add(1);
     }
 }
 
@@ -1345,8 +1358,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn workflow_completion_retries_until_actor_admission_ack() {
+    #[tokio::test(start_paused = true)]
+    async fn workflow_handoff_retries_until_actor_admission_ack() {
         let mut tracker = WorkflowTracker::default();
         let mut state = tracker.start_run(
             "workflow-retry".into(),
@@ -1358,29 +1371,30 @@ mod tests {
             crate::session::workflow::tracker::test_runtime_route(),
         );
         state.status = WorkflowRunStatus::Complete;
+        state.turn_handoff = chat_state::WorkflowTurnHandoff::Completion;
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        let delivery = tokio::spawn(deliver_workflow_completion_acknowledged(
-            cmd_tx,
-            state.clone(),
-        ));
+        let delivery = tokio::spawn(deliver_workflow_handoff_acknowledged(cmd_tx, state.clone()));
 
-        let crate::session::commands::SessionCommand::WorkflowCompleted {
+        let crate::session::commands::SessionCommand::WorkflowHandoffReady {
             state: first,
             respond_to: first_ack,
             ..
         } = cmd_rx.recv().await.expect("first delivery")
         else {
-            panic!("expected WorkflowCompleted");
+            panic!("expected WorkflowHandoffReady");
         };
         first_ack.send(Err("disk unavailable".into())).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
 
-        let crate::session::commands::SessionCommand::WorkflowCompleted {
+        let crate::session::commands::SessionCommand::WorkflowHandoffReady {
             state: retry,
             respond_to: retry_ack,
             ..
         } = cmd_rx.recv().await.expect("retry delivery")
         else {
-            panic!("expected WorkflowCompleted retry");
+            panic!("expected WorkflowHandoffReady retry");
         };
         assert_eq!(retry.run_id, first.run_id);
         assert_eq!(retry.execution_epoch, first.execution_epoch);
@@ -1388,36 +1402,81 @@ mod tests {
         delivery.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn workflow_completion_exhaustion_releases_the_delivery_task() {
+    #[tokio::test(start_paused = true)]
+    async fn workflow_handoff_retries_past_three_failures_and_caps_backoff() {
         let mut tracker = WorkflowTracker::default();
         let mut state = tracker.start_run(
             "workflow-failed".into(),
             "failed".into(),
-            "verify bounded delivery".into(),
+            "verify persistent delivery".into(),
             Vec::new(),
             None,
             None,
             crate::session::workflow::tracker::test_runtime_route(),
         );
         state.status = WorkflowRunStatus::Complete;
+        state.turn_handoff = chat_state::WorkflowTurnHandoff::Completion;
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
-        let delivery = tokio::spawn(deliver_workflow_completion_acknowledged(cmd_tx, state));
+        let delivery = tokio::spawn(deliver_workflow_handoff_acknowledged(cmd_tx, state));
 
-        for _ in 0..3 {
-            let crate::session::commands::SessionCommand::WorkflowCompleted { respond_to, .. } =
-                cmd_rx.recv().await.expect("bounded workflow delivery")
+        let retry_delays_ms = [100_u64, 200, 400, 800, 1_600, 2_000, 2_000];
+        for (attempt, retry_delay_ms) in retry_delays_ms.into_iter().enumerate() {
+            let command = if attempt == 0 {
+                cmd_rx.recv().await.expect("first workflow delivery")
+            } else {
+                cmd_rx
+                    .try_recv()
+                    .expect("workflow retry must be ready after its backoff")
+            };
+            let crate::session::commands::SessionCommand::WorkflowHandoffReady {
+                respond_to, ..
+            } = command
             else {
-                panic!("expected WorkflowCompleted");
+                panic!("expected WorkflowHandoffReady");
             };
             respond_to.send(Err("disk unavailable".into())).unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(std::time::Duration::from_millis(retry_delay_ms)).await;
+            tokio::task::yield_now().await;
         }
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), delivery)
-            .await
-            .expect("workflow delivery task must retire after bounded retries")
-            .unwrap();
-        assert!(cmd_rx.try_recv().is_err());
+        let crate::session::commands::SessionCommand::WorkflowHandoffReady { respond_to, .. } =
+            cmd_rx
+                .try_recv()
+                .expect("delivery must continue after capped backoff")
+        else {
+            panic!("expected WorkflowHandoffReady after capped backoff");
+        };
+        respond_to.send(Ok(())).unwrap();
+        delivery.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn workflow_handoff_delivery_stops_when_the_mailbox_closes() {
+        let mut tracker = WorkflowTracker::default();
+        let mut state = tracker.start_run(
+            "workflow-closed-mailbox".into(),
+            "closed-mailbox".into(),
+            "verify mailbox closure".into(),
+            Vec::new(),
+            None,
+            None,
+            crate::session::workflow::tracker::test_runtime_route(),
+        );
+        state.status = WorkflowRunStatus::Complete;
+        state.turn_handoff = chat_state::WorkflowTurnHandoff::Completion;
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let delivery = tokio::spawn(deliver_workflow_handoff_acknowledged(cmd_tx, state));
+        let crate::session::commands::SessionCommand::WorkflowHandoffReady { respond_to, .. } =
+            cmd_rx.recv().await.expect("first delivery")
+        else {
+            panic!("expected WorkflowHandoffReady");
+        };
+        respond_to.send(Err("transient failure".into())).unwrap();
+        drop(cmd_rx);
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        delivery.await.unwrap();
     }
 
     #[tokio::test]
@@ -1598,8 +1657,12 @@ mod tests {
             .unwrap();
         assert!(matches!(
             outcome_rx.await.unwrap(),
-            WorkflowOutcome::Paused { .. }
+            WorkflowOutcome::AwaitingUser { .. }
         ));
+        assert_eq!(
+            manager.tracker.lock().get(&run_id).unwrap().turn_handoff,
+            chat_state::WorkflowTurnHandoff::AttentionRequired
+        );
         std::fs::write(
             dir.path()
                 .join("workflows")
@@ -1667,6 +1730,7 @@ mod tests {
             state.status,
             crate::session::workflow::tracker::WorkflowRunStatus::UserPaused
         );
+        assert_eq!(state.turn_handoff, chat_state::WorkflowTurnHandoff::None);
         assert!(!manager.active.contains_key(&run_id));
     }
 
@@ -1692,6 +1756,7 @@ mod tests {
             crate::session::workflow::tracker::WorkflowRunStatus::UserPaused,
             "pause intent must map Cancelled → UserPaused"
         );
+        assert_eq!(state.turn_handoff, chat_state::WorkflowTurnHandoff::None);
 
         let resolved = resolve_inline(script.into()).unwrap();
         let (_run_id2, outcome_rx) = manager
@@ -1880,9 +1945,14 @@ mod tests {
         );
 
         assert!(manager.cancel(&run_id).await.is_ok());
+        let cancelled = manager.tracker.lock().get(&run_id).unwrap();
         assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().status,
+            cancelled.status,
             crate::session::workflow::tracker::WorkflowRunStatus::Cancelled
+        );
+        assert_eq!(
+            cancelled.turn_handoff,
+            chat_state::WorkflowTurnHandoff::None
         );
         let trajectory = manager.timeline.trajectory().await.unwrap();
         let last = trajectory
@@ -1922,13 +1992,23 @@ mod tests {
         ));
 
         let state = manager.tracker.lock().get(&run_id).unwrap();
-        for status in [
-            crate::session::workflow::tracker::WorkflowRunStatus::Complete,
-            crate::session::workflow::tracker::WorkflowRunStatus::Cancelled,
-            crate::session::workflow::tracker::WorkflowRunStatus::Interrupted,
+        for (status, turn_handoff) in [
+            (
+                crate::session::workflow::tracker::WorkflowRunStatus::Complete,
+                chat_state::WorkflowTurnHandoff::Completion,
+            ),
+            (
+                crate::session::workflow::tracker::WorkflowRunStatus::Cancelled,
+                chat_state::WorkflowTurnHandoff::None,
+            ),
+            (
+                crate::session::workflow::tracker::WorkflowRunStatus::Interrupted,
+                chat_state::WorkflowTurnHandoff::Completion,
+            ),
         ] {
             let mut restored = state.clone();
             restored.status = status;
+            restored.turn_handoff = turn_handoff;
             let original_tracker = manager.tracker.clone();
             manager.tracker = Arc::new(parking_lot::Mutex::new(
                 WorkflowTracker::from_snapshot(vec![restored]).unwrap(),

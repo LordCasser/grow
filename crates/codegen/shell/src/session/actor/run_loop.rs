@@ -163,12 +163,22 @@ pub(super) async fn cancel_and_drain_session_subagents(
                             result.map(|_| ())
                         }
                         SessionCommand::RecordGoalUsageIncomplete { goal_id, respond_to } => {
-                            let result = session.apply_captured_goal_usage_incomplete(&goal_id).await;
+                            let outcome = session
+                                .apply_captured_goal_usage_incomplete_outcome(&goal_id)
+                                .await;
+                            let result = session
+                                .finish_goal_usage_apply_at_step_boundary(outcome)
+                                .await;
                             let _ = respond_to.send(result.clone());
                             result.map(|_| ())
                         }
                         SessionCommand::SettleGoalUsageAttempt { attempt_id, respond_to } => {
-                            let result = session.settle_claimed_goal_usage_attempt(&attempt_id).await;
+                            let outcome = session
+                                .settle_claimed_goal_usage_attempt_outcome(&attempt_id)
+                                .await;
+                            let result = session
+                                .finish_goal_usage_apply_at_step_boundary(outcome)
+                                .await;
                             let _ = respond_to.send(result.clone());
                             result.map(|_| ())
                         }
@@ -1305,7 +1315,8 @@ pub(super) async fn run_session(
                             }
                             chat_state::NotificationSource::MonitorProgress { .. }
                             | chat_state::NotificationSource::TaskStillRunning { .. }
-                            | chat_state::NotificationSource::WorkflowCompleted { .. } => None,
+                            | chat_state::NotificationSource::PlanHandoff { .. }
+                            | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
                         };
                         let admission = session
                             .receive_notification(source, source_version, body.clone())
@@ -1423,8 +1434,11 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::RecordGoalUsageIncomplete { goal_id, respond_to } => {
                         let _control = session.step_control_gate.lock().await;
+                        let outcome = session
+                            .apply_captured_goal_usage_incomplete_outcome(&goal_id)
+                            .await;
                         let result = session
-                            .apply_captured_goal_usage_incomplete(&goal_id)
+                            .finish_goal_usage_apply_at_step_boundary(outcome)
                             .await;
                         let fatal = result.is_err();
                         let _ = respond_to.send(result);
@@ -1439,8 +1453,11 @@ pub(super) async fn run_session(
                         respond_to,
                     } => {
                         let _control = session.step_control_gate.lock().await;
+                        let outcome = session
+                            .settle_claimed_goal_usage_attempt_outcome(&attempt_id)
+                            .await;
                         let result = session
-                            .settle_claimed_goal_usage_attempt(&attempt_id)
+                            .finish_goal_usage_apply_at_step_boundary(outcome)
                             .await;
                         let truly_idle = {
                             let admission = session.state.lock().await;
@@ -2493,13 +2510,13 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(Ok(()));
                         tracing::info!(expected_turn_id, "Queued same-turn steering input");
                     }
-                    SessionCommand::WorkflowCompleted {
+                    SessionCommand::WorkflowHandoffReady {
                         state,
                         respond_to,
                     } => {
                         let run_id = state.run_id.clone();
                         let admission = session
-                            .admit_public_workflow_completion(&state)
+                            .admit_public_workflow_handoff(&state)
                             .await;
                         if admission.is_ok() {
                             session.send_available_commands_update().await;

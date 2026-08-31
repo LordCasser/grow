@@ -897,7 +897,8 @@ impl SessionActor {
                         && matches!(
                             &item.origin,
                             super::PromptOrigin::TaskCompleted { .. }
-                                | super::PromptOrigin::WorkflowCompleted { .. }
+                                | super::PromptOrigin::WorkflowHandoff { .. }
+                                | super::PromptOrigin::PlanHandoff { .. }
                         )
                     {
                         Self::respond_removed_prompt(item.respond_to);

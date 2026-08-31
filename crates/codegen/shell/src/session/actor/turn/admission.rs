@@ -197,7 +197,8 @@ impl SessionActor {
                 .filter_map(|notification| match notification.source {
                     chat_state::NotificationSource::MonitorProgress { .. }
                     | chat_state::NotificationSource::TaskStillRunning { .. }
-                    | chat_state::NotificationSource::WorkflowCompleted { .. } => None,
+                    | chat_state::NotificationSource::PlanHandoff { .. }
+                    | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
                     chat_state::NotificationSource::TaskCompleted { task_id, .. } => Some(task_id),
                     chat_state::NotificationSource::SubagentCompleted { subagent_id, .. } => {
                         Some(subagent_id)
@@ -667,7 +668,7 @@ impl SessionActor {
                     super::super::PromptOrigin::SubagentCompleted { .. } => {
                         ConversationItem::subagent_completed(user_message)
                     }
-                    super::super::PromptOrigin::WorkflowCompleted { .. } => {
+                    super::super::PromptOrigin::WorkflowHandoff { .. } => {
                         ConversationItem::notification_drain(user_message)
                     }
                     super::super::PromptOrigin::NotificationDrain => {
@@ -681,8 +682,8 @@ impl SessionActor {
                             user_message,
                             sampling_types::SyntheticReason::SystemReminder,
                         ),
-                    super::super::PromptOrigin::PlanResume => {
-                        ConversationItem::system_reminder(user_message)
+                    super::super::PromptOrigin::PlanHandoff { .. } => {
+                        ConversationItem::notification_drain(user_message)
                     }
                     super::super::PromptOrigin::User => {
                         let mut item = ConversationItem::user(user_message);
@@ -936,7 +937,7 @@ impl SessionActor {
                     None,
                     None,
                 ),
-                Ok(AdmittedTurnSuccess::Model(TurnOutcome::ControlBoundary { .. })) => (
+                Ok(AdmittedTurnSuccess::Model(TurnOutcome::ControlEnded { .. })) => (
                     crate::session::events::TurnOutcomeLabel::Completed,
                     chat_state::TurnTerminal {
                         stop_reason: "end_turn".into(),
@@ -1110,7 +1111,7 @@ impl SessionActor {
                     error_category: None,
                 });
             }
-            Ok(TurnOutcome::ControlBoundary { .. }) => {
+            Ok(TurnOutcome::ControlEnded { .. }) => {
                 self.send_after_turn_event(tool_protocol::turn_hook::AfterTurnPayload {
                     turn_number: current_prompt_index as u64,
                     outcome: tool_protocol::turn_hook::TurnHookOutcome::Completed,
@@ -1283,7 +1284,7 @@ impl SessionActor {
         }
         match &result {
             Ok(TurnOutcome::Completed { .. })
-            | Ok(TurnOutcome::ControlBoundary { .. })
+            | Ok(TurnOutcome::ControlEnded { .. })
             | Ok(TurnOutcome::GoalSpendingStopped { .. })
             | Ok(TurnOutcome::StationarityEnded { .. }) => {
                 if let Some(extension) = &self.idle_prompt_extension {
@@ -1344,7 +1345,7 @@ impl SessionActor {
                         PromptCompletionKind::Completed,
                         structured_output,
                     ),
-                    TurnOutcome::ControlBoundary { snapshot } => (
+                    TurnOutcome::ControlEnded { snapshot } => (
                         acp::StopReason::EndTurn,
                         *snapshot,
                         PromptCompletionKind::Completed,

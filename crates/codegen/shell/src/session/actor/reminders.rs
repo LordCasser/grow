@@ -95,10 +95,25 @@ impl SessionActor {
     /// Render the exact terminal manifest snapshot into the durable
     /// notification payload. Report discovery descends from the pinned
     /// session-directory capability rather than reopening its display path.
-    pub(super) async fn workflow_completion_notification(
+    pub(super) async fn workflow_handoff_notification(
         &self,
         run: &crate::session::workflow::tracker::WorkflowRunState,
     ) -> String {
+        if run.turn_handoff == chat_state::WorkflowTurnHandoff::AttentionRequired {
+            let detail = run
+                .pause_message
+                .as_deref()
+                .map(workflow_completion_detail)
+                .unwrap_or_else(|| "The workflow is waiting for user input.".into());
+            return format!(
+                "Workflow '{}' (run id {}) requires attention.\n\n- Status: {}\n- Reason: {}\n\nExplain why the workflow paused and what input is needed. Tell the user to continue it explicitly with `/workflow-run resume {}`. Do not resume it automatically.",
+                run.name,
+                run.run_id,
+                run.status.as_str(),
+                detail,
+                run.name,
+            );
+        }
         let bridge = self.agent.borrow().tool_bridge().clone();
         let read_tool_name =
             tools::reminders::task_completion::resolve_read_tool_name(&bridge).await;
@@ -585,6 +600,7 @@ mod workflow_reminder_tests {
             name: "demo".to_owned(),
             objective: "exercise formatter".to_owned(),
             status: WorkflowRunStatus::Failed,
+            turn_handoff: chat_state::WorkflowTurnHandoff::Completion,
             phases: Vec::new(),
             current_phase: None,
             agent_budget: None,

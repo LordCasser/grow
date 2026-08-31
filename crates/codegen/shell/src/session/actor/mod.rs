@@ -1303,6 +1303,28 @@ pub(crate) struct PreparedToolCall {
     /// True when this native call writes a session Workflow draft. Dispatch
     /// rechecks live Behavior while holding Workflow admission.
     workflow_draft_write: bool,
+    /// Explicit continuation semantics after a successful dispatch. This is
+    /// frozen from the validated typed input; post-flight must not infer it
+    /// from the broader tool kind.
+    success_control: Option<ControlDisposition>,
+    /// Exact Plan snapshot that a successful complete/cancel call must retire.
+    /// The transition is committed post-dispatch so tool failure can never
+    /// leave durable Behavior state ahead of its visible result.
+    plan_exit_on_success: Option<crate::session::behavior::BehaviorSnapshot>,
+}
+
+/// Exhaustive result of preflighting one provider tool call. A resolved call
+/// has already emitted its user-visible outcome and must never be dispatched.
+#[derive(Debug)]
+pub(crate) enum ToolPreflight {
+    Dispatch(PreparedToolCall),
+    Resolved { loop_result: ToolLoop },
+}
+
+impl ToolPreflight {
+    fn resolved(loop_result: ToolLoop) -> Self {
+        Self::Resolved { loop_result }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

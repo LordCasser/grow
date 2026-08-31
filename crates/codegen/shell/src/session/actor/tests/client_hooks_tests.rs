@@ -146,7 +146,12 @@ async fn pre_tool_use_resolves_meta_dispatch_tool_name_end_to_end() {
             .expect("prepare_tool_call must not hang")
             .expect("prepare_tool_call must not error");
             assert!(
-                matches!(result, Err(ToolLoop::HookDenied { .. })),
+                matches!(
+                    result,
+                    ToolPreflight::Resolved {
+                        loop_result: ToolLoop::HookDenied { .. }
+                    }
+                ),
                 "a hook matched on the resolved tool must gate the use_tool dispatch; \
                  got {result:?}"
             );

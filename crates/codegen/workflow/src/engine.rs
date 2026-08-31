@@ -27,6 +27,7 @@ impl WorkflowRunParams {
 enum ControlToken {
     Complete(serde_json::Value),
     Pause(PauseKind, String),
+    AwaitUser(PauseKind, String),
     Budget(String),
     Cancelled,
     Fatal(String),
@@ -216,6 +217,9 @@ fn outcome_from_error(err: EvalAltResult) -> WorkflowOutcome {
         return match token {
             ControlToken::Complete(result) => WorkflowOutcome::Completed { result },
             ControlToken::Pause(kind, message) => WorkflowOutcome::Paused { kind, message },
+            ControlToken::AwaitUser(kind, message) => {
+                WorkflowOutcome::AwaitingUser { kind, message }
+            }
             ControlToken::Budget(message) => WorkflowOutcome::BudgetExceeded { message },
             ControlToken::Cancelled => WorkflowOutcome::Cancelled,
             ControlToken::Fatal(error) => WorkflowOutcome::Failed { error },
@@ -817,7 +821,10 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                 Ok(None) => {
                     c.borrow_mut()
                         .record(seq, "await_user", hash, serde_json::Value::Null)?;
-                    Err(terminated(ControlToken::Pause(parsed, message.to_string())))
+                    Err(terminated(ControlToken::AwaitUser(
+                        parsed,
+                        message.to_string(),
+                    )))
                 }
                 Err(error) => Err(journal_fatal(error)),
             }
@@ -1099,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn await_user_pauses_once_then_passes_on_resume() {
+    fn await_user_requests_attention_once_then_passes_on_resume() {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("journal.jsonl");
         let script = r#"
@@ -1111,11 +1118,11 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let outcome = run_workflow(params(script, Journal::new(Some(journal_path.clone())), tx));
         match outcome {
-            WorkflowOutcome::Paused { kind, message } => {
+            WorkflowOutcome::AwaitingUser { kind, message } => {
                 assert_eq!(kind, PauseKind::BackOff);
                 assert_eq!(message, "needs a human");
             }
-            other => panic!("expected Paused, got {other:?}"),
+            other => panic!("expected AwaitingUser, got {other:?}"),
         }
 
         let (tx, _rx) = mpsc::unbounded_channel();

@@ -24,6 +24,22 @@ use preparation::*;
 pub(in crate::session::actor) use result::wait_for_pending_interjection;
 use result::*;
 use tracing::Instrument;
+
+fn retain_batch_terminal_result(slot: &mut Option<ToolLoop>, candidate: ToolLoop) {
+    if slot.is_none()
+        && matches!(
+            &candidate,
+            ToolLoop::Control(_)
+                | ToolLoop::PermissionReject { .. }
+                | ToolLoop::Cancelled
+                | ToolLoop::PermissionTimedOut { .. }
+                | ToolLoop::FollowupMessage(_)
+        )
+    {
+        *slot = Some(candidate);
+    }
+}
+
 impl SessionActor {
     #[tracing::instrument(
         name = "tools.execute",
@@ -42,30 +58,50 @@ impl SessionActor {
         let mut final_result: Option<ToolLoop> = None;
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
         if tool_calls.len() > 1 {
-            let kind_of = |name: &str| self.agent.borrow().tool_bridge().tool_kind(name);
-            let (control, siblings) = split_state_control_barrier(tool_calls, kind_of);
-            if let Some(control) = control {
-                self.execute_tool_calls_batch(
-                    vec![control],
-                    &mut deferred_followups,
-                    &mut final_result,
-                )
-                .await?;
-                // Lifecycle mutations invalidate the sibling calls sampled
-                // against the old state. Reuse the ordinary durable batch
-                // cancellation path, then re-sample under the new Behavior.
-                if !siblings.is_empty() {
-                    final_result.get_or_insert(ToolLoop::Continue);
+            let isolates_batch_preflight = |name: &str| {
+                self.agent
+                    .borrow()
+                    .tool_bridge()
+                    .isolates_batch_preflight(name)
+            };
+            let mut remaining = tool_calls;
+            loop {
+                let (control, siblings) =
+                    split_control_preflight_barrier(remaining, isolates_batch_preflight);
+                if let Some(control) = control {
+                    self.execute_tool_calls_batch(
+                        vec![control],
+                        &mut deferred_followups,
+                        &mut final_result,
+                    )
+                    .await?;
+                    if final_result.is_some() {
+                        if !siblings.is_empty() {
+                            self.execute_tool_calls_batch(
+                                siblings,
+                                &mut deferred_followups,
+                                &mut final_result,
+                            )
+                            .await?;
+                        }
+                        break;
+                    }
+                    if siblings.is_empty() {
+                        break;
+                    }
+                    // An invalid or failed control leaves authority unchanged.
+                    // Re-run the barrier selection over the remaining calls so
+                    // a later control still precedes every ordinary sibling.
+                    remaining = siblings;
+                } else {
                     self.execute_tool_calls_batch(
                         siblings,
                         &mut deferred_followups,
                         &mut final_result,
                     )
                     .await?;
+                    break;
                 }
-            } else {
-                self.execute_tool_calls_batch(siblings, &mut deferred_followups, &mut final_result)
-                    .await?;
             }
         } else {
             self.execute_tool_calls_batch(tool_calls, &mut deferred_followups, &mut final_result)
@@ -210,12 +246,12 @@ impl SessionActor {
                 }
             };
             match prepared {
-                Ok(prepared) => approved.push(prepared),
-                Err(tool_loop) => {
+                ToolPreflight::Dispatch(prepared) => approved.push(prepared),
+                ToolPreflight::Resolved { loop_result } => {
                     self.events
                         .tool_completed_durably(
                             &call_id,
-                            undispatched_tool_outcome(&tool_loop).into(),
+                            undispatched_tool_outcome(&loop_result).into(),
                             Some(serde_json::json!({
                                 "dispatched": false,
                                 "stage": "preflight",
@@ -227,21 +263,15 @@ impl SessionActor {
                                 "undispatched tool call was not durably closed: {error}"
                             ))
                         })?;
-                    if matches!(
-                        tool_loop,
-                        ToolLoop::PermissionReject { .. }
-                            | ToolLoop::Cancelled
-                            | ToolLoop::PermissionTimedOut { .. }
-                            | ToolLoop::FollowupMessage(_)
-                    ) && final_result.is_none()
-                    {
-                        *final_result = Some(tool_loop);
-                    }
+                    retain_batch_terminal_result(final_result, loop_result);
                 }
             }
         }
         if final_result.is_some() && !approved.is_empty() {
             let reason = match final_result.as_ref() {
+                Some(ToolLoop::Control(_)) => {
+                    "Tool execution cancelled because an earlier control changed session state"
+                }
                 Some(ToolLoop::Cancelled) => {
                     "Tool execution cancelled before batch dispatch by the user"
                 }
@@ -463,6 +493,25 @@ impl SessionActor {
             let prepared = approved_slots[idx]
                 .take()
                 .expect("dispatch index should match an approved slot exactly once");
+            if result
+                .as_ref()
+                .is_ok_and(|tool_result| !tool_result.output.is_error())
+                && let Some(expected) = prepared.plan_exit_on_success.as_ref()
+            {
+                let commit = self.finish_plan_to_default_if(expected).await;
+                if !matches!(commit, Ok(true)) {
+                    let message = match commit {
+                        Ok(false) => "Plan changed before the completed control could be committed"
+                            .to_owned(),
+                        Err(message) => message,
+                        Ok(true) => unreachable!(),
+                    };
+                    result = Err(tool_runtime::ToolError::custom(
+                        "plan_control_commit_failed",
+                        message,
+                    ));
+                }
+            }
             self.signals_handle().record_tool_call(&prepared.tool_name);
             let tool_call_id = prepared.call_id.clone();
             let mut post_tool_use_result: Option<serde_json::Value> = None;
@@ -516,15 +565,8 @@ impl SessionActor {
                     // state and must be durably cancelled before the next
                     // sample.  Failed/invalid controls stay Continue so an
                     // otherwise valid sibling can still run.
-                    if !tool_failed
-                        && is_state_control_kind(
-                            self.agent
-                                .borrow()
-                                .tool_bridge()
-                                .tool_kind(&prepared.tool_name),
-                        )
-                    {
-                        ToolLoop::ControlBoundary
+                    if !tool_failed && let Some(disposition) = prepared.success_control {
+                        ToolLoop::Control(disposition)
                     } else {
                         ToolLoop::Continue
                     }
@@ -616,7 +658,7 @@ impl SessionActor {
             }
             let tool_outcome = match &tool_loop {
                 _ if tool_failed => crate::session::events::ToolOutcome::Error,
-                ToolLoop::Continue | ToolLoop::ControlBoundary => {
+                ToolLoop::Continue | ToolLoop::Control(_) => {
                     crate::session::events::ToolOutcome::Success
                 }
                 ToolLoop::PermissionReject { .. } => {
@@ -663,22 +705,7 @@ impl SessionActor {
                 outcome = <&'static str>::from(tool_outcome),
             )
             .in_scope(|| {});
-            match &tool_loop {
-                ToolLoop::ControlBoundary => {
-                    if final_result.is_none() {
-                        *final_result = Some(tool_loop);
-                    }
-                }
-                ToolLoop::PermissionReject { .. }
-                | ToolLoop::Cancelled
-                | ToolLoop::PermissionTimedOut { .. }
-                | ToolLoop::FollowupMessage(_) => {
-                    if final_result.is_none() {
-                        *final_result = Some(tool_loop);
-                    }
-                }
-                _ => {}
-            }
+            retain_batch_terminal_result(final_result, tool_loop);
         }
         Ok(())
     }
@@ -736,18 +763,12 @@ impl SessionActor {
                 return Err(err);
             }
         };
-        let parsed =
-            serde_json::from_str::<PlanApprovalExtResponse>(raw.0.get()).unwrap_or_else(|_| {
-                PlanApprovalExtResponse {
-                    outcome: "cancelled".into(),
-                    feedback: None,
-                }
-            });
-        Ok(parsed)
+        serde_json::from_str::<PlanApprovalExtResponse>(raw.0.get()).map_err(|error| {
+            acp::Error::invalid_params()
+                .data(format!("invalid grow/plan_approval response: {error}"))
+        })
     }
-    /// Leave plan mode (approved/abandoned) and tell the client to show the
-    /// Default mode. Mirrors the mid-turn exit so the resume re-park
-    /// drives the mode change through the same path.
+    /// Leave Plan and tell the client to show Normal.
     async fn finish_plan_to_default(&self) -> Result<(), String> {
         let previous_behavior = self.behavior.lock().snapshot();
         let deactivated = self.behavior.lock().finish_plan();
@@ -834,11 +855,53 @@ impl SessionActor {
         Ok(false)
     }
 
+    pub(super) async fn reconcile_restored_plan_handoff_notification(&self) -> Result<(), String> {
+        let snapshot = self.behavior.lock().snapshot();
+        self.admit_plan_handoff_notification(&snapshot).await
+    }
+
+    pub(super) async fn admit_plan_handoff_notification(
+        &self,
+        snapshot: &crate::session::behavior::BehaviorSnapshot,
+    ) -> Result<(), String> {
+        let Some(handoff) = snapshot.last_plan_handoff.as_ref() else {
+            return Ok(());
+        };
+        let source = chat_state::NotificationSource::PlanHandoff {
+            artifact_hash: handoff.artifact_hash.clone(),
+            artifact_revision: handoff.artifact_revision,
+            handoff: handoff.kind,
+        };
+        let source_version = chat_state::NotificationSourceVersion::Ordinal {
+            value: handoff.artifact_revision,
+        };
+        match self
+            .chat_state_handle
+            .received_notification_id(source.clone(), source_version.clone())
+            .await
+        {
+            Some(Some(_)) => return Ok(()),
+            Some(None) => {}
+            None => return Err("Plan handoff receipt fold is unavailable".into()),
+        }
+        let body = match handoff.kind {
+            chat_state::PlanHandoffKind::Execute => {
+                "The approved Plan is now in the Executing phase. Continue from the frozen Plan contract."
+            }
+            chat_state::PlanHandoffKind::Revise => {
+                "The Plan is now in a revision phase. Revise the frozen Plan contract before resubmitting it."
+            }
+        };
+        self.receive_notification(source, source_version, body.into())
+            .await
+            .map(|_| ())
+    }
+
     /// Resume hook: re-issue the parked Plan approval
     /// after a session restored with `approval_pending == true`, so the
     /// client re-shows approval chrome over a real live waiter. Handles the
-    /// decision with no in-flight turn — approve: leave plan mode + start an
-    /// implement turn; request-changes: stay in plan mode + feed the comments
+    /// decision with no in-flight turn — approve: enter execution + start an
+    /// implement turn; request-changes: stay in Plan + feed the comments
     /// back as a turn; abandon: leave plan mode and wait for the user.
     pub(super) async fn resume_plan_approval(
         self: Arc<Self>,
@@ -904,8 +967,9 @@ impl SessionActor {
                 return;
             }
         };
-        match resume_action_for(PlanApprovalOutcome::from_response(&parsed), parsed.feedback) {
-            ResumeAction::LeaveOnly => {
+        let decision_feedback = parsed.feedback;
+        match parsed.outcome {
+            PlanApprovalOutcome::Abandoned => {
                 tracing::info!("plan_control resume: user abandoned Plan");
                 match self.finish_plan_to_default_if(&approval_snapshot).await {
                     Ok(true) => {}
@@ -917,83 +981,56 @@ impl SessionActor {
                     }
                 }
             }
-            ResumeAction::StayAndRevise(text) => {
+            PlanApprovalOutcome::Cancelled => {
                 tracing::info!("plan_control resume: user requested changes");
                 let previous_behavior = self.behavior.lock().snapshot();
-                let transitioned = self
-                    .behavior
-                    .lock()
-                    .reject_submitted_plan_if(&approval_snapshot);
+                let transitioned = self.behavior.lock().reject_submitted_plan_if_with_feedback(
+                    &approval_snapshot,
+                    decision_feedback.clone(),
+                );
                 if !transitioned {
                     tracing::info!("plan_control resume: dropping stale request-changes decision");
                     return;
                 }
-                let expected_next = self.behavior.lock().snapshot();
                 if self
                     .commit_behavior_mutation_or_restore(previous_behavior)
                     .await
                     .is_ok()
                 {
-                    self.start_resume_turn(text, completion_tx, expected_next)
-                        .await;
+                    let next = self.behavior.lock().snapshot();
+                    if let Err(error) = self.admit_plan_handoff_notification(&next).await {
+                        tracing::warn!(%error, "Plan revision handoff receipt will be reconciled after restore");
+                    }
+                    SessionActor::maybe_drain_notifications(self.clone(), completion_tx).await;
                 }
             }
-            ResumeAction::LeaveAndImplement => {
+            PlanApprovalOutcome::Approved => {
                 tracing::info!("plan_control resume: user approved Plan");
                 let previous_behavior = self.behavior.lock().snapshot();
                 let transitioned = self
                     .behavior
                     .lock()
-                    .approve_submitted_plan_if(&approval_snapshot);
+                    .approve_submitted_plan_if_with_feedback(
+                        &approval_snapshot,
+                        decision_feedback.clone(),
+                    );
                 if !transitioned {
                     tracing::info!("plan_control resume: dropping stale approval decision");
                     return;
                 }
-                let expected_next = self.behavior.lock().snapshot();
                 if self
                     .commit_behavior_mutation_or_restore(previous_behavior)
                     .await
                     .is_ok()
                 {
-                    self.start_resume_turn(
-                        PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string(),
-                        completion_tx,
-                        expected_next,
-                    )
-                    .await;
+                    let next = self.behavior.lock().snapshot();
+                    if let Err(error) = self.admit_plan_handoff_notification(&next).await {
+                        tracing::warn!(%error, "Plan execution handoff receipt will be reconciled after restore");
+                    }
+                    SessionActor::maybe_drain_notifications(self.clone(), completion_tx).await;
                 }
             }
         }
-    }
-    /// Inject a synthetic user turn after a resumed plan decision and kick the
-    /// scheduler (no in-flight turn exists on resume to continue).
-    async fn start_resume_turn(
-        self: Arc<Self>,
-        text: String,
-        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
-        expected_behavior: crate::session::behavior::BehaviorSnapshot,
-    ) {
-        if self.behavior.lock().snapshot() != expected_behavior {
-            tracing::info!("plan_control resume: state changed before PlanResume admission");
-            return;
-        }
-        let prompt_id = format!("plan-resume-{}", chrono::Utc::now().timestamp_millis());
-        let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
-        let (respond_to, _rx) = oneshot::channel();
-        self.queue_input(
-            prompt_blocks,
-            prompt_id,
-            crate::session::PromptOrigin::PlanResume,
-            crate::session::TurnKind::Internal,
-            None,
-            None,
-            false,
-            None,
-            respond_to,
-            None,
-        )
-        .await;
-        SessionActor::maybe_start_running_task(self.clone(), completion_tx).await;
     }
 }
 #[cfg(test)]
@@ -1215,10 +1252,10 @@ mod rwx_projection_tests {
     }
 }
 #[cfg(test)]
-mod state_control_tail_predicate_tests {
-    use super::{is_plan_control_kind, is_state_control_kind, split_state_control_barrier};
-    use tools::types::ToolInput;
-    use tools::types::tool::ToolKind;
+mod state_control_batch_tests {
+    use super::{
+        ControlDisposition, ToolLoop, retain_batch_terminal_result, split_control_preflight_barrier,
+    };
     fn call(name: &str, args: &str) -> crate::sampling::types::ToolCallResponse {
         crate::sampling::types::ToolCallResponse {
             id: format!("call_{name}"),
@@ -1226,22 +1263,12 @@ mod state_control_tail_predicate_tests {
             function: crate::sampling::types::ToolCallFunction::new(name, args),
         }
     }
-    /// Wire name does not matter — only [`ToolKind::PlanControl`].
-    fn kind_of(name: &str) -> Option<ToolKind> {
-        match name {
-            "plan_control" | "PlanControl" => Some(ToolKind::PlanControl),
-            "create_goal" | "update_goal" => Some(ToolKind::GoalLifecycleUpdate),
-            _ => None,
-        }
-    }
-    #[test]
-    fn plan_control_kind_is_protocol_boundary() {
-        assert!(is_plan_control_kind(Some(ToolKind::PlanControl)));
-        assert!(!is_plan_control_kind(Some(ToolKind::Edit)));
-        assert!(!is_plan_control_kind(None));
-        assert!(is_state_control_kind(Some(ToolKind::PlanControl)));
-        assert!(is_state_control_kind(Some(ToolKind::GoalLifecycleUpdate)));
-        assert!(!is_state_control_kind(Some(ToolKind::Edit)));
+    /// Test double for the explicit metadata declared by control tools.
+    fn isolates_batch_preflight(name: &str) -> bool {
+        matches!(
+            name,
+            "plan_control" | "PlanControl" | "create_goal" | "update_goal"
+        )
     }
     #[test]
     fn lifecycle_control_is_the_only_admitted_call_in_a_mixed_batch() {
@@ -1263,27 +1290,65 @@ mod state_control_tail_predicate_tests {
             vec![write.clone(), exit.clone(), proposal.clone()],
         ] {
             let count = calls.len();
-            let (control, siblings) = split_state_control_barrier(calls, kind_of);
+            let (control, siblings) =
+                split_control_preflight_barrier(calls, isolates_batch_preflight);
             assert!(control.is_some());
             assert_eq!(siblings.len(), count - 1);
         }
-        let (control, siblings) =
-            split_state_control_barrier(vec![write.clone(), unknown_alias], kind_of);
+        let (control, siblings) = split_control_preflight_barrier(
+            vec![write.clone(), unknown_alias],
+            isolates_batch_preflight,
+        );
         assert!(control.is_none());
         assert_eq!(siblings.len(), 2);
-        let (control, siblings) =
-            split_state_control_barrier(vec![write.clone(), proposal], kind_of);
+        let (control, siblings) = split_control_preflight_barrier(
+            vec![write.clone(), proposal],
+            isolates_batch_preflight,
+        );
         assert!(control.is_none());
         assert_eq!(siblings.len(), 2);
 
         let second_control = call("update_goal", r#"{"status":"complete"}"#);
-        let (control, siblings) =
-            split_state_control_barrier(vec![exit, second_control, write], kind_of);
+        let (control, siblings) = split_control_preflight_barrier(
+            vec![exit, second_control, write],
+            isolates_batch_preflight,
+        );
         assert_eq!(control.unwrap().function.name, "plan_control");
         assert_eq!(
             siblings.len(),
             2,
             "later lifecycle controls are siblings too"
+        );
+    }
+
+    #[test]
+    fn only_successful_control_makes_the_batch_terminal() {
+        let mut final_result = None;
+        retain_batch_terminal_result(&mut final_result, ToolLoop::Continue);
+        assert!(
+            final_result.is_none(),
+            "an invalid or rejected control returns Continue so siblings remain admissible"
+        );
+
+        retain_batch_terminal_result(
+            &mut final_result,
+            ToolLoop::Control(ControlDisposition::ResampleStep),
+        );
+        assert!(matches!(
+            &final_result,
+            Some(ToolLoop::Control(ControlDisposition::ResampleStep))
+        ));
+
+        retain_batch_terminal_result(
+            &mut final_result,
+            ToolLoop::Control(ControlDisposition::EndTurn),
+        );
+        assert!(
+            matches!(
+                &final_result,
+                Some(ToolLoop::Control(ControlDisposition::ResampleStep))
+            ),
+            "the first terminal decision owns sibling cancellation"
         );
     }
 }
@@ -1571,6 +1636,7 @@ mod plan_mode_edit_gate_tests {
     fn executing_allows_mcp_tools_regardless_of_read_only() {
         use tools::implementations::grow_build::workflow::WorkflowToolInput;
         let mut t = active_tracker();
+        t.record_plan_artifact("# approved plan");
         assert!(t.submit_initial_plan());
         assert!(t.approve_submitted_plan());
         assert_eq!(gate(&t, &write("/tmp/src/main.rs")), PlanEditGate::Allow);
@@ -1673,68 +1739,12 @@ mod plan_mode_edit_gate_tests {
 }
 #[cfg(test)]
 mod plan_approval_helper_tests {
-    use super::{
-        PlanApprovalOutcome, ResumeAction, ext_method_no_client, resume_action_for,
-        revise_plan_message,
-    };
-    use tools::implementations::grow_build::plan_control::PlanApprovalExtResponse;
-    fn resp(outcome: &str) -> PlanApprovalExtResponse {
-        PlanApprovalExtResponse {
-            outcome: outcome.into(),
-            feedback: None,
-        }
-    }
-    #[test]
-    fn outcome_from_response_maps_known_and_fails_closed() {
-        assert_eq!(
-            PlanApprovalOutcome::from_response(&resp("approved")),
-            PlanApprovalOutcome::Approved
-        );
-        assert_eq!(
-            PlanApprovalOutcome::from_response(&resp("abandoned")),
-            PlanApprovalOutcome::Abandoned
-        );
-        assert_eq!(
-            PlanApprovalOutcome::from_response(&resp("cancelled")),
-            PlanApprovalOutcome::Cancelled
-        );
-        assert_eq!(
-            PlanApprovalOutcome::from_response(&resp("approve")),
-            PlanApprovalOutcome::Cancelled
-        );
-        assert_eq!(
-            PlanApprovalOutcome::from_response(&resp("")),
-            PlanApprovalOutcome::Cancelled
-        );
-    }
+    use super::ext_method_no_client;
     #[test]
     fn ext_method_no_client_defaults_false_for_untagged_error() {
         assert!(!ext_method_no_client(&acp_transport::acp_internal_error(
             "unrelated internal error"
         )));
-    }
-    #[test]
-    fn revise_plan_message_includes_feedback_when_present() {
-        assert!(revise_plan_message("").contains("Ask the user what changes"));
-        assert!(revise_plan_message("   ").contains("Ask the user what changes"));
-        let with = revise_plan_message("use async");
-        assert!(with.contains("The user said:"));
-        assert!(with.contains("use async"));
-    }
-    #[test]
-    fn resume_action_maps_each_outcome() {
-        assert_eq!(
-            resume_action_for(PlanApprovalOutcome::Approved, None),
-            ResumeAction::LeaveAndImplement
-        );
-        assert_eq!(
-            resume_action_for(PlanApprovalOutcome::Abandoned, Some("ignored".into())),
-            ResumeAction::LeaveOnly
-        );
-        match resume_action_for(PlanApprovalOutcome::Cancelled, Some("tweak it".into())) {
-            ResumeAction::StayAndRevise(text) => assert!(text.contains("tweak it")),
-            other => panic!("expected StayAndRevise, got {other:?}"),
-        }
     }
 }
 

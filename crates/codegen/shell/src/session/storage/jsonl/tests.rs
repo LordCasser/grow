@@ -2733,7 +2733,6 @@ async fn forked_control_snapshot_drops_plan_runtime_without_its_artifact() {
         crate::session::behavior::PlanPhase::AwaitingApproval,
     );
     plan.approval_pending = true;
-    plan.reminder_count = 3;
     plan.plan_artifact_revision = 4;
     plan.plan_artifact_hash = Some("orphaned-plan-artifact".into());
     append_control_snapshot(

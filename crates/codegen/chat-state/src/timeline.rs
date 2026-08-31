@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 21;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 22;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_ID_BYTES: usize = 128;
 pub const MAX_NOTIFICATION_PAYLOAD_BYTES: u64 = 1024 * 1024;
@@ -336,6 +336,7 @@ pub enum WorkflowEvent {
         run_id: String,
         execution_epoch: u64,
         status: WorkflowExecutionStatus,
+        handoff: WorkflowTurnHandoff,
         duration_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
@@ -346,6 +347,7 @@ pub enum WorkflowEvent {
         run_id: String,
         execution_epoch: u64,
         status: WorkflowExecutionStatus,
+        handoff: WorkflowTurnHandoff,
         duration_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
@@ -365,6 +367,19 @@ pub enum WorkflowExecutionStatus {
     Complete,
     Failed,
     Cancelled,
+}
+
+/// Whether a durable Workflow boundary owns a model-facing successor turn.
+///
+/// This is recorded explicitly instead of being inferred from status: a
+/// natural completion and an explicit stop may both be terminal while only
+/// the former owns a follow-up turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowTurnHandoff {
+    None,
+    Completion,
+    AttentionRequired,
 }
 
 impl WorkflowExecutionStatus {
@@ -457,6 +472,7 @@ pub struct ObservationEvent {
 pub enum ControlContextLayer {
     AgentRole,
     GoalDefinition,
+    PlanPhase,
     Behavior,
 }
 
@@ -652,6 +668,13 @@ pub struct SubagentResultEvent {
 /// Payload and presentation deliberately live outside this enum. The source
 /// identity is the at-least-once deduplication key; the immutable payload is
 /// referenced separately by [`NotificationPayloadRef`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanHandoffKind {
+    Execute,
+    Revise,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NotificationSource {
@@ -676,8 +699,14 @@ pub enum NotificationSource {
         subagent_id: String,
         owner: NotificationOwner,
     },
-    WorkflowCompleted {
+    PlanHandoff {
+        artifact_hash: String,
+        artifact_revision: u64,
+        handoff: PlanHandoffKind,
+    },
+    WorkflowHandoff {
         run_id: String,
+        handoff: WorkflowTurnHandoff,
     },
 }
 
@@ -702,8 +731,14 @@ enum NotificationSourceIdentity {
     SubagentCompleted {
         subagent_id: String,
     },
-    WorkflowCompleted {
+    PlanHandoff {
+        artifact_hash: String,
+        artifact_revision: u64,
+        handoff: PlanHandoffKind,
+    },
+    WorkflowHandoff {
         run_id: String,
+        handoff: WorkflowTurnHandoff,
     },
 }
 
@@ -714,7 +749,8 @@ impl NotificationSource {
             | Self::TaskStillRunning { task_id, .. }
             | Self::TaskCompleted { task_id, .. } => task_id,
             Self::SubagentCompleted { subagent_id, .. } => subagent_id,
-            Self::WorkflowCompleted { run_id } => run_id,
+            Self::PlanHandoff { artifact_hash, .. } => artifact_hash,
+            Self::WorkflowHandoff { run_id, .. } => run_id,
         }
     }
 
@@ -724,7 +760,16 @@ impl NotificationSource {
             | Self::TaskStillRunning { owner, .. }
             | Self::TaskCompleted { owner, .. } => owner.clone(),
             Self::SubagentCompleted { owner, .. } => owner.clone(),
-            Self::WorkflowCompleted { .. } => NotificationOwner::Session,
+            Self::PlanHandoff {
+                artifact_hash,
+                artifact_revision,
+                handoff,
+            } => NotificationOwner::Plan {
+                artifact_hash: artifact_hash.clone(),
+                artifact_revision: *artifact_revision,
+                handoff: *handoff,
+            },
+            Self::WorkflowHandoff { .. } => NotificationOwner::Session,
         }
     }
 
@@ -734,7 +779,7 @@ impl NotificationSource {
             | Self::TaskStillRunning { owner, .. }
             | Self::TaskCompleted { owner, .. } => *owner = notification_owner,
             Self::SubagentCompleted { owner, .. } => *owner = notification_owner,
-            Self::WorkflowCompleted { .. } => {}
+            Self::PlanHandoff { .. } | Self::WorkflowHandoff { .. } => {}
         }
         self
     }
@@ -761,9 +806,21 @@ impl NotificationSource {
                     subagent_id: subagent_id.clone(),
                 }
             }
-            Self::WorkflowCompleted { run_id } => NotificationSourceIdentity::WorkflowCompleted {
-                run_id: run_id.clone(),
+            Self::PlanHandoff {
+                artifact_hash,
+                artifact_revision,
+                handoff,
+            } => NotificationSourceIdentity::PlanHandoff {
+                artifact_hash: artifact_hash.clone(),
+                artifact_revision: *artifact_revision,
+                handoff: *handoff,
             },
+            Self::WorkflowHandoff { run_id, handoff } => {
+                NotificationSourceIdentity::WorkflowHandoff {
+                    run_id: run_id.clone(),
+                    handoff: *handoff,
+                }
+            }
         }
     }
 }
@@ -776,6 +833,11 @@ pub enum NotificationOwner {
     Goal {
         goal_id: String,
         definition_revision: u64,
+    },
+    Plan {
+        artifact_hash: String,
+        artifact_revision: u64,
+        handoff: PlanHandoffKind,
     },
 }
 
@@ -838,6 +900,11 @@ pub enum NotificationDismissReason {
     GoalOwnedAutostart {
         goal_id: String,
         definition_revision: u64,
+    },
+    PlanSuperseded {
+        artifact_hash: String,
+        artifact_revision: u64,
+        handoff: PlanHandoffKind,
     },
 }
 
@@ -988,6 +1055,7 @@ pub struct WorkflowLifecycle {
     pub objective: String,
     pub execution_epoch: u64,
     pub status: Option<WorkflowExecutionStatus>,
+    pub handoff: Option<WorkflowTurnHandoff>,
     pub message: Option<String>,
     pub open: bool,
     pub closed: bool,
@@ -1317,6 +1385,7 @@ impl Timeline {
                     for layer in [
                         ControlContextLayer::AgentRole,
                         ControlContextLayer::GoalDefinition,
+                        ControlContextLayer::PlanPhase,
                     ] {
                         if let Some(projection) = pending.remove(&layer) {
                             active.insert(layer, projection);
@@ -1690,26 +1759,31 @@ impl Timeline {
                     TimelineEventKind::Workflow(WorkflowEvent::Ended {
                         run_id: candidate,
                         status,
+                        handoff,
                         message,
                         ..
                     })
                     | TimelineEventKind::Workflow(WorkflowEvent::Closed {
                         run_id: candidate,
                         status,
+                        handoff,
                         message,
                         ..
-                    }) if candidate == run_id => Some((*status, message.clone())),
+                    }) if candidate == run_id => Some((*status, *handoff, message.clone())),
                     _ => None,
                 })
         });
-        let (status, message) = terminal
+        let (status, handoff, message) = terminal
             .flatten()
-            .map_or((None, None), |(status, message)| (Some(status), message));
+            .map_or((None, None, None), |(status, handoff, message)| {
+                (Some(status), Some(handoff), message)
+            });
         Some(WorkflowLifecycle {
             name,
             objective,
             execution_epoch: fold.execution_epoch,
             status,
+            handoff,
             message,
             open: fold.open,
             closed: fold.closed,
@@ -1839,6 +1913,7 @@ impl Timeline {
                 run_id,
                 execution_epoch,
                 status: WorkflowExecutionStatus::Interrupted,
+                handoff: WorkflowTurnHandoff::Completion,
                 duration_ms,
                 message: Some("process_interrupted".into()),
             }))?;
@@ -2380,7 +2455,8 @@ impl Timeline {
                         self.pending_notifications.insert(id.clone(), notification);
                     }
                     NotificationSource::SubagentCompleted { .. }
-                    | NotificationSource::WorkflowCompleted { .. } => {
+                    | NotificationSource::PlanHandoff { .. }
+                    | NotificationSource::WorkflowHandoff { .. } => {
                         self.pending_notifications.insert(id.clone(), notification);
                     }
                 }
@@ -2968,8 +3044,31 @@ impl Timeline {
                     }
                 }
                 if let Some(input) = input
-                    && !valid_notification_input(input)
+                    && valid_notification_input(input)
                 {
+                    let plan_receipts = notification_ids
+                        .iter()
+                        .filter_map(|id| {
+                            let notification = self.pending_notifications.get(id)?;
+                            matches!(notification.source.owner(), NotificationOwner::Plan { .. })
+                                .then_some(notification.source.identity())
+                        })
+                        .collect::<Vec<_>>();
+                    if !plan_receipts.is_empty() {
+                        let plan_turn = self.events.iter().rev().any(|event| {
+                            matches!(
+                                &event.kind,
+                                TimelineEventKind::Turn(TurnEvent::Started { id, identity, .. })
+                                    if id == turn && identity.origin == "plan_handoff"
+                            )
+                        });
+                        let exact_plan_batch = plan_receipts.len() == notification_ids.len()
+                            && plan_receipts.windows(2).all(|pair| pair[0] == pair[1]);
+                        if !plan_turn || !exact_plan_batch {
+                            return Err(TimelineError::InvalidNotification);
+                        }
+                    }
+                } else if let Some(input) = input {
                     let Some(goal_id) = valid_goal_notification_input(input) else {
                         return Err(TimelineError::InvalidNotification);
                     };
@@ -3011,30 +3110,46 @@ impl Timeline {
                 if notification_ids.is_empty() || notification_ids.len() > u32::MAX as usize {
                     return Err(TimelineError::InvalidNotification);
                 }
-                let (goal_id, definition_revision) = match reason {
-                    NotificationDismissReason::GoalOwnedAutostart {
-                        goal_id,
-                        definition_revision,
-                    } if valid_notification_identifier(goal_id) => (goal_id, definition_revision),
-                    _ => return Err(TimelineError::InvalidNotification),
-                };
                 let mut unique = BTreeSet::new();
                 for id in notification_ids {
+                    let reason_matches_owner = self.pending_notifications.get(id).is_some_and(
+                        |notification| match reason {
+                            NotificationDismissReason::GoalOwnedAutostart {
+                                goal_id,
+                                definition_revision,
+                            } => {
+                                valid_notification_identifier(goal_id)
+                                    && matches!(
+                                        notification.source.owner(),
+                                        NotificationOwner::Goal {
+                                            goal_id: owner_goal_id,
+                                            definition_revision: owner_revision,
+                                        } if owner_goal_id == *goal_id
+                                            && owner_revision == *definition_revision
+                                    )
+                            }
+                            NotificationDismissReason::PlanSuperseded {
+                                artifact_hash,
+                                artifact_revision,
+                                handoff,
+                            } => {
+                                valid_blake3(artifact_hash)
+                                    && matches!(
+                                        notification.source.owner(),
+                                        NotificationOwner::Plan {
+                                            artifact_hash: owner_hash,
+                                            artifact_revision: owner_revision,
+                                            handoff: owner_handoff,
+                                        } if owner_hash == *artifact_hash
+                                            && owner_revision == *artifact_revision
+                                            && owner_handoff == *handoff
+                                    )
+                            }
+                        },
+                    );
                     if !unique.insert(id)
                         || !self.received_notification_ids.contains(id)
-                        || !self
-                            .pending_notifications
-                            .get(id)
-                            .is_some_and(|notification| {
-                                matches!(
-                                    notification.source.owner(),
-                                    NotificationOwner::Goal {
-                                        goal_id: owner_goal_id,
-                                        definition_revision: owner_revision,
-                                    } if owner_goal_id.as_str() == goal_id.as_str()
-                                        && owner_revision == *definition_revision
-                                )
-                            })
+                        || !reason_matches_owner
                     {
                         return Err(TimelineError::InvalidNotification);
                     }
@@ -3517,10 +3632,12 @@ impl LifecycleFold {
                 run_id,
                 execution_epoch,
                 status,
+                handoff,
                 message,
                 ..
             }) => {
                 if !valid_workflow_run_id(run_id)
+                    || !valid_workflow_turn_handoff(*status, *handoff, false)
                     || message
                         .as_deref()
                         .is_some_and(|message| message.trim().is_empty())
@@ -3565,6 +3682,7 @@ impl LifecycleFold {
                 run_id,
                 execution_epoch,
                 status,
+                handoff,
                 message,
                 ..
             }) => {
@@ -3573,6 +3691,7 @@ impl LifecycleFold {
                         status,
                         WorkflowExecutionStatus::Interrupted | WorkflowExecutionStatus::Cancelled
                     )
+                    || !valid_workflow_turn_handoff(*status, *handoff, true)
                     || message
                         .as_deref()
                         .is_some_and(|message| message.trim().is_empty())
@@ -3799,14 +3918,23 @@ fn valid_notification_source_version(
     match (source, version) {
         (
             NotificationSource::MonitorProgress { .. }
-            | NotificationSource::TaskStillRunning { .. }
-            | NotificationSource::WorkflowCompleted { .. },
+            | NotificationSource::TaskStillRunning { .. },
             NotificationSourceVersion::Opaque { value },
         ) => valid_notification_identifier(value),
+        (
+            NotificationSource::WorkflowHandoff { handoff, .. },
+            NotificationSourceVersion::Opaque { value },
+        ) => *handoff != WorkflowTurnHandoff::None && valid_notification_identifier(value),
         (
             NotificationSource::TaskCompleted { .. } | NotificationSource::SubagentCompleted { .. },
             NotificationSourceVersion::Ordinal { value },
         ) => *value > 0,
+        (
+            NotificationSource::PlanHandoff {
+                artifact_revision, ..
+            },
+            NotificationSourceVersion::Ordinal { value },
+        ) => *value == *artifact_revision && *value > 0,
         _ => false,
     }
 }
@@ -3818,6 +3946,11 @@ fn valid_notification_owner(owner: &NotificationOwner) -> bool {
             goal_id,
             definition_revision,
         } => valid_notification_identifier(goal_id) && *definition_revision > 0,
+        NotificationOwner::Plan {
+            artifact_hash,
+            artifact_revision,
+            ..
+        } => valid_blake3(artifact_hash) && *artifact_revision > 0,
     }
 }
 
@@ -3874,9 +4007,9 @@ fn is_valid_control_context(context: &ControlContext) -> bool {
         ControlContextLayer::GoalDefinition => user.goal_directive.as_ref().is_some_and(|tag| {
             tag.definition_revision > 0 && valid_notification_identifier(&tag.goal_id)
         }),
-        ControlContextLayer::AgentRole | ControlContextLayer::Behavior => {
-            user.goal_directive.is_none()
-        }
+        ControlContextLayer::AgentRole
+        | ControlContextLayer::PlanPhase
+        | ControlContextLayer::Behavior => user.goal_directive.is_none(),
     };
     user.synthetic_reason == Some(SyntheticReason::SystemReminder)
         && user.permission_evidence.is_none()
@@ -3951,7 +4084,9 @@ pub(crate) fn control_transition_waits_for_boundary(
         return false;
     }
     match context.layer {
-        ControlContextLayer::AgentRole | ControlContextLayer::GoalDefinition => active_step,
+        ControlContextLayer::AgentRole
+        | ControlContextLayer::GoalDefinition
+        | ControlContextLayer::PlanPhase => active_step,
         ControlContextLayer::Behavior => active_turn,
     }
 }
@@ -3962,6 +4097,7 @@ fn take_pending_step_control_contexts(
     let mut contexts = [
         ControlContextLayer::AgentRole,
         ControlContextLayer::GoalDefinition,
+        ControlContextLayer::PlanPhase,
     ]
     .into_iter()
     .filter_map(|layer| pending.remove(&layer))
@@ -4454,6 +4590,42 @@ fn valid_workflow_run_id(run_id: &str) -> bool {
         && run_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_workflow_turn_handoff(
+    status: WorkflowExecutionStatus,
+    handoff: WorkflowTurnHandoff,
+    closed: bool,
+) -> bool {
+    if closed {
+        return handoff == WorkflowTurnHandoff::None;
+    }
+    match handoff {
+        WorkflowTurnHandoff::None => matches!(
+            status,
+            WorkflowExecutionStatus::UserPaused
+                | WorkflowExecutionStatus::BackOffPaused
+                | WorkflowExecutionStatus::NoProgressPaused
+                | WorkflowExecutionStatus::InfraPaused
+                | WorkflowExecutionStatus::Blocked
+                | WorkflowExecutionStatus::Cancelled
+        ),
+        WorkflowTurnHandoff::Completion => matches!(
+            status,
+            WorkflowExecutionStatus::BudgetLimited
+                | WorkflowExecutionStatus::Interrupted
+                | WorkflowExecutionStatus::Complete
+                | WorkflowExecutionStatus::Failed
+        ),
+        WorkflowTurnHandoff::AttentionRequired => matches!(
+            status,
+            WorkflowExecutionStatus::UserPaused
+                | WorkflowExecutionStatus::BackOffPaused
+                | WorkflowExecutionStatus::NoProgressPaused
+                | WorkflowExecutionStatus::InfraPaused
+                | WorkflowExecutionStatus::Blocked
+        ),
+    }
 }
 
 fn valid_system_layout(items: &[ConversationItem]) -> bool {
@@ -4990,6 +5162,70 @@ mod tests {
     }
 
     #[test]
+    fn plan_phase_activates_at_step_boundary_and_latest_transition_wins() {
+        let mut timeline = Timeline::from_seed(vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+        ])
+        .unwrap();
+        let turn = TurnId(44);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                identity: user_identity(),
+                model_id: "model".into(),
+                input_message_count: timeline.surface().len(),
+                prompt_index: 0,
+                prompt_text: "task".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        let step = StepId { turn, index: 0 };
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+        for (revision, text) in [(1, "awaiting approval"), (2, "executing")] {
+            timeline
+                .record(TimelineEventKind::Control(ControlEvent {
+                    revision,
+                    snapshot: serde_json::json!({ "revision": revision }),
+                    retired_context_layers: vec![],
+                    model_contexts: vec![ControlContext {
+                        layer: ControlContextLayer::PlanPhase,
+                        activation: ControlContextActivation::Transition,
+                        item: ConversationItem::system_reminder(text),
+                    }],
+                }))
+                .unwrap();
+        }
+        assert_eq!(timeline.surface().len(), 2);
+
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Ended {
+                id: step,
+                outcome: "control_resample".into(),
+                duration_ms: 1,
+            }))
+            .unwrap();
+
+        assert_eq!(
+            timeline
+                .surface()
+                .iter()
+                .map(ConversationItem::text_content)
+                .collect::<Vec<_>>(),
+            ["system", "task", "executing"]
+        );
+        assert_eq!(
+            timeline.active_control_contexts()[&ControlContextLayer::PlanPhase]
+                .item
+                .text_content(),
+            "executing"
+        );
+    }
+
+    #[test]
     fn edited_goal_definition_activates_after_step_not_after_turn() {
         let mut timeline = Timeline::from_seed(vec![
             ConversationItem::system("system"),
@@ -5307,6 +5543,7 @@ mod tests {
                 objective: "find the cause".into(),
                 execution_epoch: 0,
                 status: None,
+                handoff: None,
                 message: None,
                 open: true,
                 closed: false,
@@ -5317,6 +5554,7 @@ mod tests {
                 run_id: "wf_1".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::Failed,
+                handoff: WorkflowTurnHandoff::Completion,
                 duration_ms: 8,
                 message: Some("host failed".into()),
             }))
@@ -5333,6 +5571,7 @@ mod tests {
                 run_id: "wf_1".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::Complete,
+                handoff: WorkflowTurnHandoff::Completion,
                 duration_ms: 1,
                 message: None,
             })),
@@ -5343,6 +5582,7 @@ mod tests {
                 run_id: "wf_1".into(),
                 execution_epoch: 1,
                 status: WorkflowExecutionStatus::Complete,
+                handoff: WorkflowTurnHandoff::Completion,
                 duration_ms: 1,
                 message: None,
             }))
@@ -5432,6 +5672,7 @@ mod tests {
                 run_id: "wf_pause".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::UserPaused,
+                handoff: WorkflowTurnHandoff::None,
                 duration_ms: 2,
                 message: None,
             }))
@@ -5441,6 +5682,7 @@ mod tests {
                 run_id: "wf_pause".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::Cancelled,
+                handoff: WorkflowTurnHandoff::None,
                 duration_ms: 3,
                 message: Some("stopped by user".into()),
             }))
@@ -5450,6 +5692,7 @@ mod tests {
                 run_id: "wf_pause".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::Cancelled,
+                handoff: WorkflowTurnHandoff::None,
                 duration_ms: 3,
                 message: None,
             })),
@@ -5502,6 +5745,7 @@ mod tests {
                 run_id: "wf_children".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::Failed,
+                handoff: WorkflowTurnHandoff::Completion,
                 duration_ms: 1,
                 message: Some("child still running".into()),
             })),
@@ -5530,6 +5774,7 @@ mod tests {
                 run_id: "wf_children".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::Failed,
+                handoff: WorkflowTurnHandoff::Completion,
                 duration_ms: 1,
                 message: Some("child cancelled".into()),
             }))
@@ -8123,6 +8368,83 @@ mod tests {
     }
 
     #[test]
+    fn plan_notification_input_requires_a_dedicated_plan_handoff_turn() {
+        fn start_turn(timeline: &mut Timeline, id: TurnId, origin: &str) {
+            timeline
+                .record(TimelineEventKind::Turn(TurnEvent::Started {
+                    id,
+                    identity: TurnIdentity {
+                        origin: origin.into(),
+                        turn_kind: "internal".into(),
+                        goal_id: None,
+                        goal_definition_revision: None,
+                        stage_id: None,
+                    },
+                    model_id: "test-model".into(),
+                    input_message_count: timeline.surface_len(),
+                    prompt_index: 0,
+                    prompt_text: "continue plan".into(),
+                    input_kind: TurnInputKind::Prompt,
+                    redirect_kind: None,
+                }))
+                .unwrap();
+        }
+
+        fn input() -> ConversationItem {
+            let mut input = ConversationItem::notification_drain("continue approved plan");
+            let ConversationItem::User(user) = &mut input else {
+                unreachable!()
+            };
+            user.prompt_index = Some(0);
+            input
+        }
+
+        let source = NotificationSource::PlanHandoff {
+            artifact_hash: blake3::hash(b"# plan").to_hex().to_string(),
+            artifact_revision: 1,
+            handoff: PlanHandoffKind::Execute,
+        };
+        let mut accepted = Timeline::default();
+        let accepted_id = receive_notification(
+            &mut accepted,
+            source.clone(),
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "execute",
+        );
+        let accepted_turn = TurnId(20);
+        start_turn(&mut accepted, accepted_turn, "plan_handoff");
+        accepted
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![accepted_id],
+                    turn: accepted_turn,
+                    input: Some(input()),
+                },
+            ))
+            .unwrap();
+
+        let mut rejected = Timeline::default();
+        let rejected_id = receive_notification(
+            &mut rejected,
+            source,
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "execute",
+        );
+        let rejected_turn = TurnId(21);
+        start_turn(&mut rejected, rejected_turn, "notification_drain");
+        assert!(matches!(
+            rejected.record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![rejected_id],
+                    turn: rejected_turn,
+                    input: Some(input()),
+                },
+            )),
+            Err(TimelineError::InvalidNotification)
+        ));
+    }
+
+    #[test]
     fn running_task_checkpoints_use_opaque_epochs_and_can_repeat() {
         let mut timeline = Timeline::default();
         let source = NotificationSource::TaskStillRunning {
@@ -8163,10 +8485,11 @@ mod tests {
     }
 
     #[test]
-    fn workflow_terminal_boundaries_use_opaque_epoch_and_status_identity() {
+    fn workflow_handoff_boundaries_use_opaque_epoch_status_and_kind_identity() {
         let mut timeline = Timeline::default();
-        let source = NotificationSource::WorkflowCompleted {
+        let source = NotificationSource::WorkflowHandoff {
             run_id: "workflow-1".into(),
+            handoff: WorkflowTurnHandoff::Completion,
         };
         assert!(matches!(
             notification_id(
@@ -8177,24 +8500,24 @@ mod tests {
             Err(TimelineError::InvalidNotification)
         ));
 
-        let paused = receive_notification(
+        let first = receive_notification(
             &mut timeline,
             source.clone(),
             NotificationSourceVersion::Opaque {
-                value: "workflow-terminal-v1:1:user_paused".into(),
+                value: "workflow-handoff-v1:1:failed:completion".into(),
             },
-            "paused",
+            "failed",
         );
-        let cancelled = receive_notification(
+        let second = receive_notification(
             &mut timeline,
             source,
             NotificationSourceVersion::Opaque {
-                value: "workflow-terminal-v1:1:cancelled".into(),
+                value: "workflow-handoff-v1:2:complete:completion".into(),
             },
-            "cancelled",
+            "complete",
         );
 
-        assert_ne!(paused, cancelled);
+        assert_ne!(first, second);
         assert_eq!(timeline.pending_notifications().len(), 2);
     }
 

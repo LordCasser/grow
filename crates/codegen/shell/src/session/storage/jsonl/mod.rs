@@ -2404,14 +2404,11 @@ impl JsonlStorageAdapter {
                     "Workflow manifest",
                     MAX_WORKFLOW_MANIFEST_BYTES,
                 )
-                .and_then(|bytes| {
-                    serde_json::from_slice::<crate::session::workflow::store::WorkflowRunManifest>(
-                        &bytes,
-                    )
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-                }) {
+                .and_then(|bytes| crate::session::workflow::store::decode_workflow_manifest(&bytes))
+            {
                 Ok(manifest) => manifest,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => return Err(error),
                 Err(error) => {
                     tracing::warn!(path = %manifest_path.display(), %error, "skipping invalid workflow manifest");
                     continue;

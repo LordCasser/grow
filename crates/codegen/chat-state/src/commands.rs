@@ -592,11 +592,12 @@ mod tests {
         let _ = ChatStateCommand::GetNotificationMeta { reply: tx };
         let (tx, _rx) = oneshot::channel();
         let _ = ChatStateCommand::GetReceivedNotificationId {
-            source: crate::NotificationSource::WorkflowCompleted {
+            source: crate::NotificationSource::WorkflowHandoff {
                 run_id: "workflow-1".into(),
+                handoff: crate::WorkflowTurnHandoff::Completion,
             },
             source_version: crate::NotificationSourceVersion::Opaque {
-                value: "workflow-terminal-v1:0:complete".into(),
+                value: "workflow-handoff-v1:0:complete:completion".into(),
             },
             reply: tx,
         };

@@ -69,10 +69,10 @@ pub(crate) enum TurnOutcome {
         /// provider gave no message).
         refusal: Option<String>,
     },
-    /// A lifecycle/control tool committed a new authority state. The current
-    /// turn must close at this tool-result boundary; completion recovery and
-    /// Stop hooks are not allowed to sample again under the old admission.
-    ControlBoundary {
+    /// A lifecycle/control tool explicitly ended the current turn after its
+    /// durable state transition. Completion recovery and Stop hooks are not
+    /// allowed to sample again under the old admission.
+    ControlEnded {
         snapshot: Box<Option<TurnDeltaSnapshot>>,
     },
     /// The active Goal crossed its token budget after a completed provider /
@@ -96,13 +96,19 @@ pub(crate) enum TurnOutcome {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlDisposition {
+    /// End the current Step, refresh phase-sensitive context/tools, and sample
+    /// again under the same admitted Turn identity.
+    ResampleStep,
+    /// End the current Turn after the control result is committed.
+    EndTurn,
+}
+
 #[derive(Debug)]
 pub(crate) enum ToolLoop {
     Continue,
-    /// A durable control-plane transition changed the authority or lifecycle
-    /// that admitted this turn. End the turn at this tool-result boundary so
-    /// the next sample is admitted against the new state.
-    ControlBoundary,
+    Control(ControlDisposition),
     NonExistingTool,
     ToolParsingError,
     /// User clicked "No" on a permission prompt. Carries the rejection reason

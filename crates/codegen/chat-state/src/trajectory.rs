@@ -448,6 +448,10 @@ fn dimensions(
                         crate::ControlContextActivation::Transition,
                     ) => ("system.goal", "prompt.goal_definition.updated"),
                     (
+                        ControlContextLayer::PlanPhase,
+                        crate::ControlContextActivation::Transition,
+                    ) => ("system.plan", "prompt.plan_phase.updated"),
+                    (
                         ControlContextLayer::Behavior,
                         crate::ControlContextActivation::Transition,
                     ) => ("system.behavior", "prompt.behavior.updated"),
@@ -459,6 +463,10 @@ fn dimensions(
                         ControlContextLayer::GoalDefinition,
                         crate::ControlContextActivation::Reprojection,
                     ) => ("system.goal", "prompt.goal_definition.reprojected"),
+                    (
+                        ControlContextLayer::PlanPhase,
+                        crate::ControlContextActivation::Reprojection,
+                    ) => ("system.plan", "prompt.plan_phase.reprojected"),
                     (
                         ControlContextLayer::Behavior,
                         crate::ControlContextActivation::Reprojection,
@@ -715,6 +723,7 @@ fn describe(
                 run_id,
                 execution_epoch,
                 status,
+                handoff,
                 duration_ms,
                 message,
             } => tuple(
@@ -726,13 +735,17 @@ fn describe(
                 Some(run_id.clone()),
                 Some(*duration_ms),
                 message.clone().unwrap_or_else(|| {
-                    format!("execution epoch {execution_epoch} {}", status.as_str())
+                    format!(
+                        "execution epoch {execution_epoch} {} ({handoff:?})",
+                        status.as_str()
+                    )
                 }),
             ),
             WorkflowEvent::Closed {
                 run_id,
                 execution_epoch,
                 status,
+                handoff,
                 duration_ms,
                 message,
             } => tuple(
@@ -745,8 +758,8 @@ fn describe(
                 Some(*duration_ms),
                 message.clone().unwrap_or_else(|| {
                     format!(
-                        "run closed after epoch {execution_epoch}: {}",
-                        status.as_str()
+                        "run closed after epoch {execution_epoch}: {} ({handoff:?})",
+                        status.as_str(),
                     )
                 }),
             ),
@@ -974,7 +987,8 @@ fn notification_source_label(source: &NotificationSource) -> &'static str {
         NotificationSource::TaskStillRunning { .. } => "task still running",
         NotificationSource::TaskCompleted { .. } => "task completed",
         NotificationSource::SubagentCompleted { .. } => "subagent completed",
-        NotificationSource::WorkflowCompleted { .. } => "workflow completed",
+        NotificationSource::PlanHandoff { .. } => "plan handoff",
+        NotificationSource::WorkflowHandoff { .. } => "workflow handoff",
     }
 }
 
@@ -1053,6 +1067,7 @@ fn describe_control_event(previous: Option<&serde_json::Value>, control: &Contro
             ControlContextLayer::GoalDefinition => {
                 "Goal definition prompt context reassembled".into()
             }
+            ControlContextLayer::PlanPhase => "Plan phase prompt context reassembled".into(),
             ControlContextLayer::Behavior => "Behavior prompt context reassembled".into(),
         };
     }

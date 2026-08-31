@@ -60,6 +60,14 @@ pub trait ToolMetadata: Send + Sync {
         &[]
     }
 
+    /// Whether this tool must be preflighted alone before any sibling emitted
+    /// in the same provider batch. State-control tools opt in so a successful
+    /// transition can cancel siblings sampled under stale authority; the
+    /// eventual continuation is still decided from the validated typed input.
+    fn isolates_batch_preflight(&self) -> bool {
+        false
+    }
+
     /// Requirements expression evaluated at finalize time.
     /// Default: `Expr::True` (no requirements).
     fn requires_expr(&self) -> Expr<ToolRequirement> {

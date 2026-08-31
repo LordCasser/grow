@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use chat_state::WorkflowTurnHandoff;
 use serde::{Deserialize, Serialize};
 use tools::implementations::grow_build::workflow::{WorkflowDefinitionId, WorkflowScope};
 use workflow::{PauseKind, PhaseMeta, WorkflowOutcome};
@@ -42,10 +43,6 @@ impl WorkflowRunStatus {
             self,
             Self::Interrupted | Self::Complete | Self::Failed | Self::Cancelled
         )
-    }
-
-    pub fn is_completion_reportable(self) -> bool {
-        self.is_terminal() || self == Self::BudgetLimited
     }
 
     pub fn is_paused(self) -> bool {
@@ -1131,6 +1128,7 @@ pub struct WorkflowRunState {
     pub name: String,
     pub objective: String,
     pub status: WorkflowRunStatus,
+    pub turn_handoff: WorkflowTurnHandoff,
     pub phases: Vec<PhaseMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_phase: Option<String>,
@@ -1164,6 +1162,33 @@ impl WorkflowRunState {
                 "Workflow restore received an active manifest instead of a Timeline-reconciled projection",
             );
         }
+        let valid_handoff = match self.turn_handoff {
+            WorkflowTurnHandoff::None => !matches!(
+                self.status,
+                WorkflowRunStatus::BudgetLimited
+                    | WorkflowRunStatus::Interrupted
+                    | WorkflowRunStatus::Complete
+                    | WorkflowRunStatus::Failed
+            ),
+            WorkflowTurnHandoff::Completion => matches!(
+                self.status,
+                WorkflowRunStatus::BudgetLimited
+                    | WorkflowRunStatus::Interrupted
+                    | WorkflowRunStatus::Complete
+                    | WorkflowRunStatus::Failed
+            ),
+            WorkflowTurnHandoff::AttentionRequired => matches!(
+                self.status,
+                WorkflowRunStatus::UserPaused
+                    | WorkflowRunStatus::BackOffPaused
+                    | WorkflowRunStatus::NoProgressPaused
+                    | WorkflowRunStatus::InfraPaused
+                    | WorkflowRunStatus::Blocked
+            ),
+        };
+        if !valid_handoff {
+            return Err("Workflow turn handoff does not match its durable status");
+        }
         Ok(())
     }
 
@@ -1177,12 +1202,19 @@ impl WorkflowRunState {
         &mut self,
         execution_epoch: u64,
         status: WorkflowRunStatus,
+        turn_handoff: WorkflowTurnHandoff,
         message: Option<String>,
         execution_was_open: bool,
     ) -> bool {
         let message = message.map(capped_pause_message);
+        let turn_handoff = if execution_was_open {
+            WorkflowTurnHandoff::Completion
+        } else {
+            turn_handoff
+        };
         if self.execution_epoch == execution_epoch
             && self.status == status
+            && self.turn_handoff == turn_handoff
             && self.pause_message == message
             && !execution_was_open
         {
@@ -1190,6 +1222,7 @@ impl WorkflowRunState {
         }
         self.execution_epoch = execution_epoch;
         self.status = status;
+        self.turn_handoff = turn_handoff;
         self.pause_message = message.clone();
         if status != WorkflowRunStatus::Complete {
             self.result_summary = None;
@@ -1255,6 +1288,7 @@ impl WorkflowTracker {
             name,
             objective,
             status: WorkflowRunStatus::Active,
+            turn_handoff: WorkflowTurnHandoff::None,
             phases,
             current_phase: None,
             agent_budget,
@@ -1333,6 +1367,7 @@ impl WorkflowTracker {
             run.state.agent_budget = Some(budget);
         }
         run.state.status = WorkflowRunStatus::Active;
+        run.state.turn_handoff = WorkflowTurnHandoff::None;
         run.state.pause_message = None;
         run.state.result_summary = None;
         for agent in &mut run.state.agents {
@@ -1503,6 +1538,7 @@ impl WorkflowTracker {
         }
         run.fold_elapsed();
         run.state.status = WorkflowRunStatus::UserPaused;
+        run.state.turn_handoff = WorkflowTurnHandoff::None;
         run.state.pause_message = message.map(capped_pause_message);
         run.state.advance_revision();
         Some(run.state.clone())
@@ -1517,6 +1553,7 @@ impl WorkflowTracker {
         run.fold_elapsed();
         let message = capped_pause_message(message);
         run.state.status = WorkflowRunStatus::Interrupted;
+        run.state.turn_handoff = WorkflowTurnHandoff::Completion;
         run.state.pause_message = Some(message.clone());
         run.state.result_summary = None;
         run.state.advance_revision();
@@ -1530,6 +1567,7 @@ impl WorkflowTracker {
         }
         run.fold_elapsed();
         run.state.status = WorkflowRunStatus::Cancelled;
+        run.state.turn_handoff = WorkflowTurnHandoff::None;
         run.state.pause_message = Some("cancelled while no execution was active".into());
         run.state.result_summary = None;
         run.state.advance_revision();
@@ -1554,16 +1592,25 @@ impl WorkflowTracker {
         match outcome {
             WorkflowOutcome::Completed { result } => {
                 run.state.status = WorkflowRunStatus::Complete;
+                run.state.turn_handoff = WorkflowTurnHandoff::Completion;
                 run.state.result_summary = Some(summarize_result(result));
                 run.state.advance_revision();
             }
             WorkflowOutcome::Paused { kind, message } => {
                 run.state.status = WorkflowRunStatus::from_pause(*kind);
+                run.state.turn_handoff = WorkflowTurnHandoff::None;
+                run.state.pause_message = Some(capped_pause_message(message.clone()));
+                run.state.advance_revision();
+            }
+            WorkflowOutcome::AwaitingUser { kind, message } => {
+                run.state.status = WorkflowRunStatus::from_pause(*kind);
+                run.state.turn_handoff = WorkflowTurnHandoff::AttentionRequired;
                 run.state.pause_message = Some(capped_pause_message(message.clone()));
                 run.state.advance_revision();
             }
             WorkflowOutcome::BudgetExceeded { message } => {
                 run.state.status = WorkflowRunStatus::BudgetLimited;
+                run.state.turn_handoff = WorkflowTurnHandoff::Completion;
                 let hint = if run.state.agents_used >= workflow::MAX_AGENT_BUDGET {
                     "finished work is kept, but this run reached the maximum agent budget and \
                      cannot be resumed; start a new run"
@@ -1576,10 +1623,12 @@ impl WorkflowTracker {
             }
             WorkflowOutcome::Cancelled => {
                 run.state.status = WorkflowRunStatus::Cancelled;
+                run.state.turn_handoff = WorkflowTurnHandoff::None;
                 run.state.advance_revision();
             }
             WorkflowOutcome::Failed { error } => {
                 run.state.status = WorkflowRunStatus::Failed;
+                run.state.turn_handoff = WorkflowTurnHandoff::Completion;
                 let error = capped_pause_message(error.clone());
                 run.state.pause_message = Some(error.clone());
                 run.state.advance_revision();
@@ -1666,7 +1715,16 @@ impl WorkflowTracker {
     pub fn live_status_snapshot(&self) -> Vec<WorkflowRunState> {
         self.runs
             .iter()
-            .filter(|run| !run.state.status.is_completion_reportable())
+            .filter(|run| {
+                !matches!(
+                    run.state.status,
+                    WorkflowRunStatus::BudgetLimited
+                        | WorkflowRunStatus::Interrupted
+                        | WorkflowRunStatus::Complete
+                        | WorkflowRunStatus::Failed
+                        | WorkflowRunStatus::Cancelled
+                )
+            })
             .map(|run| {
                 let mut state = run.state.clone();
                 state.elapsed_ms_floor = run.live_elapsed_ms();
@@ -2274,6 +2332,7 @@ mod tests {
             test_runtime_route(),
         );
         assert_eq!(state.status, WorkflowRunStatus::Active);
+        assert_eq!(state.turn_handoff, WorkflowTurnHandoff::None);
         (t, "wf_1".into())
     }
 
@@ -2306,10 +2365,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(s.status, WorkflowRunStatus::BackOffPaused);
+        assert_eq!(s.turn_handoff, WorkflowTurnHandoff::None);
         assert_eq!(s.pause_message.as_deref(), Some("cap"));
 
         let s = t.resume_run(&id, None).unwrap();
         assert_eq!(s.status, WorkflowRunStatus::Active);
+        assert_eq!(s.turn_handoff, WorkflowTurnHandoff::None);
         assert!(s.pause_message.is_none());
 
         let s = t
@@ -2321,7 +2382,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(s.status, WorkflowRunStatus::Complete);
+        assert_eq!(s.turn_handoff, WorkflowTurnHandoff::Completion);
         assert_eq!(s.result_summary.as_deref(), Some("shipped"));
+    }
+
+    #[test]
+    fn awaiting_user_requires_attention_and_resume_clears_the_handoff() {
+        let (mut tracker, run_id) = tracker_with_run();
+        let awaiting = tracker
+            .apply_outcome(
+                &run_id,
+                &WorkflowOutcome::AwaitingUser {
+                    kind: PauseKind::Verification,
+                    message: "approve the rollout".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(awaiting.status, WorkflowRunStatus::Blocked);
+        assert_eq!(
+            awaiting.turn_handoff,
+            WorkflowTurnHandoff::AttentionRequired
+        );
+
+        let resumed = tracker.resume_run(&run_id, None).unwrap();
+        assert_eq!(resumed.status, WorkflowRunStatus::Active);
+        assert_eq!(resumed.turn_handoff, WorkflowTurnHandoff::None);
     }
 
     #[test]
@@ -2445,6 +2530,7 @@ mod tests {
         let restored = WorkflowTracker::from_snapshot(t.snapshot()).unwrap();
         let run = restored.get(&id).unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Interrupted);
+        assert_eq!(run.turn_handoff, WorkflowTurnHandoff::Completion);
         assert_eq!(run.agents[0].state, "cancelled");
     }
 
@@ -2453,12 +2539,16 @@ mod tests {
         let (mut t, id) = tracker_with_run();
         t.interrupt(&id, "lost executor").unwrap();
         assert!(t.resume_run(&id, None).is_none());
-        assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Interrupted);
+        let interrupted = t.get(&id).unwrap();
+        assert_eq!(interrupted.status, WorkflowRunStatus::Interrupted);
+        assert_eq!(interrupted.turn_handoff, WorkflowTurnHandoff::Completion);
 
         let (mut t, id) = tracker_with_run();
         t.apply_outcome(&id, &WorkflowOutcome::Cancelled);
         assert!(t.resume_run(&id, None).is_none());
-        assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Cancelled);
+        let cancelled = t.get(&id).unwrap();
+        assert_eq!(cancelled.status, WorkflowRunStatus::Cancelled);
+        assert_eq!(cancelled.turn_handoff, WorkflowTurnHandoff::None);
 
         let (mut t, id) = tracker_with_run();
         t.apply_outcome(
@@ -2468,7 +2558,9 @@ mod tests {
             },
         );
         assert!(t.resume_run(&id, None).is_none());
-        assert_eq!(t.get(&id).unwrap().status, WorkflowRunStatus::Complete);
+        let complete = t.get(&id).unwrap();
+        assert_eq!(complete.status, WorkflowRunStatus::Complete);
+        assert_eq!(complete.turn_handoff, WorkflowTurnHandoff::Completion);
     }
 
     #[test]
@@ -2494,6 +2586,7 @@ mod tests {
         );
         let failed = t.get(&id).unwrap();
         assert_eq!(failed.status, WorkflowRunStatus::Failed);
+        assert_eq!(failed.turn_handoff, WorkflowTurnHandoff::Completion);
         assert!(failed.status.is_resumable());
         assert!(failed.status.is_terminal());
         assert!(!failed.status.is_paused());
@@ -2501,6 +2594,7 @@ mod tests {
 
         let resumed = t.resume_run(&id, None).unwrap();
         assert_eq!(resumed.status, WorkflowRunStatus::Active);
+        assert_eq!(resumed.turn_handoff, WorkflowTurnHandoff::None);
         assert!(resumed.pause_message.is_none());
         assert_eq!(
             resumed.agents[0].state, "cancelled",
@@ -2645,6 +2739,10 @@ mod tests {
             &WorkflowOutcome::BudgetExceeded {
                 message: "spent".into(),
             },
+        );
+        assert_eq!(
+            t.get(&id).unwrap().turn_handoff,
+            WorkflowTurnHandoff::Completion
         );
         assert_eq!(t.get(&id).unwrap().agent_budget, Some(1000));
         assert!(t.resume_run(&id, Some(1100)).is_none());

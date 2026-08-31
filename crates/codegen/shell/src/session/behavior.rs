@@ -73,6 +73,15 @@ pub enum PlanPhase {
     Amending,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDecisionHandoff {
+    pub kind: chat_state::PlanHandoffKind,
+    pub artifact_hash: String,
+    pub artifact_revision: u64,
+    pub feedback: Option<String>,
+}
+
 /// Serialized control projection. The coordinator does not use this enum as
 /// its mutable state machine: Plan keeps independent runtime state and is
 /// combined here only for one atomic persistence payload.
@@ -96,9 +105,9 @@ struct PlanRuntime {
     /// A reverse approval request is parked and must be restored after a
     /// reconnect. This is transport state for a Plan phase, not another phase.
     approval_pending: bool,
-    reminder_count: u32,
     artifact_revision: u64,
     artifact_hash: Option<String>,
+    last_handoff: Option<PlanDecisionHandoff>,
 }
 
 impl Default for PlanRuntime {
@@ -106,9 +115,9 @@ impl Default for PlanRuntime {
         Self {
             phase: PlanPhase::Drafting,
             approval_pending: false,
-            reminder_count: 0,
             artifact_revision: 0,
             artifact_hash: None,
+            last_handoff: None,
         }
     }
 }
@@ -131,11 +140,10 @@ struct PendingBehaviorSwitch {
 pub struct BehaviorSnapshot {
     pub state: BehaviorState,
     pub approval_pending: bool,
-    pub reminder_count: u32,
-    #[serde(default)]
     pub plan_artifact_revision: u64,
-    #[serde(default)]
     pub plan_artifact_hash: Option<String>,
+    #[serde(default)]
+    pub last_plan_handoff: Option<PlanDecisionHandoff>,
 }
 
 impl BehaviorSnapshot {
@@ -154,9 +162,9 @@ impl BehaviorSnapshot {
         Self {
             state,
             approval_pending: false,
-            reminder_count: 0,
             plan_artifact_revision: 0,
             plan_artifact_hash: None,
+            last_plan_handoff: None,
         }
     }
 
@@ -176,9 +184,33 @@ impl BehaviorSnapshot {
     pub fn runtime_fields_match_selection(&self) -> bool {
         matches!(self.state, BehaviorState::Plan(_))
             || (!self.approval_pending
-                && self.reminder_count == 0
                 && self.plan_artifact_revision == 0
-                && self.plan_artifact_hash.is_none())
+                && self.plan_artifact_hash.is_none()
+                && self.last_plan_handoff.is_none())
+    }
+
+    pub fn plan_runtime_is_valid(&self) -> bool {
+        if !matches!(self.state, BehaviorState::Plan(_)) {
+            return self.runtime_fields_match_selection();
+        }
+        match self.last_plan_handoff.as_ref() {
+            None => true,
+            Some(handoff) => {
+                handoff.artifact_revision > 0
+                    && self.plan_artifact_revision == handoff.artifact_revision
+                    && self.plan_artifact_hash.as_deref() == Some(handoff.artifact_hash.as_str())
+                    && matches!(
+                        (&self.state, handoff.kind),
+                        (
+                            BehaviorState::Plan(PlanPhase::Executing),
+                            chat_state::PlanHandoffKind::Execute
+                        ) | (
+                            BehaviorState::Plan(PlanPhase::Drafting | PlanPhase::Amending),
+                            chat_state::PlanHandoffKind::Revise
+                        )
+                    )
+            }
+        }
     }
 }
 
@@ -204,9 +236,9 @@ impl BehaviorCoordinator {
             plan: PlanRuntime {
                 phase: plan_phase,
                 approval_pending: snapshot.approval_pending,
-                reminder_count: snapshot.reminder_count,
                 artifact_revision: snapshot.plan_artifact_revision,
                 artifact_hash: snapshot.plan_artifact_hash,
+                last_handoff: snapshot.last_plan_handoff,
             },
             pending_switch: None,
         }
@@ -216,9 +248,9 @@ impl BehaviorCoordinator {
         BehaviorSnapshot {
             state: self.state(),
             approval_pending: self.plan.approval_pending,
-            reminder_count: self.plan.reminder_count,
             plan_artifact_revision: self.plan.artifact_revision,
             plan_artifact_hash: self.plan.artifact_hash.clone(),
+            last_plan_handoff: self.plan.last_handoff.clone(),
         }
     }
 
@@ -488,6 +520,10 @@ impl BehaviorCoordinator {
     }
 
     pub fn approve_submitted_plan(&mut self) -> bool {
+        self.approve_submitted_plan_with_feedback(None)
+    }
+
+    pub fn approve_submitted_plan_with_feedback(&mut self, feedback: Option<String>) -> bool {
         if !self.is_plan()
             || !matches!(
                 self.plan.phase,
@@ -496,26 +532,51 @@ impl BehaviorCoordinator {
         {
             return false;
         }
+        let Some(artifact_hash) = self.plan.artifact_hash.clone() else {
+            return false;
+        };
         self.plan.phase = PlanPhase::Executing;
         self.plan.approval_pending = false;
-        self.plan.reminder_count = 0;
+        self.plan.last_handoff = Some(PlanDecisionHandoff {
+            kind: chat_state::PlanHandoffKind::Execute,
+            artifact_hash,
+            artifact_revision: self.plan.artifact_revision,
+            feedback: normalize_plan_feedback(feedback),
+        });
         true
     }
 
     pub fn reject_submitted_plan(&mut self) -> bool {
-        self.plan.approval_pending = false;
-        if !self.is_plan() {
+        self.reject_submitted_plan_with_feedback(None)
+    }
+
+    pub fn reject_submitted_plan_with_feedback(&mut self, feedback: Option<String>) -> bool {
+        if !self.is_plan()
+            || !matches!(
+                self.plan.phase,
+                PlanPhase::AwaitingApproval | PlanPhase::Amending
+            )
+        {
             return false;
         }
+        let Some(artifact_hash) = self.plan.artifact_hash.clone() else {
+            return false;
+        };
+        self.plan.approval_pending = false;
         match self.plan.phase {
             PlanPhase::AwaitingApproval => {
                 self.plan.phase = PlanPhase::Drafting;
-                self.plan.reminder_count = 0;
-                true
             }
-            PlanPhase::Amending => true,
-            _ => false,
+            PlanPhase::Amending => {}
+            _ => return false,
         }
+        self.plan.last_handoff = Some(PlanDecisionHandoff {
+            kind: chat_state::PlanHandoffKind::Revise,
+            artifact_hash,
+            artifact_revision: self.plan.artifact_revision,
+            feedback: normalize_plan_feedback(feedback),
+        });
+        true
     }
 
     pub fn finish_plan(&mut self) -> bool {
@@ -562,29 +623,77 @@ impl BehaviorCoordinator {
     /// This is intentionally a compare-and-swap boundary for restored
     /// approvals, whose response arrives outside the actor mailbox.
     pub fn approve_submitted_plan_if(&mut self, expected: &BehaviorSnapshot) -> bool {
+        self.approve_submitted_plan_if_with_feedback(expected, None)
+    }
+
+    pub fn approve_submitted_plan_if_with_feedback(
+        &mut self,
+        expected: &BehaviorSnapshot,
+        feedback: Option<String>,
+    ) -> bool {
         if !self.matches_pending_plan_approval(expected) {
             return false;
         }
+        let Some(artifact_hash) = self.plan.artifact_hash.clone() else {
+            return false;
+        };
         self.plan.phase = PlanPhase::Executing;
         self.plan.approval_pending = false;
-        self.plan.reminder_count = 0;
+        self.plan.last_handoff = Some(PlanDecisionHandoff {
+            kind: chat_state::PlanHandoffKind::Execute,
+            artifact_hash,
+            artifact_revision: self.plan.artifact_revision,
+            feedback: normalize_plan_feedback(feedback),
+        });
         true
     }
 
     /// Reject only the exact pending submission captured by `expected`.
     pub fn reject_submitted_plan_if(&mut self, expected: &BehaviorSnapshot) -> bool {
+        self.reject_submitted_plan_if_with_feedback(expected, None)
+    }
+
+    /// Close a failed approval transport without fabricating a human
+    /// Request-changes decision or successor handoff.
+    pub fn fail_pending_plan_approval_if(&mut self, expected: &BehaviorSnapshot) -> bool {
         if !self.matches_pending_plan_approval(expected) {
             return false;
         }
         self.plan.approval_pending = false;
         match self.plan.phase {
+            PlanPhase::AwaitingApproval => self.plan.phase = PlanPhase::Drafting,
+            PlanPhase::Amending => {}
+            _ => unreachable!("pending approval phase was checked above"),
+        }
+        self.plan.last_handoff = None;
+        true
+    }
+
+    pub fn reject_submitted_plan_if_with_feedback(
+        &mut self,
+        expected: &BehaviorSnapshot,
+        feedback: Option<String>,
+    ) -> bool {
+        if !self.matches_pending_plan_approval(expected) {
+            return false;
+        }
+        let Some(artifact_hash) = self.plan.artifact_hash.clone() else {
+            return false;
+        };
+        self.plan.approval_pending = false;
+        match self.plan.phase {
             PlanPhase::AwaitingApproval => {
                 self.plan.phase = PlanPhase::Drafting;
-                self.plan.reminder_count = 0;
             }
             PlanPhase::Amending => {}
             _ => unreachable!("pending approval phase was checked above"),
         }
+        self.plan.last_handoff = Some(PlanDecisionHandoff {
+            kind: chat_state::PlanHandoffKind::Revise,
+            artifact_hash,
+            artifact_revision: self.plan.artifact_revision,
+            feedback: normalize_plan_feedback(feedback),
+        });
         true
     }
 
@@ -601,10 +710,19 @@ impl BehaviorCoordinator {
     pub fn record_plan_artifact(&mut self, markdown: &str) {
         self.plan.artifact_revision = self.plan.artifact_revision.saturating_add(1);
         self.plan.artifact_hash = Some(blake3::hash(markdown.as_bytes()).to_hex().to_string());
+        self.plan.last_handoff = None;
     }
 
     pub fn plan_artifact_hash(&self) -> Option<&str> {
         self.plan.artifact_hash.as_deref()
+    }
+
+    pub fn plan_artifact_revision(&self) -> u64 {
+        self.plan.artifact_revision
+    }
+
+    pub fn last_plan_handoff(&self) -> Option<&PlanDecisionHandoff> {
+        self.plan.last_handoff.as_ref()
     }
 
     pub fn plan_artifact_ref(&self) -> Option<String> {
@@ -619,32 +737,68 @@ impl BehaviorCoordinator {
             && self.plan.artifact_hash.as_deref()
                 == Some(blake3::hash(markdown.as_bytes()).to_hex().as_str())
     }
-
-    pub fn should_use_full_reminder(&self) -> bool {
-        self.plan.reminder_count.is_multiple_of(2)
-    }
-
-    pub fn record_reminder_injected(&mut self) {
-        self.plan.reminder_count += 1;
-    }
-
-    pub fn reset_after_compaction(&mut self) {
-        if self.is_plan() {
-            self.plan.reminder_count = 0;
-        }
-    }
 }
 
-pub fn plan_mode_reminder_full_template() -> &'static str {
-    include_str!("../../prompts/behaviors/plan/full.md")
+fn normalize_plan_feedback(feedback: Option<String>) -> Option<String> {
+    feedback.and_then(|feedback| {
+        let feedback = feedback.trim();
+        (!feedback.is_empty()).then(|| feedback.to_owned())
+    })
 }
 
 pub fn plan_behavior_template() -> &'static str {
     include_str!("../../prompts/behaviors/plan/base.md")
 }
 
-pub fn plan_mode_reminder_sparse_template() -> &'static str {
-    include_str!("../../prompts/behaviors/plan/sparse.md")
+pub fn plan_phase_model_context(snapshot: &BehaviorSnapshot, plan_content: &str) -> Option<String> {
+    let BehaviorState::Plan(phase) = snapshot.state else {
+        return None;
+    };
+    let plan = plan_content.trim();
+    let feedback = snapshot
+        .last_plan_handoff
+        .as_ref()
+        .and_then(|handoff| handoff.feedback.as_deref())
+        .map(str::trim)
+        .filter(|feedback| !feedback.is_empty());
+    let context = match phase {
+        PlanPhase::Drafting => format!(
+            "{}\n\nPlan phase: Drafting. Workspace mutation and execution are forbidden. Investigate, resolve material uncertainties, and submit one complete plan for approval with `plan_control` action `submit`.{}{}",
+            plan_behavior_template().trim(),
+            if plan.is_empty() {
+                ""
+            } else {
+                "\n\nPlan requiring revision:\n\n"
+            },
+            if plan.is_empty() { "" } else { plan },
+        ),
+        PlanPhase::AwaitingApproval => format!(
+            "{}\n\nPlan phase: AwaitingApproval. The plan below is frozen and awaiting a human decision. Do not execute it, modify the workspace, or replace it unless the approval result moves the phase.\n\nFrozen plan:\n\n{}",
+            plan_behavior_template().trim(),
+            plan,
+        ),
+        PlanPhase::Amending if snapshot.approval_pending => format!(
+            "{}\n\nPlan phase: Amending. The replacement plan below is frozen and awaiting a human decision. Workspace mutation and execution are forbidden; do not revise or resubmit it until the approval result moves the phase.\n\nFrozen replacement plan:\n\n{}",
+            plan_behavior_template().trim(),
+            plan,
+        ),
+        PlanPhase::Amending => format!(
+            "{}\n\nPlan phase: Amending. Workspace mutation and execution are forbidden. Revise the complete plan in response to the review feedback, then submit the complete replacement with `plan_control` action `amend`.\n\nPlan requiring amendment:\n\n{}{}",
+            plan_behavior_template().trim(),
+            plan,
+            feedback.map_or_else(String::new, |feedback| format!(
+                "\n\nApproval feedback:\n\n{feedback}"
+            )),
+        ),
+        PlanPhase::Executing => format!(
+            "The following plan is a frozen, human-approved contract and is now in the Executing phase. Implement and verify only work within its scope. If its objective, architecture, major steps, risk boundary, or deletion behavior must change, stop workspace mutation and submit a complete replacement with `plan_control` action `amend`. When all approved work is verified, call `plan_control` with action `complete` and a non-empty final user-facing `report`; that tool result is the only final report.\n\nApproved plan:\n\n{}{}",
+            plan,
+            feedback.map_or_else(String::new, |feedback| format!(
+                "\n\nApproval review:\n\n{feedback}"
+            )),
+        ),
+    };
+    Some(context)
 }
 
 pub fn plan_mode_edit_rejected_template() -> &'static str {
@@ -684,10 +838,6 @@ pub fn behavior_transition_context(admitted: BehaviorId) -> String {
     };
     let escaped = instructions.replace("</behavior-context>", "<\\/behavior-context>");
     format!("<behavior-context>\n{escaped}\n</behavior-context>")
-}
-
-pub fn plan_execution_reminder_template() -> &'static str {
-    include_str!("../../prompts/behaviors/plan/executing.md")
 }
 
 pub(crate) const MAX_PLAN_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
@@ -786,6 +936,7 @@ mod tests {
     fn only_executing_plan_allows_edits() {
         let mut controller = controller();
         controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# plan");
         assert!(!controller.plan_allows_edits());
         assert!(controller.submit_initial_plan());
         assert!(!controller.plan_allows_edits());
@@ -799,8 +950,10 @@ mod tests {
     fn amendment_rejection_stays_read_only_for_revision() {
         let mut controller = controller();
         controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# initial");
         controller.submit_initial_plan();
         controller.approve_submitted_plan();
+        controller.record_plan_artifact("# amendment");
         controller.submit_plan_amendment();
         controller.set_approval_pending(false);
         assert!(controller.reject_submitted_plan());
@@ -845,6 +998,74 @@ mod tests {
     }
 
     #[test]
+    fn approval_handoff_is_bound_to_the_frozen_artifact_and_feedback_is_projected_once() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# approved");
+        assert!(controller.submit_initial_plan());
+        let expected = controller.snapshot();
+        assert!(controller.approve_submitted_plan_if_with_feedback(
+            &expected,
+            Some("  keep the boundary explicit  ".into()),
+        ));
+
+        let snapshot = controller.snapshot();
+        let handoff = snapshot.last_plan_handoff.as_ref().unwrap();
+        assert_eq!(handoff.kind, chat_state::PlanHandoffKind::Execute);
+        assert_eq!(handoff.artifact_revision, snapshot.plan_artifact_revision);
+        assert_eq!(
+            Some(handoff.artifact_hash.as_str()),
+            snapshot.plan_artifact_hash.as_deref()
+        );
+        assert!(snapshot.plan_runtime_is_valid());
+
+        let context = plan_phase_model_context(&snapshot, "# approved").unwrap();
+        assert_eq!(context.matches("keep the boundary explicit").count(), 1);
+
+        controller.record_plan_artifact("# replacement");
+        assert!(controller.snapshot().last_plan_handoff.is_none());
+    }
+
+    #[test]
+    fn request_changes_persists_a_revision_handoff_and_plan_exit_clears_it() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# candidate");
+        assert!(controller.submit_initial_plan());
+        let expected = controller.snapshot();
+        assert!(
+            controller
+                .reject_submitted_plan_if_with_feedback(&expected, Some("cover recovery".into()),)
+        );
+        let revised = controller.snapshot();
+        assert_eq!(
+            revised
+                .last_plan_handoff
+                .as_ref()
+                .map(|handoff| handoff.kind),
+            Some(chat_state::PlanHandoffKind::Revise)
+        );
+        assert!(revised.plan_runtime_is_valid());
+        assert!(controller.finish_plan());
+        assert!(controller.snapshot().last_plan_handoff.is_none());
+    }
+
+    #[test]
+    fn approval_transport_failure_does_not_fabricate_a_revision_handoff() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# candidate");
+        assert!(controller.submit_initial_plan());
+        let expected = controller.snapshot();
+
+        assert!(controller.fail_pending_plan_approval_if(&expected));
+        let failed = controller.snapshot();
+        assert_eq!(failed.state, BehaviorState::Plan(PlanPhase::Drafting));
+        assert!(!failed.approval_pending);
+        assert!(failed.last_plan_handoff.is_none());
+    }
+
+    #[test]
     fn behavior_selection_resets_plan_runtime_state() {
         let mut controller = controller();
         controller.select_behavior(BehaviorId::Plan);
@@ -865,9 +1086,9 @@ mod tests {
         let snapshot = BehaviorSnapshot {
             state: BehaviorState::Normal,
             approval_pending: true,
-            reminder_count: 1,
             plan_artifact_revision: 1,
             plan_artifact_hash: Some("stale".into()),
+            last_plan_handoff: None,
         };
         assert!(!snapshot.runtime_fields_match_selection());
     }

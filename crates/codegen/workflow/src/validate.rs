@@ -132,6 +132,10 @@ pub fn validate_script_with_agent_budget(
         WorkflowOutcome::Paused { kind, message } => {
             (true, format!("paused ({kind:?}): {}", truncate(message)))
         }
+        WorkflowOutcome::AwaitingUser { kind, message } => (
+            true,
+            format!("awaiting user ({kind:?}): {}", truncate(message)),
+        ),
         WorkflowOutcome::Failed { error } => (false, format!("failed: {error}")),
         other => (false, format!("{other:?}")),
     };
@@ -169,6 +173,18 @@ mod tests {
         .unwrap();
         assert_eq!(report.name, "t");
         assert!(report.outcome_ok);
+    }
+
+    #[test]
+    fn await_user_counts_as_valid_and_reports_attention() {
+        let report = validate_script(
+            "let meta = #{ name: \"t\", description: \"d\" };\nawait_user(\"verification\", \"review needed\");",
+            None,
+        )
+        .unwrap();
+        assert!(report.outcome_ok);
+        assert!(report.outcome_summary.contains("awaiting user"));
+        assert!(report.outcome_summary.contains("review needed"));
     }
 
     #[test]

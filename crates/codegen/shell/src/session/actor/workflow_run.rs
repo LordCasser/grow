@@ -2,14 +2,20 @@ use std::sync::Arc;
 
 use super::SessionActor;
 
-fn workflow_completion_source_version(
+fn workflow_handoff_source_version(
     state: &crate::session::workflow::tracker::WorkflowRunState,
 ) -> chat_state::NotificationSourceVersion {
+    let handoff = match state.turn_handoff {
+        chat_state::WorkflowTurnHandoff::None => "none",
+        chat_state::WorkflowTurnHandoff::Completion => "completion",
+        chat_state::WorkflowTurnHandoff::AttentionRequired => "attention_required",
+    };
     chat_state::NotificationSourceVersion::Opaque {
         value: format!(
-            "workflow-terminal-v1:{}:{}",
+            "workflow-handoff-v1:{}:{}:{}",
             state.execution_epoch,
-            state.status.as_str()
+            state.status.as_str(),
+            handoff,
         ),
     }
 }
@@ -19,7 +25,7 @@ impl SessionActor {
     /// the pending inbox. Returning `None` means this exact terminal boundary
     /// was already admitted (and may already be consumed), so callers must not
     /// regenerate configuration-sensitive payload text.
-    async fn unresolved_workflow_completion_identity(
+    async fn unresolved_workflow_handoff_identity(
         &self,
         state: &crate::session::workflow::tracker::WorkflowRunState,
     ) -> Result<
@@ -29,10 +35,11 @@ impl SessionActor {
         )>,
         String,
     > {
-        let source = chat_state::NotificationSource::WorkflowCompleted {
+        let source = chat_state::NotificationSource::WorkflowHandoff {
             run_id: state.run_id.clone(),
+            handoff: state.turn_handoff,
         };
-        let source_version = workflow_completion_source_version(state);
+        let source_version = workflow_handoff_source_version(state);
         match self
             .chat_state_handle
             .received_notification_id(source.clone(), source_version.clone())
@@ -50,26 +57,26 @@ impl SessionActor {
         let states = self.workflow_tracker().await.lock().list();
         for state in states
             .iter()
-            .filter(|state| state.status.is_completion_reportable())
+            .filter(|state| state.turn_handoff != chat_state::WorkflowTurnHandoff::None)
         {
-            self.admit_public_workflow_completion(state).await?;
+            self.admit_public_workflow_handoff(state).await?;
         }
         Ok(())
     }
 
-    pub(super) async fn admit_public_workflow_completion(
+    pub(super) async fn admit_public_workflow_handoff(
         &self,
         state: &crate::session::workflow::tracker::WorkflowRunState,
     ) -> Result<(), String> {
-        if !state.status.is_completion_reportable() {
+        if state.turn_handoff == chat_state::WorkflowTurnHandoff::None {
             return Ok(());
         }
         let Some((source, source_version)) =
-            self.unresolved_workflow_completion_identity(state).await?
+            self.unresolved_workflow_handoff_identity(state).await?
         else {
             return Ok(());
         };
-        let prompt_text = self.workflow_completion_notification(state).await;
+        let prompt_text = self.workflow_handoff_notification(state).await;
         self.receive_notification(
             source,
             // Execution epoch plus terminal status is the stable identity of
@@ -615,7 +622,7 @@ fn narrow_run_matches(mut all: Vec<RunMatch>, selector: &str, op: &str) -> Vec<R
 
 #[cfg(test)]
 mod run_match_tests {
-    use super::{narrow_run_matches, workflow_completion_source_version};
+    use super::{narrow_run_matches, workflow_handoff_source_version};
     use crate::session::workflow::tracker::{WorkflowRunStatus, WorkflowTracker};
 
     fn run(id: &str, name: &str, status: WorkflowRunStatus) -> super::RunMatch {
@@ -634,7 +641,7 @@ mod run_match_tests {
     }
 
     #[test]
-    fn workflow_completion_retry_identity_ignores_manifest_projection_revisions() {
+    fn workflow_handoff_retry_identity_ignores_manifest_projection_revisions() {
         let mut tracker = WorkflowTracker::default();
         let mut state = tracker.start_run(
             "wf-replay".into(),
@@ -650,9 +657,11 @@ mod run_match_tests {
             )
             .unwrap(),
         );
-        let first = workflow_completion_source_version(&state);
+        state.status = WorkflowRunStatus::Complete;
+        state.turn_handoff = chat_state::WorkflowTurnHandoff::Completion;
+        let first = workflow_handoff_source_version(&state);
         state.revision = state.revision.saturating_add(7);
-        assert_eq!(workflow_completion_source_version(&state), first);
+        assert_eq!(workflow_handoff_source_version(&state), first);
     }
 
     #[tokio::test]
@@ -681,10 +690,12 @@ mod run_match_tests {
                     .unwrap(),
                 );
                 state.status = WorkflowRunStatus::Complete;
-                let source = chat_state::NotificationSource::WorkflowCompleted {
+                state.turn_handoff = chat_state::WorkflowTurnHandoff::Completion;
+                let source = chat_state::NotificationSource::WorkflowHandoff {
                     run_id: state.run_id.clone(),
+                    handoff: state.turn_handoff,
                 };
-                let version = workflow_completion_source_version(&state);
+                let version = workflow_handoff_source_version(&state);
                 let receipt = actor
                     .receive_notification(
                         source.clone(),
@@ -701,7 +712,7 @@ mod run_match_tests {
                     .expect("consume historical receipt");
 
                 actor
-                    .admit_public_workflow_completion(&state)
+                    .admit_public_workflow_handoff(&state)
                     .await
                     .expect("restore must accept the existing receipt without rebuilding body");
 

@@ -200,6 +200,55 @@ impl SessionActor {
         Ok(())
     }
 
+    /// Consume the approval handoff owned by the live Plan turn before that
+    /// turn admits its successor Step. The PlanPhase control layer carries the
+    /// model contract; the receipt is only the durable wakeup handoff and must
+    /// not survive to open a duplicate idle turn after live resampling.
+    pub(super) async fn consume_live_plan_handoff_for_next_step(
+        &self,
+    ) -> Result<(), chat_state::TimelineWriteError> {
+        if *self.turn_behavior.lock() != tool_types::BehaviorId::Plan {
+            return Ok(());
+        }
+        let snapshot = self.behavior.lock().snapshot();
+        let Some(handoff) = snapshot.last_plan_handoff.as_ref() else {
+            return Ok(());
+        };
+        self.admit_plan_handoff_notification(&snapshot)
+            .await
+            .map_err(|_| chat_state::TimelineWriteError::AcknowledgementLost)?;
+        let Some(turn) = self.events.current_turn() else {
+            return Err(chat_state::TimelineWriteError::Invalid(
+                chat_state::TimelineError::InvalidNotification,
+            ));
+        };
+        let notification_ids: Vec<String> = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?
+            .into_iter()
+            .filter_map(|notification| match notification.source {
+                chat_state::NotificationSource::PlanHandoff {
+                    artifact_hash,
+                    artifact_revision,
+                    handoff: kind,
+                } if artifact_hash == handoff.artifact_hash
+                    && artifact_revision == handoff.artifact_revision
+                    && kind == handoff.kind =>
+                {
+                    Some(notification.id)
+                }
+                _ => None,
+            })
+            .collect();
+        if notification_ids.is_empty() {
+            return Err(chat_state::TimelineWriteError::AcknowledgementLost);
+        }
+        self.consume_notifications_durably(notification_ids, turn, None)
+            .await
+    }
+
     /// Resolve receipts that are intentionally forbidden from opening a model
     /// turn. Like consumption, dismissal is a durable Timeline fact; payload
     /// deletion remains a post-commit garbage-collection side effect.
@@ -263,7 +312,8 @@ impl SessionActor {
                 Some(task_id.clone())
             }
             chat_state::NotificationSource::SubagentCompleted { .. }
-            | chat_state::NotificationSource::WorkflowCompleted { .. } => None,
+            | chat_state::NotificationSource::PlanHandoff { .. }
+            | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
         };
         let goal_owner = task_id.as_ref().and_then(|task_id| {
             if let Some((goal_id, revision)) = self.goal_turn_task_ids.lock().get(task_id).cloned()
@@ -279,7 +329,8 @@ impl SessionActor {
                     | chat_state::NotificationSource::TaskStillRunning { task_id, .. }
                     | chat_state::NotificationSource::TaskCompleted { task_id, .. } => task_id,
                     chat_state::NotificationSource::SubagentCompleted { .. }
-                    | chat_state::NotificationSource::WorkflowCompleted { .. } => return None,
+                    | chat_state::NotificationSource::PlanHandoff { .. }
+                    | chat_state::NotificationSource::WorkflowHandoff { .. } => return None,
                 };
                 match notification.source.owner() {
                     chat_state::NotificationOwner::Goal { goal_id, .. }
@@ -578,6 +629,9 @@ impl SessionActor {
         else {
             return false;
         };
+        let active_plan_handoff = (*self.turn_behavior.lock() == tool_types::BehaviorId::Plan)
+            .then(|| self.behavior.lock().snapshot().last_plan_handoff)
+            .flatten();
         let notifications = self
             .chat_state_handle
             .pending_notifications()
@@ -585,7 +639,13 @@ impl SessionActor {
             .unwrap_or_default()
             .into_iter()
             .filter(|notification| !excluded_notification_ids.contains(&notification.id))
-            .filter(|notification| Self::notification_consumable_by(&origin, notification))
+            .filter(|notification| {
+                Self::notification_consumable_by(
+                    &origin,
+                    active_plan_handoff.as_ref(),
+                    notification,
+                )
+            })
             .collect::<Vec<_>>();
         if notifications.is_empty() {
             return false;
@@ -693,14 +753,69 @@ impl SessionActor {
             }
         }
 
-        notifications.retain(|notification| {
-            matches!(
-                notification.source.owner(),
-                chat_state::NotificationOwner::Session
-            )
+        let current_plan_handoff = self.behavior.lock().snapshot().last_plan_handoff;
+        let mut stale_plan_receipts = Vec::new();
+        for notification in &notifications {
+            if let chat_state::NotificationSource::PlanHandoff {
+                artifact_hash,
+                artifact_revision,
+                handoff,
+            } = &notification.source
+                && current_plan_handoff.as_ref().is_none_or(|current| {
+                    current.artifact_hash != *artifact_hash
+                        || current.artifact_revision != *artifact_revision
+                        || current.kind != *handoff
+                })
+            {
+                stale_plan_receipts.push((
+                    notification.id.clone(),
+                    artifact_hash.clone(),
+                    *artifact_revision,
+                    *handoff,
+                ));
+            }
+        }
+        for (notification_id, artifact_hash, artifact_revision, handoff) in stale_plan_receipts {
+            if let Err(error) = self
+                .dismiss_notifications_durably(
+                    vec![notification_id],
+                    chat_state::NotificationDismissReason::PlanSuperseded {
+                        artifact_hash,
+                        artifact_revision,
+                        handoff,
+                    },
+                )
+                .await
+            {
+                tracing::error!(%error, "failed to dismiss superseded Plan handoff");
+                return;
+            }
+        }
+
+        notifications.retain(|notification| match notification.source.owner() {
+            chat_state::NotificationOwner::Session => true,
+            chat_state::NotificationOwner::Plan {
+                artifact_hash,
+                artifact_revision,
+                handoff,
+            } => current_plan_handoff.as_ref().is_some_and(|current| {
+                current.artifact_hash == artifact_hash
+                    && current.artifact_revision == artifact_revision
+                    && current.kind == handoff
+            }),
+            chat_state::NotificationOwner::Goal { .. } => false,
         });
         if notifications.is_empty() {
             return;
+        }
+        if let Some(plan_handoff_id) = notifications.iter().find_map(|notification| {
+            matches!(
+                notification.source,
+                chat_state::NotificationSource::PlanHandoff { .. }
+            )
+            .then_some(notification.id.clone())
+        }) {
+            notifications.retain(|notification| notification.id == plan_handoff_id);
         }
         notifications.sort_by_key(|notification| {
             let priority = match notification.source {
@@ -708,7 +823,8 @@ impl SessionActor {
                 chat_state::NotificationSource::TaskStillRunning { .. } => 2u8,
                 chat_state::NotificationSource::TaskCompleted { .. }
                 | chat_state::NotificationSource::SubagentCompleted { .. }
-                | chat_state::NotificationSource::WorkflowCompleted { .. } => 0u8,
+                | chat_state::NotificationSource::PlanHandoff { .. }
+                | chat_state::NotificationSource::WorkflowHandoff { .. } => 0u8,
             };
             (priority, notification.received_seq)
         });
@@ -829,6 +945,7 @@ impl SessionActor {
 
     fn notification_consumable_by(
         origin: &crate::session::PromptOrigin,
+        active_plan_handoff: Option<&crate::session::behavior::PlanDecisionHandoff>,
         notification: &chat_state::PendingNotification,
     ) -> bool {
         match notification.source.owner() {
@@ -843,6 +960,26 @@ impl SessionActor {
                     definition_revision: active_revision,
                 } if active_goal_id == &goal_id && active_revision == &definition_revision
             ),
+            chat_state::NotificationOwner::Plan {
+                artifact_hash,
+                artifact_revision,
+                handoff,
+            } => {
+                active_plan_handoff.is_some_and(|active| {
+                    active.artifact_hash == artifact_hash
+                        && active.artifact_revision == artifact_revision
+                        && active.kind == handoff
+                }) || matches!(
+                    origin,
+                    crate::session::PromptOrigin::PlanHandoff {
+                        artifact_hash: active_hash,
+                        artifact_revision: active_revision,
+                        handoff: active_handoff,
+                    } if active_hash == &artifact_hash
+                        && active_revision == &artifact_revision
+                        && active_handoff == &handoff
+                )
+            }
         }
     }
 
@@ -945,7 +1082,8 @@ impl SessionActor {
                 chat_state::NotificationSource::TaskCompleted { .. }
                 | chat_state::NotificationSource::TaskStillRunning { .. }
                 | chat_state::NotificationSource::SubagentCompleted { .. }
-                | chat_state::NotificationSource::WorkflowCompleted { .. } => {
+                | chat_state::NotificationSource::PlanHandoff { .. }
+                | chat_state::NotificationSource::WorkflowHandoff { .. } => {
                     sections.push(vec![acp::ContentBlock::Text(acp::TextContent::new(
                         payload.clone(),
                     ))]);
@@ -993,7 +1131,21 @@ impl SessionActor {
                         crate::session::TurnKind::Internal,
                     );
                 }
-                chat_state::NotificationSource::WorkflowCompleted { run_id } => {
+                chat_state::NotificationSource::PlanHandoff {
+                    artifact_hash,
+                    artifact_revision,
+                    handoff,
+                } => {
+                    return (
+                        super::PromptOrigin::PlanHandoff {
+                            artifact_hash: artifact_hash.clone(),
+                            artifact_revision: *artifact_revision,
+                            handoff: *handoff,
+                        },
+                        crate::session::TurnKind::Internal,
+                    );
+                }
+                chat_state::NotificationSource::WorkflowHandoff { run_id, .. } => {
                     let terminal_identity = match &notification.source_version {
                         chat_state::NotificationSourceVersion::Opaque { value } => value.clone(),
                         chat_state::NotificationSourceVersion::Ordinal { value } => {
@@ -1001,8 +1153,8 @@ impl SessionActor {
                         }
                     };
                     return (
-                        super::PromptOrigin::WorkflowCompleted {
-                            completion_id: format!("{run_id}-{terminal_identity}"),
+                        super::PromptOrigin::WorkflowHandoff {
+                            handoff_id: format!("{run_id}-{terminal_identity}"),
                         },
                         crate::session::TurnKind::Internal,
                     );
@@ -1028,8 +1180,9 @@ mod tests {
             received_seq: chat_state::Timeline::default().next_seq(),
             id: format!("notification-{terminal}"),
             owner_session_id: "session-1".into(),
-            source: chat_state::NotificationSource::WorkflowCompleted {
+            source: chat_state::NotificationSource::WorkflowHandoff {
                 run_id: "workflow-1".into(),
+                handoff: chat_state::WorkflowTurnHandoff::Completion,
             },
             source_version: chat_state::NotificationSourceVersion::Opaque {
                 value: terminal.into(),
@@ -1041,17 +1194,188 @@ mod tests {
         };
 
         let (first, _) = SessionActor::notification_turn_identity(&[notification(
-            "workflow-terminal-v1:1:failed",
+            "workflow-handoff-v1:1:failed:completion",
         )]);
         let (second, _) = SessionActor::notification_turn_identity(&[notification(
-            "workflow-terminal-v1:2:complete",
+            "workflow-handoff-v1:2:complete:completion",
         )]);
 
         assert_ne!(first.completion_id(), second.completion_id());
         assert_eq!(
             second.completion_id(),
-            Some("workflow-1-workflow-terminal-v1:2:complete")
+            Some("workflow-1-workflow-handoff-v1:2:complete:completion")
         );
+    }
+
+    #[test]
+    fn plan_handoff_is_consumable_only_by_the_exact_plan_identity() {
+        let artifact_hash = blake3::hash(b"# plan").to_hex().to_string();
+        let handoff = crate::session::behavior::PlanDecisionHandoff {
+            kind: chat_state::PlanHandoffKind::Execute,
+            artifact_hash: artifact_hash.clone(),
+            artifact_revision: 3,
+            feedback: Some("review".into()),
+        };
+        let notification = chat_state::PendingNotification {
+            received_seq: chat_state::Timeline::default().next_seq(),
+            id: "plan-handoff".into(),
+            owner_session_id: "session-1".into(),
+            source: chat_state::NotificationSource::PlanHandoff {
+                artifact_hash: artifact_hash.clone(),
+                artifact_revision: 3,
+                handoff: chat_state::PlanHandoffKind::Execute,
+            },
+            source_version: chat_state::NotificationSourceVersion::Ordinal { value: 3 },
+            payload_ref: chat_state::NotificationPayloadRef {
+                blake3: blake3::hash(b"handoff").to_hex().to_string(),
+                bytes: 7,
+            },
+        };
+
+        assert!(SessionActor::notification_consumable_by(
+            &crate::session::PromptOrigin::User,
+            Some(&handoff),
+            &notification,
+        ));
+        let stale = crate::session::behavior::PlanDecisionHandoff {
+            artifact_revision: 4,
+            ..handoff
+        };
+        assert!(!SessionActor::notification_consumable_by(
+            &crate::session::PromptOrigin::User,
+            Some(&stale),
+            &notification,
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_control_live_handoff_is_consumed_between_steps_before_resampling() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+                *actor.turn_behavior.lock() = tool_types::BehaviorId::Plan;
+                crate::session::behavior::write_plan_artifact(
+                    &actor.session_directory,
+                    "# approved plan",
+                )
+                .unwrap();
+                {
+                    let mut behavior = actor.behavior.lock();
+                    assert!(behavior.select_behavior(tool_types::BehaviorId::Plan));
+                    behavior.record_plan_artifact("# approved plan");
+                    assert!(behavior.submit_initial_plan());
+                    assert!(behavior.approve_submitted_plan_with_feedback(Some(
+                        "keep the validation strict".into(),
+                    )));
+                }
+                let snapshot = actor.behavior.lock().snapshot();
+                actor
+                    .persist_plan_phase_transition_durably(snapshot.clone(), None)
+                    .await
+                    .unwrap();
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "simulate a crash window after state commit and before receipt admission"
+                );
+
+                let boundary = actor
+                    .end_step_control_boundary("plan_approved")
+                    .await
+                    .expect("old Plan step must end");
+                let changed = actor
+                    .apply_pending_controls_at_step_boundary(boundary)
+                    .await;
+                assert_eq!(changed, (false, false, false));
+                actor
+                    .consume_live_plan_handoff_for_next_step()
+                    .await
+                    .unwrap();
+                actor.emit_event(crate::session::events::Event::LoopStarted { loop_index: 1 });
+                actor
+                    .events
+                    .request_started("request-after-approval".into(), "model".into(), 1, 1)
+                    .await
+                    .unwrap();
+
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "the live handoff must not survive to open a duplicate idle turn"
+                );
+                let conversation = actor.chat_state_handle.get_conversation().await;
+                assert!(conversation.iter().any(|item| {
+                    let text = item.text_content();
+                    text.contains("now in the Executing phase")
+                        && text.contains("keep the validation strict")
+                }));
+
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let step_ended = events
+                    .iter()
+                    .position(|event| {
+                        matches!(
+                            event.kind,
+                            chat_state::TimelineEventKind::Step(
+                                chat_state::StepEvent::Ended { .. }
+                            )
+                        )
+                    })
+                    .unwrap();
+                let consumed = events
+                    .iter()
+                    .position(|event| {
+                        matches!(
+                            event.kind,
+                            chat_state::TimelineEventKind::Notification(
+                                chat_state::NotificationEvent::Consumed { .. }
+                            )
+                        )
+                    })
+                    .unwrap();
+                let next_step = events
+                    .iter()
+                    .rposition(|event| {
+                        matches!(
+                            event.kind,
+                            chat_state::TimelineEventKind::Step(
+                                chat_state::StepEvent::Started { .. }
+                            )
+                        )
+                    })
+                    .unwrap();
+                let request_started = events
+                    .iter()
+                    .position(|event| {
+                        matches!(
+                            event.kind,
+                            chat_state::TimelineEventKind::Request(
+                                chat_state::RequestEvent::Started { .. }
+                            )
+                        )
+                    })
+                    .unwrap();
+                assert!(step_ended < consumed);
+                assert!(consumed < next_step);
+                assert!(next_step < request_started);
+                assert!(!events.iter().any(|event| {
+                    matches!(
+                        event.kind,
+                        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { .. })
+                    )
+                }));
+            })
+            .await;
     }
 
     #[tokio::test]

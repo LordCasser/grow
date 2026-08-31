@@ -5,7 +5,7 @@
 //! handles, activity projections and UI clocks are intentionally absent and
 //! reconstructed after reload.
 
-pub const SESSION_CONTROL_ARCHITECTURE_VERSION: u32 = 4;
+pub const SESSION_CONTROL_ARCHITECTURE_VERSION: u32 = 5;
 
 /// Client intent whose successful desired-state transition is committed in
 /// the same Timeline fact as the authoritative domain state. This closes the
@@ -66,14 +66,19 @@ impl SessionControlSnapshot {
     }
 
     fn retired_context_layers(&self) -> Vec<chat_state::ControlContextLayer> {
+        let plan_phase_active = self.behavior.behavior() == tool_types::BehaviorId::Plan;
         let goal_definition_active = self.behavior.behavior() == tool_types::BehaviorId::Goal
             && self.goal.as_ref().is_some_and(|goal| {
                 goal.status == crate::session::goal_tracker::GoalStatus::Active
             });
-        (!goal_definition_active)
-            .then_some(chat_state::ControlContextLayer::GoalDefinition)
-            .into_iter()
-            .collect()
+        let mut retired = Vec::new();
+        if !goal_definition_active {
+            retired.push(chat_state::ControlContextLayer::GoalDefinition);
+        }
+        if !plan_phase_active {
+            retired.push(chat_state::ControlContextLayer::PlanPhase);
+        }
+        retired
     }
 
     fn validate(&self) -> std::io::Result<()> {
@@ -96,6 +101,12 @@ impl SessionControlSnapshot {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "session control Behavior contains cross-runtime state",
+            ));
+        }
+        if !self.behavior.plan_runtime_is_valid() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "session control Plan handoff does not match its artifact and phase",
             ));
         }
         if let Some(receipt) = self.applied_control.as_ref() {
@@ -615,7 +626,10 @@ mod tests {
         };
         assert_eq!(
             control.retired_context_layers,
-            [chat_state::ControlContextLayer::GoalDefinition]
+            [
+                chat_state::ControlContextLayer::GoalDefinition,
+                chat_state::ControlContextLayer::PlanPhase,
+            ]
         );
     }
 
@@ -631,6 +645,9 @@ mod tests {
         let chat_state::TimelineEventKind::Control(control) = kind else {
             unreachable!();
         };
-        assert!(control.retired_context_layers.is_empty());
+        assert_eq!(
+            control.retired_context_layers,
+            [chat_state::ControlContextLayer::PlanPhase]
+        );
     }
 }

@@ -249,7 +249,8 @@ impl SessionActor {
                 }
                 chat_state::NotificationSource::MonitorProgress { .. }
                 | chat_state::NotificationSource::TaskStillRunning { .. }
-                | chat_state::NotificationSource::WorkflowCompleted { .. } => false,
+                | chat_state::NotificationSource::PlanHandoff { .. }
+                | chat_state::NotificationSource::WorkflowHandoff { .. } => false,
             })
             .collect::<Vec<_>>();
         if pending.len() != ids.len() {

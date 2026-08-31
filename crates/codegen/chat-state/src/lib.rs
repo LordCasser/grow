@@ -67,12 +67,13 @@ pub use timeline::{
     MAX_WORKFLOW_RUN_ID_BYTES, MessageCause, MessageEvent, NotificationDismissReason,
     NotificationEvent, NotificationOwner, NotificationPayloadRef, NotificationSource,
     NotificationSourceVersion, NotificationTaskKind, ObservationEvent, PendingNotification,
-    PromptRecord, RecoveryEvent, RequestEvent, RequestUsage, SessionTitleEvent, SessionTitleSource,
-    StepEvent, StepId, SubagentContextSource, SubagentEvent, SubagentOutcome, SubagentResultEvent,
-    SubagentSeedEvent, SubagentSpawnEvent, SubagentTerminalEvent, SurfaceId, SurfaceOp,
-    SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline, TimelineError, TimelineEvent,
+    PlanHandoffKind, PromptRecord, RecoveryEvent, RequestEvent, RequestUsage, SessionTitleEvent,
+    SessionTitleSource, StepEvent, StepId, SubagentContextSource, SubagentEvent, SubagentOutcome,
+    SubagentResultEvent, SubagentSeedEvent, SubagentSpawnEvent, SubagentTerminalEvent, SurfaceId,
+    SurfaceOp, SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline, TimelineError, TimelineEvent,
     TimelineEventKind, ToolEvent, TurnEvent, TurnId, TurnIdentity, TurnInputKind, TurnTerminal,
-    WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle, notification_id,
+    WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle, WorkflowTurnHandoff,
+    notification_id,
 };
 pub use trajectory::{
     SurfaceVisibility, TRAJECTORY_SCHEMA_VERSION, TrajectoryIssueSeverity, TrajectoryProjector,

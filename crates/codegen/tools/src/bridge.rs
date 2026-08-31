@@ -122,6 +122,15 @@ impl ToolBridge {
         self.registry.get_tool_metadata(tool_name).map(|m| m.kind())
     }
 
+    /// Explicit batch-admission policy declared by the concrete tool. This is
+    /// intentionally independent from [`ToolKind`], which is presentation
+    /// metadata and must not imply control-flow semantics.
+    pub fn isolates_batch_preflight(&self, tool_name: &str) -> bool {
+        self.registry
+            .get_tool_metadata(tool_name)
+            .is_some_and(|metadata| metadata.isolates_batch_preflight())
+    }
+
     /// Descriptor-owned RWX requirement for a registered tool.
     pub fn max_access(&self, tool_name: &str) -> Option<tool_protocol::ToolAccess> {
         self.registry

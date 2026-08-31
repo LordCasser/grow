@@ -837,10 +837,10 @@ pub enum SessionCommand {
         images: Vec<acp::ImageContent>,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
-    /// Workflow terminal producer notification. The state is the exact
-    /// manifest snapshot whose revision ended the execution, so a queued
-    /// command can never render a later retry as this completion.
-    WorkflowCompleted {
+    /// Workflow successor notification. The state is the exact manifest
+    /// snapshot whose revision ended the execution, so a queued command can
+    /// never render a later retry as this handoff.
+    WorkflowHandoffReady {
         state: crate::session::workflow::tracker::WorkflowRunState,
         respond_to: oneshot::Sender<Result<(), String>>,
     },

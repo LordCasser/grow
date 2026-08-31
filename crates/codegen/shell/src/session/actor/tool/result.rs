@@ -74,7 +74,8 @@ pub(super) fn consumed_completion_id_from_tool_error(
 
 pub(super) fn undispatched_tool_outcome(action: &ToolLoop) -> &'static str {
     match action {
-        ToolLoop::Continue | ToolLoop::ControlBoundary => "not_dispatched",
+        ToolLoop::Control(_) => "success",
+        ToolLoop::Continue => "not_dispatched",
         ToolLoop::NonExistingTool | ToolLoop::ToolParsingError => "invalid_tool",
         ToolLoop::PermissionReject { .. } => "permission_rejected",
         ToolLoop::Cancelled => "permission_cancelled",
@@ -196,7 +197,8 @@ impl SessionActor {
                 }
                 chat_state::NotificationSource::MonitorProgress { .. }
                 | chat_state::NotificationSource::TaskStillRunning { .. }
-                | chat_state::NotificationSource::WorkflowCompleted { .. } => false,
+                | chat_state::NotificationSource::PlanHandoff { .. }
+                | chat_state::NotificationSource::WorkflowHandoff { .. } => false,
             })
             .map(|notification| notification.id)
             .collect::<Vec<_>>();

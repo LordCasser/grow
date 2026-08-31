@@ -33,6 +33,19 @@ enum GoalProviderWindow {
     UsageIncomplete(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GoalUsageIncompleteApply {
+    Ignored,
+    Recorded,
+    Stopped,
+}
+
+impl GoalUsageIncompleteApply {
+    pub(super) fn applied(self) -> bool {
+        self != Self::Ignored
+    }
+}
+
 #[derive(Debug, Clone)]
 struct GoalUsageAttemptOwner {
     goal_id: String,
@@ -476,29 +489,58 @@ impl SessionActor {
         &self,
         goal_id: &str,
     ) -> Result<bool, String> {
+        let _boundary = self.step_control_gate.lock().await;
+        let outcome = self
+            .apply_captured_goal_usage_incomplete_outcome(goal_id)
+            .await;
+        self.finish_goal_usage_apply_at_step_boundary(outcome).await
+    }
+
+    /// Apply the turn-terminal effect of a Goal usage settlement while the
+    /// caller still owns `step_control_gate`.
+    pub(super) async fn finish_goal_usage_apply_at_step_boundary(
+        &self,
+        outcome: Result<GoalUsageIncompleteApply, String>,
+    ) -> Result<bool, String> {
+        let outcome = outcome?;
+        if outcome == GoalUsageIncompleteApply::Stopped {
+            self.arm_terminal_preemption_if_running().await;
+        }
+        Ok(outcome.applied())
+    }
+
+    pub(super) async fn apply_captured_goal_usage_incomplete_outcome(
+        &self,
+        goal_id: &str,
+    ) -> Result<GoalUsageIncompleteApply, String> {
         let _transaction = self.goal_transaction_gate.lock().await;
         let Some(previous) = self.goal_tracker.lock().snapshot().cloned() else {
-            return Ok(false);
+            return Ok(GoalUsageIncompleteApply::Ignored);
         };
         if previous.goal_id != goal_id {
-            return Ok(false);
+            return Ok(GoalUsageIncompleteApply::Ignored);
         }
-        if previous.usage_incomplete && !previous.usage_incomplete_acknowledged {
-            return Ok(true);
-        }
+        let already_recorded = previous.usage_incomplete && !previous.usage_incomplete_acknowledged;
         let definition_revision = previous.definition_revision;
-        if !self.goal_tracker.lock().mark_usage_incomplete(goal_id) {
-            return Ok(false);
+        if !already_recorded && !self.goal_tracker.lock().mark_usage_incomplete(goal_id) {
+            return Ok(GoalUsageIncompleteApply::Ignored);
         }
         if !self.events.has_active_step() {
-            let _ = self.goal_tracker.lock().pause_for_incomplete_usage(goal_id);
-            self.commit_goal_stop_or_restore(previous).await?;
-            let tokens_used = self.goal_tokens_used();
-            self.goal_notify_sender()
-                .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
-            self.retire_goal_owned_work(goal_id, definition_revision, None)
-                .await;
-            return Ok(true);
+            if self.goal_tracker.lock().pause_for_incomplete_usage(goal_id) {
+                self.commit_goal_stop_or_restore(previous).await?;
+                let tokens_used = self.goal_tokens_used();
+                self.goal_notify_sender()
+                    .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+                self.retire_goal_owned_work(goal_id, definition_revision, None)
+                    .await;
+                return Ok(GoalUsageIncompleteApply::Stopped);
+            }
+            if previous.status == crate::session::goal_tracker::GoalStatus::Paused {
+                return Ok(GoalUsageIncompleteApply::Stopped);
+            }
+        }
+        if already_recorded {
+            return Ok(GoalUsageIncompleteApply::Recorded);
         }
         let next = self.goal_tracker.lock().snapshot().cloned();
         let behavior = self.behavior.lock().snapshot();
@@ -510,7 +552,7 @@ impl SessionActor {
         let tokens_used = self.goal_tokens_used();
         self.goal_notify_sender()
             .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
-        Ok(true)
+        Ok(GoalUsageIncompleteApply::Recorded)
     }
 
     /// Root-only, idempotent settlement authority for provider attempts. The
@@ -521,12 +563,32 @@ impl SessionActor {
         &self,
         attempt_id: &str,
     ) -> Result<bool, String> {
+        let _boundary = self.step_control_gate.lock().await;
+        let outcome = self
+            .settle_claimed_goal_usage_attempt_outcome(attempt_id)
+            .await;
+        self.finish_goal_usage_apply_at_step_boundary(outcome).await
+    }
+
+    pub(super) async fn settle_claimed_goal_usage_attempt_outcome(
+        &self,
+        attempt_id: &str,
+    ) -> Result<GoalUsageIncompleteApply, String> {
         let Some((goal_id, tokens)) = self.goal_usage_window.attempt_settlement(attempt_id) else {
-            return Ok(false);
+            return Ok(GoalUsageIncompleteApply::Ignored);
         };
         let applied = match tokens {
-            Some(tokens) => self.apply_captured_goal_usage(&goal_id, tokens).await?,
-            None => self.apply_captured_goal_usage_incomplete(&goal_id).await?,
+            Some(tokens) => {
+                if self.apply_captured_goal_usage(&goal_id, tokens).await? {
+                    GoalUsageIncompleteApply::Recorded
+                } else {
+                    GoalUsageIncompleteApply::Ignored
+                }
+            }
+            None => {
+                self.apply_captured_goal_usage_incomplete_outcome(&goal_id)
+                    .await?
+            }
         };
         self.goal_usage_window.finish_attempt(attempt_id);
         Ok(applied)
@@ -559,7 +621,9 @@ impl SessionActor {
     /// A foreground owner that unwinds cannot report any provider attempts it
     /// still owns. Claim only that session's attempts as usage-incomplete and
     /// settle them before closing its Step/Turn, so the next owner epoch never
-    /// waits forever on work whose future no longer exists.
+    /// waits forever on work whose future no longer exists. The caller owns
+    /// `step_control_gate`; use the outcome API so panic recovery cannot
+    /// recursively acquire the same terminal fence.
     pub(super) async fn settle_goal_usage_for_owner_failure(&self) -> Result<(), String> {
         let owner_id = self.session_id_string();
         let attempt_ids = self
@@ -571,7 +635,11 @@ impl SessionActor {
                     .settle_attempt_via_root(attempt_id, None)
                     .await?;
             } else {
-                self.settle_claimed_goal_usage_attempt(&attempt_id).await?;
+                let outcome = self
+                    .settle_claimed_goal_usage_attempt_outcome(&attempt_id)
+                    .await;
+                self.finish_goal_usage_apply_at_step_boundary(outcome)
+                    .await?;
             }
         }
         Ok(())
@@ -823,17 +891,16 @@ impl SessionActor {
     ) -> std::io::Result<()> {
         let behavior_id = behavior.behavior();
         let context = crate::session::behavior::behavior_transition_context(behavior_id);
-        self.persist_control_snapshot_with_context_durably(
-            behavior,
-            goal,
-            None,
-            Some((
-                chat_state::ControlContextLayer::Behavior,
-                chat_state::ControlContextActivation::Transition,
-                sampling_types::ConversationItem::system_reminder(context),
-            )),
-        )
-        .await
+        let mut contexts = vec![(
+            chat_state::ControlContextLayer::Behavior,
+            chat_state::ControlContextActivation::Transition,
+            sampling_types::ConversationItem::system_reminder(context),
+        )];
+        if let Some(plan_phase) = self.plan_phase_control_context(&behavior)? {
+            contexts.push(plan_phase);
+        }
+        self.persist_control_snapshot_with_contexts_durably(behavior, goal, None, contexts)
+            .await
     }
 
     pub(super) async fn persist_behavior_transition_for_control_durably(
@@ -844,15 +911,19 @@ impl SessionActor {
     ) -> std::io::Result<()> {
         let behavior_id = behavior.behavior();
         let context = crate::session::behavior::behavior_transition_context(behavior_id);
+        let mut contexts = vec![(
+            chat_state::ControlContextLayer::Behavior,
+            chat_state::ControlContextActivation::Transition,
+            sampling_types::ConversationItem::system_reminder(context),
+        )];
+        if let Some(plan_phase) = self.plan_phase_control_context(&behavior)? {
+            contexts.push(plan_phase);
+        }
         self.persist_control_snapshot_with_contexts_and_receipt_durably(
             behavior,
             goal,
             None,
-            vec![(
-                chat_state::ControlContextLayer::Behavior,
-                chat_state::ControlContextActivation::Transition,
-                sampling_types::ConversationItem::system_reminder(context),
-            )],
+            contexts,
             Some(crate::session::control::DurableControlReceipt {
                 domain: crate::extensions::notification::ControlDomain::Behavior,
                 intent,
@@ -862,6 +933,54 @@ impl SessionActor {
             }),
         )
         .await
+    }
+
+    pub(super) async fn persist_plan_phase_transition_durably(
+        &self,
+        behavior: crate::session::behavior::BehaviorSnapshot,
+        goal: Option<crate::session::goal_tracker::GoalState>,
+    ) -> std::io::Result<()> {
+        let context = self.plan_phase_control_context(&behavior)?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Plan phase transition requires active Plan behavior",
+            )
+        })?;
+        self.persist_control_snapshot_with_contexts_durably(behavior, goal, None, vec![context])
+            .await
+    }
+
+    fn plan_phase_control_context(
+        &self,
+        behavior: &crate::session::behavior::BehaviorSnapshot,
+    ) -> std::io::Result<
+        Option<(
+            chat_state::ControlContextLayer,
+            chat_state::ControlContextActivation,
+            sampling_types::ConversationItem,
+        )>,
+    > {
+        if behavior.behavior() != tool_types::BehaviorId::Plan {
+            return Ok(None);
+        }
+        let plan_content = match behavior.plan_artifact_hash.as_deref() {
+            Some(hash) => {
+                crate::session::behavior::read_plan_artifact(&self.session_directory, hash)?
+            }
+            None => String::new(),
+        };
+        let context = crate::session::behavior::plan_phase_model_context(behavior, &plan_content)
+            .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "active Plan snapshot has no Plan phase context",
+            )
+        })?;
+        Ok(Some((
+            chat_state::ControlContextLayer::PlanPhase,
+            chat_state::ControlContextActivation::Transition,
+            sampling_types::ConversationItem::system_reminder(context),
+        )))
     }
 
     pub(super) async fn persist_applied_control_receipt_durably(
@@ -1373,7 +1492,34 @@ impl SessionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::actor::tests::support::build_actor;
+    use crate::session::actor::tests::support::{
+        begin_test_active_causal_turn_with_origin, build_actor,
+    };
+
+    async fn build_active_goal_turn(
+        prompt_id: &str,
+        origin: crate::session::PromptOrigin,
+        turn_kind: crate::session::TurnKind,
+    ) -> std::sync::Arc<SessionActor> {
+        let (actor, _gateway_rx) = build_actor().await;
+        actor
+            .goal_tracker
+            .lock()
+            .create_goal(
+                "goal-1".into(),
+                "finish".into(),
+                None,
+                "2026-08-27T00:00:00Z".into(),
+            )
+            .unwrap();
+        actor
+            .behavior
+            .lock()
+            .select_behavior(tool_types::BehaviorId::Goal);
+        actor.sync_goal_usage_window();
+        begin_test_active_causal_turn_with_origin(&actor, prompt_id, origin, turn_kind).await;
+        actor
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn known_usage_waits_for_the_step_budget_fence() {
@@ -1564,6 +1710,110 @@ mod tests {
                     })
                     .unwrap();
                 assert!(step_end < terminal_control);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn incomplete_usage_in_step_gap_preempts_user_turn() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let prompt_id = "user-goal-turn";
+                let actor = build_active_goal_turn(
+                    prompt_id,
+                    crate::session::PromptOrigin::User,
+                    crate::session::TurnKind::User,
+                )
+                .await;
+                actor
+                    .end_step_control_boundary("usage_settled")
+                    .await
+                    .expect("the active Step must end before the settlement gap");
+
+                let gate = actor.step_control_gate.lock().await;
+                let outcome = actor
+                    .apply_captured_goal_usage_incomplete_outcome("goal-1")
+                    .await
+                    .unwrap();
+                assert_eq!(outcome, GoalUsageIncompleteApply::Stopped);
+                assert!(
+                    actor
+                        .finish_goal_usage_apply_at_step_boundary(Ok(outcome))
+                        .await
+                        .unwrap()
+                );
+                drop(gate);
+
+                assert_eq!(actor.events.current_goal_id(), None);
+                assert_eq!(
+                    actor.goal_tracker.lock().status(),
+                    Some(crate::session::goal_tracker::GoalStatus::Paused)
+                );
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Normal
+                );
+                let state = actor.state.lock().await;
+                assert!(state.terminal_preemption_pending);
+                assert!(!state.can_continue_regular_turn(prompt_id));
+                assert!(!actor.events.has_active_step());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recorded_incomplete_retry_in_step_gap_preempts_goal_continuation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let prompt_id = "goal-continuation";
+                let actor = build_active_goal_turn(
+                    prompt_id,
+                    crate::session::PromptOrigin::GoalContinuation {
+                        goal_id: "goal-1".into(),
+                        definition_revision: 1,
+                    },
+                    crate::session::TurnKind::Internal,
+                )
+                .await;
+
+                let gate = actor.step_control_gate.lock().await;
+                let recorded = actor
+                    .apply_captured_goal_usage_incomplete_outcome("goal-1")
+                    .await
+                    .unwrap();
+                assert_eq!(recorded, GoalUsageIncompleteApply::Recorded);
+                assert!(
+                    actor
+                        .finish_goal_usage_apply_at_step_boundary(Ok(recorded))
+                        .await
+                        .unwrap()
+                );
+                assert!(!actor.state.lock().await.terminal_preemption_pending);
+                drop(gate);
+
+                actor
+                    .end_step_control_boundary("usage_settled")
+                    .await
+                    .expect("the active Step must end before the retry gap");
+                let gate = actor.step_control_gate.lock().await;
+                let stopped = actor
+                    .apply_captured_goal_usage_incomplete_outcome("goal-1")
+                    .await
+                    .unwrap();
+                assert_eq!(stopped, GoalUsageIncompleteApply::Stopped);
+                assert!(
+                    actor
+                        .finish_goal_usage_apply_at_step_boundary(Ok(stopped))
+                        .await
+                        .unwrap()
+                );
+                drop(gate);
+
+                assert_eq!(actor.events.current_goal_id().as_deref(), Some("goal-1"));
+                let state = actor.state.lock().await;
+                assert!(state.terminal_preemption_pending);
+                assert!(!state.can_continue_regular_turn(prompt_id));
+                assert!(!actor.events.has_active_step());
             })
             .await;
     }

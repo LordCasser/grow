@@ -4,8 +4,8 @@
 //! `approval_pending = true` as a Timeline Control event. On `--continue` the
 //! shell re-issues the `grow/plan_approval` reverse-request — a real live ACP
 //! waiter — so the pager re-shows approval chrome through its normal path with
-//! no pager-side disk logic. Approving then leaves plan mode and starts the
-//! implement turn.
+//! no pager-side disk logic. Approving then enters the Plan Executing phase and
+//! starts the durable handoff turn because no live Plan turn survived restart.
 //!
 //! This FAILS without the shell re-park (PR2 product change): no reverse-request
 //! reaches the resumed pager, so no approval chrome appears.
@@ -36,8 +36,8 @@ const PLAN_BODY: &str = "\
 3. Resume and expect restored approval chrome
 ";
 
-/// Regression: the shell re-parks Plan approval on resume; pressing
-/// approve leaves plan mode and starts the implement turn.
+/// Regression: the shell re-parks Plan approval on resume; pressing approve
+/// enters Plan execution and starts the durable handoff turn.
 pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
     let content = ContentController::start()
         .await
@@ -126,11 +126,11 @@ pub async fn assert_plan_approval_restored_after_resume() -> Result<()> {
         bail!("pager panicked\n{screen}");
     }
 
-    // Approve: the shell leaves plan mode and injects the implement turn.
+    // Approve: the shell enters Plan execution and admits the durable handoff turn.
     resumed.inject_keys(b"a").context("press 'a' to approve")?;
     resumed
         .wait_for_text(IMPLEMENT_SENTINEL, Duration::from_secs(30))
-        .context("approve must leave plan mode and start the implement turn")?;
+        .context("approve must enter Plan execution and start the handoff turn")?;
     tokio::time::timeout(Duration::from_secs(10), implement_turn.wait_satisfied())
         .await
         .context("implement turn expectation timeout")?;
@@ -246,12 +246,12 @@ fn append_awaiting_plan_control(path: &Path) -> Result<()> {
         serde_json::json!({ "Plan": "AwaitingApproval" }),
     );
     behavior.insert("approval_pending".into(), serde_json::Value::Bool(true));
-    behavior.insert("reminder_count".into(), serde_json::json!(0));
     behavior.insert("plan_artifact_revision".into(), serde_json::json!(1));
     behavior.insert(
         "plan_artifact_hash".into(),
         serde_json::json!(blake3::hash(PLAN_BODY.as_bytes()).to_hex().to_string()),
     );
+    behavior.insert("last_plan_handoff".into(), serde_json::Value::Null);
     let at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -265,6 +265,23 @@ fn append_awaiting_plan_control(path: &Path) -> Result<()> {
         "event": {
             "revision": revision,
             "snapshot": snapshot,
+            "retired_context_layers": ["goal_definition"],
+            "model_contexts": [
+                {
+                    "layer": "behavior",
+                    "activation": "transition",
+                    "item": system_reminder_json(
+                        "Plan behavior is active. The Plan phase contract is authoritative."
+                    ),
+                },
+                {
+                    "layer": "plan_phase",
+                    "activation": "transition",
+                    "item": system_reminder_json(format!(
+                        "Plan phase: AwaitingApproval. The following plan is frozen and awaiting a human decision. Do not execute it or modify the workspace.\n\n{PLAN_BODY}"
+                    )),
+                },
+            ],
         },
     });
     let mut file = std::fs::OpenOptions::new()
@@ -279,4 +296,12 @@ fn append_awaiting_plan_control(path: &Path) -> Result<()> {
     file.sync_all()
         .context("durably append Timeline control event")?;
     Ok(())
+}
+
+fn system_reminder_json(text: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({
+        "type": "user",
+        "content": [{ "type": "text", "text": text.into() }],
+        "synthetic_reason": "system_reminder",
+    })
 }

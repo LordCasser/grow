@@ -2,7 +2,7 @@ use acp_transport::AcpResult;
 use acp_transport::protocol as acp;
 
 pub use tools::implementations::grow_build::plan_control::{
-    PlanApprovalExtRequest, PlanApprovalExtResponse,
+    PlanApprovalExtRequest, PlanApprovalExtResponse, PlanApprovalOutcome,
 };
 
 use crate::views::prompt_widget::StashedPrompt;
@@ -94,14 +94,11 @@ impl PlanApprovalViewState {
 
 pub fn send_plan_approval_response(
     tx: tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>,
-    outcome: &str,
+    outcome: PlanApprovalOutcome,
     feedback: Option<String>,
 ) {
     let feedback = feedback.filter(|f| !f.trim().is_empty());
-    let resp = PlanApprovalExtResponse {
-        outcome: outcome.into(),
-        feedback,
-    };
+    let resp = PlanApprovalExtResponse { outcome, feedback };
     let raw = serde_json::value::to_raw_value(&resp)
         .expect("PlanApprovalExtResponse serialization should not fail");
     tx.send(Ok(acp::ExtResponse::new(raw.into()))).ok();
@@ -109,7 +106,7 @@ pub fn send_plan_approval_response(
 
 fn send_ext_response(
     tx: &mut Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>,
-    outcome: &str,
+    outcome: PlanApprovalOutcome,
     feedback: Option<String>,
 ) -> bool {
     let Some(tx) = tx.take() else {
@@ -120,16 +117,24 @@ fn send_ext_response(
 }
 
 impl PlanApprovalViewState {
-    pub fn send_approved(&mut self) -> bool {
-        send_ext_response(&mut self.response_tx, "approved", None)
+    pub fn send_approved(&mut self, feedback: Option<String>) -> bool {
+        send_ext_response(
+            &mut self.response_tx,
+            PlanApprovalOutcome::Approved,
+            feedback,
+        )
     }
 
     pub fn send_abandoned(&mut self) -> bool {
-        send_ext_response(&mut self.response_tx, "abandoned", None)
+        send_ext_response(&mut self.response_tx, PlanApprovalOutcome::Abandoned, None)
     }
 
     pub fn send_cancelled(&mut self, feedback: Option<String>) -> bool {
-        send_ext_response(&mut self.response_tx, "cancelled", feedback)
+        send_ext_response(
+            &mut self.response_tx,
+            PlanApprovalOutcome::Cancelled,
+            feedback,
+        )
     }
 
     pub fn send_stale_cancel(&mut self) -> bool {
@@ -213,13 +218,25 @@ mod tests {
     #[test]
     fn test_send_approved() {
         let (mut state, mut rx) = make_test_state();
-        assert!(state.send_approved());
+        assert!(state.send_approved(None));
         let resp = rx.try_recv().expect("should receive response");
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
         assert_eq!(parsed["outcome"], "approved");
         assert!(parsed.get("feedback").is_none());
+    }
+
+    #[test]
+    fn test_send_approved_with_feedback() {
+        let (mut state, mut rx) = make_test_state();
+        assert!(state.send_approved(Some("keep the public API stable".into())));
+        let resp = rx.try_recv().expect("should receive response");
+        let raw = resp.expect("should be Ok");
+        let parsed: serde_json::Value =
+            serde_json::from_str(raw.0.get()).expect("should be valid JSON");
+        assert_eq!(parsed["outcome"], "approved");
+        assert_eq!(parsed["feedback"], "keep the public API stable");
     }
 
     #[test]
@@ -273,8 +290,8 @@ mod tests {
     #[test]
     fn test_double_send_returns_false() {
         let (mut state, _rx) = make_test_state();
-        assert!(state.send_approved());
-        assert!(!state.send_approved());
+        assert!(state.send_approved(None));
+        assert!(!state.send_approved(None));
         assert!(!state.send_cancelled(None));
     }
 

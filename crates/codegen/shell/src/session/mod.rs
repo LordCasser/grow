@@ -54,8 +54,8 @@ pub enum PromptOrigin {
         /// The subagent ID (without the `subagent-completed-` prefix).
         subagent_id: String,
     },
-    WorkflowCompleted {
-        completion_id: String,
+    WorkflowHandoff {
+        handoff_id: String,
     },
     /// Server-initiated prompt from the idle-gated notification drain
     /// (`maybe_drain_notifications`). Batches one or more monitor-event
@@ -71,11 +71,14 @@ pub enum PromptOrigin {
         goal_id: String,
         definition_revision: u64,
     },
-    /// Turn injected after a resumed plan-approval decision: the
-    /// shell re-parked Plan approval on resume, the user approved/revised,
-    /// and the shell injects the follow-up turn. Synthetic so the user never
-    /// typed it — kept out of prompt history — but it still runs a real turn.
-    PlanResume,
+    /// Durable successor for a Plan approval decision when no live Plan turn
+    /// can resample. The artifact identity prevents stale approvals from
+    /// leaking into a newer Plan or another Behavior.
+    PlanHandoff {
+        artifact_hash: String,
+        artifact_revision: u64,
+        handoff: chat_state::PlanHandoffKind,
+    },
 }
 
 /// Participation of a regular turn in the user-visible lifecycle.
@@ -107,11 +110,11 @@ impl PromptOrigin {
             Self::User => "user",
             Self::TaskCompleted { .. } => "task_completed",
             Self::SubagentCompleted { .. } => "subagent_completed",
-            Self::WorkflowCompleted { .. } => "workflow_completed",
+            Self::WorkflowHandoff { .. } => "workflow_handoff",
             Self::NotificationDrain => "notification_drain",
             Self::HostCommand => "host_command",
             Self::GoalContinuation { .. } => "goal_continuation",
-            Self::PlanResume => "plan_resume",
+            Self::PlanHandoff { .. } => "plan_handoff",
         }
     }
     /// Returns `true` for auto-wake (synthetic) prompts.
@@ -129,7 +132,8 @@ impl PromptOrigin {
             self,
             Self::TaskCompleted { .. }
                 | Self::SubagentCompleted { .. }
-                | Self::WorkflowCompleted { .. }
+                | Self::WorkflowHandoff { .. }
+                | Self::PlanHandoff { .. }
                 | Self::NotificationDrain
         )
     }
@@ -140,10 +144,11 @@ impl PromptOrigin {
     /// Plan-resume follow-ups and real user turns still render.
     pub fn hide_user_echo_from_scrollback(&self) -> bool {
         match self {
-            Self::User | Self::PlanResume => false,
+            Self::User => false,
             Self::TaskCompleted { .. }
             | Self::SubagentCompleted { .. }
-            | Self::WorkflowCompleted { .. }
+            | Self::WorkflowHandoff { .. }
+            | Self::PlanHandoff { .. }
             | Self::NotificationDrain
             | Self::HostCommand
             | Self::GoalContinuation { .. } => true,
@@ -153,12 +158,12 @@ impl PromptOrigin {
         match self {
             Self::TaskCompleted { task_id } => Some(task_id),
             Self::SubagentCompleted { subagent_id, .. } => Some(subagent_id),
-            Self::WorkflowCompleted { completion_id } => Some(completion_id),
+            Self::WorkflowHandoff { handoff_id } => Some(handoff_id),
             Self::User
             | Self::NotificationDrain
             | Self::HostCommand
             | Self::GoalContinuation { .. }
-            | Self::PlanResume => None,
+            | Self::PlanHandoff { .. } => None,
         }
     }
 }
