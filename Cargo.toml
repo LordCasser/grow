@@ -134,7 +134,7 @@ fastrace = { version = "0.7" }
 fastrand = "2"
 filetime = "0.2.25"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-fontdb = "0.23"
+fontdb = "0.24"
 fs2 = "0.4"
 futures = "0.3"
 futures-util = "0.3"
@@ -186,7 +186,7 @@ reflink-copy = "0.1"
 regex = "1"
 reqwest = { version = "0.13", features = ["rustls-no-provider", "stream", "json", "multipart", "http2", "blocking", "socks"], default-features = false }
 reqwest-middleware = { version = "0.5", features = ["multipart"] }
-resvg = { version = "0.47", default-features = false, features = ["text"] }
+resvg = { version = "0.48.1", default-features = false, features = ["text"] }
 rhai = { version = "1.25", features = ["serde"] }
 ring = "0.17"
 runfiles = "0.1"
@@ -229,7 +229,7 @@ tower-http = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "smallvec", "tracing-log", "std", "ansi"] }
 tui-scrollbar = "0.2"
-two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
 unicode-segmentation = "1.12.0"
 unicode-width = "0.2"
 url = "2"
