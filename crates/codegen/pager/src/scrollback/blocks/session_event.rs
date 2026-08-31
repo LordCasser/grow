@@ -91,9 +91,10 @@ pub enum SessionEvent {
         /// Wall-clock elapsed time for the command.
         elapsed: Duration,
     },
-    /// Hook annotation — displayed inline after a tool call.
-    /// Message comes from agent via GrowSessionUpdate::HookAnnotation.
+    /// Hook annotation projected from a completed Timeline occurrence.
     HookAnnotation {
+        /// Durable Hook occurrence that owns this annotation.
+        occurrence_id: String,
         /// The hook message
         message: String,
     },
@@ -213,7 +214,7 @@ impl SessionEvent {
             SessionEvent::CompactCompleted { elapsed } => {
                 format!("Compaction completed in {}.", format_duration(*elapsed))
             }
-            SessionEvent::HookAnnotation { message } => message.clone(),
+            SessionEvent::HookAnnotation { message, .. } => message.clone(),
             SessionEvent::ModelUnavailable {
                 new_model_id,
                 reason,

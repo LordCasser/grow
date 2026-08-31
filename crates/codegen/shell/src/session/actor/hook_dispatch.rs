@@ -7,7 +7,6 @@ use ::hooks::config::{HandlerType, HookOrigin, OnFailure};
 use ::hooks::dispatcher::{HookGateEffect, HookPlanAction};
 use ::hooks::event::{GateKind, HookEventEnvelope, HookEventName};
 use ::hooks::result::{HookDecision, HookRunResult, HookSkipReason};
-use futures::StreamExt as _;
 
 /// The one authoritative result of a hook occurrence. Callers consume this
 /// only after [`SessionActor::dispatch_hook_occurrence`] has durably closed the
@@ -27,6 +26,12 @@ pub(super) enum HookAggregate {
     Stop {
         result: ::hooks::dispatcher::StopDispatchResult,
     },
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum HookDispatchPolicy {
+    Execute,
+    SkipAllPolicyDisabled,
 }
 
 impl HookAggregate {
@@ -462,17 +467,6 @@ impl SessionActor {
         }
     }
 
-    /// Send a hook annotation to the TUI scrollback.
-    ///
-    /// Rendered inline with the preceding tool call block rather than as
-    /// a separate agent message.
-    pub(super) async fn send_hook_annotation(&self, message: &str) {
-        self.send_transient_hook_notification(GrowSessionUpdate::HookAnnotation {
-            message: message.to_string(),
-        })
-        .await;
-    }
-
     /// Send structured hook execution data for rich scrollback rendering.
     ///
     /// `prompt_id` is `None` for session-level dispatches (session_start /
@@ -541,11 +535,52 @@ impl SessionActor {
                 })
             })
             .collect::<Vec<_>>();
-        if runs.is_empty()
-            || runs
-                .iter()
-                .all(|run| matches!(run.status, HookRunStatusDto::Skipped))
-        {
+        let annotations = projection
+            .handlers
+            .iter()
+            .zip(&projection.runs)
+            .flat_map(|(handler, run)| {
+                let chat_state::HookHandlerLifecycle::Finished { control, .. } = run else {
+                    return Vec::new();
+                };
+                match control {
+                    chat_state::HookRunControl::Block { reason } => vec![format!(
+                        "\u{26a0} `{}` blocked by hook `{}`: {reason}",
+                        tool_name.unwrap_or("Input"),
+                        handler.name
+                    )],
+                    chat_state::HookRunControl::StopKeepWorking {
+                        reason: Some(reason),
+                        ..
+                    } => vec![format!(
+                        "\u{21a9} Stop blocked by hook `{}`, continuing: {reason}",
+                        handler.name
+                    )],
+                    chat_state::HookRunControl::StopKeepWorking {
+                        additional_context: Some(context),
+                        ..
+                    } => vec![format!(
+                        "\u{21a9} Stop hook `{}` feedback, continuing: {context}",
+                        handler.name
+                    )],
+                    chat_state::HookRunControl::StopKeepWorking {
+                        reason: None,
+                        additional_context: None,
+                    } => Vec::new(),
+                    chat_state::HookRunControl::StopForce { reason } => vec![match reason {
+                        Some(reason) => {
+                            format!(
+                                "\u{26a0} Hook `{}` stopped the agent: {reason}",
+                                handler.name
+                            )
+                        }
+                        None => format!("\u{26a0} Hook `{}` stopped the agent", handler.name),
+                    }],
+                    chat_state::HookRunControl::None => Vec::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+        if runs.is_empty() && annotations.is_empty() {
             return;
         }
 
@@ -558,6 +593,7 @@ impl SessionActor {
             tool_name: tool_name.map(|s| s.to_string()),
             prompt_id: prompt_id.map(|s| s.to_string()),
             runs,
+            annotations,
         })
         .await;
     }
@@ -603,6 +639,7 @@ impl SessionActor {
         cause: chat_state::HookCause,
         envelope: HookEventEnvelope,
         gate: GateKind,
+        policy: HookDispatchPolicy,
     ) -> Result<HookAggregate, chat_state::TimelineWriteError> {
         debug_assert_eq!(event, envelope.hook_event_name);
         debug_assert!(
@@ -622,6 +659,9 @@ impl SessionActor {
                     // An unclassifiable file source has no authority to execute.
                     // Keep it visible as a policy skip under the conservative
                     // project tier instead of inventing a privileged origin.
+                    entry.action = HookPlanAction::Skip(HookSkipReason::PolicyDisabled);
+                }
+                if matches!(policy, HookDispatchPolicy::SkipAllPolicyDisabled) {
                     entry.action = HookPlanAction::Skip(HookSkipReason::PolicyDisabled);
                 }
                 let failure_policy = match &entry.action {
@@ -671,7 +711,14 @@ impl SessionActor {
                     provenance: chat_state::HookHandlerProvenance::Client,
                     kind: chat_state::HookHandlerKind::Client,
                     failure_policy: chat_state::HookFailurePolicy::Allow,
-                    action: chat_state::HookHandlerPlanAction::Execute,
+                    action: match policy {
+                        HookDispatchPolicy::Execute => chat_state::HookHandlerPlanAction::Execute,
+                        HookDispatchPolicy::SkipAllPolicyDisabled => {
+                            chat_state::HookHandlerPlanAction::Skip {
+                                reason: chat_state::HookRunSkipReason::PolicyDisabled,
+                            }
+                        }
+                    },
                 },
                 handler: PlannedHandler::Client(client),
             });
@@ -701,7 +748,6 @@ impl SessionActor {
         let (file_plan, client_plan): (Vec<_>, Vec<_>) = plan
             .into_iter()
             .partition(|entry| matches!(&entry.handler, PlannedHandler::File(_)));
-        let file_plan_len = file_plan.len();
         debug_assert!(
             file_plan
                 .iter()
@@ -823,80 +869,63 @@ impl SessionActor {
         }
 
         if decisive {
-            // A file force-stop must not invoke the client decision endpoint,
-            // but observers still receive the turn-end notification. The
-            // Timeline records that notification as a non-controlling run;
-            // Prompt/Tool siblings are closed as prior-block skips.
+            // One ordered policy chain spans file and client handlers. A
+            // decisive file result prevents every later client callback from
+            // producing an external side effect.
             for entry in client_plan {
-                let PlannedHandler::Client(client) = entry.handler else {
-                    unreachable!("file handler partitioned as client")
-                };
-                if gate == GateKind::Stop {
-                    self.record_hook_event(chat_state::HookEvent::RunStarted {
-                        occurrence_id: occurrence_id.clone(),
-                        run_id: entry.timeline.run_id.clone(),
-                        handler_index: entry.timeline.index,
-                    })
-                    .await?;
-                    let started = std::time::Instant::now();
-                    let delivered = self.notify_planned_client_hook(&client.callback_id, &envelope);
-                    let elapsed = started.elapsed();
-                    let (outcome, result) = if delivered {
-                        (
-                            chat_state::HookRunOutcome::Success,
-                            HookRunResult::Success {
-                                hook_name: format!("client:{}", client.callback_id),
-                                elapsed,
-                                http_info: None,
-                            },
-                        )
-                    } else {
-                        (
-                            chat_state::HookRunOutcome::Failed {
-                                message: "client hook notification failed".into(),
-                            },
-                            HookRunResult::Failed {
-                                hook_name: format!("client:{}", client.callback_id),
-                                error: "failed to serialize client hook notification".into(),
-                                elapsed,
-                                http_info: None,
-                            },
-                        )
-                    };
-                    self.record_hook_event(chat_state::HookEvent::RunFinished {
-                        occurrence_id: occurrence_id.clone(),
-                        run_id: entry.timeline.run_id,
-                        handler_index: entry.timeline.index,
-                        elapsed_ms: elapsed.as_millis() as u64,
-                        outcome,
-                        control: chat_state::HookRunControl::None,
-                    })
-                    .await?;
-                    aggregate_results_mut(&mut aggregate).push(result);
-                } else {
-                    self.record_hook_event(chat_state::HookEvent::RunSkipped {
-                        occurrence_id: occurrence_id.clone(),
-                        run_id: entry.timeline.run_id,
-                        handler_index: entry.timeline.index,
-                        reason: timeline_skip(HookSkipReason::PriorBlock),
-                    })
-                    .await?;
-                    aggregate_results_mut(&mut aggregate).push(HookRunResult::Skipped {
-                        hook_name: format!("client:{}", client.callback_id),
-                        reason: HookSkipReason::PriorBlock,
-                    });
-                }
+                let hook_name = entry.handler.runtime_name();
+                self.record_hook_event(chat_state::HookEvent::RunSkipped {
+                    occurrence_id: occurrence_id.clone(),
+                    run_id: entry.timeline.run_id,
+                    handler_index: entry.timeline.index,
+                    reason: timeline_skip(HookSkipReason::PriorBlock),
+                })
+                .await?;
+                aggregate_results_mut(&mut aggregate).push(HookRunResult::Skipped {
+                    hook_name,
+                    reason: HookSkipReason::PriorBlock,
+                });
             }
-        } else if gate == GateKind::Observe {
-            // Observe notifications are non-blocking sends, so deterministic
-            // order has no slow-callback starvation risk.
+        } else {
+            // Client callbacks are an ordered policy chain, not a fan-out.
+            // Only the callback whose turn has arrived may be started. Once a
+            // callback returns a decisive deny/stop decision, later callbacks
+            // must have neither an RPC side effect nor a Started lifecycle.
             for entry in client_plan {
                 let index = entry.timeline.index;
                 let run_id = entry.timeline.run_id.clone();
                 let hook_name = entry.handler.runtime_name();
+                if let chat_state::HookHandlerPlanAction::Skip { reason } = &entry.timeline.action {
+                    self.record_hook_event(chat_state::HookEvent::RunSkipped {
+                        occurrence_id: occurrence_id.clone(),
+                        run_id,
+                        handler_index: index,
+                        reason: *reason,
+                    })
+                    .await?;
+                    aggregate_results_mut(&mut aggregate).push(HookRunResult::Skipped {
+                        hook_name,
+                        reason: HookSkipReason::PolicyDisabled,
+                    });
+                    continue;
+                }
                 let PlannedHandler::Client(client) = entry.handler else {
                     unreachable!("file handler partitioned as client")
                 };
+                if decisive {
+                    self.record_hook_event(chat_state::HookEvent::RunSkipped {
+                        occurrence_id: occurrence_id.clone(),
+                        run_id,
+                        handler_index: index,
+                        reason: timeline_skip(HookSkipReason::PriorBlock),
+                    })
+                    .await?;
+                    aggregate_results_mut(&mut aggregate).push(HookRunResult::Skipped {
+                        hook_name,
+                        reason: HookSkipReason::PriorBlock,
+                    });
+                    continue;
+                }
                 self.record_hook_event(chat_state::HookEvent::RunStarted {
                     occurrence_id: occurrence_id.clone(),
                     run_id,
@@ -904,67 +933,8 @@ impl SessionActor {
                 })
                 .await?;
                 let executed = self.execute_client_handler(gate, &envelope, client).await;
-                self.finish_hook_handler(
-                    &occurrence_id,
-                    &entry.timeline,
-                    &hook_name,
-                    gate,
-                    &mut aggregate,
-                    executed,
-                )
-                .await?;
-            }
-        } else {
-            // Reverse client requests are independent. Start every lifecycle
-            // durably before polling any request, then run the requests
-            // concurrently. Prompt/Tool gates short-circuit on the first deny;
-            // started siblings are explicitly closed as Cancelled. Stop gates
-            // await every response and fold them in registration order.
-            for entry in &client_plan {
-                self.record_hook_event(chat_state::HookEvent::RunStarted {
-                    occurrence_id: occurrence_id.clone(),
-                    run_id: entry.timeline.run_id.clone(),
-                    handler_index: entry.timeline.index,
-                })
-                .await?;
-            }
-            let mut pending = futures::stream::FuturesUnordered::new();
-            for entry in &client_plan {
-                let PlannedHandler::Client(client) = &entry.handler else {
-                    unreachable!("file handler partitioned as client")
-                };
-                let client = client.clone();
-                let index = entry.timeline.index;
-                let actor = self;
-                let envelope = &envelope;
-                pending.push(async move {
-                    (
-                        index,
-                        actor.execute_client_handler(gate, envelope, client).await,
-                    )
-                });
-            }
-            let mut completed = (0..client_plan.len()).map(|_| None).collect::<Vec<_>>();
-            while let Some((index, executed)) = pending.next().await {
-                let offset = usize::try_from(index)
-                    .ok()
-                    .and_then(|index| index.checked_sub(file_plan_len))
-                    .expect("client handler index must follow the file plan");
-                completed[offset] = Some(executed);
-                if gate != GateKind::Stop
-                    && completed[offset]
-                        .as_ref()
-                        .is_some_and(|executed| executed.decisive)
-                {
-                    break;
-                }
-            }
-            drop(pending);
-
-            for (entry, executed) in client_plan.into_iter().zip(completed) {
-                let hook_name = entry.handler.runtime_name();
-                if let Some(executed) = executed {
-                    self.finish_hook_handler(
+                decisive |= self
+                    .finish_hook_handler(
                         &occurrence_id,
                         &entry.timeline,
                         &hook_name,
@@ -973,29 +943,6 @@ impl SessionActor {
                         executed,
                     )
                     .await?;
-                } else {
-                    let elapsed = std::time::Duration::ZERO;
-                    let executed = ExecutedHandler {
-                        outcome: chat_state::HookRunOutcome::Cancelled,
-                        control: chat_state::HookRunControl::None,
-                        result: HookRunResult::Cancelled {
-                            hook_name: hook_name.clone(),
-                            elapsed,
-                            http_info: None,
-                        },
-                        gate: failure_gate(gate, &hook_name, None),
-                        decisive: false,
-                    };
-                    self.finish_hook_handler(
-                        &occurrence_id,
-                        &entry.timeline,
-                        &hook_name,
-                        gate,
-                        &mut aggregate,
-                        executed,
-                    )
-                    .await?;
-                }
             }
         }
 
@@ -1078,7 +1025,13 @@ impl SessionActor {
     ) -> Result<(), chat_state::TimelineWriteError> {
         let envelope = self.make_hook_envelope(event, prompt_id, payload);
         let aggregate = self
-            .dispatch_hook_occurrence(event, cause, envelope, GateKind::Observe)
+            .dispatch_hook_occurrence(
+                event,
+                cause,
+                envelope,
+                GateKind::Observe,
+                HookDispatchPolicy::Execute,
+            )
             .await?;
         debug_assert!(matches!(aggregate, HookAggregate::Observe { .. }));
         Ok(())
@@ -1093,8 +1046,14 @@ impl SessionActor {
         envelope: HookEventEnvelope,
         gate: GateKind,
     ) -> Result<HookAggregate, chat_state::TimelineWriteError> {
-        self.dispatch_hook_occurrence(HookEventName::UserPromptSubmit, cause, envelope, gate)
-            .await
+        self.dispatch_hook_occurrence(
+            HookEventName::UserPromptSubmit,
+            cause,
+            envelope,
+            gate,
+            HookDispatchPolicy::Execute,
+        )
+        .await
     }
 
     async fn execute_client_handler(
@@ -1302,6 +1261,21 @@ impl SessionActor {
                 outcome: diagnostic_outcome,
             });
 
+            let blocked = matches!(control, chat_state::HookRunControl::Block { .. })
+                || matches!(
+                    control,
+                    chat_state::HookRunControl::StopKeepWorking {
+                        reason: Some(_),
+                        ..
+                    }
+                );
+            if blocked {
+                ::diagnostics::session_ctx::log_event(::diagnostics::events::HookBlocked {
+                    occurrence_id: projection.occurrence_id.clone(),
+                    hook_name: handler.name.clone(),
+                });
+            }
+
             if handler.kind == chat_state::HookHandlerKind::Client {
                 let client_outcome = match (outcome, control) {
                     (_, chat_state::HookRunControl::Block { .. })
@@ -1355,13 +1329,9 @@ mod notification_hook_filter_tests {
                 status: HookRunStatusDto::Success { elapsed_ms: 1 },
                 output: None,
             }],
+            annotations: Vec::new(),
         };
         assert!(notification_hook_for_update(&execution).is_none());
-
-        let annotation = GrowSessionUpdate::HookAnnotation {
-            message: "running hooks".into(),
-        };
-        assert!(notification_hook_for_update(&annotation).is_none());
     }
 
     #[test]

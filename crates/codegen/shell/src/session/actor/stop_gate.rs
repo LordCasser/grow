@@ -1,5 +1,6 @@
 //! The turn-end `Stop`/`SubagentStop` gate for `SessionActor`.
 
+use super::hook_dispatch::HookDispatchPolicy;
 use super::*;
 use ::hooks::dispatcher;
 use ::hooks::event::{
@@ -137,14 +138,6 @@ impl SessionActor {
         (tasks, crons)
     }
 
-    async fn announce_force_stop(&self, prevent: &dispatcher::StopBlock) {
-        self.send_hook_annotation(&format!(
-            "\u{26a0} Hook `{}` stopped the agent: {}",
-            prevent.hook_name, prevent.reason
-        ))
-        .await;
-    }
-
     async fn build_stop_payload(&self, stop_hook_active: bool) -> event::HookPayload {
         let last_assistant_message = self
             .chat_state_handle
@@ -183,20 +176,6 @@ impl SessionActor {
         } else {
             event::HookEventName::Stop
         };
-        // At the cap no hook is consulted or notified for this forced stop,
-        // unlike the force-stop path below which still notifies observers.
-        if continuations_this_turn >= MAX_STOP_HOOK_CONTINUATIONS_PER_TURN {
-            tracing::warn!(
-                continuations_this_turn,
-                "stop hook continuation limit reached; ending the turn"
-            );
-            self.send_hook_annotation(&format!(
-                "\u{26a0} Stop hooks kept the agent working {MAX_STOP_HOOK_CONTINUATIONS_PER_TURN} times this turn: limit reached, ending the turn"
-            ))
-            .await;
-            return StopGateDecision::AllowStop;
-        }
-
         let payload = self.build_stop_payload(continuations_this_turn > 0).await;
         // Gate envelope via `make_hook_envelope`, not the observe-notify
         // `fire_hook`: client hooks get the awaited `grow/hooks/run` request
@@ -214,8 +193,41 @@ impl SessionActor {
         } else {
             chat_state::HookCause::Turn { turn }
         };
+        // The cap is itself a durable Stop policy outcome. Do not invoke or
+        // notify external handlers, but do record the same complete occurrence
+        // shape as every other Stop gate before exposing AllowStop.
+        if continuations_this_turn >= MAX_STOP_HOOK_CONTINUATIONS_PER_TURN {
+            tracing::warn!(
+                continuations_this_turn,
+                "stop hook continuation limit reached; ending the turn"
+            );
+            match self
+                .dispatch_hook_occurrence(
+                    event,
+                    cause,
+                    envelope,
+                    event::GateKind::Stop,
+                    HookDispatchPolicy::SkipAllPolicyDisabled,
+                )
+                .await
+            {
+                Ok(aggregate) => {
+                    debug_assert!(!aggregate.into_stop_result().wants_continuation());
+                }
+                Err(error) => {
+                    tracing::error!(%error, "capped stop hook lifecycle was not durable");
+                }
+            }
+            return StopGateDecision::AllowStop;
+        }
         let aggregate = match self
-            .dispatch_hook_occurrence(event, cause, envelope, event::GateKind::Stop)
+            .dispatch_hook_occurrence(
+                event,
+                cause,
+                envelope,
+                event::GateKind::Stop,
+                HookDispatchPolicy::Execute,
+            )
             .await
         {
             Ok(aggregate) => aggregate,
@@ -229,8 +241,7 @@ impl SessionActor {
         };
         let mut result = aggregate.into_stop_result();
 
-        if let Some(prevent) = result.prevent_continuation.take() {
-            self.announce_force_stop(&prevent).await;
+        if result.prevent_continuation.take().is_some() {
             return StopGateDecision::AllowStop;
         }
 
@@ -238,38 +249,8 @@ impl SessionActor {
             return StopGateDecision::AllowStop;
         }
 
-        self.announce_keep_working(&result.blocks, &result.additional_context)
-            .await;
         StopGateDecision::KeepWorking {
             feedback: format_stop_feedback(&result.blocks, &result.additional_context),
-        }
-    }
-
-    /// Annotate the scrollback when a stop gate keeps the agent working: one line
-    /// per block (with `HookBlocked` diagnostics), or the context lines when only
-    /// `additionalContext` was returned.
-    async fn announce_keep_working(
-        &self,
-        blocks: &[dispatcher::StopBlock],
-        additional_context: &[String],
-    ) {
-        for block in blocks {
-            self.send_hook_annotation(&format!(
-                "\u{21a9} Stop blocked by hook `{}`, continuing: {}",
-                block.hook_name, block.reason
-            ))
-            .await;
-            ::diagnostics::session_ctx::log_event(::diagnostics::events::HookBlocked {
-                hook_name: block.hook_name.clone(),
-            });
-        }
-        if blocks.is_empty() {
-            for context in additional_context {
-                self.send_hook_annotation(&format!(
-                    "\u{21a9} Stop hook feedback, continuing: {context}"
-                ))
-                .await;
-            }
         }
     }
 }
@@ -370,5 +351,140 @@ mod stop_gate_snapshot_tests {
         assert_eq!(cron.schedule, "every 5 minutes");
         assert!(cron.recurring);
         assert_eq!(cron.prompt, "check the build");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuation_cap_records_policy_skipped_stop_occurrence_before_allowing_stop() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = crate::session::actor::tests::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
+
+                let mut client_hooks = crate::extensions::hooks::ClientHooks::new();
+                client_hooks.insert(
+                    ::hooks::event::HookEventName::Stop,
+                    vec![crate::extensions::hooks::ClientHookGroup {
+                        matcher: None,
+                        callback_ids: vec!["must-not-run-at-cap".into()],
+                        timeout: None,
+                    }],
+                );
+                *actor.hooks.client_hooks.borrow_mut() = client_hooks;
+
+                let reverse_requests = std::rc::Rc::new(std::cell::Cell::new(0u32));
+                let observed_requests = std::rc::Rc::clone(&reverse_requests);
+                tokio::task::spawn_local(async move {
+                    while let Some(message) = gateway_rx.recv().await {
+                        match message {
+                            acp_transport::AcpClientMessage::ExtMethod(args) => {
+                                observed_requests.set(observed_requests.get() + 1);
+                                let response: std::sync::Arc<serde_json::value::RawValue> =
+                                    serde_json::value::to_raw_value(&serde_json::json!({}))
+                                        .unwrap()
+                                        .into();
+                                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(response)));
+                            }
+                            acp_transport::AcpClientMessage::SessionNotification(args) => {
+                                let _ = args.response_tx.send(Ok(()));
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+
+                let before = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .unwrap()
+                    .len();
+                let decision = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.run_stop_gate("prompt-at-cap", MAX_STOP_HOOK_CONTINUATIONS_PER_TURN),
+                )
+                .await
+                .expect("the capped Stop gate must not hang");
+                assert!(matches!(decision, StopGateDecision::AllowStop));
+
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let cap_events = &events[before..];
+                assert_eq!(
+                    cap_events.len(),
+                    3,
+                    "one matching handler closes as Triggered, RunSkipped, Completed"
+                );
+                let (occurrence_id, run_id) = match &cap_events[0].kind {
+                    chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
+                        occurrence_id,
+                        event: chat_state::HookEventType::Stop,
+                        gate: chat_state::HookGateKind::Stop,
+                        cause: chat_state::HookCause::Turn { .. },
+                        handlers,
+                        ..
+                    }) => {
+                        assert_eq!(handlers.len(), 1);
+                        assert_eq!(
+                            handlers[0].provenance,
+                            chat_state::HookHandlerProvenance::Client
+                        );
+                        assert_eq!(
+                            handlers[0].action,
+                            chat_state::HookHandlerPlanAction::Skip {
+                                reason: chat_state::HookRunSkipReason::PolicyDisabled,
+                            }
+                        );
+                        (occurrence_id.clone(), handlers[0].run_id.clone())
+                    }
+                    other => panic!("expected capped Stop HookTriggered, got {other:?}"),
+                };
+                assert!(matches!(
+                    &cap_events[1].kind,
+                    chat_state::TimelineEventKind::Hook(chat_state::HookEvent::RunSkipped {
+                        occurrence_id: skipped_occurrence,
+                        run_id: skipped_run,
+                        handler_index: 0,
+                        reason: chat_state::HookRunSkipReason::PolicyDisabled,
+                    }) if skipped_occurrence == &occurrence_id && skipped_run == &run_id
+                ));
+                assert!(matches!(
+                    &cap_events[2].kind,
+                    chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Completed {
+                        occurrence_id: completed_occurrence,
+                        decision: chat_state::HookAggregateDecision::Stop {
+                            decision: chat_state::HookStopDecision::AllowStop,
+                        },
+                    }) if completed_occurrence == &occurrence_id
+                ));
+
+                let projection = actor
+                    .chat_state_handle
+                    .hook_projection(occurrence_id)
+                    .await
+                    .expect("the capped Stop occurrence must be projectable");
+                assert!(matches!(
+                    projection.runs.as_slice(),
+                    [chat_state::HookHandlerLifecycle::Skipped {
+                        reason: chat_state::HookRunSkipReason::PolicyDisabled,
+                    }]
+                ));
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    reverse_requests.get(),
+                    0,
+                    "the capped policy must not invoke the skipped client Hook"
+                );
+            })
+            .await;
     }
 }

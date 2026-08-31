@@ -925,26 +925,18 @@ fn handle_session_notification_inner(
             }
             true
         }
-        GrowSessionUpdate::HookAnnotation { message } => {
-            if app.appearance.disable_plugins {
-                return false;
-            }
-            tracing::debug!("Hook annotation: {message}");
-            agent
-                .scrollback
-                .push_block(RenderBlock::session_event(SessionEvent::HookAnnotation {
-                    message,
-                }));
-            true
-        }
         GrowSessionUpdate::HookExecution {
-            occurrence_id: _,
+            occurrence_id,
             event_name,
             tool_name: _tool_name,
             prompt_id: batch_prompt_id,
             runs,
+            annotations,
         } => {
             use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
+            if !agent.session.tracker.claim_hook_occurrence(&occurrence_id) {
+                return false;
+            }
             let hook_entries: Vec<HookRunEntry> = runs
                 .into_iter()
                 .map(|r| {
@@ -981,7 +973,15 @@ fn handle_session_notification_inner(
                 .collect();
             let is_tool_hook = event_name == "pre_tool_use" || event_name == "post_tool_use";
             let is_stop_hook = event_name == "stop" || event_name == "stop_failure";
-            if is_tool_hook {
+            if is_tool_hook && (meta.is_replay || agent.session.loading_replay) {
+                // Reconnect snapshots arrive after the ACP transcript replay.
+                // Without the original transport ordering, attaching to the
+                // last tool would corrupt an unrelated row; render an explicit
+                // lifecycle projection instead.
+                agent
+                    .scrollback
+                    .push_lifecycle_hooks(event_name.clone(), hook_entries);
+            } else if is_tool_hook {
                 let phase = if event_name == "pre_tool_use" {
                     HookPhase::Pre
                 } else {
@@ -1030,6 +1030,14 @@ fn handle_session_notification_inner(
                 agent
                     .scrollback
                     .push_lifecycle_hooks(event_name, hook_entries);
+            }
+            for message in annotations {
+                agent.scrollback.push_block(RenderBlock::session_event(
+                    SessionEvent::HookAnnotation {
+                        occurrence_id: occurrence_id.clone(),
+                        message,
+                    },
+                ));
             }
             true
         }

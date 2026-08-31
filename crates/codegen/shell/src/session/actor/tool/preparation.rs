@@ -650,6 +650,7 @@ impl SessionActor {
                 },
                 envelope,
                 ::hooks::event::GateKind::Tool,
+                super::super::hook_dispatch::HookDispatchPolicy::Execute,
             )
             .await
             .map_err(|error| {
@@ -657,16 +658,10 @@ impl SessionActor {
                     .data(format!("pre-tool hook lifecycle was not durable: {error}"))
             })?;
         let decision = aggregate.into_tool_decision();
-        if let ::hooks::result::HookDecision::Deny { reason, hook_name } = decision {
+        if let ::hooks::result::HookDecision::Deny { hook_name, reason } = decision {
             return Ok(ToolPreflight::resolved(
-                self.deny_tool(
-                    &call.id,
-                    &tool_call_id,
-                    resolved_tool_name,
-                    hook_name,
-                    reason,
-                )
-                .await?,
+                self.deny_tool(&call.id, &tool_call_id, hook_name, reason)
+                    .await?,
             ));
         }
         {

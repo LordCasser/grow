@@ -1528,6 +1528,7 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::PublishControlState { respond_to } => {
                         session.publish_control_state_snapshot().await;
+                        session.publish_completed_hook_projections().await;
                         let _ = respond_to.send(());
                     }
                     SessionCommand::GetCurrentModel { responds_to } => {

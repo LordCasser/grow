@@ -339,6 +339,11 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Option<crate::HookLifecycleProjection>>,
     },
 
+    /// Rebuild every completed Hook occurrence from the Timeline fold.
+    GetCompletedHookProjections {
+        reply: oneshot::Sender<Vec<crate::HookLifecycleProjection>>,
+    },
+
     /// Clone the canonical event ledger for recovery/reconciliation logic.
     GetTimelineEvents {
         reply: oneshot::Sender<Vec<crate::TimelineEvent>>,

@@ -2203,6 +2203,24 @@ impl Timeline {
         })
     }
 
+    /// Completed Hook occurrences in their durable completion order.
+    ///
+    /// This is the authoritative source for rebuilding transient Hook UI after
+    /// reconnect and for any consumer that needs completed lifecycle facts.
+    /// In-flight occurrences are deliberately omitted because they have no
+    /// committed aggregate decision yet.
+    pub fn completed_hook_projections(&self) -> Vec<HookLifecycleProjection> {
+        self.events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                TimelineEventKind::Hook(HookEvent::Completed { occurrence_id, .. }) => {
+                    self.hook_projection(occurrence_id)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn input_state(&self, input_id: &str) -> Option<InputLifecycle> {
         let input = self.lifecycle.inputs.get(input_id)?;
         let state = match (&input.admission, input.dismissed) {
@@ -6893,6 +6911,80 @@ mod tests {
                 "{event:?}"
             );
         }
+    }
+
+    #[test]
+    fn completed_hook_projection_snapshot_replays_only_committed_occurrences_in_order() {
+        let mut timeline = Timeline::default();
+        let turn = start_internal_turn(&mut timeline, 1);
+        start_tool(&mut timeline, turn, "tool-blocked");
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "hook-blocked".into(),
+                event: HookEventType::PreToolUse,
+                gate: HookGateKind::Tool,
+                cause: HookCause::Tool {
+                    call_id: "tool-blocked".into(),
+                },
+                config_generation: 7,
+                handlers: vec![command_handler(0, "run-blocked")],
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunStarted {
+                occurrence_id: "hook-blocked".into(),
+                run_id: "run-blocked".into(),
+                handler_index: 0,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::RunFinished {
+                occurrence_id: "hook-blocked".into(),
+                run_id: "run-blocked".into(),
+                handler_index: 0,
+                elapsed_ms: 3,
+                outcome: HookRunOutcome::Blocked,
+                control: HookRunControl::Block {
+                    reason: "policy denied".into(),
+                },
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: "hook-blocked".into(),
+                decision: HookAggregateDecision::Tool {
+                    decision: HookGateDecision::Block {
+                        reason: "policy denied".into(),
+                    },
+                },
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: "hook-in-flight".into(),
+                event: HookEventType::Notification,
+                gate: HookGateKind::Observe,
+                cause: HookCause::Notification {
+                    notification_id: "hook-in-flight".into(),
+                },
+                config_generation: 8,
+                handlers: Vec::new(),
+            }))
+            .unwrap();
+
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        let snapshot = replayed.completed_hook_projections();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].occurrence_id, "hook-blocked");
+        assert_eq!(
+            snapshot[0].decision,
+            Some(HookAggregateDecision::Tool {
+                decision: HookGateDecision::Block {
+                    reason: "policy denied".into(),
+                },
+            })
+        );
+        assert!(replayed.hook_projection("hook-in-flight").is_some());
     }
 
     #[test]

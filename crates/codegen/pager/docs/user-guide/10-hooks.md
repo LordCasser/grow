@@ -97,6 +97,8 @@ Because hooks are unified under folder-trust, a `--trust` / `/hooks-trust` grant
 
 `pre_tool_use` can block a tool call, and `stop`/`subagent_stop` can block the Agent from stopping (see [Stop Decision Control](#stop-decision-control)); every other event is passive. Event keys are exact snake_case values; alternate spellings are rejected.
 
+Handlers form one ordered policy chain: file handlers run first in their frozen registration order, followed by client callbacks in registration order. Grow starts only the handler whose turn has arrived. The first explicit deny, stop block, or force-stop short-circuits the chain; later handlers are recorded as skipped and are never invoked. This matters for hooks with external side effects: a later callback cannot run in the background after an earlier policy decision has already won.
+
 ---
 
 ## The Hook JSON Format
@@ -217,12 +219,12 @@ For `pre_tool_use` hooks, write JSON to **stdout**:
 
 - **Block the stop**: `{"decision": "block", "reason": "The test suite hasn't been run yet"}`. The reason is fed back to the model as a user message and the agent runs another round in the same turn.
 - **Non-error feedback**: `{"additionalContext": "Run the linter before finishing"}`. Also keeps the Agent working, but is surfaced as hook feedback rather than a hook error.
-- **Force stop**: `{"continue": false, "stopReason": "Budget exhausted"}`. Ends the turn, overriding any blocks.
+- **Force stop**: `{"continue": false, "stopReason": "Budget exhausted"}`. Ends the turn when this is the first decisive result reached in the ordered chain.
 - **Allow the stop**: exit 0 with no output (or any non-JSON output).
 
 Exiting with code `2` also blocks the stop, with **stderr** as the feedback.
 
-The hook input includes `stopHookActive` and `lastAssistantMessage`. `stopHookActive` is true when the agent is already continuing due to a previous stop-hook block this turn; check it, or the transcript, to avoid blocking on a condition that will never resolve. `lastAssistantMessage` carries the text of the agent's final response this turn, so hooks can act on it without parsing the transcript. After **8 continuations** (blocks or non-error feedback) in one turn the gate is overridden and the turn ends; hooks are not consulted for that final, forced stop. The counter is per turn: the next user prompt starts fresh, so a long-running goal can span turns. Hook failures fail open: the agent stops normally.
+The hook input includes `stopHookActive` and `lastAssistantMessage`. `stopHookActive` is true when the agent is already continuing due to a previous stop-hook block this turn; check it, or the transcript, to avoid blocking on a condition that will never resolve. `lastAssistantMessage` carries the text of the agent's final response this turn, so hooks can act on it without parsing the transcript. After **8 continuations** (blocks or non-error feedback) in one turn the gate is overridden and the turn ends. Grow records that final Stop occurrence with every matching handler skipped by policy, but does not invoke external hooks. The counter is per turn: the next user prompt starts fresh, so a long-running goal can span turns. Hook failures fail open: the agent stops normally.
 
 `stop` and `subagent_stop` hooks default to a 600-second timeout because gates commonly run builds or test suites, and a timed-out hook fails open. Other events keep the 5-second default. Set `timeout` explicitly when a gate needs more: `{ "type": "command", "command": "bin/verify.sh", "timeout": 1200 }`.
 

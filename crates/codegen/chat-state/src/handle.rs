@@ -522,6 +522,15 @@ impl ChatStateHandle {
         .flatten()
     }
 
+    /// Read every durably completed Hook occurrence in completion order.
+    pub async fn completed_hook_projections(&self) -> Vec<crate::HookLifecycleProjection> {
+        self.query("GetCompletedHookProjections", |reply| {
+            ChatStateCommand::GetCompletedHookProjections { reply }
+        })
+        .await
+        .unwrap_or_default()
+    }
+
     pub async fn timeline_events(&self) -> Option<Vec<crate::TimelineEvent>> {
         self.query("GetTimelineEvents", |reply| {
             ChatStateCommand::GetTimelineEvents { reply }

@@ -9,7 +9,7 @@
 //!     stopping (its `systemMessage` becomes the feedback), `continue: false`
 //!     (+ `stopReason`) force-stops overriding blocks, and `additionalContext`
 //!     keeps the agent working with non-error feedback: the same vocabulary
-//!     file hooks produce, aggregated in [`Self::run_stop_client_hooks`].
+//!     file hooks produce.
 //! - **All other events**: fire-and-forget *notifications* `grow/hooks/event`,
 //!   observe-only (the callback's return is ignored). Sent per matching callback.
 
@@ -20,8 +20,6 @@ use ::diagnostics::events::ClientHookGateOutcome;
 use ::hooks::event::{HookEventEnvelope, HookEventName, HookPayload};
 use acp_transport::AcpClientHandler as _;
 use acp_transport::protocol as acp;
-#[cfg(test)]
-use futures::StreamExt as _;
 use serde_json::value::RawValue;
 
 use super::{SessionActor, ToolLoop};
@@ -249,31 +247,23 @@ impl SessionActor {
         envelope
     }
 
-    /// Block a tool call denied by a `PreToolUse` hook (file- or client-side),
-    /// emitting the shared diagnostics + UI side-effects and returning the
-    /// [`ToolLoop::HookDenied`] the caller should propagate.
+    /// Close a tool call after its `PreToolUse` occurrence was durably denied.
+    /// UI and diagnostics were already projected from that exact completed
+    /// occurrence by the dispatcher; this adapter only closes tool control.
     pub(super) async fn deny_tool(
         &self,
         model_call_id: &str,
         tool_call_id: &acp::ToolCallId,
-        tool_name: String,
         hook_name: String,
         reason: String,
     ) -> Result<ToolLoop, acp::Error> {
-        tracing::info!(%tool_name, %hook_name, %reason, "tool call denied by pre_tool_use hook");
-        ::diagnostics::session_ctx::log_event(::diagnostics::events::HookBlocked {
-            hook_name: hook_name.clone(),
-        });
+        tracing::info!(%hook_name, %reason, "tool call denied by pre_tool_use hook");
         self.handle_tool_not_executed(
             model_call_id,
             tool_call_id,
             format!("Hook denied: {reason}"),
         )
         .await?;
-        self.send_hook_annotation(&format!(
-            "\u{26a0} `{tool_name}` blocked by hook `{hook_name}`: {reason}"
-        ))
-        .await;
         Ok(ToolLoop::HookDenied { hook_name })
     }
 
@@ -345,41 +335,35 @@ impl SessionActor {
             .unwrap_or(call.function.name.as_str());
 
         let callbacks = matching_gate_callbacks(&groups, Some(tool_name), CLIENT_HOOK_TIMEOUT);
-        let mut pending = futures::stream::FuturesUnordered::new();
         for (callback_id, timeout) in callbacks {
-            pending.push(async move {
-                let result = self
-                    .run_client_gate_callback(&callback_id, timeout, Some(tool_name), envelope)
-                    .await;
-                (callback_id, result)
-            });
-        }
-        while let Some((callback_id, (response, _elapsed, _outcome))) = pending.next().await {
+            let (response, _elapsed, _outcome) = self
+                .run_client_gate_callback(&callback_id, timeout, Some(tool_name), envelope)
+                .await;
             if response.decision == ClientHookDecision::Deny {
                 let reason = response
                     .system_message
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or_else(|| "blocked by client hook".to_string());
-                return Ok(Some(
-                    self.deny_tool(
-                        &call.id,
-                        tool_call_id,
-                        tool_name.to_owned(),
-                        // Name the specific callback so diagnostics / the UI annotation can
-                        // attribute the block, not collapse every client hook to "client".
-                        format!("client:{callback_id}"),
-                        reason,
-                    )
-                    .await?,
-                ));
+                // This test-only adapter predates the durable dispatcher and
+                // intentionally has no Timeline occurrence to project. Keep it
+                // side-effect free beyond the tool terminal; production uses
+                // `dispatch_hook_occurrence` and `deny_tool` above.
+                self.handle_tool_not_executed(
+                    &call.id,
+                    tool_call_id,
+                    format!("Hook denied: {reason}"),
+                )
+                .await?;
+                return Ok(Some(ToolLoop::HookDenied {
+                    hook_name: format!("client:{callback_id}"),
+                }));
             }
         }
         Ok(None)
     }
 
-    /// Run the client `Stop`/`SubagentStop` gate for a turn-end envelope.
-    /// Unlike the `PreToolUse` gate (first deny wins), every callback's response
-    /// is aggregated into a [`StopDispatchResult`] (a `deny` maps to a block).
+    /// Run the client `Stop`/`SubagentStop` gate for a turn-end envelope in
+    /// registration order, stopping at the first decisive response.
     #[cfg(test)]
     pub(super) async fn run_stop_client_hooks(
         &self,
@@ -401,16 +385,10 @@ impl SessionActor {
 
         let match_value = envelope.payload.match_value();
         let callbacks = matching_gate_callbacks(&groups, match_value, CLIENT_STOP_GATE_TIMEOUT);
-        let responses = futures::future::join_all(callbacks.into_iter().map(
-            |(callback_id, timeout)| async move {
-                let result = self
-                    .run_client_gate_callback(&callback_id, timeout, match_value, envelope)
-                    .await;
-                (callback_id, result)
-            },
-        ))
-        .await;
-        for (callback_id, (response, elapsed, _outcome)) in responses {
+        for (callback_id, timeout) in callbacks {
+            let (response, elapsed, _outcome) = self
+                .run_client_gate_callback(&callback_id, timeout, match_value, envelope)
+                .await;
             let hook_name = format!("client:{callback_id}");
             let block_reason = (response.decision == ClientHookDecision::Deny).then(|| {
                 response
@@ -444,6 +422,7 @@ impl SessionActor {
                 },
             });
 
+            let decisive = block_reason.is_some() || stop_reason.is_some();
             out.absorb(
                 &hook_name,
                 ::hooks::dispatcher::StopSignals {
@@ -454,6 +433,9 @@ impl SessionActor {
                         .filter(|c| !c.trim().is_empty()),
                 },
             );
+            if decisive {
+                break;
+            }
         }
         out
     }

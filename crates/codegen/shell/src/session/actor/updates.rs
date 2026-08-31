@@ -3,6 +3,26 @@
 //! the gateway-bridge dispatch shims.
 use super::*;
 use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
+
+fn timeline_hook_event_name(event: chat_state::HookEventType) -> &'static str {
+    match event {
+        chat_state::HookEventType::SessionStart => "session_start",
+        chat_state::HookEventType::UserPromptSubmit => "user_prompt_submit",
+        chat_state::HookEventType::PreToolUse => "pre_tool_use",
+        chat_state::HookEventType::PostToolUse => "post_tool_use",
+        chat_state::HookEventType::PostToolUseFailure => "post_tool_use_failure",
+        chat_state::HookEventType::PermissionDenied => "permission_denied",
+        chat_state::HookEventType::Stop => "stop",
+        chat_state::HookEventType::StopFailure => "stop_failure",
+        chat_state::HookEventType::StopCancelled => "stop_cancelled",
+        chat_state::HookEventType::Notification => "notification",
+        chat_state::HookEventType::SubagentStart => "subagent_start",
+        chat_state::HookEventType::SubagentStop => "subagent_stop",
+        chat_state::HookEventType::PreCompact => "pre_compact",
+        chat_state::HookEventType::PostCompact => "post_compact",
+        chat_state::HookEventType::SessionEnd => "session_end",
+    }
+}
 /// Result of applying a subagent fold into parent ledgers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SubagentUsageApply {
@@ -617,6 +637,21 @@ impl SessionActor {
         self.forward_grow_notification_unhooked(notification);
     }
 
+    /// Re-publish Hook display projections after `session/load` rebuilt the
+    /// client transcript. Hook transports stay transient: completed Timeline
+    /// occurrences are queried again instead of copied to `updates.jsonl`.
+    pub(super) async fn publish_completed_hook_projections(&self) {
+        for projection in self.chat_state_handle.completed_hook_projections().await {
+            self.send_hook_execution(
+                timeline_hook_event_name(projection.event),
+                None,
+                None,
+                &projection,
+            )
+            .await;
+        }
+    }
+
     /// Persist and forward a passive UI/audit update without changing rewind
     /// interaction state. UI projections such as permission audit and command
     /// output are observable facts, not conversation or user-action boundaries.
@@ -874,18 +909,26 @@ mod grow_event_id_stamping_tests {
                     create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
                 );
                 actor
-                    .send_grow_notification(GrowSessionUpdate::HookAnnotation {
-                        message: "own emission".into(),
-                    })
+                    .send_grow_notification(GrowSessionUpdate::RetryState(
+                        crate::extensions::notification::RetryState::Retrying {
+                            attempt: 1,
+                            max_retries: 2,
+                            reason: "own emission".into(),
+                        },
+                    ))
                     .await;
                 let own_id = persisted_grow_event_id(&mut prx).await;
                 assert!(own_id.starts_with("test-actor-"));
                 actor
                     .handle_grow_session_notification(GrowSessionNotification {
                         session_id: acp::SessionId::new("test-actor"),
-                        update: GrowSessionUpdate::HookAnnotation {
-                            message: "inbound".into(),
-                        },
+                        update: GrowSessionUpdate::RetryState(
+                            crate::extensions::notification::RetryState::Retrying {
+                                attempt: 1,
+                                max_retries: 2,
+                                reason: "inbound".into(),
+                            },
+                        ),
                         meta: None,
                     })
                     .await
@@ -893,9 +936,13 @@ mod grow_event_id_stamping_tests {
                 let inbound_id = persisted_grow_event_id(&mut prx).await;
                 assert!(inbound_id.starts_with("test-actor-"));
                 assert_ne!(own_id, inbound_id);
-                actor.persist_update_only(GrowSessionUpdate::HookAnnotation {
-                    message: "persist-only".into(),
-                });
+                actor.persist_update_only(GrowSessionUpdate::RetryState(
+                    crate::extensions::notification::RetryState::Retrying {
+                        attempt: 1,
+                        max_retries: 2,
+                        reason: "persist-only".into(),
+                    },
+                ));
                 let persist_only_id = persisted_grow_event_id(&mut prx).await;
                 assert!(persist_only_id.starts_with("test-actor-"));
                 assert_ne!(inbound_id, persist_only_id);

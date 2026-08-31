@@ -220,6 +220,10 @@ pub struct AcpUpdateTracker {
     /// Tool calls in flight, keyed by ACP tool call ID string.
     /// Stores the base ToolCall for field merging with ToolCallUpdate.
     pending_tools: HashMap<String, PendingTool>,
+    /// Hook Timeline occurrences already projected into this view. Live and
+    /// reconnect snapshots share the immutable occurrence id, so a renderer
+    /// never attaches or announces the same completed occurrence twice.
+    seen_hook_occurrences: std::collections::HashSet<String>,
     /// ToolCallUpdates that arrived before their ToolCall (race condition).
     /// When the ToolCall arrives, we merge and create the entry immediately
     /// as completed.
@@ -482,6 +486,10 @@ impl AcpUpdateTracker {
         self.pending_tools
             .get(tool_call_id)
             .and_then(|t| t.entry_id)
+    }
+
+    pub fn claim_hook_occurrence(&mut self, occurrence_id: &str) -> bool {
+        self.seen_hook_occurrences.insert(occurrence_id.to_owned())
     }
     /// Remove a tool from pending_tools (for demotion swap).
     ///
@@ -2480,6 +2488,13 @@ mod tests {
                 .cloned(),
             ),
         )
+    }
+    #[test]
+    fn hook_occurrence_identity_deduplicates_live_and_reconnect_projection() {
+        let mut tracker = AcpUpdateTracker::new();
+        assert!(tracker.claim_hook_occurrence("hook-1"));
+        assert!(!tracker.claim_hook_occurrence("hook-1"));
+        assert!(tracker.claim_hook_occurrence("hook-2"));
     }
     #[test]
     fn streaming_agent_message() {

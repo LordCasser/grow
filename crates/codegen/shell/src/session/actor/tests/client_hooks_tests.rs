@@ -273,11 +273,11 @@ async fn subagent_inherits_parent_pre_tool_use_client_hook() {
         .await;
 }
 
-/// A slow/hung callback must not starve a later deny: with the first-registered callback
-/// never replying and the second denying, the durable production dispatcher resolves
-/// the Tool gate quickly (a sequential gate would block on the hung one's full timeout).
+/// Client callbacks are an ordered policy chain. Once the first callback
+/// denies, a later callback must not receive an RPC and its durable lifecycle
+/// must close as `PriorBlock` without ever becoming `Started`.
 #[tokio::test(flavor = "current_thread")]
-async fn pre_tool_use_slow_callback_does_not_starve_a_deny() {
+async fn pre_tool_use_first_deny_skips_later_client_without_side_effect() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -290,28 +290,34 @@ async fn pre_tool_use_slow_callback_does_not_starve_a_deny() {
             install_client_hook(
                 &actor,
                 ::hooks::event::HookEventName::PreToolUse,
-                &["slow_cb", "deny_cb"],
+                &["deny_cb", "must_not_run"],
             );
             begin_test_causal_turn(&actor).await;
 
+            let observed_callbacks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let observed = std::rc::Rc::clone(&observed_callbacks);
             tokio::task::spawn_local(async move {
-                let mut held = Vec::new();
                 while let Some(msg) = gateway_rx.recv().await {
                     match msg {
                         acp_transport::AcpClientMessage::ExtMethod(args) => {
                             let params: serde_json::Value =
                                 serde_json::from_str(args.request.params.get()).unwrap();
-                            if params["hookCallbackId"] == "deny_cb" {
-                                let deny: Arc<serde_json::value::RawValue> =
-                                    serde_json::value::to_raw_value(&serde_json::json!({
-                                        "decision": "deny",
-                                    }))
-                                    .unwrap()
-                                    .into();
-                                let _ = args.response_tx.send(Ok(acp::ExtResponse::new(deny)));
-                            } else {
-                                held.push(args.response_tx);
-                            }
+                            let callback_id = params["hookCallbackId"]
+                                .as_str()
+                                .expect("client hook callback id")
+                                .to_owned();
+                            observed.borrow_mut().push(callback_id.clone());
+                            let response: Arc<serde_json::value::RawValue> =
+                                serde_json::value::to_raw_value(&serde_json::json!({
+                                    "decision": if callback_id == "deny_cb" {
+                                        "deny"
+                                    } else {
+                                        "continue"
+                                    },
+                                }))
+                                .unwrap()
+                                .into();
+                            let _ = args.response_tx.send(Ok(acp::ExtResponse::new(response)));
                         }
                         acp_transport::AcpClientMessage::SessionNotification(args) => {
                             let _ = args.response_tx.send(Ok(()));
@@ -350,25 +356,58 @@ async fn pre_tool_use_slow_callback_does_not_starve_a_deny() {
                 },
             );
 
-            // 5s ceiling is well under the hung callback's 30s per-callback timeout, so a
-            // pass proves the deny was not serialized behind the slow callback.
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                actor.dispatch_hook_occurrence(
+            let result = actor
+                .dispatch_hook_occurrence(
                     ::hooks::event::HookEventName::PreToolUse,
                     chat_state::HookCause::Tool {
                         call_id: call.id.clone(),
                     },
                     envelope,
                     ::hooks::event::GateKind::Tool,
-                ),
-            )
-            .await
-            .expect("a deny must resolve without waiting on the hung callback")
-            .expect("the hook lifecycle must remain durable");
+                    super::super::hook_dispatch::HookDispatchPolicy::Execute,
+                )
+                .await
+                .expect("the hook lifecycle must remain durable");
             assert!(matches!(
                 result.into_tool_decision(),
                 ::hooks::result::HookDecision::Deny { .. }
+            ));
+            tokio::task::yield_now().await;
+            assert_eq!(
+                observed_callbacks.borrow().as_slice(),
+                ["deny_cb".to_owned()].as_slice(),
+                "a callback after the first deny must have no external RPC side effect"
+            );
+
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let occurrence_id = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
+                        occurrence_id,
+                        event: chat_state::HookEventType::PreToolUse,
+                        cause: chat_state::HookCause::Tool { call_id },
+                        ..
+                    }) if call_id == "call_1" => Some(occurrence_id.clone()),
+                    _ => None,
+                })
+                .expect("the PreToolUse occurrence must be durable");
+            let projection = actor
+                .chat_state_handle
+                .hook_projection(occurrence_id)
+                .await
+                .expect("the completed occurrence must project");
+            assert!(matches!(
+                projection.runs.as_slice(),
+                [
+                    chat_state::HookHandlerLifecycle::Finished {
+                        outcome: chat_state::HookRunOutcome::Blocked,
+                        ..
+                    },
+                    chat_state::HookHandlerLifecycle::Skipped {
+                        reason: chat_state::HookRunSkipReason::PriorBlock,
+                    }
+                ]
             ));
         })
         .await;
@@ -524,9 +563,9 @@ async fn pre_tool_use_deny_feeds_reason_back_and_continues_turn() {
         .await;
 }
 
-/// The Stop client gate collects every deny as a block (no short-circuit).
+/// The Stop client gate stops after the first decisive callback.
 #[tokio::test(flavor = "current_thread")]
-async fn stop_client_gate_collects_denies() {
+async fn stop_client_gate_short_circuits_after_first_deny() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -597,10 +636,10 @@ async fn stop_client_gate_collects_denies() {
         .await;
 }
 
-/// `continue: false` becomes a force-stop (with `stopReason`) and `additionalContext`
-/// becomes non-error feedback, matching what file hooks express.
+/// `continue: false` becomes a force-stop and prevents later callbacks from
+/// contributing context or external side effects.
 #[tokio::test(flavor = "current_thread")]
-async fn stop_client_gate_carries_continue_false_and_context() {
+async fn stop_client_gate_force_stop_short_circuits_later_context() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -665,7 +704,7 @@ async fn stop_client_gate_carries_continue_false_and_context() {
                 .expect("continue:false captured");
             assert_eq!(prevent.hook_name, "client:cb_stop");
             assert_eq!(prevent.reason, "budget");
-            assert_eq!(result.additional_context, ["run the linter"]);
+            assert!(result.additional_context.is_empty());
         })
         .await;
 }
@@ -744,10 +783,10 @@ fn file_registry_with_stop_spec(
     registry
 }
 
-/// A file-hook force-stop skips the client run gate (its signals would be discarded)
-/// but still delivers the observe `grow/hooks/event` notification.
+/// A file-hook force-stop skips every later client callback without either a
+/// decision request or an observe notification side effect.
 #[tokio::test(flavor = "current_thread")]
-async fn file_force_stop_skips_client_gate_but_notifies() {
+async fn file_force_stop_skips_all_later_client_callbacks() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -809,20 +848,18 @@ async fn file_force_stop_skips_client_gate_but_notifies() {
                 matches!(decision, StopGateDecision::AllowStop),
                 "a file force-stop must end the turn"
             );
-            // Yield so the fire-and-forget notification lands.
             tokio::task::yield_now().await;
             assert_eq!(run_requests.get(), 0, "the client run gate must be skipped");
             assert_eq!(
                 observe_events.get(),
-                1,
-                "client callbacks must still see the turn end as an observe event"
+                0,
+                "a prior decisive result must prevent every later callback side effect"
             );
         })
         .await;
 }
 
-/// Two client callbacks both force-stop; attribution follows registration order even
-/// when that callback responds last (completion order must not decide it).
+/// The first registered client force-stop is the only callback invoked.
 #[tokio::test(flavor = "current_thread")]
 async fn client_force_stop_attribution_is_registration_ordered() {
     let local = tokio::task::LocalSet::new();
@@ -849,7 +886,6 @@ async fn client_force_stop_attribution_is_registration_ordered() {
                             let is_first = params["hookCallbackId"] == "cb_first";
                             tokio::task::spawn_local(async move {
                                 if is_first {
-                                    // The registration-order winner replies last.
                                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                                 }
                                 let reason = if is_first {

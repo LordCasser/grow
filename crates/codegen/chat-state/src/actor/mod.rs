@@ -640,6 +640,9 @@ impl ChatStateActor {
             } => {
                 let _ = reply.send(self.state.timeline.hook_projection(&occurrence_id));
             }
+            ChatStateCommand::GetCompletedHookProjections { reply } => {
+                let _ = reply.send(self.state.timeline.completed_hook_projections());
+            }
             ChatStateCommand::GetTimelineEvents { reply } => {
                 let _ = reply.send(self.state.timeline.events().to_vec());
             }

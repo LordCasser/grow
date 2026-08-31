@@ -679,6 +679,7 @@ pub struct HookExecuted {
 
 #[derive(Serialize)]
 pub struct HookBlocked {
+    pub occurrence_id: String,
     pub hook_name: String,
 }
 

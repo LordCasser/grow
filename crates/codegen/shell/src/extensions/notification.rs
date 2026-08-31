@@ -631,12 +631,6 @@ pub enum SessionUpdate {
         /// Reason for cancellation
         reason: AutoCompactCancelReason,
     },
-    /// A hook annotation message for the TUI scrollback.
-    /// Rendered inline with the preceding tool call block.
-    HookAnnotation {
-        /// The hook message to display (e.g., "🪝 Running post_tool_use hooks for `Edit`...")
-        message: String,
-    },
     /// Structured hook execution data attached to tool call blocks.
     HookExecution {
         /// Stable Timeline identity of the projected occurrence.
@@ -651,6 +645,9 @@ pub enum SessionUpdate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_id: Option<String>,
         runs: Vec<HookRunEntryDto>,
+        /// User-visible lines derived from the completed Timeline decision.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        annotations: Vec<String>,
     },
     /// Hooks registry changed (after reload or trust/untrust).
     /// Sent so the pager modal can auto-refresh if open.
