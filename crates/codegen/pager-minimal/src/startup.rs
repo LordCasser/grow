@@ -16,7 +16,7 @@ pub(super) enum MinimalStartupHint {
 
 pub(super) fn minimal_startup_hint(trust: &TrustState) -> MinimalStartupHint {
     match trust {
-        TrustState::Pending { workspace } => MinimalStartupHint::TrustFolder {
+        TrustState::Pending { workspace, .. } => MinimalStartupHint::TrustFolder {
             workspace: workspace.clone(),
         },
         TrustState::Done => MinimalStartupHint::Starting,
