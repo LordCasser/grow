@@ -5,9 +5,7 @@
 //! the local composer and the pre-admission Behavior latch.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-#[cfg(unix)]
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
