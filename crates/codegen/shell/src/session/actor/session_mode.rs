@@ -193,6 +193,121 @@ mod desired_state_tests {
     }
 
     #[tokio::test]
+    async fn picker_can_enter_plan_from_a_regular_normal_foreground() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                *actor.agent.borrow_mut() =
+                    super::super::tests::support::test_agent_with_plan_tools().await;
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(
+                    super::super::tests::support::running_task_stub("normal-turn"),
+                );
+
+                let projection = actor.behavior_availability_projection().await;
+                assert_eq!(
+                    projection
+                        .choice(tool_types::BehaviorId::Plan)
+                        .expect("Plan projection")
+                        .disposition,
+                    tool_types::BehaviorAvailabilityDisposition::Available,
+                );
+
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                assert!(
+                    actor
+                        .admit_behavior_selection(
+                            acp::SessionModeId::new("plan"),
+                            None,
+                            response_tx,
+                        )
+                        .await
+                );
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor
+                    .clone()
+                    .drain_behavior_selections(completion_tx)
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    response_rx.await.unwrap().unwrap(),
+                    BehaviorChangeOutcome::Applied,
+                );
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Plan,
+                );
+                assert_eq!(
+                    *actor.turn_behavior.lock(),
+                    tool_types::BehaviorId::Normal,
+                    "the already-admitted turn keeps its captured Behavior",
+                );
+                let state = actor.state.lock().await;
+                assert!(state.foreground.regular().is_some());
+                assert!(state.terminal_preemption_pending);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn picker_can_enter_workflow_from_a_regular_normal_foreground() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                Arc::get_mut(&mut actor)
+                    .expect("test actor must be uniquely owned")
+                    .background_workflows_enabled = true;
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(
+                    super::super::tests::support::running_task_stub("normal-turn"),
+                );
+
+                let projection = actor.behavior_availability_projection().await;
+                assert_eq!(
+                    projection
+                        .choice(tool_types::BehaviorId::Workflow)
+                        .expect("Workflow projection")
+                        .disposition,
+                    tool_types::BehaviorAvailabilityDisposition::Available,
+                );
+
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                assert!(
+                    actor
+                        .admit_behavior_selection(
+                            acp::SessionModeId::new("workflow"),
+                            None,
+                            response_tx,
+                        )
+                        .await
+                );
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor
+                    .clone()
+                    .drain_behavior_selections(completion_tx)
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    response_rx.await.unwrap().unwrap(),
+                    BehaviorChangeOutcome::Applied,
+                );
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Workflow,
+                );
+                assert_eq!(
+                    *actor.turn_behavior.lock(),
+                    tool_types::BehaviorId::Normal,
+                    "the already-admitted turn keeps its captured Behavior",
+                );
+                let state = actor.state.lock().await;
+                assert!(state.foreground.regular().is_some());
+                assert!(state.terminal_preemption_pending);
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn picker_projection_and_admission_share_the_host_foreground_rejection() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -765,9 +880,10 @@ impl SessionActor {
 
     /// Goal entry is an out-of-band control operation: from Normal/Clarify it
     /// may commit while their regular turn is still active, after which the
-    /// command-plane caller cancels that exact foreground turn. The generic
-    /// Behavior picker remains idle-only, and Plan/Workflow ownership rules
-    /// are unchanged.
+    /// command-plane caller cancels that exact foreground turn. The picker may
+    /// also enter Plan or Workflow from a Normal/Clarify turn; that turn keeps
+    /// its captured Behavior and observes the existing terminal-preemption
+    /// boundary.
     pub(super) async fn request_goal_behavior_entry(
         &self,
     ) -> Result<BehaviorChangeOutcome, acp::Error> {

@@ -140,6 +140,16 @@ impl OpenedSession {
                     io::ErrorKind::InvalidData,
                     "mandatory Timeline ledger is missing",
                 )
+            } else if crate::session::persistence::session_version_mismatch_from(&error).is_some() {
+                error
+            } else if error.kind() == io::ErrorKind::InvalidData {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid Timeline ledger (expected schema version {}): {error}",
+                        chat_state::TIMELINE_SCHEMA_VERSION,
+                    ),
+                )
             } else {
                 error
             }
@@ -543,11 +553,14 @@ impl JsonlStorageAdapter {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error),
             };
-            let events = match super::read_committed_jsonl_from_directory::<chat_state::SidebandEvent>(
+            let component = format!("Sideband schema for {sideband_id}");
+            let events = match Self::read_versioned_jsonl_from_directory::<chat_state::SidebandEvent>(
                 &sideband,
                 std::ffi::OsStr::new(super::TIMELINE_FILE),
                 "sideband Timeline ledger",
                 super::MAX_JSONL_ENTRY_BYTES,
+                &component,
+                u64::from(chat_state::SIDEBAND_SCHEMA_VERSION),
             ) {
                 Ok(events) => events,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -1780,6 +1793,60 @@ impl JsonlStorageAdapter {
         )
     }
 
+    fn read_versioned_jsonl_from_directory<T: serde::de::DeserializeOwned>(
+        directory: &super::ContainedDirectory,
+        name: &std::ffi::OsStr,
+        description: &str,
+        max_entry_bytes: u64,
+        component: &str,
+        current_version: u64,
+    ) -> io::Result<Vec<T>> {
+        let path = directory.display_path().join(name);
+        super::read_committed_jsonl_from_directory::<Box<serde_json::value::RawValue>>(
+            directory,
+            name,
+            description,
+            max_entry_bytes,
+        )?
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let value: serde_json::Value = serde_json::from_str(raw.get()).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{}: {error}", path.display(), index + 1),
+                )
+            })?;
+            let persisted_version = value
+                .get("version")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{}:{} has no valid schema version",
+                            path.display(),
+                            index + 1,
+                        ),
+                    )
+                })?;
+            if persisted_version != current_version {
+                return Err(crate::session::persistence::session_version_mismatch(
+                    component,
+                    persisted_version,
+                    current_version,
+                ));
+            }
+            serde_json::from_str(raw.get()).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{}: {error}", path.display(), index + 1),
+                )
+            })
+        })
+        .collect()
+    }
+
     /// Read every complete Timeline record. A final non-newline-terminated
     /// fragment was never committed and is ignored; every complete line is
     /// parsed strictly so interior corruption still fails closed.
@@ -1814,11 +1881,13 @@ impl JsonlStorageAdapter {
     fn read_timeline_from_directory(
         directory: &super::ContainedDirectory,
     ) -> io::Result<Vec<chat_state::TimelineEvent>> {
-        super::read_committed_jsonl_from_directory(
+        Self::read_versioned_jsonl_from_directory(
             directory,
             std::ffi::OsStr::new(super::TIMELINE_FILE),
             "mandatory Timeline ledger",
             super::MAX_JSONL_ENTRY_BYTES,
+            "Timeline schema",
+            u64::from(chat_state::TIMELINE_SCHEMA_VERSION),
         )
     }
     /// Append a session update to the updates.jsonl file, wrapping it in an envelope with timestamp.
@@ -2317,10 +2386,7 @@ impl JsonlStorageAdapter {
                 ),
             ));
         }
-        let summary = serde_json::from_slice::<Summary>(&bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        summary.validate_current_format()?;
-        Ok(summary)
+        crate::session::persistence::decode_summary(&bytes)
     }
     fn read_optional_json_sync<T: serde::de::DeserializeOwned>(
         &self,

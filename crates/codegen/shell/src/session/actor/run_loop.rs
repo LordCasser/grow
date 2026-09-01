@@ -95,6 +95,54 @@ pub(super) async fn latch_termination_and_cancel_controls(
     Ok(())
 }
 
+/// Atomically decide an idle unload against every Session-owned admission
+/// surface and, when idle, close them in the same critical section. In
+/// particular the Workflow manager lock must span the active-run read and
+/// `close_admission`; otherwise a detached ingress worker can admit a new Run
+/// between those two operations.
+async fn try_latch_idle_unload(
+    session: &SessionActor,
+    cmd_rx: &tokio::sync::mpsc::UnboundedReceiver<SessionCommand>,
+    respond_to: &tokio::sync::oneshot::Sender<bool>,
+) -> Result<bool, String> {
+    let _gate = session.step_control_gate.lock().await;
+    let mut workflow_admission = session.workflow_manager.lock().await;
+    let goal_status = session.goal_tracker.lock().status();
+    let public_workflow_active = workflow_admission.tracker().lock().has_active_run();
+    let has_parked_plan_approval = crate::session::pending_interaction::has_parked_plan_approval(
+        &session.pending_interactions,
+    );
+    let pending_behavior = {
+        let mut state = session.state.lock().await;
+        if respond_to.is_closed()
+            || session_has_work(
+                &state,
+                goal_status,
+                public_workflow_active,
+                has_parked_plan_approval,
+            )
+            || !cmd_rx.is_empty()
+        {
+            return Ok(false);
+        }
+        state.termination.request(TerminationState::Graceful);
+        if matches!(state.termination, TerminationState::Fatal) {
+            return Err("session already crossed a fatal persistence boundary".to_string());
+        }
+        state.pending_step_controls.cancel_for_shutdown();
+        state.pending_behavior_control.take()
+    };
+    if let Some(pending) = pending_behavior {
+        let _ = pending.responds_to.send(Err(
+            acp::Error::internal_error().data("session is shutting down")
+        ));
+    }
+    workflow_admission.close_admission();
+    session.workflow_service_shutdown.cancel();
+    session.idle_arbiter.notify_waiters();
+    Ok(true)
+}
+
 /// Cancel every queued owner except the exact foreground turn still settling.
 /// Shutdown cannot drop a `session/prompt` responder, and it cannot use FIFO
 /// position as a proxy for foreground ownership.
@@ -495,6 +543,79 @@ mod permission_mode_change_tests {
 #[cfg(test)]
 mod shutdown_queue_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn idle_unload_rejects_an_active_workflow_without_closing_admission() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                let tracker = actor.workflow_tracker().await;
+                tracker.lock().start_run(
+                    "wf_active".into(),
+                    "active".into(),
+                    "keep the session resident".into(),
+                    Vec::new(),
+                    None,
+                    None,
+                    crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
+                        "test-model",
+                        Some(sampling_types::ReasoningEffort::Medium),
+                        sampling_types::ModelImageInputKey::new(
+                            "test-model",
+                            "responses",
+                            "test-endpoint",
+                        ),
+                    )
+                    .unwrap(),
+                );
+                let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (respond_to, _response) = tokio::sync::oneshot::channel();
+
+                assert!(
+                    !try_latch_idle_unload(&actor, &cmd_rx, &respond_to)
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    actor
+                        .workflow_manager
+                        .lock()
+                        .await
+                        .admission_snapshot()
+                        .is_ok(),
+                    "a rejected unload must leave Workflow admission open"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn accepted_idle_unload_closes_workflow_admission() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (respond_to, _response) = tokio::sync::oneshot::channel();
+
+                assert!(
+                    try_latch_idle_unload(&actor, &cmd_rx, &respond_to)
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    actor
+                        .workflow_manager
+                        .lock()
+                        .await
+                        .admission_snapshot()
+                        .is_err(),
+                    "idle unload must close Workflow admission before acknowledgement"
+                );
+            })
+            .await;
+    }
 
     #[tokio::test]
     async fn shutdown_rejection_keeps_the_settling_owner_and_resolves_queued_prompts() {
@@ -2550,43 +2671,29 @@ pub(super) async fn run_session(
                     | SessionCommand::UnloadIfIdle { .. }) => {
                         let is_shutdown = matches!(&command, SessionCommand::Shutdown);
                         let mut unload_respond_to = None;
+                        let mut termination_latched = false;
                         if let SessionCommand::UnloadIfIdle { respond_to } = command {
-                            // This decision and the termination latch are
-                            // performed in one actor turn. The mailbox remains
-                            // physically open only for descendant Goal usage
-                            // settlement, then closes after child drain.
-                            let goal_status = session.goal_tracker.lock().status();
-                            let has_parked_plan_approval =
-                                crate::session::pending_interaction::has_parked_plan_approval(
-                                    &session.pending_interactions,
-                                );
-                            let busy = {
-                                let state = session.state.lock().await;
-                                session_has_work(
-                                    &state,
-                                    goal_status,
-                                    has_parked_plan_approval,
-                                )
-                            } || !cmd_rx.is_empty();
-                            // The leader bounds this transaction. If its
-                            // waiter timed out while the actor was occupied,
-                            // the unload request is cancelled: shutting down
-                            // now would leave a dead actor behind a retained
-                            // session handle.
-                            if respond_to.is_closed() {
-                                continue;
-                            }
-                            if busy {
-                                let _ = respond_to.send(false);
-                                continue;
+                            match try_latch_idle_unload(&session, &cmd_rx, &respond_to).await {
+                                Ok(true) => termination_latched = true,
+                                Ok(false) => {
+                                    let _ = respond_to.send(false);
+                                    continue;
+                                }
+                                Err(error) => {
+                                    tracing::error!(%error, "failed to accept idle session unload");
+                                    let _ = respond_to.send(false);
+                                    terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
+                                    return;
+                                }
                             }
                             unload_respond_to = Some(respond_to);
                         }
-                        if let Err(error) = latch_termination_and_cancel_controls(
-                            &session,
-                            TerminationState::Graceful,
-                        )
-                        .await
+                        if !termination_latched
+                            && let Err(error) = latch_termination_and_cancel_controls(
+                                &session,
+                                TerminationState::Graceful,
+                            )
+                            .await
                         {
                             tracing::error!(%error, "failed to accept graceful session shutdown");
                             if let Some(respond_to) = unload_respond_to.take() {

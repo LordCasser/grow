@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::{PromptOrigin, TurnKind};
 
 /// Scoped ACP control route for a live child actor. Dropping the child run
 /// removes the route even on cancellation or an early error return.
@@ -40,6 +41,14 @@ enum WorktreeMaterialization {
 pub(super) fn canonical_total_tokens(totals: &chat_state::UsageTotals) -> u64 {
     totals.total_tokens()
 }
+
+/// A delegated task is the child's externally submitted user-role input, not
+/// an autonomous child turn. Keeping origin and turn kind paired prevents the
+/// input inbox from admitting an identity that `TurnStarted` cannot reserve.
+pub(super) fn child_task_prompt_identity() -> (PromptOrigin, TurnKind) {
+    (PromptOrigin::User, TurnKind::User)
+}
+
 pub(super) fn usage_is_incomplete(
     ledger_incomplete: bool,
     cancellation_may_hide_usage: bool,
@@ -1539,11 +1548,12 @@ pub(crate) async fn run_shell_child(
     let (prompt_tx, prompt_rx) = oneshot::channel();
     let prompt_text = task_prompt_text;
     let child_prompt_id = uuid::Uuid::now_v7().to_string();
+    let (prompt_origin, turn_kind) = child_task_prompt_identity();
     let _ = child_handle.cmd_tx.send(SessionCommand::QueuePrompt {
         prompt_id: child_prompt_id.clone(),
         prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
-        origin: crate::session::PromptOrigin::User,
-        turn_kind: crate::session::TurnKind::Internal,
+        origin: prompt_origin,
+        turn_kind,
         client_identifier: None,
         screen_mode: None,
         verbatim: true,

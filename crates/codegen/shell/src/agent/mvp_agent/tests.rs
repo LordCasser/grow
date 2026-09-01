@@ -1414,6 +1414,61 @@ async fn wait_for_in_flight_load_blocks_until_load_completes() {
         })
         .await;
 }
+/// Rewind used to bypass the shared load barrier and could report
+/// `session not found` while the reconnect-replayed `session/load` was still
+/// publishing the actor. Exercise the extension boundary, not only the helper.
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_points_waits_for_in_flight_session_load() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let agent = std::rc::Rc::new(build_minimal_agent_for_tests());
+            let sid = acp::SessionId::new("sess-rewind-loading");
+            let guard = agent.begin_session_load(&sid);
+            let request = acp::ExtRequest::new(
+                "grow/rewind/points",
+                serde_json::value::to_raw_value(&serde_json::json!({
+                    "sessionId": "sess-rewind-loading",
+                }))
+                .unwrap()
+                .into(),
+            );
+            let request_agent = agent.clone();
+            let waiter = tokio::task::spawn_local(async move {
+                crate::extensions::rewind::handle(&request_agent, &request).await
+            });
+
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            assert!(
+                !waiter.is_finished(),
+                "Rewind must wait while the target session is loading"
+            );
+
+            let (handle, mut commands) = make_test_handle_with_receiver("test-model", None);
+            agent.sessions.borrow_mut().insert(sid, handle);
+            drop(guard);
+            let command = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                commands.recv(),
+            )
+            .await
+            .expect("Rewind command must arrive after load publication")
+            .expect("Rewind command channel must remain open");
+            let crate::session::SessionCommand::GetRewindPoints { respond_to } = command else {
+                panic!("unexpected command after Rewind lookup");
+            };
+            respond_to
+                .send(crate::session::RewindPointsResponse {
+                    rewind_points: Vec::new(),
+                })
+                .expect("Rewind response receiver must remain open");
+
+            waiter
+                .await
+                .expect("Rewind task must not panic")
+                .expect("Rewind must resolve after session/load publishes the actor");
+        })
+        .await;
+}
 /// A failed load (guard dropped WITHOUT registering the session) also
 /// wakes waiters — they re-check, find nothing, and the caller surfaces
 /// the regular "unknown session id" error rather than hanging.

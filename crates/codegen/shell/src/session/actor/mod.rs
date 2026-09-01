@@ -1259,13 +1259,14 @@ fn is_session_idle_for_injection(state: &AdmissionState) -> bool {
         && state.pending_inputs.is_empty()
         && !state.notifications_suppressed
 }
-/// Canonical actor-owned blocker for idle unload. An Active Goal remains
-/// resident because it owns the right to request the next idle continuation.
+/// Canonical actor-owned blocker for idle unload. Active Goal and Workflow
+/// runtimes remain resident because they own work beyond the foreground turn.
 /// A parked Plan approval is also live work even though its reverse-request
 /// runs in a detached task.
 fn session_has_work(
     state: &AdmissionState,
     goal_status: Option<crate::session::goal_tracker::GoalStatus>,
+    public_workflow_active: bool,
     has_parked_plan_approval: bool,
 ) -> bool {
     !state.foreground.is_idle()
@@ -1277,6 +1278,7 @@ fn session_has_work(
         || state.applying_behavior_control.is_some()
         || !state.pending_inputs.is_empty()
         || goal_status == Some(crate::session::goal_tracker::GoalStatus::Active)
+        || public_workflow_active
         || has_parked_plan_approval
 }
 /// Data carried from prepare_tool_call → dispatch_tool → finalize.

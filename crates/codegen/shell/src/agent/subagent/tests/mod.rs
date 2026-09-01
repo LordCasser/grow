@@ -1,7 +1,8 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use super::handle_request::{
-    canonical_total_tokens, record_subagent_usage, usage_is_incomplete,
+    canonical_total_tokens, child_task_prompt_identity, record_subagent_usage,
+    usage_is_incomplete,
 };
 use crate::test_support::lsp_runtime::{
     DummyLspDispatch, ctx_with_toggle, test_gateway_with_receiver,
@@ -9,6 +10,15 @@ use crate::test_support::lsp_runtime::{
 use tools::implementations::grow_build::task::coordinator::{
     ChildCompletion, CompletionDisposition,
 };
+
+#[test]
+fn delegated_task_is_a_child_user_turn() {
+    let (origin, turn_kind) = child_task_prompt_identity();
+
+    assert_eq!(origin, crate::session::PromptOrigin::User);
+    assert_eq!(turn_kind, crate::session::TurnKind::User);
+    assert_eq!(origin.turn_identity(turn_kind).turn_kind, "user");
+}
 
 #[test]
 fn resume_authority_follows_immediate_security_parent() {

@@ -240,10 +240,7 @@ fn read_summary_contained(
             "summary.json is empty (0 bytes)",
         ));
     }
-    let summary = serde_json::from_slice::<Summary>(&bytes)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    summary.validate_current_format()?;
-    Ok(summary)
+    crate::session::persistence::decode_summary(&bytes)
 }
 
 #[cfg(all(test, any(unix, windows)))]

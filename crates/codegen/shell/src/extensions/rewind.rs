@@ -10,7 +10,6 @@
 //! response is identical either way.
 use super::{ExtResult, parse_params, to_raw_response};
 use crate::agent::MvpAgent;
-use crate::session::handle::SessionHandle;
 use crate::session::{RewindMode, RewindRequest, SessionCommand};
 use acp_transport::protocol as acp;
 use serde::Deserialize;
@@ -56,20 +55,22 @@ impl RewindSessionRequest {
 struct RewindPointsRequest {
     session_id: String,
 }
-/// Look up a `SessionHandle` by id string, or return a `resource_not_found`
-/// `acp::Error`. Used by both arms below.
-fn lookup_session(agent: &MvpAgent, session_id: String) -> Result<SessionHandle, acp::Error> {
+/// Resolve a primary session through the same reconnect/load barrier as other
+/// user-facing session controls. A bare roster lookup can race the replayed
+/// `session/load` and report a false `session not found`.
+async fn lookup_session(
+    agent: &MvpAgent,
+    session_id: String,
+) -> Result<crate::session::handle::SessionHandle, acp::Error> {
     agent
-        .sessions
-        .borrow()
-        .get(&acp::SessionId::new(session_id))
-        .cloned()
+        .session_handle_waiting_for_load(&acp::SessionId::new(session_id))
+        .await
         .ok_or_else(|| acp::Error::resource_not_found(Some("session not found".into())))
 }
 async fn handle_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let request: RewindSessionRequest = parse_params(args)?;
     let target_prompt_index = request.prompt_index_for_local()?;
-    let handle = lookup_session(agent, request.session_id)?;
+    let handle = lookup_session(agent, request.session_id).await?;
     let (tx, rx) = oneshot::channel();
     handle
         .cmd_tx
@@ -90,7 +91,7 @@ async fn handle_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 }
 async fn handle_points(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let request: RewindPointsRequest = parse_params(args)?;
-    let handle = lookup_session(agent, request.session_id)?;
+    let handle = lookup_session(agent, request.session_id).await?;
     let (tx, rx) = oneshot::channel();
     handle
         .cmd_tx

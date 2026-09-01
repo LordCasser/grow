@@ -2192,7 +2192,118 @@ async fn load_rejects_a_non_current_session_format() {
 
     let error = adapter.load_session_without_updates(&info).await.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("unsupported session format"));
+    let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
+    assert_eq!(mismatch.component, "session format");
+    assert_eq!(mismatch.persisted, u64::from(crate::session::persistence::SESSION_FORMAT_VERSION - 1));
+    assert_eq!(mismatch.current, u64::from(crate::session::persistence::SESSION_FORMAT_VERSION));
+}
+
+#[tokio::test]
+async fn load_reports_the_persisted_and_expected_timeline_schema_versions() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    append_timeline_seed(&adapter, &info, vec![ConversationItem::user("hello")]).await;
+
+    let path = adapter.timeline_file(&info);
+    let mut event: serde_json::Value = serde_json::from_slice(
+        std::fs::read(&path)
+            .unwrap()
+            .trim_ascii(),
+    )
+    .unwrap();
+    let persisted_version = u64::from(chat_state::TIMELINE_SCHEMA_VERSION) + 1;
+    event["version"] = persisted_version.into();
+    event["future_field"] = true.into();
+    event.as_object_mut().unwrap().remove("type");
+    event.as_object_mut().unwrap().remove("event");
+    let mut bytes = serde_json::to_vec(&event).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(path, bytes).unwrap();
+
+    let error = adapter.load_session_without_updates(&info).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
+    assert_eq!(mismatch.component, "Timeline schema");
+    assert_eq!(mismatch.persisted, persisted_version);
+    assert_eq!(mismatch.current, u64::from(chat_state::TIMELINE_SCHEMA_VERSION));
+    let acp_error = crate::session::persistence::io_error_to_acp(&error);
+    assert_eq!(
+        acp_error.message,
+        format!(
+            "Cannot restore this session: persisted Timeline schema version {persisted_version} is incompatible with current version {}. Start a new session.",
+            chat_state::TIMELINE_SCHEMA_VERSION,
+        )
+    );
+}
+
+#[tokio::test]
+async fn load_reports_the_first_of_multiple_version_incompatibilities() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    let mut summary = adapter.init_session(&info, default_model_id()).await.unwrap();
+    append_timeline_seed(&adapter, &info, vec![ConversationItem::user("hello")]).await;
+
+    summary.session_format_version = crate::session::persistence::SESSION_FORMAT_VERSION - 1;
+    let summary_bytes = serde_json::to_vec_pretty(&summary).unwrap();
+    crate::session::storage::write_bytes_atomic(&adapter.summary_file(&info), &summary_bytes)
+        .unwrap();
+
+    let timeline_path = adapter.timeline_file(&info);
+    let mut timeline_event: serde_json::Value = serde_json::from_slice(
+        std::fs::read(&timeline_path)
+            .unwrap()
+            .trim_ascii(),
+    )
+    .unwrap();
+    timeline_event["version"] =
+        (u64::from(chat_state::TIMELINE_SCHEMA_VERSION) + 1).into();
+    let mut timeline_bytes = serde_json::to_vec(&timeline_event).unwrap();
+    timeline_bytes.push(b'\n');
+    std::fs::write(timeline_path, timeline_bytes).unwrap();
+
+    let error = adapter.load_session_without_updates(&info).await.unwrap_err();
+    let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
+    assert_eq!(mismatch.component, "session format");
+}
+
+#[tokio::test]
+async fn sideband_schema_is_checked_before_event_shape() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let session = adapter.open_session(&info).unwrap().directory;
+    let name = std::ffi::OsStr::new("sideband-version-test.jsonl");
+    let persisted = u64::from(chat_state::SIDEBAND_SCHEMA_VERSION) + 1;
+    let mut bytes = serde_json::to_vec(&serde_json::json!({
+        "version": persisted,
+        "future_field": true,
+    }))
+    .unwrap();
+    bytes.push(b'\n');
+    std::fs::write(session.display_path().join(name), bytes).unwrap();
+
+    let error = JsonlStorageAdapter::read_versioned_jsonl_from_directory::<
+        chat_state::SidebandEvent,
+    >(
+        &session,
+        name,
+        "sideband Timeline ledger",
+        super::super::MAX_JSONL_ENTRY_BYTES,
+        "Sideband schema for test-sideband",
+        u64::from(chat_state::SIDEBAND_SCHEMA_VERSION),
+    )
+    .unwrap_err();
+    let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
+    assert_eq!(mismatch.component, "Sideband schema for test-sideband");
+    assert_eq!(mismatch.persisted, persisted);
+    assert_eq!(
+        mismatch.current,
+        u64::from(chat_state::SIDEBAND_SCHEMA_VERSION),
+    );
 }
 
 #[tokio::test]

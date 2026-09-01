@@ -2538,9 +2538,10 @@ impl AgentSession {
     /// structured `BehaviorAvailability` projection arrives.
     ///
     /// Signals (any true → available):
-    /// 1. `available_tools` is `None` (the shell has not published the
-    ///    authoritative snapshot yet), or `Some(_)` and contains the
-    ///    `workflow` tool.
+    /// 1. Both tool and command discovery are still empty, or the published
+    ///    tool snapshot contains the `workflow` tool. A non-empty command
+    ///    catalog is already a bootstrap capability signal, so it must not be
+    ///    overridden merely because the separate tool snapshot is pending.
     /// 2. A Workflow runtime slash command is advertised.
     /// 3. `has_workflow_runs` — workflows stay selectable while a run is known
     ///    to the pager (running or history).
@@ -2554,12 +2555,13 @@ impl AgentSession {
         available_commands: &[acp::AvailableCommand],
         has_workflow_runs: bool,
     ) -> bool {
+        let discovery_unknown = available_tools.is_none() && available_commands.is_empty();
         let has_workflow_tool =
-            available_tools.is_none_or(|tools| tools.contains(WORKFLOW_TOOL_NAME));
+            available_tools.is_some_and(|tools| tools.contains(WORKFLOW_TOOL_NAME));
         let has_workflow_command = available_commands
             .iter()
             .any(|c| c.name == WORKFLOW_TOOL_NAME || c.name == WORKFLOW_RUN_COMMAND_NAME);
-        has_workflow_tool || has_workflow_command || has_workflow_runs
+        discovery_unknown || has_workflow_tool || has_workflow_command || has_workflow_runs
     }
     /// Process an ACP session update. Returns true if scrollback was modified.
     pub fn handle_update(
@@ -2888,6 +2890,14 @@ mod tests {
             &[],
             false
         ));
+        let unrelated = [acp::AvailableCommand::new(
+            "goal".to_string(),
+            "Manage Goal".to_string(),
+        )];
+        assert!(
+            !AgentSession::bootstrap_workflow_support(None, &unrelated, false),
+            "a known non-Workflow command catalog must not be treated as total discovery absence"
+        );
     }
 
     #[test]

@@ -79,7 +79,7 @@ async fn goal_failure_keeps_its_origin_across_terminalization() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn only_active_goal_keeps_an_idle_session_resident() {
+async fn active_control_runtimes_keep_an_idle_session_resident() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let (gateway_tx, _gateway_rx) =
@@ -88,25 +88,30 @@ async fn only_active_goal_keeps_an_idle_session_resident() {
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             let state = actor.state.lock().await;
-            assert!(!session_has_work(&state, None, false));
+            assert!(!session_has_work(&state, None, false, false));
             assert!(session_has_work(
                 &state,
                 Some(crate::session::goal_tracker::GoalStatus::Active),
                 false,
+                false,
             ));
+            assert!(
+                session_has_work(&state, None, true, false),
+                "an active Workflow run must keep its owning session resident"
+            );
             for stopped in [
                 crate::session::goal_tracker::GoalStatus::Paused,
                 crate::session::goal_tracker::GoalStatus::Blocked,
                 crate::session::goal_tracker::GoalStatus::BudgetLimited,
                 crate::session::goal_tracker::GoalStatus::Complete,
             ] {
-                assert!(!session_has_work(&state, Some(stopped), false));
+                assert!(!session_has_work(&state, Some(stopped), false, false));
             }
             drop(state);
             let mut state = actor.state.lock().await;
             state.behavior_control_worker_active = true;
             assert!(
-                session_has_work(&state, None, false),
+                session_has_work(&state, None, false, false),
                 "an idle Behavior worker must fence actor unload"
             );
             state.behavior_control_worker_active = false;

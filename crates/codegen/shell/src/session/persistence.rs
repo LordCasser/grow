@@ -31,6 +31,44 @@ pub const MAX_REWIND_TRANSACTION_BYTES: u64 = 16 * 1024;
 pub(crate) const MODEL_CHANGE_SCOPE: &str = "model";
 pub(crate) const MODEL_CHANGE_NAME: &str = "changed";
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SessionVersionMismatch {
+    pub(crate) component: String,
+    pub(crate) persisted: u64,
+    pub(crate) current: u64,
+}
+
+impl std::fmt::Display for SessionVersionMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "persisted {} version {} is incompatible with current version {}",
+            self.component, self.persisted, self.current,
+        )
+    }
+}
+
+impl std::error::Error for SessionVersionMismatch {}
+
+pub(crate) fn session_version_mismatch(
+    component: impl Into<String>,
+    persisted: u64,
+    current: u64,
+) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        SessionVersionMismatch {
+            component: component.into(),
+            persisted,
+            current,
+        },
+    )
+}
+
+pub(crate) fn session_version_mismatch_from(error: &io::Error) -> Option<&SessionVersionMismatch> {
+    error.get_ref()?.downcast_ref()
+}
+
 /// Build the canonical Timeline fact for a user-visible model selection.
 ///
 /// The catalog IDs are the stable session selection; provider model names are
@@ -515,14 +553,37 @@ pub(crate) fn read_summary_from_dir(session_dir: &Path) -> io::Result<Summary> {
         "session summary",
         crate::session::storage::MAX_SESSION_SUMMARY_BYTES,
     )?;
-    let summary: Summary = serde_json::from_slice(&bytes)
+    decode_summary(&bytes).map_err(|error| {
+        if session_version_mismatch_from(&error).is_some() {
+            error
+        } else {
+            io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+        }
+    })
+}
+
+pub(crate) fn decode_summary(bytes: &[u8]) -> io::Result<Summary> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    summary.validate_current_format().map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{}: {error}", path.display()),
-        )
-    })?;
+    let persisted = value
+        .get("session_format_version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session summary has no valid format version",
+            )
+        })?;
+    if persisted != u64::from(SESSION_FORMAT_VERSION) {
+        return Err(session_version_mismatch(
+            "session format",
+            persisted,
+            u64::from(SESSION_FORMAT_VERSION),
+        ));
+    }
+    let summary: Summary = serde_json::from_slice(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    summary.validate_current_format()?;
     Ok(summary)
 }
 
@@ -1112,12 +1173,10 @@ pub fn default_model_id() -> crate::agent::models::ModelId {
 impl Summary {
     pub fn validate_current_format(&self) -> io::Result<()> {
         if self.session_format_version != SESSION_FORMAT_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "unsupported session format {}; expected {} (legacy Chat snapshots are not loadable)",
-                    self.session_format_version, SESSION_FORMAT_VERSION
-                ),
+            return Err(session_version_mismatch(
+                "session format",
+                u64::from(self.session_format_version),
+                u64::from(SESSION_FORMAT_VERSION),
             ));
         }
         match (&self.title, &self.title_source, self.title_event_seq) {
@@ -1541,7 +1600,13 @@ mod title_projection_tests {
             "session_format_version": 2,
             "current_model_id": "model"
         });
-        assert!(serde_json::from_value::<Summary>(legacy).is_err());
+        assert!(serde_json::from_value::<Summary>(legacy.clone()).is_err());
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        let error = decode_summary(&bytes).unwrap_err();
+        let mismatch = session_version_mismatch_from(&error).unwrap();
+        assert_eq!(mismatch.component, "session format");
+        assert_eq!(mismatch.persisted, 2);
+        assert_eq!(mismatch.current, u64::from(SESSION_FORMAT_VERSION));
     }
 
     #[test]
@@ -2084,6 +2149,22 @@ impl SessionPersistence {
 /// Map a persistence `io::Error` into an `acp::Error` with a human-friendly
 /// `message` and a stable `data.code` for log aggregation.
 pub(crate) fn io_error_to_acp(e: &io::Error) -> acp::Error {
+    if let Some(mismatch) = session_version_mismatch_from(e) {
+        return acp::Error::new(
+            acp::ErrorCode::InternalError.into(),
+            format!(
+                "Cannot restore this session: persisted {} version {} is incompatible with current version {}. Start a new session.",
+                mismatch.component, mismatch.persisted, mismatch.current,
+            ),
+        )
+        .data(Some(serde_json::json!({
+            "code": "SESSION_VERSION_INCOMPATIBLE",
+            "component": mismatch.component,
+            "persistedVersion": mismatch.persisted,
+            "currentVersion": mismatch.current,
+        })));
+    }
+
     // Unix: ENOSPC / EDQUOT. Windows: ERROR_DISK_FULL (112). Also accept
     // `ErrorKind::StorageFull` when no raw OS code is present.
     #[cfg(unix)]
@@ -2096,6 +2177,17 @@ pub(crate) fn io_error_to_acp(e: &io::Error) -> acp::Error {
     #[cfg(windows)]
     let is_disk_full_os = matches!(e.raw_os_error(), Some(ERROR_DISK_FULL));
     let is_disk_full = is_disk_full_os || e.kind() == io::ErrorKind::StorageFull;
+
+    if e.kind() == io::ErrorKind::InvalidData {
+        return acp::Error::new(
+            acp::ErrorCode::InternalError.into(),
+            format!("Session data is incompatible or corrupt: {e}"),
+        )
+        .data(Some(serde_json::json!({
+            "code": "FS_INVALID_DATA",
+            "detail": e.to_string(),
+        })));
+    }
 
     let (message, code) = if is_disk_full {
         ("No space left on device", "FS_DISK_QUOTA_EXCEEDED")
@@ -2119,7 +2211,7 @@ pub(crate) fn io_error_to_acp(e: &io::Error) -> acp::Error {
 
 #[cfg(test)]
 mod io_error_to_acp_tests {
-    use super::io_error_to_acp;
+    use super::{io_error_to_acp, session_version_mismatch};
     use std::io;
 
     #[test]
@@ -2127,6 +2219,33 @@ mod io_error_to_acp_tests {
         let acp_err = io_error_to_acp(&io::Error::from(io::ErrorKind::StorageFull));
         assert_eq!(acp_err.message, "No space left on device");
         assert_eq!(acp_err.data.unwrap()["code"], "FS_DISK_QUOTA_EXCEEDED");
+    }
+
+    #[test]
+    fn invalid_session_data_preserves_the_specific_reason() {
+        let acp_err = io_error_to_acp(&io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported timeline schema version 23; expected 24",
+        ));
+        assert_eq!(
+            acp_err.message,
+            "Session data is incompatible or corrupt: unsupported timeline schema version 23; expected 24"
+        );
+        assert_eq!(acp_err.data.unwrap()["code"], "FS_INVALID_DATA");
+    }
+
+    #[test]
+    fn version_mismatch_explains_why_restore_is_impossible() {
+        let acp_err = io_error_to_acp(&session_version_mismatch("Timeline schema", 23, 24));
+        assert_eq!(
+            acp_err.message,
+            "Cannot restore this session: persisted Timeline schema version 23 is incompatible with current version 24. Start a new session."
+        );
+        let data = acp_err.data.unwrap();
+        assert_eq!(data["code"], "SESSION_VERSION_INCOMPATIBLE");
+        assert_eq!(data["component"], "Timeline schema");
+        assert_eq!(data["persistedVersion"], 23);
+        assert_eq!(data["currentVersion"], 24);
     }
 }
 

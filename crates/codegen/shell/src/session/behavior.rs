@@ -451,9 +451,11 @@ impl BehaviorCoordinator {
                             && matches!(source, BehaviorId::Normal | BehaviorId::Clarify))
                 }
                 BehaviorForeground::Regular => {
-                    authority == BehaviorRequestAuthority::GoalLifecycle
-                        && target == BehaviorId::Goal
-                        && matches!(source, BehaviorId::Normal | BehaviorId::Clarify)
+                    matches!(source, BehaviorId::Normal | BehaviorId::Clarify)
+                        && ((authority == BehaviorRequestAuthority::Picker
+                            && matches!(target, BehaviorId::Plan | BehaviorId::Workflow))
+                            || (authority == BehaviorRequestAuthority::GoalLifecycle
+                                && target == BehaviorId::Goal))
                 }
                 BehaviorForeground::Busy => false,
             };
@@ -1372,6 +1374,28 @@ mod tests {
             foreground: BehaviorForeground::Regular,
             ..BehaviorSwitchFacts::default()
         };
+        assert_eq!(
+            controller
+                .assess_switch(
+                    BehaviorId::Plan,
+                    &regular_foreground,
+                    BehaviorRequestAuthority::Picker,
+                )
+                .disposition,
+            BehaviorAvailabilityDisposition::Available,
+            "the picker may select Plan for the next boundary of a Normal turn"
+        );
+        assert_eq!(
+            controller
+                .assess_switch(
+                    BehaviorId::Workflow,
+                    &regular_foreground,
+                    BehaviorRequestAuthority::Picker,
+                )
+                .disposition,
+            BehaviorAvailabilityDisposition::Available,
+            "the picker may select Workflow for the next boundary of a Normal turn"
+        );
         assert_eq!(
             controller
                 .assess_switch(

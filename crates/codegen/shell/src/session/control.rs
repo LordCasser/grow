@@ -65,6 +65,49 @@ impl SessionControlSnapshot {
         self.architecture_version == SESSION_CONTROL_ARCHITECTURE_VERSION
     }
 
+    fn decode_persisted(value: serde_json::Value) -> std::io::Result<Self> {
+        let architecture_version = value
+            .get("architecture_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session control snapshot has no valid architecture version",
+                )
+            })?;
+        if architecture_version != u64::from(SESSION_CONTROL_ARCHITECTURE_VERSION) {
+            return Err(crate::session::persistence::session_version_mismatch(
+                "Session Control architecture",
+                architecture_version,
+                u64::from(SESSION_CONTROL_ARCHITECTURE_VERSION),
+            ));
+        }
+        if let Some(goal) = value.get("goal").filter(|goal| !goal.is_null()) {
+            let goal_architecture = goal
+                .get("architecture_version")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Goal snapshot has no valid architecture version",
+                    )
+                })?;
+            if goal_architecture
+                != u64::from(crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION)
+            {
+                return Err(crate::session::persistence::session_version_mismatch(
+                    "Goal architecture",
+                    goal_architecture,
+                    u64::from(crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION),
+                ));
+            }
+        }
+        let snapshot: Self = serde_json::from_value(value)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
     fn retired_context_layers(&self) -> Vec<chat_state::ControlContextLayer> {
         let plan_phase_active = self.behavior.behavior() == tool_types::BehaviorId::Plan;
         let goal_definition_active = self.behavior.behavior() == tool_types::BehaviorId::Goal
@@ -83,12 +126,10 @@ impl SessionControlSnapshot {
 
     fn validate(&self) -> std::io::Result<()> {
         if !self.architecture_is_current() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "unsupported session control architecture {}",
-                    self.architecture_version
-                ),
+            return Err(crate::session::persistence::session_version_mismatch(
+                "Session Control architecture",
+                u64::from(self.architecture_version),
+                u64::from(SESSION_CONTROL_ARCHITECTURE_VERSION),
             ));
         }
         if self.agent_name.trim().is_empty() {
@@ -145,6 +186,14 @@ impl SessionControlSnapshot {
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         }
         if let Some(goal) = self.goal.as_ref() {
+            if goal.architecture_version != crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION
+            {
+                return Err(crate::session::persistence::session_version_mismatch(
+                    "Goal architecture",
+                    u64::from(goal.architecture_version),
+                    u64::from(crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION),
+                ));
+            }
             crate::session::goal_tracker::GoalTracker::validate_snapshot(goal)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         }
@@ -225,9 +274,7 @@ impl SessionControlSnapshot {
             chat_state::TimelineEventKind::Control(control) => Some(control),
             _ => None,
         }) {
-            let snapshot: Self = serde_json::from_value(control.snapshot.clone())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            snapshot.validate()?;
+            let snapshot = Self::decode_persisted(control.snapshot.clone())?;
             if snapshot.control_revision != control.revision {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -256,9 +303,7 @@ impl SessionControlSnapshot {
             chat_state::TimelineEventKind::Control(control) => Some(control),
             _ => None,
         }) {
-            let snapshot: Self = serde_json::from_value(control.snapshot.clone())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            snapshot.validate()?;
+            let snapshot = Self::decode_persisted(control.snapshot.clone())?;
             if let Some(receipt) = snapshot.applied_control {
                 receipts.push(receipt);
             }
@@ -534,6 +579,67 @@ mod tests {
 
         let error = SessionControlSnapshot::latest_from_timeline(timeline.events()).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn control_architecture_is_checked_before_snapshot_shape() {
+        let persisted = u64::from(SESSION_CONTROL_ARCHITECTURE_VERSION) + 1;
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Control(
+                chat_state::ControlEvent {
+                    revision: 1,
+                    snapshot: serde_json::json!({
+                        "architecture_version": persisted,
+                        "future_field": true,
+                    }),
+                    retired_context_layers: vec![],
+                    model_contexts: vec![],
+                },
+            ))
+            .unwrap();
+
+        let error = SessionControlSnapshot::latest_from_timeline(timeline.events()).unwrap_err();
+        let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
+        assert_eq!(mismatch.component, "Session Control architecture");
+        assert_eq!(mismatch.persisted, persisted);
+        assert_eq!(
+            mismatch.current,
+            u64::from(SESSION_CONTROL_ARCHITECTURE_VERSION),
+        );
+    }
+
+    #[test]
+    fn nested_goal_architecture_is_reported_separately() {
+        let persisted = u64::from(crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION) - 1;
+        let snapshot = SessionControlSnapshot::new(
+            1,
+            "grow",
+            crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
+            Some(goal(crate::session::goal_tracker::GoalStatus::Active)),
+        );
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        value["goal"]["architecture_version"] = persisted.into();
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Control(
+                chat_state::ControlEvent {
+                    revision: 1,
+                    snapshot: value,
+                    retired_context_layers: vec![],
+                    model_contexts: vec![],
+                },
+            ))
+            .unwrap();
+
+        let error = SessionControlSnapshot::latest_from_timeline(timeline.events()).unwrap_err();
+        let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
+        assert_eq!(mismatch.component, "Goal architecture");
+        assert_eq!(mismatch.persisted, persisted);
+        assert_eq!(
+            mismatch.current,
+            u64::from(crate::session::goal_tracker::GOAL_ARCHITECTURE_VERSION),
+        );
     }
 
     #[test]
