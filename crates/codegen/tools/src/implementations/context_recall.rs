@@ -70,11 +70,13 @@ impl crate::types::tool_metadata::ToolMetadata for ContextRecallImpl {
     }
 
     fn description_template(&self) -> &str {
-        "Recall a relevant fact, decision, constraint, or piece of prior work from conversation \
-         context unloaded by compaction. This is a model-assisted retrieval operation over the \
-         calling agent's own immutable session history: describe what you need, and a read-only \
-         Sideband searches that history and returns a concise recollection. Use it only when the \
-         compacted summary does not contain a detail needed for the current task. It does not \
+        "Use only when the current conversation contains a compaction summary and that summary \
+         omits a specific fact, decision, constraint, or piece of prior work required for the \
+         current task. Search only conversation context unloaded by that completed compaction. \
+         Never use this tool to inspect context that is still visible, to decide how to continue \
+         current work, or to search source code, issues, the web, or cross-session memory. Provide \
+         a specific description of the missing detail. A read-only Sideband searches the calling \
+         agent's own immutable session history and returns a concise recollection; it does not \
          restore or expand old messages into the active conversation."
     }
 }
@@ -148,6 +150,7 @@ impl tool_runtime::Tool for ContextRecallImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::tool_metadata::ToolMetadata;
 
     #[test]
     fn recall_query_must_be_specific_and_bounded() {
@@ -169,6 +172,20 @@ mod tests {
             }
             .validate()
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn description_scopes_recall_to_missing_compacted_context() {
+        let description = ContextRecallImpl.description_template();
+        assert!(
+            description.starts_with(
+                "Use only when the current conversation contains a compaction summary"
+            )
+        );
+        assert!(description.contains("Search only conversation context unloaded"));
+        assert!(
+            description.contains("Never use this tool to inspect context that is still visible")
         );
     }
 }

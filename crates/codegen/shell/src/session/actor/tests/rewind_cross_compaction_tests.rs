@@ -1,4 +1,6 @@
-use super::support::{create_test_actor, record_test_prompt, seed_test_timeline};
+use super::support::{
+    create_test_actor, record_test_prompt, seed_test_timeline, test_agent_with_tools,
+};
 
 use crate::sampling::ConversationItem;
 use crate::session::{RewindMode, RewindRequest};
@@ -501,4 +503,92 @@ async fn run_clears_marker_scenario() {
         Some("1"),
         "header must report 1 after the summary is dropped (got {header:?})"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn context_recall_visibility_follows_completed_compaction_on_selected_branch() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            use tools::implementations::context_recall::{
+                CONTEXT_RECALL_TOOL_NAME, ContextRecallImpl,
+            };
+            use tools::registry::types::ToolConfig;
+
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+            actor.agent.replace(
+                test_agent_with_tools(vec![ToolConfig::for_tool::<ContextRecallImpl>()]).await,
+            );
+
+            let recall_is_visible = |definitions: &[sampling_types::ToolDefinition]| {
+                definitions
+                    .iter()
+                    .any(|definition| definition.function.name == CONTEXT_RECALL_TOOL_NAME)
+            };
+
+            let definitions = actor.prepare_tool_definitions_inner().await;
+            assert!(
+                !recall_is_visible(&definitions),
+                "recall must be hidden before a completed compaction"
+            );
+
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                    chat_state::CompactionEvent::Started {
+                        id: "visibility-incomplete".into(),
+                        source_items: 1,
+                        prompt_index: 0,
+                    },
+                ))
+                .await
+                .unwrap();
+            let definitions = actor.prepare_tool_definitions_inner().await;
+            assert!(
+                !recall_is_visible(&definitions),
+                "an open compaction transaction must not expose recall"
+            );
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                    chat_state::CompactionEvent::Failed {
+                        id: "visibility-incomplete".into(),
+                        duration_ms: 1,
+                        error: "test failure".into(),
+                    },
+                ))
+                .await
+                .unwrap();
+            let definitions = actor.prepare_tool_definitions_inner().await;
+            assert!(
+                !recall_is_visible(&definitions),
+                "a failed compaction transaction must not expose recall"
+            );
+
+            seed_compacted_timeline(&actor).await;
+            let definitions = actor.prepare_tool_definitions_inner().await;
+            assert!(
+                recall_is_visible(&definitions),
+                "the next tool manifest must expose recall after compaction commits"
+            );
+
+            let response = actor
+                .handle_rewind(RewindRequest {
+                    target_prompt_index: 3,
+                    force: true,
+                    mode: RewindMode::ConversationOnly,
+                })
+                .await
+                .expect("handle_rewind ok");
+            assert!(response.success, "rewind should succeed: {response:?}");
+
+            let definitions = actor.prepare_tool_definitions_inner().await;
+            assert!(
+                !recall_is_visible(&definitions),
+                "rewinding before compaction must hide recall again"
+            );
+        })
+        .await;
 }

@@ -631,6 +631,22 @@ impl SessionActor {
         }
         let bridge = self.agent.borrow().tool_bridge().clone();
         let mut defs = bridge.tool_definitions_builtins_only().await;
+        // Recall availability is a projection of the committed Timeline branch,
+        // not mutable tool state. Tool manifests are refreshed before each new
+        // Step, so a completed compaction becomes visible on the next sample
+        // without rebuilding the Agent. Started/failed compactions stay hidden;
+        // rewinding before the compaction hides the tool again.
+        if self
+            .chat_state_handle
+            .get_last_compaction_prompt_index()
+            .await
+            .is_none()
+        {
+            defs.retain(|definition| {
+                bridge.tool_kind(&definition.function.name)
+                    != Some(tools::types::tool::ToolKind::ContextRecall)
+            });
+        }
         // Child schemas remain stable. Eligibility and
         // locked/forbidden status are enforced by exact identity at dispatch;
         // hiding tools here would make visibility itself an authorization
