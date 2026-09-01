@@ -457,12 +457,10 @@ impl SessionSignals {
                 })?)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             if snapshot.version != TIMELINE_SIGNALS_VERSION {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "unsupported Timeline signals version {}; expected {}",
-                        snapshot.version, TIMELINE_SIGNALS_VERSION
-                    ),
+                return Err(crate::session::persistence::session_version_mismatch(
+                    "Timeline signals",
+                    u64::from(snapshot.version),
+                    u64::from(TIMELINE_SIGNALS_VERSION),
                 ));
             }
             latest = Some(snapshot.signals);
@@ -1804,6 +1802,16 @@ mod tests {
 
         let error = SessionSignals::latest_from_timeline(timeline.events()).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
+        assert_eq!(mismatch.component, "Timeline signals");
+        assert_eq!(mismatch.persisted, 2);
+        assert_eq!(mismatch.current, 1);
+        assert_eq!(
+            crate::session::persistence::io_error_to_acp(&error)
+                .data
+                .unwrap()["code"],
+            "SESSION_VERSION_INCOMPATIBLE"
+        );
     }
 
     #[tokio::test]

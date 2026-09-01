@@ -466,9 +466,9 @@ fn ensure_llm_configured(mut raw: toml::Value) -> anyhow::Result<toml::Value> {
     if !path.exists() {
         std::fs::write(&path, LLM_CONFIG_TEMPLATE)?;
     }
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_owned());
+    let visual = std::env::var("VISUAL").ok();
+    let editor = std::env::var("EDITOR").ok();
+    let editor = external_editor::resolve_editor_command(visual.as_deref(), editor.as_deref());
     let status = std::process::Command::new(&editor).arg(&path).status()?;
     if !status.success() {
         anyhow::bail!("editor `{editor}` exited unsuccessfully");

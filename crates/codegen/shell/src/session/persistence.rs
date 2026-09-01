@@ -66,7 +66,27 @@ pub(crate) fn session_version_mismatch(
 }
 
 pub(crate) fn session_version_mismatch_from(error: &io::Error) -> Option<&SessionVersionMismatch> {
-    error.get_ref()?.downcast_ref()
+    session_version_mismatch_from_error(error)
+}
+
+/// Find the canonical incompatibility through source-preserving boundaries.
+/// `io::Error` keeps custom payloads behind `get_ref()` rather than exposing
+/// them consistently through `Error::source()`, so both paths are required.
+pub(crate) fn session_version_mismatch_from_error<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a SessionVersionMismatch> {
+    let mut source = Some(error);
+    while let Some(error) = source {
+        if let Some(mismatch) = error.downcast_ref::<SessionVersionMismatch>() {
+            return Some(mismatch);
+        }
+        let io_source = error
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::get_ref)
+            .map(|source| source as &(dyn std::error::Error + 'static));
+        source = io_source.or_else(|| error.source());
+    }
+    None
 }
 
 /// Build the canonical Timeline fact for a user-visible model selection.
@@ -297,9 +317,10 @@ pub struct RewindTransaction {
 impl RewindTransaction {
     pub fn validate(&self) -> io::Result<()> {
         if self.version != REWIND_TRANSACTION_VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported rewind transaction version",
+            return Err(session_version_mismatch(
+                "Rewind transaction",
+                u64::from(self.version),
+                u64::from(REWIND_TRANSACTION_VERSION),
             ));
         }
         if self.mode != crate::session::RewindMode::FilesOnly
@@ -2246,6 +2267,20 @@ mod io_error_to_acp_tests {
         assert_eq!(data["component"], "Timeline schema");
         assert_eq!(data["persistedVersion"], 23);
         assert_eq!(data["currentVersion"], 24);
+    }
+
+    #[test]
+    fn wrapped_version_mismatch_keeps_the_restore_diagnostic() {
+        let error = io::Error::other(session_version_mismatch("Rewind transaction", 0, 1));
+        let acp_err = io_error_to_acp(&error);
+        assert_eq!(
+            acp_err.message,
+            "Cannot restore this session: persisted Rewind transaction version 0 is incompatible with current version 1. Start a new session."
+        );
+        assert_eq!(
+            acp_err.data.unwrap()["code"],
+            "SESSION_VERSION_INCOMPATIBLE"
+        );
     }
 }
 

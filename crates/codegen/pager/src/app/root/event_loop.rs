@@ -29,6 +29,13 @@ use crate::app::{PagerArgs, PagerTerminal};
 /// Maximum ACP messages processed before loop deadlines are checked again.
 const ACP_DRAIN_BATCH_MAX: usize = 32;
 
+/// Maximum immediately buffered terminal events consumed in one drain.
+///
+/// Native Windows terminals can continuously produce mouse, focus, and key-release
+/// events. An unbounded `try_recv` loop would then never yield back to the main
+/// event loop, starving completed session tasks and rendering.
+pub(crate) const INPUT_DRAIN_BATCH_MAX: usize = 256;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TimedInputEvent {
     pub(crate) event: Event,
@@ -2685,7 +2692,7 @@ async fn drain_and_process(
 
     // Collect all immediately-available events for paste coalescing.
     let mut raw_events = vec![first];
-    drain_immediate(&mut raw_events, input_rx);
+    drain_immediate(&mut raw_events, input_rx, INPUT_DRAIN_BATCH_MAX);
 
     // XTVERSION reply removal must precede paste coalescing so reply chars
     // are never folded into a synthetic Paste.
@@ -2959,7 +2966,7 @@ async fn detect_paste(
         Ok(Some(ev)) => {
             let prev_len = batch.len();
             batch.push(ev);
-            drain_immediate(batch, input_rx);
+            drain_immediate(batch, input_rx, INPUT_DRAIN_BATCH_MAX);
             batch[prev_len..]
                 .iter()
                 .any(|e| is_pasteable_key_event(&e.event))
@@ -2976,21 +2983,23 @@ async fn collect_remaining_paste(
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
 ) {
     let mut extended = 0usize;
+    let mut idle_deadline = Instant::now() + PASTE_CONTINUE_TIMEOUT;
     loop {
-        if extended >= PASTE_EXTEND_MAX_EVENTS {
+        if extended >= PASTE_EXTEND_MAX_EVENTS || Instant::now() >= idle_deadline {
             break;
         }
-        match tokio::time::timeout(PASTE_CONTINUE_TIMEOUT, input_rx.recv()).await {
+        match tokio::time::timeout_at(idle_deadline, input_rx.recv()).await {
             Ok(Some(ev)) => {
                 let prev_len = batch.len();
                 batch.push(ev);
                 extended += 1;
-                drain_immediate(batch, input_rx);
-                if !batch[prev_len..]
+                let remaining = PASTE_EXTEND_MAX_EVENTS - extended;
+                extended += drain_immediate(batch, input_rx, remaining.min(INPUT_DRAIN_BATCH_MAX));
+                if batch[prev_len..]
                     .iter()
                     .any(|e| is_pasteable_key_event(&e.event))
                 {
-                    continue;
+                    idle_deadline = Instant::now() + PASTE_CONTINUE_TIMEOUT;
                 }
             }
             _ => break,
@@ -2998,14 +3007,21 @@ async fn collect_remaining_paste(
     }
 }
 
-/// Non-blocking drain of all immediately available events.
+/// Non-blocking drain of up to `limit` immediately available events.
 pub(crate) fn drain_immediate(
     batch: &mut Vec<TimedInputEvent>,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
-) {
-    while let Ok(ev) = input_rx.try_recv() {
+    limit: usize,
+) -> usize {
+    let mut drained = 0;
+    while drained < limit {
+        let Ok(ev) = input_rx.try_recv() else {
+            break;
+        };
         batch.push(ev);
+        drained += 1;
     }
+    drained
 }
 
 /// Minimum key events in a run to trigger paste coalescing.
@@ -4451,6 +4467,63 @@ mod tests {
             TimedInputEvent::now(Event::FocusLost),
         ];
         assert!(should_extend_for_paste(&events));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_paste_event_storm_does_not_keep_paste_collection_alive() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let producer = std::thread::spawn(move || {
+            for _ in 0..200 {
+                std::thread::sleep(Duration::from_millis(1));
+                if tx
+                    .send(TimedInputEvent::now(Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::Moved,
+                        column: 10,
+                        row: 5,
+                        modifiers: KeyModifiers::NONE,
+                    })))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let mut batch = vec![press(KeyCode::Char('a')), press(KeyCode::Char('b'))];
+
+        let completed = tokio::time::timeout(
+            Duration::from_millis(50),
+            collect_remaining_paste(&mut batch, &mut rx),
+        )
+        .await
+        .is_ok();
+        drop(rx);
+        producer.join().unwrap();
+
+        assert!(
+            completed,
+            "mouse/focus/release traffic must not reset the paste idle deadline"
+        );
+    }
+
+    #[test]
+    fn immediate_input_drain_is_bounded() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for width in 0..=INPUT_DRAIN_BATCH_MAX {
+            tx.send(TimedInputEvent::now(Event::Resize(width as u16, 24)))
+                .unwrap();
+        }
+        let mut batch = Vec::new();
+
+        let drained = drain_immediate(&mut batch, &mut rx, INPUT_DRAIN_BATCH_MAX);
+
+        assert_eq!(drained, INPUT_DRAIN_BATCH_MAX);
+        assert_eq!(batch.len(), INPUT_DRAIN_BATCH_MAX);
+        assert!(
+            rx.try_recv().is_ok(),
+            "one event must remain for the next turn"
+        );
     }
 
     #[test]

@@ -398,6 +398,47 @@ async fn pending_rewind_transaction_rolls_forward_before_session_use() {
         .await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn pending_rewind_version_mismatch_remains_classifiable_during_recovery() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+            let transaction = crate::session::persistence::RewindTransaction {
+                version: crate::session::persistence::REWIND_TRANSACTION_VERSION + 1,
+                target_prompt_index: 0,
+                pre_prompt_index: 1,
+                mode: RewindMode::All,
+            };
+            actor
+                .session_directory
+                .write_atomic(
+                    std::ffi::OsStr::new(crate::session::persistence::REWIND_TRANSACTION_FILE),
+                    &serde_json::to_vec(&transaction).unwrap(),
+                    true,
+                    true,
+                )
+                .unwrap();
+
+            let error = actor.recover_pending_rewind().await.unwrap_err();
+            let mismatch =
+                crate::session::persistence::session_version_mismatch_from_error(error.as_ref())
+                    .unwrap();
+            assert_eq!(mismatch.component, "Rewind transaction");
+            assert_eq!(
+                mismatch.persisted,
+                u64::from(crate::session::persistence::REWIND_TRANSACTION_VERSION + 1)
+            );
+            assert_eq!(
+                mismatch.current,
+                u64::from(crate::session::persistence::REWIND_TRANSACTION_VERSION)
+            );
+        })
+        .await;
+}
+
 /// A cross-compaction rewind to BEFORE the compaction point rebuilds the
 /// conversation without a summary, so the stale `last_compaction_prompt_index`
 /// must be cleared — otherwise the per-model `x-compactions-remaining` header

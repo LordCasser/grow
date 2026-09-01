@@ -29,6 +29,12 @@ const PROMPT_EDITOR_TOO_LARGE: &str =
 const PROMPT_EDITOR_STALE: &str =
     "The draft changed while the external editor was open; the newer draft was kept.";
 
+const fn default_editor_for(windows: bool) -> &'static str {
+    if windows { "notepad.exe" } else { "vi" }
+}
+
+pub(crate) const DEFAULT_EDITOR: &str = default_editor_for(cfg!(windows));
+
 #[derive(Clone, Debug)]
 pub(crate) enum PendingEditorRequest {
     /// Edit an Agent configuration file, then refresh its modal.
@@ -126,12 +132,18 @@ fn parse_editor_argv(command: &str) -> Result<Vec<String>, String> {
         .ok_or_else(|| "could not parse $VISUAL or $EDITOR".to_owned())
 }
 
-fn resolve_editor_argv(visual: Option<&str>, editor: Option<&str>) -> Result<Vec<String>, String> {
-    let command = visual
+pub(crate) fn resolve_editor_command<'a>(
+    visual: Option<&'a str>,
+    editor: Option<&'a str>,
+) -> &'a str {
+    visual
         .filter(|value| !value.trim().is_empty())
         .or_else(|| editor.filter(|value| !value.trim().is_empty()))
-        .unwrap_or("vi");
-    parse_editor_argv(command)
+        .unwrap_or(DEFAULT_EDITOR)
+}
+
+fn resolve_editor_argv(visual: Option<&str>, editor: Option<&str>) -> Result<Vec<String>, String> {
+    parse_editor_argv(resolve_editor_command(visual, editor))
 }
 
 fn editor_argv() -> Result<Vec<String>, String> {
@@ -355,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_resolution_and_parsing_follow_visual_editor_vi_order() {
+    fn editor_resolution_and_parsing_follow_visual_editor_default_order() {
         assert_eq!(
             resolve_editor_argv(Some("visual --wait"), Some("editor")).unwrap(),
             ["visual", "--wait"]
@@ -364,7 +376,14 @@ mod tests {
             resolve_editor_argv(Some("  "), Some("editor --name 'prompt draft'")).unwrap(),
             ["editor", "--name", "prompt draft"]
         );
-        assert_eq!(resolve_editor_argv(None, None).unwrap(), ["vi"]);
+        assert_eq!(default_editor_for(true), "notepad.exe");
+        assert_eq!(default_editor_for(false), "vi");
+        assert_eq!(
+            resolve_editor_command(Some("visual"), Some("editor")),
+            "visual"
+        );
+        assert_eq!(resolve_editor_command(Some("  "), Some("editor")), "editor");
+        assert_eq!(resolve_editor_argv(None, None).unwrap(), [DEFAULT_EDITOR]);
         assert!(parse_editor_argv("editor 'unterminated").is_err());
         assert!(parse_editor_argv("   ").is_err());
     }

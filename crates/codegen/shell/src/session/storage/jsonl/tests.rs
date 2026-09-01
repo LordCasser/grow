@@ -1196,7 +1196,13 @@ async fn workflow_restore_rebuilds_missing_and_invalid_manifests_from_timeline()
         std::fs::write(script_revision_path(&run_dir, 0), "complete(\"ok\");").unwrap();
         std::fs::write(run_dir.join("args.json"), "{}").unwrap();
         if invalid_sidecar {
-            std::fs::write(run_dir.join("state.json"), b"not json").unwrap();
+            let mut legacy_sidecar = manifest.clone();
+            legacy_sidecar.version = WORKFLOW_RUN_MANIFEST_VERSION - 1;
+            std::fs::write(
+                run_dir.join("state.json"),
+                serde_json::to_vec(&legacy_sidecar).unwrap(),
+            )
+            .unwrap();
         }
     }
 
@@ -1214,6 +1220,81 @@ async fn workflow_restore_rebuilds_missing_and_invalid_manifests_from_timeline()
             .workflow_runs
             .iter()
             .all(|run| run.script == "complete(\"ok\");")
+    );
+}
+
+#[tokio::test]
+async fn workflow_restore_reports_an_incompatible_timeline_manifest() {
+    use crate::session::workflow::store::{
+        WORKFLOW_RUN_MANIFEST_VERSION, WorkflowRunManifest, workflow_args_hash,
+        workflow_script_hash,
+    };
+    use crate::session::workflow::tracker::{WorkflowRuntimeRoute, WorkflowTracker};
+
+    let temp_dir = TempDir::new().unwrap();
+    let info = create_test_info();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+    let state = WorkflowTracker::default().start_run(
+        "wf_legacy_seed".into(),
+        "demo".into(),
+        "ship".into(),
+        Vec::new(),
+        None,
+        Some("workflows/wf_legacy_seed/journal.jsonl".into()),
+        WorkflowRuntimeRoute::for_test(
+            "test-model",
+            None,
+            sampling_types::ModelImageInputKey::new(
+                "test-model",
+                "responses",
+                "test-endpoint",
+            ),
+        )
+        .unwrap(),
+    );
+    let manifest = WorkflowRunManifest {
+        version: WORKFLOW_RUN_MANIFEST_VERSION,
+        state,
+        script_revision: 0,
+    };
+    let mut legacy_seed = serde_json::to_value(&manifest).unwrap();
+    legacy_seed["version"] = serde_json::json!(WORKFLOW_RUN_MANIFEST_VERSION - 1);
+    let mut timeline = chat_state::Timeline::default();
+    let spawn = timeline
+        .record(chat_state::TimelineEventKind::Workflow(
+            chat_state::WorkflowEvent::Spawned {
+                run_id: "wf_legacy_seed".into(),
+                execution_epoch: 0,
+                name: "demo".into(),
+                objective: "ship".into(),
+                script_hash: workflow_script_hash("complete(\"ok\");"),
+                args_hash: workflow_args_hash(&serde_json::json!({})).unwrap(),
+                initial_manifest: legacy_seed,
+            },
+        ))
+        .unwrap();
+    adapter.append_timeline_event(&info, &spawn).await.unwrap();
+    let run_dir = adapter
+        .session_dir(&info)
+        .join("workflows/wf_legacy_seed");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(
+        run_dir.join("state.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let error = adapter.load_session_without_updates(&info).await.unwrap_err();
+    let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
+    assert_eq!(mismatch.component, "Workflow run manifest");
+    assert_eq!(
+        mismatch.persisted,
+        u64::from(WORKFLOW_RUN_MANIFEST_VERSION - 1)
+    );
+    assert_eq!(
+        crate::session::persistence::io_error_to_acp(&error).data.unwrap()["code"],
+        "SESSION_VERSION_INCOMPATIBLE"
     );
 }
 

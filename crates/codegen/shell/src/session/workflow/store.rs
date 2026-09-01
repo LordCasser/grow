@@ -315,6 +315,9 @@ pub(crate) fn resolve_workflow_restore_manifest(
     validate_run_id(run_id)?;
     let initial =
         decode_workflow_manifest_value(lifecycle.initial_manifest.clone()).map_err(|error| {
+            if crate::session::persistence::session_version_mismatch_from(&error).is_some() {
+                return error;
+            }
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Workflow {run_id} has an invalid Timeline initial projection: {error}"),
@@ -507,11 +510,10 @@ pub(crate) fn decode_workflow_manifest(bytes: &[u8]) -> io::Result<WorkflowRunMa
             )
         })?;
     if version != u64::from(WORKFLOW_RUN_MANIFEST_VERSION) {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "unsupported Workflow manifest version {version}; expected {WORKFLOW_RUN_MANIFEST_VERSION}"
-            ),
+        return Err(crate::session::persistence::session_version_mismatch(
+            "Workflow run manifest",
+            version,
+            u64::from(WORKFLOW_RUN_MANIFEST_VERSION),
         ));
     }
     serde_json::from_value(value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
@@ -530,11 +532,10 @@ pub(crate) fn decode_workflow_manifest_value(
             )
         })?;
     if version != u64::from(WORKFLOW_RUN_MANIFEST_VERSION) {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "unsupported Workflow manifest version {version}; expected {WORKFLOW_RUN_MANIFEST_VERSION}"
-            ),
+        return Err(crate::session::persistence::session_version_mismatch(
+            "Workflow run manifest",
+            version,
+            u64::from(WORKFLOW_RUN_MANIFEST_VERSION),
         ));
     }
     serde_json::from_value(value).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
@@ -1243,7 +1244,19 @@ mod tests {
             resolve_workflow_restore_manifest("wf_seed", &lifecycle, Some(sidecar)).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("Timeline initial projection"));
+        let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
+        assert_eq!(mismatch.component, "Workflow run manifest");
+        assert_eq!(
+            mismatch.persisted,
+            u64::from(WORKFLOW_RUN_MANIFEST_VERSION - 1)
+        );
+        assert_eq!(mismatch.current, u64::from(WORKFLOW_RUN_MANIFEST_VERSION));
+        assert_eq!(
+            crate::session::persistence::io_error_to_acp(&error)
+                .data
+                .unwrap()["code"],
+            "SESSION_VERSION_INCOMPATIBLE"
+        );
     }
 
     #[test]
@@ -1278,11 +1291,10 @@ mod tests {
             br#"{"version":5,"state":{"run_id":"wf_legacy"},"script_revision":0}"#,
         )
         .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported Workflow manifest version 5; expected 6")
-        );
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
+        assert_eq!(mismatch.component, "Workflow run manifest");
+        assert_eq!(mismatch.persisted, 5);
+        assert_eq!(mismatch.current, 6);
     }
 }

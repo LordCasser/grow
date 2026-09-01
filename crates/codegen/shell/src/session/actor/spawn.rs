@@ -4,6 +4,7 @@
 #![allow(clippy::items_after_test_module)]
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
+use anyhow::Context as _;
 use futures_util::FutureExt as _;
 
 fn permission_audit_text(value: Option<String>) -> Option<String> {
@@ -2493,9 +2494,9 @@ pub(crate) async fn spawn_session_actor(
         workspace_ops: workspace_ops.clone(),
     });
     session.recover_pending_rewind().await.map_err(|error| {
-        agent::AgentBuildError::IoError(std::io::Error::other(format!(
-            "failed to recover pending rewind transaction: {error}"
-        )))
+        agent::AgentBuildError::IoError(std::io::Error::other(
+            error.context("failed to recover pending rewind transaction"),
+        ))
     })?;
     // Close process-local causal scopes before reconstructing the durable input
     // inbox. In particular, TurnEnded releases FIFO reservations and makes a
@@ -3227,6 +3228,16 @@ async fn join_failed_session_init_thread(
 ) -> Result<std::thread::Result<()>, tokio::task::JoinError> {
     tokio::task::spawn_blocking(move || session_thread.join()).await
 }
+
+fn session_initialization_error_to_acp(error: &agent::AgentBuildError) -> acp::Error {
+    if let agent::AgentBuildError::IoError(error) = error
+        && crate::session::persistence::session_version_mismatch_from(error).is_some()
+    {
+        return crate::session::persistence::io_error_to_acp(error);
+    }
+    acp::Error::internal_error().data(format!("session initialization failed: {error}"))
+}
+
 /// Spawn a session actor on a dedicated thread with its own tokio runtime and `LocalSet`.
 ///
 /// The entire `spawn_session_actor` body runs on the session thread — the `!Send`
@@ -3479,8 +3490,7 @@ pub(crate) async fn spawn_session_on_thread(
                     "session initialization failed: {error}; session thread panicked while unwinding"
                 )));
             }
-            Err(acp::Error::internal_error()
-                .data(format!("session initialization failed: {error}")))
+            Err(session_initialization_error_to_acp(&error))
         }
         Err(_) => {
             let joined = join_failed_session_init_thread(session_thread)
@@ -3656,7 +3666,31 @@ mod workflow_ingress_shutdown_tests {
 
 #[cfg(test)]
 mod failed_session_init_join_tests {
-    use super::{SessionThread, SessionThreadState, join_failed_session_init_thread};
+    use super::{
+        SessionThread, SessionThreadState, join_failed_session_init_thread,
+        session_initialization_error_to_acp,
+    };
+    use anyhow::Context as _;
+
+    #[test]
+    fn version_mismatch_keeps_its_structured_error_across_session_initialization() {
+        let recovery_error = anyhow::Error::from(
+            crate::session::persistence::session_version_mismatch("Rewind transaction", 0, 1),
+        )
+        .context("failed to recover pending rewind transaction");
+        let error = agent::AgentBuildError::IoError(std::io::Error::other(recovery_error));
+
+        let acp_error = session_initialization_error_to_acp(&error);
+
+        assert_eq!(
+            acp_error.data.unwrap()["code"],
+            "SESSION_VERSION_INCOMPATIBLE"
+        );
+        assert_eq!(
+            acp_error.message,
+            "Cannot restore this session: persisted Rewind transaction version 0 is incompatible with current version 1. Start a new session."
+        );
+    }
 
     #[tokio::test]
     async fn failed_initialization_waits_for_thread_teardown() {

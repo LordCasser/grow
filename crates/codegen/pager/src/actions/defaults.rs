@@ -22,7 +22,7 @@ fn mode_ctrl_g_action(screen_mode: crate::app::ScreenMode) -> ActionDef {
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Opens the current prompt draft in $VISUAL or $EDITOR, falling back to vi when neither is set.\nSaving and closing the editor returns the updated text to the composer; it does not send the prompt.\nAvailable in minimal mode for ordinary attachment-free drafts.",
+                "Opens the current prompt draft in $VISUAL or $EDITOR, falling back to Notepad on Windows and vi elsewhere.\nSaving and closing the editor returns the updated text to the composer; it does not send the prompt.\nAvailable in minimal mode for ordinary attachment-free drafts.",
             ),
         }
     } else {

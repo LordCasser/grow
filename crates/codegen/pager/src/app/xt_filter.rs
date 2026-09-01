@@ -248,7 +248,11 @@ pub(super) async fn filter_with_fragment_wait(
         match tokio::time::timeout(XT_FRAGMENT_TIMEOUT, input_rx.recv()).await {
             Ok(Some(ev)) => {
                 let mut more = vec![ev];
-                super::root::event_loop::drain_immediate(&mut more, input_rx);
+                super::root::event_loop::drain_immediate(
+                    &mut more,
+                    input_rx,
+                    super::root::event_loop::INPUT_DRAIN_BATCH_MAX,
+                );
                 raw_events.extend(xt_filter.filter(more));
             }
             _ => {
