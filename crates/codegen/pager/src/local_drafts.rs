@@ -5,7 +5,9 @@
 //! the local composer and the pre-admission Behavior latch.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,6 +20,7 @@ use crate::views::prompt_widget::{KIND_FILE_REF, KIND_IMAGE, KIND_PASTE, Stashed
 
 const SCHEMA_VERSION: u32 = 1;
 const DEBOUNCE: Duration = Duration::from_millis(200);
+const WRITE_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_RECORD_BYTES: usize = 256 * 1024;
 const MAX_TEXT_BYTES: usize = 128 * 1024;
 const MAX_CHIPS: usize = 256;
@@ -253,20 +256,15 @@ impl LocalDraftStore {
                 "serialized local draft exceeds limit",
             ));
         }
-        let tmp = self
-            .root
-            .join(format!(".{}.{}.tmp", key.filename(), uuid::Uuid::new_v4()));
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        set_mode(&tmp, 0o600)?;
-        if let Err(error) = (|| -> io::Result<()> {
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            fs::rename(&tmp, &path)?;
-            sync_dir(&self.root)
-        })() {
-            let _ = fs::remove_file(&tmp);
-            return Err(error);
-        }
+        let mut tmp = tempfile::NamedTempFile::new_in(&self.root)?;
+        set_mode(tmp.path(), 0o600)?;
+        tmp.write_all(&bytes)?;
+        tmp.as_file().sync_all()?;
+        // `std::fs::rename` cannot replace an existing destination on Windows.
+        // `persist` supplies the platform-specific atomic replacement required
+        // after the first draft write.
+        tmp.persist(&path).map_err(|error| error.error)?;
+        sync_dir(&self.root)?;
         Ok(())
     }
 
@@ -348,7 +346,7 @@ impl LocalDraftRuntime {
             if let Some(old) = self.keys.insert(*id, key.clone())
                 && old != key
             {
-                self.flush_key(&old);
+                self.flush_key(&old, now);
                 if let Err(error) = self.store.rekey(&old, &key) {
                     tracing::warn!(?error, "failed to rekey local draft at session bind");
                 }
@@ -415,10 +413,10 @@ impl LocalDraftRuntime {
         let active_key = active.and_then(|id| self.keys.get(&id).cloned());
         if active_key != self.active_key {
             if let Some(old) = self.active_key.take() {
-                self.flush_key(&old);
+                self.flush_key(&old, now);
             }
             if let Some(key) = active_key.as_ref() {
-                self.flush_key(key);
+                self.flush_key(key, now);
             }
             self.active_key = active_key;
         }
@@ -465,8 +463,9 @@ impl LocalDraftRuntime {
 
     pub(crate) fn flush_all(&mut self) {
         let keys = self.tracked.keys().cloned().collect::<Vec<_>>();
+        let now = Instant::now();
         for key in keys {
-            self.flush_key(&key);
+            self.flush_key(&key, now);
         }
     }
 
@@ -479,11 +478,11 @@ impl LocalDraftRuntime {
             })
             .collect::<Vec<_>>();
         for key in keys {
-            self.flush_key(&key);
+            self.flush_key(&key, now);
         }
     }
 
-    fn flush_key(&mut self, key: &LocalDraftKey) {
+    fn flush_key(&mut self, key: &LocalDraftKey, now: Instant) {
         let Some(tracked) = self.tracked.get_mut(key) else {
             return;
         };
@@ -492,7 +491,14 @@ impl LocalDraftRuntime {
         }
         match self.store.write(key, &tracked.record) {
             Ok(()) => tracked.due = None,
-            Err(error) => tracing::warn!(?error, "failed to persist local draft"),
+            Err(error) => {
+                // A persistent I/O error must never leave an already-expired
+                // deadline armed. `local_draft_tick` is a high-priority biased
+                // select arm; an expired retry would otherwise hot-loop and
+                // starve repaint, terminal input, and graceful quit.
+                tracked.due = Some(now + WRITE_RETRY_BACKOFF);
+                tracing::warn!(?error, "failed to persist local draft");
+            }
         }
     }
 }
@@ -633,8 +639,17 @@ fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> io::Result<()> {
+    // Opening a directory through `std::fs::File` is unsupported on Windows.
+    // The replacement itself is still atomically published by
+    // `NamedTempFile::persist`.
+    Ok(())
 }
 
 #[cfg(test)]
@@ -669,7 +684,8 @@ mod tests {
         store
             .write(&b, &record("two", Some(tools::types::BehaviorId::Plan)))
             .unwrap();
-        assert_eq!(store.load(&a).unwrap(), Some(record("one", None)));
+        store.write(&a, &record("updated", None)).unwrap();
+        assert_eq!(store.load(&a).unwrap(), Some(record("updated", None)));
         assert_eq!(
             store.load(&b).unwrap(),
             Some(record("two", Some(tools::types::BehaviorId::Plan)))
@@ -683,6 +699,35 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_write_moves_the_deadline_out_of_the_ready_set() {
+        let root = std::env::temp_dir().join(format!(
+            "grow-pager-drafts-blocked-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&root, b"not a directory").unwrap();
+        let key = LocalDraftKey::session("retry").unwrap();
+        let now = Instant::now();
+        let mut runtime = LocalDraftRuntime {
+            store: LocalDraftStore::new(root.clone()),
+            ..Default::default()
+        };
+        runtime.tracked.insert(
+            key,
+            TrackedDraft {
+                record: record("draft", None),
+                serialized: Vec::new(),
+                due: Some(now),
+                last_deferred: None,
+            },
+        );
+
+        runtime.flush_due(now);
+
+        assert_eq!(runtime.next_deadline(), Some(now + WRITE_RETRY_BACKOFF));
+        fs::remove_file(root).unwrap();
     }
 
     #[test]

@@ -60,6 +60,7 @@ shlex = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 clap_complete = { workspace = true }
 rand = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = [
     "sync",
     "rt",
@@ -162,7 +163,6 @@ shell = { workspace = true, features = ["test-support"] }
 pretty_assertions = { workspace = true }
 insta = { workspace = true }
 criterion = { workspace = true }
-tempfile = { workspace = true }
 serial_test = { workspace = true }
 agent = { workspace = true }
 pager-pty-harness = { path = "../pager-pty-harness" }
