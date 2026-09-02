@@ -301,14 +301,11 @@ async fn commit_compaction_range(
         NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let source_items = handle.get_conversation_len().await;
-    let (_, source_surface_revision) = handle
-        .get_conversation_with_revision()
-        .await
-        .expect("actor must provide compaction source");
     let prompt_index = handle.get_prompt_index().await;
     let result_items = replacement.len();
     handle.record_timeline_event(crate::TimelineEventKind::Compaction(
         crate::CompactionEvent::Started {
+            mode: crate::CompactionMode::Foreground,
             id: id.clone(),
             source_items,
             prompt_index,
@@ -316,7 +313,7 @@ async fn commit_compaction_range(
     ));
     let target = record_compaction_summary(handle, &id).await;
     handle
-        .replace_compaction_range(target, replacement, source_surface_revision)
+        .replace_compaction_range(target, replacement)
         .await
         .unwrap();
     handle.record_timeline_event(crate::TimelineEventKind::Compaction(
@@ -331,7 +328,7 @@ async fn commit_compaction_range(
 }
 
 #[tokio::test]
-async fn compaction_rejects_a_stale_surface_without_hiding_late_messages() {
+async fn compaction_accepts_unrelated_appends_without_hiding_late_messages() {
     let h = TestHarness::with_conversation(vec![
         ConversationItem::system("system"),
         ConversationItem::user("body"),
@@ -339,6 +336,7 @@ async fn compaction_rejects_a_stale_surface_without_hiding_late_messages() {
     h.handle
         .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
             crate::CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "stale-compaction".into(),
                 source_items: 2,
                 prompt_index: 0,
@@ -346,44 +344,36 @@ async fn compaction_rejects_a_stale_surface_without_hiding_late_messages() {
         ))
         .await
         .unwrap();
-    let (_, source_revision) = h
-        .handle
-        .get_conversation_with_revision()
-        .await
-        .expect("actor must provide compaction source");
-
     let target = record_compaction_summary(&h.handle, "stale-compaction").await;
 
     h.handle
         .push_user_message_durably(ConversationItem::user("arrived during compaction"))
         .await
         .unwrap();
-    let error = h
+    h
         .handle
         .replace_compaction_range(
             target,
-            vec![ConversationItem::user("stale summary")],
-            source_revision,
+            vec![ConversationItem::user_meta("summary")],
         )
         .await
-        .expect_err("stale compaction must fail closed");
-    assert!(matches!(
-        error,
-        crate::TimelineWriteError::SurfaceChanged { .. }
-    ));
+        .expect("unrelated appends do not change the frozen target");
 
     h.handle
         .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
-            crate::CompactionEvent::Failed {
+            crate::CompactionEvent::Completed {
                 id: "stale-compaction".into(),
                 duration_ms: 1,
-                error: "surface changed".into(),
+                source_items: 2,
+                result_items: 3,
             },
         ))
         .await
         .unwrap();
     let surface = h.handle.get_conversation().await;
     assert_eq!(surface.len(), 3);
+    assert_eq!(surface[0].text_content(), "system");
+    assert_eq!(surface[1].text_content(), "summary");
     assert_eq!(surface[2].text_content(), "arrived during compaction");
 }
 
@@ -431,6 +421,7 @@ async fn partial_compaction_preserves_unselected_surface_identity() {
     h.handle
         .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
             crate::CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "partial-compaction".into(),
                 source_items: before.surface.len(),
                 prompt_index: 0,
@@ -451,7 +442,6 @@ async fn partial_compaction_preserves_unselected_surface_identity() {
         .replace_compaction_range(
             target,
             vec![ConversationItem::user_meta("summary")],
-            before.surface_revision,
         )
         .await
         .unwrap();
@@ -538,6 +528,7 @@ async fn restored_actor_replays_surface_and_continues_event_sequence() {
     timeline
         .record(crate::TimelineEventKind::Compaction(
             crate::CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 2,
                 prompt_index: 0,

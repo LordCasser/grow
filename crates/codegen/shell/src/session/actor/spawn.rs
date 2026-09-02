@@ -2317,6 +2317,8 @@ pub(crate) async fn spawn_session_actor(
         subagent_capabilities,
         compaction: super::compaction_config::CompactionConfig {
             lease: Default::default(),
+            background: Default::default(),
+            background_failed: std::cell::Cell::new(false),
             threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
             memory_flush_enabled: memory_flush_before_compaction,
             wall_clock_budget_secs: compaction_wall_clock_budget_secs,

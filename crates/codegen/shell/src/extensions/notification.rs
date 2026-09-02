@@ -588,6 +588,8 @@ pub enum SessionUpdate {
     },
     /// Auto-compact completed successfully
     AutoCompactCompleted {
+        /// Published without ever blocking foreground sampling.
+        async_compact: bool,
         /// Tokens used before compaction.
         tokens_before: u64,
         /// Tokens used after compaction

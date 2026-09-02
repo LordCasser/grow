@@ -1847,6 +1847,7 @@ fn describe_compaction(event: &CompactionEvent) -> ReturnTuple {
     match event {
         CompactionEvent::Started {
             id,
+            mode,
             source_items,
             prompt_index,
         } => tuple(
@@ -1857,7 +1858,17 @@ fn describe_compaction(event: &CompactionEvent) -> ReturnTuple {
             None,
             Some(id.clone()),
             None,
-            format!("prompt {prompt_index} · {source_items} source items"),
+            format!("{mode:?} · prompt {prompt_index} · {source_items} source items"),
+        ),
+        CompactionEvent::Promoted { id } => tuple(
+            "compaction",
+            "compaction",
+            "promoted",
+            None,
+            None,
+            Some(id.clone()),
+            None,
+            "background summary now gates foreground sampling".into(),
         ),
         CompactionEvent::Summary {
             id,

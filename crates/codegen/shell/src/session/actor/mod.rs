@@ -72,7 +72,7 @@ use workspace::file_system::CodebaseIndexManager;
 use workspace::permission::{AccessKind, ClientType, Decision, PermissionHandle};
 use workspace::session::file_state::{FileStateHandle, FileStateTracker};
 const SESSION_LOG: &str = "grow_session";
-mod compaction;
+pub(crate) mod compaction;
 pub(crate) mod context_recall;
 mod types;
 pub(crate) use types::*;

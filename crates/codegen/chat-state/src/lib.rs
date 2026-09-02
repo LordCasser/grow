@@ -60,7 +60,7 @@ pub use sideband::{
     validate_sideband_id,
 };
 pub use timeline::{
-    ActiveControlContext, CompactionEvent, ControlContext, ControlContextActivation,
+    ActiveControlContext, CompactionEvent, CompactionMode, ControlContext, ControlContextActivation,
     ControlContextLayer, ControlEvent, EventSeq, HookAggregateDecision, HookCause, HookEvent,
     HookEventType, HookFailurePolicy, HookGateDecision, HookGateKind, HookHandlerKind,
     HookHandlerLifecycle, HookHandlerPlan, HookHandlerPlanAction, HookHandlerProvenance,

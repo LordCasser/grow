@@ -1632,8 +1632,13 @@ pub(super) fn apply_session_event(
             tokens_before,
             tokens_after,
             elapsed_ms,
+            async_compact,
             ..
         } => {
+            if *async_compact {
+                scrollback.push_block(RenderBlock::notice(format!("async compact applied · {tokens_before} → {tokens_after} tokens")));
+                return true;
+            }
             tracing::info!("Auto-compact completed: {tokens_after} tokens after");
             session.set_compaction_activity(None);
             session.clear_live_feedback("compaction");

@@ -1397,6 +1397,7 @@
             make_ext_session_notification(
                 "sess-A",
                 GrowSessionUpdate::AutoCompactCompleted {
+                    async_compact: false,
                     tokens_before: 90_000,
                     tokens_after: 25_000,
                     elapsed_ms: Some(300),

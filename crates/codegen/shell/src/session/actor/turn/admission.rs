@@ -349,6 +349,7 @@ impl SessionActor {
         // and completion recovery may sample several times under this same
         // TurnStarted fact and must not resurrect a known-impossible compact
         // plan between those samples.
+        self.compaction.background_failed.set(false);
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
             crate::session::compaction_config::SUPPRESS_TURN,
             crate::session::compaction_config::SUPPRESS_NONE,

@@ -73,7 +73,9 @@ enum AcpLine {
     AutoCompactStarted {
         percentage: u8,
     },
-    AutoCompactCompleted,
+    AutoCompactCompleted {
+        async_compact: bool,
+    },
     AutoCompactFailed {
         error: String,
     },
@@ -189,7 +191,9 @@ impl Reducer for AcpReducer {
 fn acp_lifecycle_line(l: Lifecycle) -> AcpLine {
     match l {
         Lifecycle::CompactStarted { percentage } => AcpLine::AutoCompactStarted { percentage },
-        Lifecycle::CompactCompleted { .. } => AcpLine::AutoCompactCompleted,
+        Lifecycle::CompactCompleted { async_compact, .. } => {
+            AcpLine::AutoCompactCompleted { async_compact }
+        }
         Lifecycle::CompactFailed { error } => AcpLine::AutoCompactFailed { error },
         Lifecycle::CompactCancelled => AcpLine::AutoCompactCancelled,
         Lifecycle::ImageCompressed { message } => AcpLine::ImageCompressed { message },

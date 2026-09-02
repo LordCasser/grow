@@ -94,11 +94,20 @@ pub(crate) struct ToolCallUpdateEvent {
 }
 
 pub(crate) enum Lifecycle {
-    CompactStarted { percentage: u8 },
-    CompactCompleted { pre_tokens: u64 },
-    CompactFailed { error: String },
+    CompactStarted {
+        percentage: u8,
+    },
+    CompactCompleted {
+        pre_tokens: u64,
+        async_compact: bool,
+    },
+    CompactFailed {
+        error: String,
+    },
     CompactCancelled,
-    ImageCompressed { message: String },
+    ImageCompressed {
+        message: String,
+    },
 }
 
 impl Lifecycle {
@@ -108,6 +117,10 @@ impl Lifecycle {
             Lifecycle::CompactStarted { percentage } => {
                 format!("Auto-compacting conversation ({percentage}% full)...")
             }
+            Lifecycle::CompactCompleted {
+                async_compact: true,
+                ..
+            } => "async compact applied.".to_string(),
             Lifecycle::CompactCompleted { .. } => "Conversation compacted.".to_string(),
             Lifecycle::CompactFailed { error } if error.trim().is_empty() => {
                 "Auto-compact failed.".to_string()

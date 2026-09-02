@@ -531,18 +531,9 @@ impl ChatStateActor {
             ChatStateCommand::ReplaceCompactionRangeDurably {
                 target,
                 items,
-                expected_surface_revision,
                 reply,
             } => {
-                let actual = self.state.timeline.surface_revision();
-                let result = if actual != expected_surface_revision {
-                    Err(crate::commands::TimelineWriteError::SurfaceChanged {
-                        expected: expected_surface_revision,
-                        actual,
-                    })
-                } else {
-                    self.replace_compaction_range_durably(target, items).await
-                };
+                let result = self.replace_compaction_range_durably(target, items).await;
                 let _ = reply.send(result);
             }
             ChatStateCommand::RewindDurably {

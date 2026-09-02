@@ -25,6 +25,7 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
         .chat_state_handle
         .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
             chat_state::CompactionEvent::Started {
+                mode: chat_state::CompactionMode::Foreground,
                 id: "compact-5".into(),
                 source_items: 7,
                 prompt_index: 5,
@@ -32,11 +33,6 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
         ))
         .await
         .unwrap();
-    let (_, source_surface_revision) = actor
-        .chat_state_handle
-        .get_conversation_with_revision()
-        .await
-        .expect("chat-state actor must be live");
     let materialized = actor
         .chat_state_handle
         .materialize_timeline(actor.session_id_string())
@@ -84,7 +80,6 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
         .replace_compaction_range(
             target,
             vec![ConversationItem::user_meta("SUMMARY")],
-            source_surface_revision,
         )
         .await
         .unwrap();
@@ -538,6 +533,7 @@ async fn context_recall_visibility_follows_completed_compaction_on_selected_bran
                 .chat_state_handle
                 .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
                     chat_state::CompactionEvent::Started {
+                        mode: chat_state::CompactionMode::Foreground,
                         id: "visibility-incomplete".into(),
                         source_items: 1,
                         prompt_index: 0,

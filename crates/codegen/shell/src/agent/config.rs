@@ -944,7 +944,7 @@ pub struct SessionConfig {
     ///
     /// `None` means "user didn't set it"; the resolver in
     /// `crate::util::config::resolve_auto_compact_threshold_percent` falls
-    /// through to remote tiers and ultimately the shared default 75.
+    /// through to remote tiers and ultimately the shared default 80.
     /// Read this field via the resolver — not directly — to honor the full
     /// precedence chain (env, per-model, remote, default).
     #[serde(default, skip_serializing_if = "Option::is_none")]

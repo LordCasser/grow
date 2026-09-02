@@ -128,6 +128,8 @@ impl CompactCancelGate {
 
 pub struct CompactionConfig {
     pub lease: CompactionLease,
+    pub(crate) background: RefCell<Option<crate::session::actor::compaction::BackgroundCompaction>>,
+    pub(crate) background_failed: Cell<bool>,
     /// Context window usage percentage (0-100) at which auto-compact triggers.
     ///
     /// `Cell` so the value can be re-resolved at model-switch time without

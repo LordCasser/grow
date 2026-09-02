@@ -605,6 +605,7 @@ async fn timeline_round_trip_folds_the_current_surface() {
     timeline
         .record(chat_state::TimelineEventKind::Compaction(
             chat_state::CompactionEvent::Started {
+                mode: chat_state::CompactionMode::Foreground,
                 id: "test-compaction".into(),
                 source_items: 2,
                 prompt_index: 0,

@@ -966,11 +966,38 @@
     }
 
     #[test]
+    fn apply_async_compaction_preserves_foreground_prompt_and_notifies_once() {
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        session.in_flight_prompt = Some(InFlightPrompt {
+            text: "still working".into(),
+            images: Vec::new(),
+            scrollback_entry: EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        let update = GrowSessionUpdate::AutoCompactCompleted {
+            async_compact: true,
+            tokens_before: 74_000,
+            tokens_after: 20_000,
+            elapsed_ms: Some(2_000),
+            summary_preview: None,
+        };
+        assert!(apply_session_event(&update, &mut session, &mut scrollback));
+        assert_eq!(session.in_flight_prompt.as_ref().unwrap().text, "still working");
+        assert!(session.compact_held_prompt.is_none());
+        assert_eq!(scrollback.len(), 1);
+        session.finish_turn(&mut scrollback);
+        assert_eq!(scrollback.len(), 1, "async completion must not defer a second notification");
+    }
+
+    #[test]
     fn apply_compaction_completed_defers_message_until_turn_end() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         session.set_compaction_activity(Some(TurnActivity::AutoCompacting));
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            async_compact: false,
             tokens_before: 858_000,
             tokens_after: 66_000,
             elapsed_ms: Some(500),
@@ -1008,6 +1035,7 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            async_compact: false,
             tokens_before: 90_000,
             tokens_after: 20_000,
             elapsed_ms: Some(500),
@@ -1033,6 +1061,7 @@
         session.loading_replay = true;
         let mut scrollback = ScrollbackState::new();
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            async_compact: false,
             tokens_before: 90_000,
             tokens_after: 20_000,
             elapsed_ms: Some(500),
@@ -1058,6 +1087,7 @@
             .set_compaction_activity(Some(TurnActivity::AutoCompacting));
 
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            async_compact: false,
             tokens_before: 858_000,
             tokens_after: 66_000,
             elapsed_ms: Some(500),
@@ -1113,6 +1143,7 @@
             .insert(child_sid.into(), Box::new(child_view));
 
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            async_compact: false,
             tokens_before: 90000,
             tokens_after: 25000,
             elapsed_ms: Some(300),
@@ -1198,6 +1229,7 @@
             .insert(child_sid.into(), make_subagent_info(child_sid));
 
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            async_compact: false,
             tokens_before: 90000,
             tokens_after: 25000,
             elapsed_ms: Some(300),

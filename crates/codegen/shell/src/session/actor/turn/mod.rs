@@ -407,6 +407,9 @@ impl SessionActor {
                 // Goal during settlement).
                 return Ok(TurnOutcome::ControlEnded { snapshot });
             }
+            if !self.events.has_active_step() && matches!(&result, Ok(TurnOutcome::Completed { .. })) {
+                self.background_compaction_boundary().await?;
+            }
             if matches!(
                 result,
                 Ok(TurnOutcome::ControlEnded { .. })
@@ -964,6 +967,7 @@ impl SessionActor {
                         return Err(e);
                     }
                 }
+                self.background_compaction_boundary().await?;
                 if model_changed || agent_changed {
                     // The request projection epoch changed. A provider
                     // overflow on the replacement route/Agent gets its own

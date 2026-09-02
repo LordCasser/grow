@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 24;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 25;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 pub const MAX_WORKFLOW_INITIAL_MANIFEST_BYTES: usize = 512 * 1024;
 pub const MAX_NOTIFICATION_ID_BYTES: usize = 128;
@@ -421,14 +421,24 @@ impl WorkflowExecutionStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionMode {
+    Foreground,
+    Background,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompactionEvent {
     Started {
         id: String,
+        mode: CompactionMode,
         source_items: usize,
         prompt_index: usize,
     },
+    /// The same background computation now gates the next foreground sample.
+    Promoted { id: String },
     /// The summary model call completed. Content remains single-sourced in the
     /// referenced Sideband result; this governance fact links it to the frozen
     /// parent input before the Surface replacement commits.
@@ -1509,10 +1519,17 @@ struct OpenSubagent {
 #[derive(Debug, Clone)]
 struct OpenCompaction {
     id: String,
+    mode: CompactionMode,
     source_items: usize,
     summaries: u8,
     replacements: u8,
     target: Option<SurfaceRange>,
+}
+
+impl OpenCompaction {
+    fn blocks_foreground(&self) -> bool {
+        self.mode == CompactionMode::Foreground || self.summaries != 0
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4810,7 +4827,10 @@ impl LifecycleFold {
                 if self.active_step.is_some()
                     || !self.open_requests.is_empty()
                     || !self.open_tools.is_empty()
-                    || self.open_compaction.is_some()
+                    || self
+                        .open_compaction
+                        .as_ref()
+                        .is_some_and(OpenCompaction::blocks_foreground)
                 {
                     return Err(TimelineError::OpenChildren { boundary: "turn" });
                 }
@@ -4822,6 +4842,15 @@ impl LifecycleFold {
                 self.active_turn = None;
             }
             TimelineEventKind::Step(StepEvent::Started { id }) => {
+                if self
+                    .open_compaction
+                    .as_ref()
+                    .is_some_and(OpenCompaction::blocks_foreground)
+                {
+                    return Err(TimelineError::OpenChildren {
+                        boundary: "compaction",
+                    });
+                }
                 if self.active_turn != Some(id.turn) {
                     return Err(TimelineError::TurnMismatch {
                         active: self.active_turn,
@@ -4848,7 +4877,10 @@ impl LifecycleFold {
                 }
                 if self.open_requests.values().any(|(_, step)| step == id)
                     || self.open_tools.values().any(|(_, step, _)| step == id)
-                    || self.open_compaction.is_some()
+                    || self
+                        .open_compaction
+                        .as_ref()
+                        .is_some_and(OpenCompaction::blocks_foreground)
                 {
                     return Err(TimelineError::OpenChildren { boundary: "step" });
                 }
@@ -5101,13 +5133,26 @@ impl LifecycleFold {
                 lifecycle.closed = true;
             }
             TimelineEventKind::Compaction(CompactionEvent::Started {
-                id, source_items, ..
+                id,
+                mode,
+                source_items,
+                ..
             }) => {
+                if *mode == CompactionMode::Background
+                    && (self.active_step.is_some()
+                        || !self.open_requests.is_empty()
+                        || !self.open_tools.is_empty())
+                {
+                    return Err(TimelineError::OpenChildren {
+                        boundary: "background compaction start",
+                    });
+                }
                 if !self.seen_compactions.insert(id.clone()) {
                     return Err(TimelineError::CompactionAlreadySeen(id.clone()));
                 }
                 if let Some(active) = self.open_compaction.replace(OpenCompaction {
                     id: id.clone(),
+                    mode: *mode,
                     source_items: *source_items,
                     summaries: 0,
                     replacements: 0,
@@ -5115,6 +5160,24 @@ impl LifecycleFold {
                 }) {
                     return Err(TimelineError::CompactionAlreadyOpen(active.id));
                 }
+            }
+            TimelineEventKind::Compaction(CompactionEvent::Promoted { id }) => {
+                let Some(open) = self.open_compaction.as_mut() else {
+                    return Err(TimelineError::CompactionNotOpen(id.clone()));
+                };
+                if open.id != *id || open.mode != CompactionMode::Background || open.summaries != 0
+                {
+                    return Err(TimelineError::CompactionNotOpen(id.clone()));
+                }
+                if self.active_step.is_some()
+                    || !self.open_requests.is_empty()
+                    || !self.open_tools.is_empty()
+                {
+                    return Err(TimelineError::OpenChildren {
+                        boundary: "compaction promotion",
+                    });
+                }
+                open.mode = CompactionMode::Foreground;
             }
             TimelineEventKind::Compaction(CompactionEvent::Summary { id, target, .. }) => {
                 let Some(open) = self.open_compaction.as_mut() else {
@@ -5125,6 +5188,15 @@ impl LifecycleFold {
                 }
                 if open.summaries != 0 {
                     return Err(TimelineError::DuplicateCompactionSummary(id.clone()));
+                }
+                if open.mode == CompactionMode::Background
+                    && (self.active_step.is_some()
+                        || !self.open_requests.is_empty()
+                        || !self.open_tools.is_empty())
+                {
+                    return Err(TimelineError::OpenChildren {
+                        boundary: "compaction publication",
+                    });
                 }
                 open.summaries = 1;
                 open.target = Some(target.clone());
@@ -5192,7 +5264,11 @@ impl LifecycleFold {
             TimelineEventKind::Messages(MessageEvent {
                 surface: SurfaceOp::Replace { .. },
                 ..
-            }) if self.open_compaction.is_some() => {
+            }) if self
+                .open_compaction
+                .as_ref()
+                .is_some_and(OpenCompaction::blocks_foreground) =>
+            {
                 return Err(TimelineError::ReplacementDuringCompaction(
                     self.open_compaction
                         .as_ref()
@@ -6802,6 +6878,7 @@ mod tests {
                     Timeline::from_seed(vec![ConversationItem::user("source")]).unwrap();
                 timeline
                     .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                        mode: crate::CompactionMode::Foreground,
                         id: "compact-matrix".into(),
                         source_items: 1,
                         prompt_index: 0,
@@ -6819,6 +6896,7 @@ mod tests {
                     Timeline::from_seed(vec![ConversationItem::user("source")]).unwrap();
                 timeline
                     .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                        mode: crate::CompactionMode::Foreground,
                         id: "compact-matrix".into(),
                         source_items: 1,
                         prompt_index: 0,
@@ -7222,6 +7300,7 @@ mod tests {
         );
         active.subagent_seed_id = Some("seed-child".into());
         active.open_compaction = Some(OpenCompaction {
+            mode: crate::CompactionMode::Foreground,
             id: "open-compaction".into(),
             source_items: 1,
             summaries: 0,
@@ -9243,6 +9322,7 @@ mod tests {
         .unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 3,
                 prompt_index: 0,
@@ -9586,6 +9666,7 @@ mod tests {
         record_prompt(&mut timeline, 12, 2, "p2");
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: timeline.surface_len(),
                 prompt_index: 3,
@@ -9777,6 +9858,7 @@ mod tests {
         let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 1,
                 prompt_index: 0,
@@ -9829,6 +9911,7 @@ mod tests {
         let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 1,
                 prompt_index: 0,
@@ -9872,6 +9955,7 @@ mod tests {
 
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact-after-prune".into(),
                 source_items: timeline.surface().len(),
                 prompt_index: 0,
@@ -10324,6 +10408,7 @@ mod tests {
         let result_source = timeline.surface_ids()[1];
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact-tool-image".into(),
                 source_items: 2,
                 prompt_index: 0,
@@ -10414,6 +10499,7 @@ mod tests {
 
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact-two-images".into(),
                 source_items: 2,
                 prompt_index: 0,
@@ -10516,6 +10602,7 @@ mod tests {
 
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact-carrier".into(),
                 source_items: 3,
                 prompt_index: 0,
@@ -10681,6 +10768,7 @@ mod tests {
 
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact-image".into(),
                 source_items: 1,
                 prompt_index: 0,
@@ -10762,6 +10850,7 @@ mod tests {
 
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact-image-path".into(),
                 source_items: 1,
                 prompt_index: 0,
@@ -10831,6 +10920,7 @@ mod tests {
         let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 1,
                 prompt_index: 0,
@@ -10860,6 +10950,7 @@ mod tests {
         .unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 2,
                 prompt_index: 0,
@@ -10887,6 +10978,7 @@ mod tests {
         let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 1,
                 prompt_index: 0,
@@ -10923,6 +11015,7 @@ mod tests {
         let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 1,
                 prompt_index: 0,
@@ -10951,6 +11044,7 @@ mod tests {
         let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 1,
                 prompt_index: 0,
@@ -10984,6 +11078,7 @@ mod tests {
         let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 1,
                 prompt_index: 0,
@@ -11037,6 +11132,7 @@ mod tests {
         record_started_turn_and_step(&mut timeline, 1, 0);
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 1,
                 prompt_index: 0,
@@ -11058,11 +11154,174 @@ mod tests {
     }
 
     #[test]
+    fn background_compaction_allows_steps_until_publication_or_promotion() {
+        for promote in [false, true] {
+            let mut timeline =
+                Timeline::from_seed(vec![ConversationItem::user("old prompt")]).unwrap();
+            record_started_turn_and_step(&mut timeline, 1, 0);
+            let step = StepId {
+                turn: TurnId(1),
+                index: 0,
+            };
+            timeline
+                .record(TimelineEventKind::Step(StepEvent::Ended {
+                    id: step,
+                    outcome: "continued".into(),
+                    duration_ms: 1,
+                }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                    id: "background".into(),
+                    mode: CompactionMode::Background,
+                    source_items: 1,
+                    prompt_index: 0,
+                }))
+                .unwrap();
+            let successor = StepId {
+                turn: TurnId(1),
+                index: 1,
+            };
+            timeline
+                .record(TimelineEventKind::Step(StepEvent::Started {
+                    id: successor,
+                }))
+                .unwrap();
+            assert!(
+                timeline
+                    .record(TimelineEventKind::Compaction(CompactionEvent::Promoted {
+                        id: "background".into()
+                    }))
+                    .is_err()
+            );
+            timeline
+                .record(TimelineEventKind::Step(StepEvent::Ended {
+                    id: successor,
+                    outcome: "continued".into(),
+                    duration_ms: 1,
+                }))
+                .unwrap();
+            if promote {
+                timeline
+                    .record(TimelineEventKind::Compaction(CompactionEvent::Promoted {
+                        id: "background".into(),
+                    }))
+                    .unwrap();
+            }
+            let target = record_compaction_summary(&mut timeline, "background");
+            let next = StepId {
+                turn: TurnId(1),
+                index: 2,
+            };
+            assert!(
+                timeline
+                    .record(TimelineEventKind::Step(StepEvent::Started { id: next }))
+                    .is_err()
+            );
+            timeline
+                .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                    id: "background".into(),
+                    source_items: 1,
+                    result_items: 1,
+                    duration_ms: 1,
+                }))
+                .unwrap();
+            let trajectory = timeline.trajectory();
+            let rows: Vec<_> = trajectory
+                .rows
+                .iter()
+                .filter(|row| row.correlation_id.as_deref() == Some("background"))
+                .collect();
+            let states: Vec<_> = rows.iter().map(|row| row.state.as_str()).collect();
+            assert_eq!(
+                states,
+                if promote {
+                    vec!["started", "promoted", "summary", "completed"]
+                } else {
+                    vec!["started", "summary", "completed"]
+                }
+            );
+            assert!(rows[0].summary.contains("Background"));
+            assert_eq!(rows.last().unwrap().duration_ms, Some(1));
+            timeline
+                .record(TimelineEventKind::Step(StepEvent::Started { id: next }))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn background_compaction_recovery_never_applies_unpublished_summary() {
+        for published in [false, true] {
+            let mut timeline =
+                Timeline::from_seed(vec![ConversationItem::user("original")]).unwrap();
+            timeline
+                .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                    id: "background".into(),
+                    mode: CompactionMode::Background,
+                    source_items: 1,
+                    prompt_index: 0,
+                }))
+                .unwrap();
+            let target = record_compaction_summary(&mut timeline, "background");
+            if published {
+                timeline
+                    .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
+                    .unwrap();
+            }
+            let recovery = timeline.recover_interrupted().unwrap();
+            assert!(recovery.iter().any(|event| match event.kind {
+                TimelineEventKind::Compaction(CompactionEvent::Completed { .. }) => published,
+                TimelineEventKind::Compaction(CompactionEvent::Failed { .. }) => !published,
+                _ => false,
+            }));
+            assert_eq!(
+                timeline.surface()[0].text_content(),
+                if published { "summary" } else { "original" }
+            );
+            assert!(timeline.lifecycle.open_compaction.is_none());
+        }
+    }
+
+    #[test]
+    fn background_compaction_rejects_rewritten_target() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("old")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                id: "background".into(),
+                mode: CompactionMode::Background,
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = SurfaceRange {
+            start: timeline.surface_ids()[0],
+            end: timeline.surface_ids()[0],
+            shadowed: timeline.surface_ids().to_vec(),
+        };
+        // A background summary does not lock the Surface against another valid
+        // projection, but the old identity must no longer be publishable.
+        timeline
+            .replace_all(
+                vec![ConversationItem::user("rewritten")],
+                MessageCause::ContextRebuild,
+            )
+            .unwrap();
+        assert!(matches!(
+            timeline.validate_surface_range(&target),
+            Err(TimelineError::StaleReplacementBoundary)
+        ));
+    }
+
+    #[test]
     fn in_process_stop_completes_a_compaction_after_replacement_commit() {
         let mut timeline = Timeline::from_seed(vec![ConversationItem::user("prompt")]).unwrap();
         record_started_turn_and_step(&mut timeline, 1, 0);
         timeline
             .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
                 id: "compact".into(),
                 source_items: 1,
                 prompt_index: 0,

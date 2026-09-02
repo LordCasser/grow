@@ -236,6 +236,9 @@ impl SessionActor {
         }
 
         // ── Commit mode (force=true): execute the rewind ─────────────
+        self.cancel_background_compaction("rewind")
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
 
         let transaction = crate::session::persistence::RewindTransaction {
             version: crate::session::persistence::REWIND_TRANSACTION_VERSION,

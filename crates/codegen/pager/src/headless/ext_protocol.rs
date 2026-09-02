@@ -165,6 +165,7 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         },
         AutoCompactCompleted {
             tokens_before: u64,
+            async_compact: bool,
         },
         AutoCompactFailed {
             error: String,
@@ -231,11 +232,13 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         GrowUpdate::AutoCompactStarted { percentage } => {
             ExtEvent::Lifecycle(Lifecycle::CompactStarted { percentage })
         }
-        GrowUpdate::AutoCompactCompleted { tokens_before } => {
-            ExtEvent::Lifecycle(Lifecycle::CompactCompleted {
-                pre_tokens: tokens_before,
-            })
-        }
+        GrowUpdate::AutoCompactCompleted {
+            tokens_before,
+            async_compact,
+        } => ExtEvent::Lifecycle(Lifecycle::CompactCompleted {
+            pre_tokens: tokens_before,
+            async_compact,
+        }),
         GrowUpdate::AutoCompactFailed { error } => {
             ExtEvent::Lifecycle(Lifecycle::CompactFailed { error })
         }

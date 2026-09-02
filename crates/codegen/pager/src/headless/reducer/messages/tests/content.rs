@@ -340,6 +340,7 @@ fn messages_compact_completed_maps_to_system_boundary() {
     let mut r = messages(false);
     r.reduce(StreamEvent::AgentMessage("hi".into()));
     let out = r.reduce(StreamEvent::Lifecycle(Lifecycle::CompactCompleted {
+        async_compact: false,
         pre_tokens: 1234,
     }));
     let boundary = out.last().unwrap();
@@ -347,6 +348,18 @@ fn messages_compact_completed_maps_to_system_boundary() {
     assert_eq!(boundary["subtype"], "compact_boundary");
     assert_eq!(boundary["compact_metadata"]["trigger"], "auto");
     assert_eq!(boundary["compact_metadata"]["pre_tokens"], 1234);
+}
+
+#[test]
+fn messages_async_compact_has_distinct_applied_boundary() {
+    let mut r = messages(false);
+    let out = r.reduce(StreamEvent::Lifecycle(Lifecycle::CompactCompleted {
+        async_compact: true,
+        pre_tokens: 70_000,
+    }));
+    let boundary = out.last().unwrap();
+    assert_eq!(boundary["subtype"], "compact_boundary");
+    assert_eq!(boundary["compact_metadata"]["trigger"], "async");
 }
 
 #[test]

@@ -327,13 +327,11 @@ impl ChatStateHandle {
         &self,
         target: crate::SurfaceRange,
         items: Vec<ConversationItem>,
-        expected_surface_revision: u64,
     ) -> Result<(), TimelineWriteError> {
         self.query("ReplaceCompactionRangeDurably", |reply| {
             ChatStateCommand::ReplaceCompactionRangeDurably {
                 target,
                 items,
-                expected_surface_revision,
                 reply,
             }
         })

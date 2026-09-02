@@ -25,6 +25,258 @@ use serde_json::json;
 use test_support::{MockInferenceServer, ScriptedResponse, SseEvent};
 use tokio::sync::mpsc;
 
+#[test]
+fn async_compaction_threshold_tracks_resolved_hard_threshold() {
+    assert_eq!(compaction::pre_compact_threshold(80), Some(70));
+    assert_eq!(compaction::pre_compact_threshold(75), Some(65));
+    assert_eq!(compaction::pre_compact_threshold(11), Some(1));
+    assert_eq!(compaction::pre_compact_threshold(10), None);
+    assert_eq!(compaction::pre_compact_threshold(0), None);
+}
+
+#[test]
+fn async_compaction_starts_at_exact_pre_threshold_but_not_at_the_hard_threshold() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            for (main, tokens, should_start) in [
+                (80, 69_999, false),
+                (80, 70_000, true),
+                (80, 79_999, true),
+                (80, 80_000, false),
+                (65, 54_999, false),
+                (65, 55_000, true),
+                (10, 10_000, false),
+            ] {
+                let (actor, _notifications) =
+                    actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
+                        .await;
+                actor.compaction.threshold_percent.set(main);
+                actor.compaction.pre_prune.set(false);
+                seed_closed_compaction_range(&actor, 88_000).await;
+                actor
+                    .chat_state_handle
+                    .record_provider_context_anchor(tokens);
+                actor.state.lock().await.foreground =
+                    ForegroundState::RegularTurn(running_task_stub("threshold"));
+                actor.background_compaction_boundary().await.unwrap();
+                assert_eq!(
+                    actor.compaction.background.borrow().is_some(),
+                    should_start,
+                    "main={main}, tokens={tokens}"
+                );
+                actor
+                    .cancel_background_compaction("test_complete")
+                    .await
+                    .unwrap();
+            }
+        }));
+    });
+}
+
+/// Real foreground sampling proceeds while the auxiliary HTTP response is
+/// held at its terminal event. No timing-based provider sleeps are involved.
+#[test]
+fn async_compaction_runs_beside_foreground_and_publishes_only_at_boundary() {
+    async_compaction_scenario("publish");
+}
+
+#[test]
+fn async_compaction_promotes_the_same_provider_request() {
+    async_compaction_scenario("promote");
+}
+
+#[test]
+fn async_compaction_cancel_discards_late_provider_result() {
+    async_compaction_scenario("cancel");
+}
+
+#[test]
+fn async_compaction_goal_concurrency_is_exactly_charged() {
+    async_compaction_scenario("goal");
+}
+
+#[test]
+fn async_compaction_rejects_changed_model_route() {
+    async_compaction_scenario("model");
+}
+
+#[test]
+fn async_compaction_failure_does_not_interrupt_or_restart_in_the_same_turn() {
+    async_compaction_scenario("failure");
+}
+
+#[test]
+fn async_compaction_goal_budget_closes_and_settles_without_a_wait_cycle() {
+    async_compaction_scenario("budget");
+}
+
+#[test]
+fn async_compaction_authority_transition_cancels_before_publication() {
+    async_compaction_scenario("control");
+}
+
+#[test]
+fn async_compaction_promotion_keeps_the_original_deadline() {
+    async_compaction_scenario("timeout");
+}
+
+#[test]
+fn async_compaction_rewind_preview_preserves_but_commit_invalidates_the_job() {
+    async_compaction_scenario("rewind");
+}
+
+fn async_compaction_scenario(action: &'static str) {
+    run_with_session_stack(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            use test_support::{InferenceEndpoint, InferenceRequestMatcher};
+            let server = MockInferenceServer::start().await.unwrap();
+            let summary = format!("background compacted summary: {}", "Old decisions and verified evidence. ".repeat(35));
+            let summary_response = if action == "failure" {
+                ScriptedResponse::json(400, json!({"type":"error","error":{"type":"invalid_request_error","message":"unsupported summary parameter"}}))
+            } else {
+                messages_turn(&[(&summary, END_TURN)], END_TURN)
+            };
+            let mut auxiliary = server.expect_response_blocked("background summary",
+                InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                summary_response);
+            let mut tool = server.expect_response("foreground executes tool",
+                InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                ScriptedResponse::sse([
+                    json!({"type":"message_start","message":{"id":"tool-msg","type":"message","role":"assistant","content":[],"model":"test","usage":{"input_tokens":74_000,"output_tokens":0}}}),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"async-todo","name":"todo_write","input":{}}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"todos\":[{\"id\":\"latest\",\"content\":\"latest todo while summary runs\",\"status\":\"in_progress\"}]}"}}),
+                    json!({"type":"content_block_stop","index":0}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":74_000,"output_tokens":5}}),
+                    json!({"type":"message_stop"}),
+                ].into_iter().map(|event| SseEvent::data(event.to_string())).collect()));
+            let mut foreground = server.expect_response("foreground continues",
+                // This fixture has one tool and no attribution callback, so
+                // the mock classifies its foreground requests as auxiliary.
+                InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                messages_turn_with_usage(&[("foreground response after freeze", END_TURN)], END_TURN, 74_000));
+            let (actor, mut notifications) = actor_with_sampler_cw_ex(&server, sampling_types::ApiBackend::Messages, 100_000, None, if action == "timeout" { 2 } else { 0 }).await;
+            *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+            if matches!(action, "goal" | "budget") {
+                actor.goal_tracker.lock().create_goal("async-goal".into(), "verify concurrent accounting".into(), Some(if action == "budget" { 75_000 } else { 500_000 }), "now".into()).unwrap();
+                actor.behavior.lock().select_behavior(tool_types::BehaviorId::Goal);
+                actor.sync_goal_usage_window();
+            }
+            actor.compaction.threshold_percent.set(80);
+            actor.compaction.pre_prune.set(false);
+            replace_test_surface(&actor.chat_state_handle, vec![
+                ConversationItem::system("test system"), prompt("old task", 0),
+                ConversationItem::assistant("x".repeat(200_000)), prompt("recent task", 1),
+                ConversationItem::assistant("y".repeat(88_000)),
+            ]).await;
+            let turn = tokio::task::spawn_local({ let actor = actor.clone(); async move { run_user_turn(&actor, "async-foreground").await } });
+            tokio::time::timeout(std::time::Duration::from_secs(10), auxiliary.wait_blocked()).await.expect("background request starts");
+            tokio::time::timeout(std::time::Duration::from_secs(10), turn).await.expect("foreground is not blocked by summary").unwrap().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), tool.wait_satisfied()).await.expect("tool exchange completed beside the summary");
+            tokio::time::timeout(std::time::Duration::from_secs(5), foreground.wait_satisfied()).await.expect("foreground expectation consumed");
+            if action == "goal" { assert_eq!(actor.goal_tokens_used(), 148_010); }
+            assert_eq!(actor.compaction.background.borrow().is_some(), action != "budget");
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(!events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Summary { .. }))));
+            let mut early_notifications = Vec::new();
+            while let Ok(message) = notifications.try_recv() { early_notifications.push(format!("{message:?}")); }
+            assert!(!early_notifications.iter().any(|message| message.contains("auto_compact_started")), "background must not display foreground compaction");
+            let mut promotion = None;
+            if action == "cancel" {
+                actor.cancel_background_compaction("test_invalidation").await.unwrap();
+            } else if action == "rewind" {
+                let target_prompt_index = actor.chat_state_handle.get_prompt_index().await - 1;
+                let request = RewindRequest { target_prompt_index, force: false, mode: RewindMode::ConversationOnly };
+                actor.handle_rewind(request.clone()).await.unwrap();
+                assert!(actor.compaction.background.borrow().is_some(), "read-only rewind preview must not invalidate computation");
+                assert!(actor.handle_rewind(RewindRequest { force: true, ..request }).await.unwrap().success);
+                assert!(actor.compaction.background.borrow().is_none());
+            } else if action == "control" {
+                let (behavior, goal) = actor.capture_control_authorities();
+                actor.persist_behavior_transition_durably(behavior, goal).await.unwrap();
+                assert!(actor.compaction.background.borrow().is_none());
+            } else if action == "model" {
+                let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                config.context_window = std::num::NonZeroU64::new(110_000).unwrap();
+                actor.chat_state_handle.update_sampling_config(config);
+            } else if action == "promote" || action == "timeout" {
+                if action == "timeout" { tokio::time::sleep(std::time::Duration::from_millis(1_200)).await; }
+                actor.chat_state_handle.push_user_message_durably(ConversationItem::user("late input ".repeat(4_000))).await.unwrap();
+                promotion = Some(tokio::task::spawn_local({ let actor = actor.clone(); async move {
+                    actor.run_compact_only(compaction::AutoCompactTriggerInfo {
+                        tokens_used: 85_000, context_window: 100_000, percentage: 85, source: "pre_sampling",
+                    }).await
+                }}));
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        if actor.chat_state_handle.timeline_events().await.unwrap().iter().any(|event| matches!(event.kind,
+                            chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Promoted { .. }))) { break; }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.expect("existing computation is promoted");
+                assert!(!promotion.as_ref().unwrap().is_finished());
+            }
+            if action == "timeout" {
+                let error = tokio::time::timeout(std::time::Duration::from_millis(1_100), promotion.take().unwrap()).await.expect("promotion must use the original deadline, not a fresh two seconds").unwrap().unwrap_err();
+                assert!(format!("{error:?}").contains("wall-clock budget"));
+            }
+            auxiliary.release();
+            if !matches!(action, "cancel" | "budget" | "control" | "timeout" | "rewind") {
+                tokio::time::timeout(std::time::Duration::from_secs(5), auxiliary.wait_satisfied()).await.expect("auxiliary expectation completed");
+            }
+            if let Some(promotion) = promotion {
+                tokio::time::timeout(std::time::Duration::from_secs(10), promotion).await.unwrap().unwrap().unwrap();
+            } else if !matches!(action, "cancel" | "budget" | "control" | "timeout" | "rewind") {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    while actor.compaction.background.borrow().is_some() {
+                        tokio::task::yield_now().await;
+                        actor.background_compaction_boundary().await.unwrap();
+                    }
+                }).await.expect("ready result commits at the next boundary");
+            }
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let completed = events.iter().filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Completed { .. }))).count();
+            let should_commit = matches!(action, "publish" | "promote" | "goal");
+            assert_eq!(completed, usize::from(should_commit));
+            assert_eq!(server.messages_request_count(), 3, "promotion must not issue another summary request");
+            let surface = actor.chat_state_handle.get_conversation().await;
+            let text = surface.iter().map(ConversationItem::text_content).collect::<Vec<_>>().join("\n");
+            assert_eq!(text.contains("foreground response after freeze"), action != "rewind");
+            assert_eq!(surface.iter().any(|item| matches!(item, ConversationItem::ToolResult(result) if result.tool_call_id == "async-todo")), action != "rewind");
+            assert_eq!(text.contains("background compacted summary"), should_commit);
+            if should_commit {
+                assert!(surface.iter().any(|item| matches!(item, ConversationItem::User(user) if user.synthetic_reason == Some(sampling_types::SyntheticReason::CompactionMeta)) && item.text_content().contains("latest todo while summary runs")), "reminders must use the Todo state at commit, not at preparation");
+            }
+            let (notifications, completions) = drain_session_updates(&mut notifications);
+            assert_eq!(completions.len(), usize::from(should_commit));
+            if should_commit { assert_eq!(completions[0]["update"]["async_compact"], action != "promote"); }
+            assert_eq!(notifications.iter().filter(|kind| *kind == "auto_compact_started").count(), usize::from(matches!(action, "promote" | "timeout")));
+            if action == "failure" {
+                assert!(actor.compaction.background_failed.get());
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(running_task_stub("same-turn"));
+                actor.background_compaction_boundary().await.unwrap();
+                assert!(actor.compaction.background.borrow().is_none());
+                assert_eq!(server.messages_request_count(), 3);
+            }
+            if action == "promote" { assert!(text.contains("late input")); }
+            if action == "goal" { assert_eq!(actor.goal_tokens_used(), 148_025, "each foreground and summary attempt is charged exactly once"); }
+            if action == "budget" {
+                tokio::time::timeout(std::time::Duration::from_secs(2), actor.goal_usage_window.wait_for_owner_settlements_through(&actor.session_id_string(), 0)).await.expect("cancelled summary accounting must settle without a wait cycle");
+                assert_eq!(actor.goal_tokens_used(), 148_025);
+                assert!(actor.goal_usage_window.begin_model_attempt(&actor.session_id_string(), 0, Some("async-goal")).is_err());
+            }
+        }));
+    });
+}
+
 fn prompt(text: impl Into<String>, index: usize) -> ConversationItem {
     let mut item = ConversationItem::user(text);
     item.set_prompt_index(index);
@@ -118,7 +370,7 @@ async fn actor_with_sampler_cw(
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
 ) {
-    actor_with_sampler_cw_ex(server, api_backend, context_window, None).await
+    actor_with_sampler_cw_ex(server, api_backend, context_window, None, 0).await
 }
 
 /// [`actor_with_sampler_cw`] variant for fork-scenario tests: sets
@@ -129,6 +381,7 @@ async fn actor_with_sampler_cw_ex(
     api_backend: sampling_types::ApiBackend,
     context_window: u64,
     inherited_prefix_len: Option<usize>,
+    wall_clock_budget_secs: u64,
 ) -> (
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
@@ -143,6 +396,9 @@ async fn actor_with_sampler_cw_ex(
         }
     });
     let mut actor = create_test_actor(0, context_window, 85, gateway_tx, persistence_tx).await;
+    actor.compaction.wall_clock_budget_secs = wall_clock_budget_secs;
+    let (goal_usage_tx, mut goal_usage_rx) = mpsc::unbounded_channel();
+    actor.goal_usage_window = goal_support::GoalUsageWindow::new(goal_usage_tx.clone(), None);
     if let Some(prefix_len) = inherited_prefix_len {
         actor.startup_hints.inherited_prefix_len = Some(prefix_len);
     }
@@ -183,6 +439,21 @@ async fn actor_with_sampler_cw_ex(
         sampler_event_tx,
     );
     let actor = std::sync::Arc::new(actor);
+    let usage_actor = actor.clone();
+    tokio::task::spawn_local(async move {
+        let _mailbox_owner = goal_usage_tx;
+        while let Some(SessionCommand::SettleGoalUsageAttempt {
+            attempt_id,
+            respond_to,
+        }) = goal_usage_rx.recv().await
+        {
+            let _ = respond_to.send(
+                usage_actor
+                    .settle_claimed_goal_usage_attempt(&attempt_id)
+                    .await,
+            );
+        }
+    });
     let drainer = actor.clone();
     tokio::task::spawn_local(async move {
         let mut sampler_event_rx = sampler_event_rx;
@@ -201,6 +472,7 @@ async fn run_user_turn(
 ) -> Result<PromptTurnOk, acp::Error> {
     actor.state.lock().await.foreground =
         ForegroundState::RegularTurn(running_task_stub(prompt_id));
+    let behavior = actor.behavior.lock().behavior();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         actor.handle_prompt(
@@ -212,7 +484,7 @@ async fn run_user_turn(
             vec![acp::ContentBlock::Text(acp::TextContent::new(
                 "write a long answer",
             ))],
-            tool_types::BehaviorId::Normal,
+            behavior,
             None,
             None,
             false,
@@ -834,6 +1106,7 @@ fn pre_prune_error_fails_open_to_summary() {
                 .chat_state_handle
                 .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
                     chat_state::CompactionEvent::Started {
+                        mode: chat_state::CompactionMode::Foreground,
                         id: "pre-prune-conflict".into(),
                         source_items: actor.chat_state_handle.get_conversation_len().await,
                         prompt_index: actor.chat_state_handle.get_prompt_index().await,

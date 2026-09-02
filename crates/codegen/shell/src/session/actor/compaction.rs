@@ -26,6 +26,81 @@ use std::sync::Arc;
 const COMPACTION_RETAIN_PERCENT: u64 = 16;
 const MIN_COMPACTION_SOURCE_TOKENS: u64 = 5_000;
 
+/// The provider phase owns only frozen input. Publication is always performed
+/// by the foreground at a closed Step boundary, never by the background task.
+type CompactionGeneration =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<GeneratedCompaction, acp::Error>>>>;
+
+struct PreparedCompaction {
+    target: chat_state::SurfaceRange,
+    authority: Vec<chat_state::SurfaceId>,
+    model_key: (String, ApiBackend, u64),
+    generation: CompactionGeneration,
+}
+
+struct GeneratedCompaction {
+    input_ref: chat_state::TimelineRangeRef,
+    result_ref: chat_state::TimelineRangeRef,
+    range_plan: chat_state::compaction_utils::CompactionRangePlan,
+    output: crate::session::helpers::session_compact::CompactOutput,
+    diagnostics: crate::session::helpers::summary_compaction::SummaryDiagnostic,
+    input_overflow_rejections: u32,
+    scope: ::diagnostics::events::CompactionScope,
+    context_window: u64,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+pub(crate) struct BackgroundCompaction {
+    id: String,
+    source_items: usize,
+    started: std::time::Instant,
+    cancel: tokio_util::sync::CancellationToken,
+    background: Arc<std::sync::atomic::AtomicBool>,
+    authority: Vec<chat_state::SurfaceId>,
+    target: chat_state::SurfaceRange,
+    model_key: (String, ApiBackend, u64),
+    worker: tokio::task::JoinHandle<Result<GeneratedCompaction, acp::Error>>,
+}
+
+impl Drop for BackgroundCompaction {
+    fn drop(&mut self) {
+        self.background
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.cancel.cancel();
+    }
+}
+
+pub(crate) fn pre_compact_threshold(threshold: u8) -> Option<u8> {
+    threshold.checked_sub(10).filter(|threshold| *threshold > 0)
+}
+
+fn compaction_write_error(
+    stage: &'static str,
+    error: chat_state::TimelineWriteError,
+) -> acp::Error {
+    match &error {
+        chat_state::TimelineWriteError::Invalid(
+            chat_state::TimelineError::StaleReplacementBoundary
+            | chat_state::TimelineError::IncompleteShadowSet
+            | chat_state::TimelineError::ReversedReplacement,
+        ) => acp::Error::internal_error().data(format!("{stage}: {error}")),
+        _ => crate::session::commands::fatal_turn_boundary_error(stage, error.to_string()),
+    }
+}
+
+fn compaction_range_is_current(
+    ids: &[chat_state::SurfaceId],
+    target: &chat_state::SurfaceRange,
+) -> bool {
+    ids.iter()
+        .position(|id| id == &target.start)
+        .is_some_and(|start| {
+            ids.get(start..start.saturating_add(target.shadowed.len()))
+                == Some(target.shadowed.as_slice())
+                && target.shadowed.last() == Some(&target.end)
+        })
+}
+
 /// Resolve the context window to use for provider-error recovery.
 ///
 /// An explicit provider overflow is authoritative even when the local request
@@ -377,6 +452,8 @@ impl SessionActor {
         self: &Arc<Self>,
         user_context: Option<String>,
     ) -> Result<(), acp::Error> {
+        self.cancel_background_compaction("manual_compaction")
+            .await?;
         let Some(_exclusive) = self
             .compaction
             .lease
@@ -419,6 +496,7 @@ impl SessionActor {
         span.record("post_tokens", tokens_after as i64);
         span.record("success", true);
         self.send_grow_notification(GrowSessionUpdate::AutoCompactCompleted {
+            async_compact: false,
             tokens_before: total_tokens,
             tokens_after,
             elapsed_ms: None,
@@ -622,7 +700,7 @@ impl SessionActor {
         )
     )]
     async fn run_compact_inner(
-        &self,
+        self: &Arc<Self>,
         user_context: Option<String>,
         trigger: ::diagnostics::events::CompactionTrigger,
     ) -> Result<(), acp::Error> {
@@ -636,33 +714,9 @@ impl SessionActor {
                     .as_ref()
                     .is_err_and(is_compact_image_input_unsupported)
             {
-                let key = self.current_model_image_input_key().await.ok_or_else(|| {
-                    acp::Error::internal_error()
-                        .data("compaction image rejection had no model capability identity")
-                })?;
-                self.record_unsupported_model_image_input(key.clone())
-                    .await
-                    .map_err(|error| {
-                        acp::Error::internal_error().data(format!(
-                            "failed to persist text-only model capability during compaction: {error}"
-                        ))
-                    })?;
-                let projected = self
-                    .project_conversation_images_for_text_model(&key)
-                    .await
-                    .map_err(|error| {
-                        acp::Error::internal_error().data(format!(
-                            "failed to persist text-only image projection during compaction: {error}"
-                        ))
-                    })?;
-                if projected.total_images() == 0 {
+                if !self.recover_compaction_image_input().await? {
                     return result;
                 }
-                tracing::warn!(
-                    model = key.model(),
-                    described_images = projected.described_images,
-                    "compaction model rejected images; installed irreversible ImageShadows and retrying from the new Surface"
-                );
                 image_recovery_attempted = true;
                 continue;
             }
@@ -670,11 +724,36 @@ impl SessionActor {
         }
     }
 
+    async fn recover_compaction_image_input(&self) -> Result<bool, acp::Error> {
+        let key = self.current_model_image_input_key().await.ok_or_else(|| {
+            acp::Error::internal_error()
+                .data("compaction image rejection had no model capability identity")
+        })?;
+        self.record_unsupported_model_image_input(key.clone())
+            .await
+            .map_err(|error| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "compaction model capability",
+                    error.to_string(),
+                )
+            })?;
+        let projected = self
+            .project_conversation_images_for_text_model(&key)
+            .await
+            .map_err(|error| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "compaction image projection",
+                    error.to_string(),
+                )
+            })?;
+        Ok(projected.total_images() > 0)
+    }
+
     /// One durable compaction transaction. Capability recovery starts a fresh
     /// transaction because ImageShadow installation changes the authoritative
     /// Surface and therefore invalidates the first transaction's frozen input.
     async fn run_compact_transaction(
-        &self,
+        self: &Arc<Self>,
         user_context: Option<String>,
         trigger: ::diagnostics::events::CompactionTrigger,
     ) -> Result<(), acp::Error> {
@@ -684,6 +763,7 @@ impl SessionActor {
         self.chat_state_handle
             .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
                 chat_state::CompactionEvent::Started {
+                    mode: chat_state::CompactionMode::Foreground,
                     id: id.clone(),
                     source_items,
                     prompt_index,
@@ -700,9 +780,29 @@ impl SessionActor {
         let result = self
             .run_compact_attempt(&id, user_context, trigger, &mut replacement_committed)
             .await;
+        self.finish_compaction_transaction(
+            &id,
+            source_items,
+            started,
+            trigger,
+            result,
+            replacement_committed,
+        )
+        .await
+    }
+
+    async fn finish_compaction_transaction(
+        &self,
+        id: &str,
+        source_items: usize,
+        started: std::time::Instant,
+        trigger: ::diagnostics::events::CompactionTrigger,
+        result: Result<(), acp::Error>,
+        replacement_committed: bool,
+    ) -> Result<(), acp::Error> {
         let terminal = if compaction_completed(&result, replacement_committed) {
             chat_state::CompactionEvent::Completed {
-                id: id.clone(),
+                id: id.to_owned(),
                 source_items,
                 result_items: self.chat_state_handle.get_conversation_len().await,
                 duration_ms: started.elapsed().as_millis() as u64,
@@ -712,7 +812,7 @@ impl SessionActor {
                 .as_ref()
                 .expect_err("non-committed compaction must fail");
             chat_state::CompactionEvent::Failed {
-                id: id.clone(),
+                id: id.to_owned(),
                 duration_ms: started.elapsed().as_millis() as u64,
                 error: crate::util::truncate(&error.to_string(), 500).to_string(),
             }
@@ -721,9 +821,10 @@ impl SessionActor {
             .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(terminal))
             .await
             .map_err(|error| {
-                acp::Error::internal_error().data(format!(
-                    "compaction terminal was not durably recorded: {error}"
-                ))
+                crate::session::commands::fatal_turn_boundary_error(
+                    "compaction terminal",
+                    error.to_string(),
+                )
             })?;
         if replacement_committed {
             let source = match trigger {
@@ -732,7 +833,9 @@ impl SessionActor {
             };
             self.dispatch_observe_hook(
                 ::hooks::event::HookEventName::PostCompact,
-                chat_state::HookCause::Compaction { compaction_id: id },
+                chat_state::HookCause::Compaction {
+                    compaction_id: id.to_owned(),
+                },
                 ::hooks::event::HookPayload::PostCompact {
                     source: source.into(),
                 },
@@ -753,13 +856,29 @@ impl SessionActor {
     }
 
     async fn run_compact_attempt(
-        &self,
+        self: &Arc<Self>,
         transaction_id: &str,
         user_context: Option<String>,
         trigger: ::diagnostics::events::CompactionTrigger,
         replacement_committed: &mut bool,
     ) -> Result<(), acp::Error> {
         let (cancel, _cancel_scope) = self.compaction.cancel.enter();
+        let prepared = self
+            .prepare_compaction(transaction_id, user_context, trigger, cancel, None)
+            .await?;
+        let generated = prepared.generation.await?;
+        self.commit_generated_compaction(transaction_id, generated, replacement_committed)
+            .await
+    }
+
+    async fn prepare_compaction(
+        self: &Arc<Self>,
+        transaction_id: &str,
+        user_context: Option<String>,
+        trigger: ::diagnostics::events::CompactionTrigger,
+        cancel: tokio_util::sync::CancellationToken,
+        background: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<PreparedCompaction, acp::Error> {
         let tokens_before = self.chat_state_handle.get_projected_tokens().await;
         tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
         self.signals_handle().record_compaction(tokens_before);
@@ -798,6 +917,14 @@ impl SessionActor {
             model_id.clone(),
             user_context.is_some(),
         );
+        let model_key = (
+            model_id.clone(),
+            sampling_config
+                .as_ref()
+                .map(|config| config.api_backend.clone())
+                .unwrap_or(ApiBackend::Messages),
+            context_window,
+        );
         let compact_source = trigger_str;
         self.dispatch_observe_hook(
             ::hooks::event::HookEventName::PreCompact,
@@ -811,9 +938,10 @@ impl SessionActor {
         )
         .await
         .map_err(|error| {
-            acp::Error::internal_error().data(format!(
-                "pre-compaction hook lifecycle was not durable: {error}"
-            ))
+            crate::session::commands::fatal_turn_boundary_error(
+                "pre-compaction hook",
+                format!("pre-compaction hook lifecycle was not durable: {error}"),
+            )
         })?;
         let max_retries = 3u32;
         let retry_delay_secs = 3u64;
@@ -825,7 +953,11 @@ impl SessionActor {
             return Err(acp::Error::internal_error()
                 .data("Compaction failed: chat-state actor is unavailable"));
         };
-        let source_surface_revision = materialized.surface_revision;
+        let authority = materialized
+            .active_control_contexts
+            .values()
+            .map(|context| context.surface_id)
+            .collect();
         let compaction_input_ref = materialized.input_ref;
         let active_goal = self.active_goal_directive_tag();
         let full_conversation = sampling_types::project_conversation_for_goal_scope(
@@ -850,17 +982,6 @@ impl SessionActor {
                 "Compaction skipped: no closed Surface range is large enough to summarize while preserving the recent verbatim tail",
             )
         })?;
-        let shadowed_control_contexts = materialized
-            .active_control_contexts
-            .iter()
-            .filter_map(|(layer, context)| {
-                range_plan
-                    .target
-                    .shadowed
-                    .contains(&context.surface_id)
-                    .then_some((*layer, context.item.clone()))
-            })
-            .collect::<Vec<_>>();
         let context_recall_tool_name = {
             let agent_ref = self.agent.borrow();
             agent_ref
@@ -957,107 +1078,135 @@ impl SessionActor {
             )
             .await
             .map_err(|error| {
-                acp::Error::internal_error()
-                    .data(format!("compaction sideband could not start: {error}"))
+                crate::session::commands::fatal_turn_boundary_error(
+                    "compaction sideband start",
+                    error.to_string(),
+                )
             })?,
         ));
-        let sideband_feedback = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-        let mut last_error: Option<acp::Error> = None;
-        let mut last_failure_outcome = CompactionOutcome::Failed;
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        enum InputStage {
-            Verbatim,
-            VerbatimFitted,
-            Simplified,
-        }
-        impl InputStage {
-            fn as_str(self) -> &'static str {
-                match self {
-                    Self::Verbatim => "verbatim",
-                    Self::VerbatimFitted => "verbatim_fitted",
-                    Self::Simplified => "simplified",
-                }
-            }
-        }
-        let mut input_stage = if verbatim_input_enabled {
-            InputStage::Verbatim
-        } else {
-            InputStage::Simplified
-        };
-        let estimated_input_tokens = chat_state::estimate_conversation_tokens(&simplified_messages);
-        let auto_trigger = matches!(trigger, ::diagnostics::events::CompactionTrigger::Auto);
+        compaction_sideband
+            .lock()
+            .await
+            .set_background(background.clone());
+        let background = background.is_some();
         let wall_clock_budget_secs = self.compaction.wall_clock_budget_secs;
-        let sampler = crate::session::helpers::summary_compaction::ShellCompactionSampler::new(
-            user_context.clone(),
-            sampling_client,
-            sampling_config.clone(),
-            self.inference_idle_timeout.get(),
-            wall_clock_budget_secs,
-            cancel.clone(),
-            compaction_sideband.clone(),
-            sideband_feedback.clone(),
-        );
-        let observer = crate::session::helpers::summary_compaction::ShellSummaryObserver::new(
-            trigger,
-            context_window,
-            compaction.compaction_id.clone(),
-            self.session_info.id.0.to_string(),
-            estimated_input_tokens,
-            retry_delay_secs,
-            sideband_feedback,
-        );
-        let summary_config = compaction::SummaryConfig {
-            max_attempts: max_retries,
-            retry_delay_secs,
-            sampling_timeout_secs: 0,
-        };
-        let mut request_turns = simplified_messages.clone();
-        let mut input_overflow_rejections: u32 = 0;
-        let mut compact_summary: Option<String> = None;
-        while compact_summary.is_none() {
-            let summary_result = compaction::generate_summary(
-                &sampler,
-                &request_turns,
-                user_context.as_deref(),
-                &summary_config,
-                &observer,
-            )
-            .await;
-            match summary_result {
-                Ok(summary) => {
-                    compact_summary = Some(summary.summary);
-                    break;
+        let idle_timeout = self.inference_idle_timeout.get();
+        let session = Arc::clone(self);
+        let target = range_plan.target.clone();
+        Ok(PreparedCompaction {
+            target,
+            authority,
+            model_key,
+            generation: Box::pin(async move {
+                let sideband_feedback = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+                let mut last_error: Option<acp::Error> = None;
+                let mut last_failure_outcome = CompactionOutcome::Failed;
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                enum InputStage {
+                    Verbatim,
+                    VerbatimFitted,
+                    Simplified,
                 }
-                Err(compaction::SummaryError::NothingToCompact) => {
-                    last_error = Some(
-                        acp::Error::internal_error().data("compact failed: nothing to compact"),
+                impl InputStage {
+                    fn as_str(self) -> &'static str {
+                        match self {
+                            Self::Verbatim => "verbatim",
+                            Self::VerbatimFitted => "verbatim_fitted",
+                            Self::Simplified => "simplified",
+                        }
+                    }
+                }
+                let mut input_stage = if verbatim_input_enabled {
+                    InputStage::Verbatim
+                } else {
+                    InputStage::Simplified
+                };
+                let estimated_input_tokens =
+                    chat_state::estimate_conversation_tokens(&simplified_messages);
+                let auto_trigger =
+                    matches!(trigger, ::diagnostics::events::CompactionTrigger::Auto);
+                let sampler =
+                    crate::session::helpers::summary_compaction::ShellCompactionSampler::new(
+                        user_context.clone(),
+                        sampling_client,
+                        sampling_config.clone(),
+                        idle_timeout,
+                        wall_clock_budget_secs,
+                        cancel.clone(),
+                        compaction_sideband.clone(),
+                        sideband_feedback.clone(),
                     );
-                    break;
-                }
-                Err(compaction::SummaryError::EmptyResponse) => {
-                    last_failure_outcome = if observer.degenerate_seen() {
-                        CompactionOutcome::Degenerate
-                    } else {
-                        CompactionOutcome::Transient
-                    };
-                    last_error = Some(acp::Error::internal_error().data(
-                        observer.last_error_message().unwrap_or_else(|| {
-                            "compact failed: model returned empty response".to_string()
-                        }),
-                    ));
-                    break;
-                }
-                Err(compaction::SummaryError::Sampler {
-                    message,
-                    deterministic,
-                    context_overflow,
-                }) => {
-                    if cancel.is_cancelled()
-                        || message.contains(
-                            crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG,
-                        )
-                    {
-                        compaction_sideband
+                let observer =
+                    crate::session::helpers::summary_compaction::ShellSummaryObserver::new(
+                        trigger,
+                        context_window,
+                        compaction.compaction_id.clone(),
+                        session.session_info.id.0.to_string(),
+                        estimated_input_tokens,
+                        retry_delay_secs,
+                        sideband_feedback,
+                    );
+                let summary_config = compaction::SummaryConfig {
+                    max_attempts: max_retries,
+                    retry_delay_secs,
+                    sampling_timeout_secs: 0,
+                };
+                let mut request_turns = simplified_messages.clone();
+                let mut input_overflow_rejections: u32 = 0;
+                let mut compact_summary: Option<String> = None;
+                while compact_summary.is_none() {
+                    let summary_result = compaction::generate_summary(
+                        &sampler,
+                        &request_turns,
+                        user_context.as_deref(),
+                        &summary_config,
+                        &observer,
+                    )
+                    .await;
+                    match summary_result {
+                        Ok(summary) => {
+                            compact_summary = Some(summary.summary);
+                            break;
+                        }
+                        Err(compaction::SummaryError::NothingToCompact) => {
+                            last_error = Some(
+                                acp::Error::internal_error()
+                                    .data("compact failed: nothing to compact"),
+                            );
+                            break;
+                        }
+                        Err(compaction::SummaryError::EmptyResponse) => {
+                            last_failure_outcome = if observer.degenerate_seen() {
+                                CompactionOutcome::Degenerate
+                            } else {
+                                CompactionOutcome::Transient
+                            };
+                            last_error = Some(acp::Error::internal_error().data(
+                                observer.last_error_message().unwrap_or_else(|| {
+                                    "compact failed: model returned empty response".to_string()
+                                }),
+                            ));
+                            break;
+                        }
+                        Err(compaction::SummaryError::Sampler {
+                            message,
+                            deterministic,
+                            context_overflow,
+                        }) => {
+                            if let Some(error) = sampler.take_infrastructure_error() {
+                                last_error =
+                                    Some(crate::session::commands::fatal_turn_boundary_error(
+                                        "compaction sideband",
+                                        error,
+                                    ));
+                                break;
+                            }
+                            if cancel.is_cancelled()
+                                || message.contains(
+                                    crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG,
+                                )
+                            {
+                                compaction_sideband
                             .lock()
                             .await
                             .fail(
@@ -1066,132 +1215,140 @@ impl SessionActor {
                             )
                             .await
                             .map_err(|error| {
-                                acp::Error::internal_error().data(format!(
+                                crate::session::commands::fatal_turn_boundary_error("compaction sideband cancellation", format!(
                                     "compaction cancellation sideband terminal could not commit: {error}"
                                 ))
                             })?;
-                        return self.emit_compact_cancelled(auto_trigger).await;
-                    }
-                    if sampler.take_image_input_unsupported() {
-                        last_failure_outcome = CompactionOutcome::Deterministic;
-                        last_error = Some(compact_image_input_unsupported_error(message));
-                        break;
-                    }
-                    if context_overflow {
-                        let next_stage = match input_stage {
-                            InputStage::Verbatim => Some(InputStage::VerbatimFitted),
-                            InputStage::VerbatimFitted => Some(InputStage::Simplified),
-                            InputStage::Simplified => None,
-                        };
-                        if let Some(stage) = next_stage {
-                            input_overflow_rejections += 1;
-                            ::diagnostics::session_ctx::log_event(
-                                ::diagnostics::events::CompactionRetryDegraded {
-                                    trigger,
-                                    reason: "input_overflow",
-                                    from_stage: Some(input_stage.as_str()),
-                                    to_stage: Some(stage.as_str()),
-                                    summary_chars: None,
-                                    attempt: observer.attempt_count(),
-                                    context_window,
-                                    compaction_id: compaction.compaction_id.clone(),
-                                },
-                            );
-                            tracing::warn!(
-                                session_id = %self.session_info.id.0,
-                                ?stage,
-                                error = %message,
-                                "Compaction input overflowed deterministically; stepping down the input ladder to avoid an incompactable state"
-                            );
-                            request_turns = match stage {
-                                InputStage::VerbatimFitted => {
-                                    let budget = context_window
-                                        .saturating_sub(SUMMARY_BUDGET_RESERVE_TOKENS);
-                                    let verbatim = chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
+                                if !background {
+                                    session.emit_compact_cancelled(auto_trigger).await?;
+                                }
+                                return Err(acp::Error::internal_error().data(
+                                    crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG,
+                                ));
+                            }
+                            if sampler.take_image_input_unsupported() {
+                                last_failure_outcome = CompactionOutcome::Deterministic;
+                                last_error = Some(compact_image_input_unsupported_error(message));
+                                break;
+                            }
+                            if context_overflow {
+                                let next_stage = match input_stage {
+                                    InputStage::Verbatim => Some(InputStage::VerbatimFitted),
+                                    InputStage::VerbatimFitted => Some(InputStage::Simplified),
+                                    InputStage::Simplified => None,
+                                };
+                                if let Some(stage) = next_stage {
+                                    input_overflow_rejections += 1;
+                                    ::diagnostics::session_ctx::log_event(
+                                        ::diagnostics::events::CompactionRetryDegraded {
+                                            trigger,
+                                            reason: "input_overflow",
+                                            from_stage: Some(input_stage.as_str()),
+                                            to_stage: Some(stage.as_str()),
+                                            summary_chars: None,
+                                            attempt: observer.attempt_count(),
+                                            context_window,
+                                            compaction_id: compaction.compaction_id.clone(),
+                                        },
+                                    );
+                                    tracing::warn!(
+                                        session_id = %session.session_info.id.0,
+                                        ?stage,
+                                        error = %message,
+                                        "Compaction input overflowed deterministically; stepping down the input ladder to avoid an incompactable state"
+                                    );
+                                    request_turns = match stage {
+                                        InputStage::VerbatimFitted => {
+                                            let budget = context_window
+                                                .saturating_sub(SUMMARY_BUDGET_RESERVE_TOKENS);
+                                            let verbatim = chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
                                         summary_source.clone(),
                                         summary_strips_reasoning,
                                     );
-                                    chat_state::compaction_utils::fit_conversation_to_budget(
-                                        verbatim, budget,
-                                    )
-                                }
-                                InputStage::Simplified => {
-                                    let simplified_budget = context_window.saturating_mul(7) / 10;
-                                    chat_state::compaction_utils::fit_conversation_to_budget(
+                                            chat_state::compaction_utils::fit_conversation_to_budget(
+                                                verbatim, budget,
+                                            )
+                                        }
+                                        InputStage::Simplified => {
+                                            let simplified_budget =
+                                                context_window.saturating_mul(7) / 10;
+                                            chat_state::compaction_utils::fit_conversation_to_budget(
                                         chat_state::compaction_utils::prepare_conversation_for_summarization(
                                             summary_source.clone(),
                                         ),
                                         simplified_budget,
                                     )
+                                        }
+                                        InputStage::Verbatim => {
+                                            unreachable!("ladder only steps forward")
+                                        }
+                                    };
+                                    input_stage = stage;
+                                    continue;
                                 }
-                                InputStage::Verbatim => {
-                                    unreachable!("ladder only steps forward")
+                                last_failure_outcome = CompactionOutcome::Deterministic;
+                                if auto_trigger && !background {
+                                    session
+                                        .suppress_auto_compaction(
+                                            SuppressReason::Size,
+                                            estimated_input_tokens,
+                                            context_window,
+                                        )
+                                        .await;
                                 }
-                            };
-                            input_stage = stage;
-                            continue;
+                                last_error = Some(acp::Error::internal_error().data(message));
+                                break;
+                            }
+                            if deterministic {
+                                last_failure_outcome = CompactionOutcome::Deterministic;
+                                if auto_trigger && !background {
+                                    let reason = Self::classify_suppress_reason(&message);
+                                    session
+                                        .suppress_auto_compaction(
+                                            reason,
+                                            estimated_input_tokens,
+                                            context_window,
+                                        )
+                                        .await;
+                                }
+                                last_error = Some(acp::Error::internal_error().data(message));
+                                break;
+                            }
+                            last_failure_outcome = CompactionOutcome::Transient;
+                            last_error = Some(acp::Error::internal_error().data(message));
+                            break;
                         }
-                        last_failure_outcome = CompactionOutcome::Deterministic;
-                        if auto_trigger {
-                            self.suppress_auto_compaction(
-                                SuppressReason::Size,
-                                estimated_input_tokens,
-                                context_window,
-                            )
-                            .await;
-                        }
-                        last_error = Some(acp::Error::internal_error().data(message));
-                        break;
                     }
-                    if deterministic {
-                        last_failure_outcome = CompactionOutcome::Deterministic;
-                        if auto_trigger {
-                            let reason = Self::classify_suppress_reason(&message);
-                            self.suppress_auto_compaction(
-                                reason,
-                                estimated_input_tokens,
-                                context_window,
-                            )
-                            .await;
-                        }
-                        last_error = Some(acp::Error::internal_error().data(message));
-                        break;
-                    }
-                    last_failure_outcome = CompactionOutcome::Transient;
-                    last_error = Some(acp::Error::internal_error().data(message));
-                    break;
                 }
-            }
-        }
-        let diagnostics = observer.into_diagnostics();
-        let compact_output = match compact_summary {
-            Some(_) => sampler
-                .take_last_success()
-                .expect("a successful range-summary sample stashes its CompactOutput"),
-            None => {
-                let span = tracing::Span::current();
-                span.record("compaction_attempts", diagnostics.attempts as i64);
-                span.record(
-                    "compaction_degenerate_rejections",
-                    diagnostics.degenerate_rejections as i64,
-                );
-                span.record(
-                    "compaction_input_overflow_rejections",
-                    input_overflow_rejections as i64,
-                );
-                span.record(
-                    "compaction_deterministic_rejections",
-                    diagnostics.deterministic_rejections as i64,
-                );
-                span.record(
-                    "compaction_transient_rejections",
-                    diagnostics.transient_rejections as i64,
-                );
-                span.record("compaction_outcome", last_failure_outcome.as_str());
-                let error = last_error.unwrap_or_else(|| {
-                    acp::Error::internal_error().data("compaction failed: unknown error")
-                });
-                compaction_sideband
+                let diagnostics = observer.into_diagnostics();
+                let compact_output = match compact_summary {
+                    Some(_) => sampler
+                        .take_last_success()
+                        .expect("a successful range-summary sample stashes its CompactOutput"),
+                    None => {
+                        let span = tracing::Span::current();
+                        span.record("compaction_attempts", diagnostics.attempts as i64);
+                        span.record(
+                            "compaction_degenerate_rejections",
+                            diagnostics.degenerate_rejections as i64,
+                        );
+                        span.record(
+                            "compaction_input_overflow_rejections",
+                            input_overflow_rejections as i64,
+                        );
+                        span.record(
+                            "compaction_deterministic_rejections",
+                            diagnostics.deterministic_rejections as i64,
+                        );
+                        span.record(
+                            "compaction_transient_rejections",
+                            diagnostics.transient_rejections as i64,
+                        );
+                        span.record("compaction_outcome", last_failure_outcome.as_str());
+                        let error = last_error.unwrap_or_else(|| {
+                            acp::Error::internal_error().data("compaction failed: unknown error")
+                        });
+                        compaction_sideband
                     .lock()
                     .await
                     .fail(
@@ -1204,32 +1361,101 @@ impl SessionActor {
                     )
                     .await
                     .map_err(|record_error| {
-                        acp::Error::internal_error().data(format!(
+                        crate::session::commands::fatal_turn_boundary_error("compaction sideband failure", format!(
                             "compaction failed and its sideband terminal could not commit: {record_error}"
                         ))
                     })?;
-                return Err(error);
-            }
-        };
-        let sideband_result_ref = compaction_sideband
-            .lock()
+                        return Err(error);
+                    }
+                };
+                let sideband_result_ref = compaction_sideband
+                    .lock()
+                    .await
+                    .complete(
+                        compact_output.content.clone(),
+                        None,
+                        compact_output.usage.clone(),
+                        compact_output
+                            .stop_reason
+                            .clone()
+                            .unwrap_or_else(|| "unknown".into()),
+                        Vec::new(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        crate::session::commands::fatal_turn_boundary_error(
+                            "compaction sideband result",
+                            format!("compaction sideband result could not commit: {error}"),
+                        )
+                    })?;
+                Ok(GeneratedCompaction {
+                    input_ref: compaction_input_ref,
+                    result_ref: sideband_result_ref,
+                    range_plan,
+                    output: compact_output,
+                    diagnostics,
+                    input_overflow_rejections,
+                    scope: compaction,
+                    context_window,
+                    cancel,
+                })
+            }),
+        })
+    }
+
+    async fn commit_generated_compaction(
+        &self,
+        transaction_id: &str,
+        generated: GeneratedCompaction,
+        replacement_committed: &mut bool,
+    ) -> Result<(), acp::Error> {
+        let GeneratedCompaction {
+            input_ref: compaction_input_ref,
+            result_ref: sideband_result_ref,
+            range_plan,
+            output: compact_output,
+            diagnostics,
+            input_overflow_rejections,
+            scope: compaction,
+            context_window,
+            cancel,
+        } = generated;
+        if cancel.is_cancelled() {
+            return Err(acp::Error::internal_error()
+                .data(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG));
+        }
+        let materialized = self
+            .chat_state_handle
+            .materialize_timeline(self.session_id_string())
             .await
-            .complete(
-                compact_output.content.clone(),
-                None,
-                compact_output.usage.clone(),
-                compact_output
-                    .stop_reason
-                    .clone()
-                    .unwrap_or_else(|| "unknown".into()),
-                Vec::new(),
+            .ok_or_else(|| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "compaction publication",
+                    "chat-state unavailable",
+                )
+            })?;
+        let shadowed_control_contexts: Vec<_> = materialized
+            .active_control_contexts
+            .iter()
+            .filter_map(|(layer, context)| {
+                range_plan
+                    .target
+                    .shadowed
+                    .contains(&context.surface_id)
+                    .then_some((*layer, context.item.clone()))
+            })
+            .collect();
+        let source_surface = materialized.surface;
+        let context_recall_tool_name = self
+            .agent
+            .borrow()
+            .tool_bridge()
+            .render_prompt(
+                "${{ tools.by_kind.context_recall }}",
+                &serde_json::json!({}),
             )
             .await
-            .map_err(|error| {
-                acp::Error::internal_error().data(format!(
-                    "compaction sideband result could not commit: {error}"
-                ))
-            })?;
+            .filter(|name| !name.is_empty() && !name.contains("by_kind"));
         self.chat_state_handle
             .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
                 chat_state::CompactionEvent::Summary {
@@ -1242,11 +1468,7 @@ impl SessionActor {
                 },
             ))
             .await
-            .map_err(|error| {
-                acp::Error::internal_error().data(format!(
-                    "compaction summary link was not durably recorded: {error}"
-                ))
-            })?;
+            .map_err(|error| compaction_write_error("compaction summary link", error))?;
         let generate_session_compact = compact_output.content.clone();
         let (discovered_agents_md, all_skills_for_compaction, _agent_edited_paths, state_context) = {
             let agents_md: Vec<std::path::PathBuf> = self
@@ -1538,16 +1760,13 @@ impl SessionActor {
         }
         let replacement = vec![ConversationItem::user_meta(replacement_content)];
         if cancel.is_cancelled() {
-            return self.emit_compact_cancelled(auto_trigger).await;
+            return Err(acp::Error::internal_error()
+                .data(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG));
         }
         self.chat_state_handle
-            .replace_compaction_range(range_plan.target, replacement, source_surface_revision)
+            .replace_compaction_range(range_plan.target, replacement)
             .await
-            .map_err(|error| {
-                acp::Error::internal_error().data(format!(
-                    "compaction replacement was not durably recorded: {error}"
-                ))
-            })?;
+            .map_err(|error| compaction_write_error("compaction replacement", error))?;
         *replacement_committed = true;
         let control_reprojection_error = if let Err(error) = self
             .reproject_control_contexts_durably(shadowed_control_contexts)
@@ -1669,6 +1888,417 @@ impl SessionActor {
         }
         Ok(())
     }
+    /// Invalidation never publishes a late result. The independent Sideband
+    /// still owns cancellation accounting and its durable terminal.
+    pub(crate) async fn cancel_background_compaction(
+        &self,
+        reason: &str,
+    ) -> Result<(), acp::Error> {
+        let pending = self.compaction.background.borrow_mut().take();
+        if let Some(mut pending) = pending {
+            pending
+                .background
+                .store(false, std::sync::atomic::Ordering::Release);
+            pending.cancel.cancel();
+            // Discarding a ready result must not hide a durable-write failure
+            // behind a subsequent manual compact/control operation.
+            let failure = if pending.worker.is_finished() {
+                match (&mut pending.worker).await {
+                    Ok(Err(error))
+                        if crate::session::commands::is_fatal_turn_boundary_error(&error) =>
+                    {
+                        Some(error)
+                    }
+                    Err(error) => Some(crate::session::commands::fatal_turn_boundary_error(
+                        "background compaction worker",
+                        error.to_string(),
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            self.chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                    chat_state::CompactionEvent::Failed {
+                        id: pending.id.clone(),
+                        duration_ms: pending.started.elapsed().as_millis() as u64,
+                        error: reason.to_owned(),
+                    },
+                ))
+                .await
+                .map_err(|error| {
+                    crate::session::commands::fatal_turn_boundary_error(
+                        "background compaction cancellation",
+                        error.to_string(),
+                    )
+                })?;
+            if let Some(error) = failure {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Run only after pending controls and Goal settlement at a closed Step.
+    /// Ready summaries are published here; a running summary is never awaited.
+    pub(crate) async fn background_compaction_boundary(self: &Arc<Self>) -> Result<(), acp::Error> {
+        if self.events.has_active_step() {
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "background compaction",
+                "publication attempted inside an active Step",
+            ));
+        }
+        self.finish_background_compaction(false).await?;
+        if self.compaction.background.borrow().is_some()
+            || self.compaction.background_failed.get()
+            || self.compaction.lease.is_in_flight()
+            || self.tool_context.task_output_token_budget.is_some()
+            || self
+                .memory
+                .is_flushing
+                .load(std::sync::atomic::Ordering::Relaxed)
+            || self
+                .compaction
+                .auto_compact_suppressed
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != SUPPRESS_NONE
+            || self.goal_provider_admission_closed()
+        {
+            return Ok(());
+        }
+        {
+            let state = self.state.lock().await;
+            if state.pending_manual_compact.is_some()
+                || !matches!(state.foreground, super::ForegroundState::RegularTurn(_))
+            {
+                return Ok(());
+            }
+        }
+        let Some(threshold) = pre_compact_threshold(self.compaction.threshold_percent.get()) else {
+            return Ok(());
+        };
+        let Some(config) = self.chat_state_handle.get_sampling_config().await else {
+            return Ok(());
+        };
+        let tokens = self.chat_state_handle.get_projected_tokens().await;
+        // A direct jump to the hard threshold belongs to the existing sync path.
+        if token_estimation::exceeds_threshold(
+            tokens,
+            config.context_window.get(),
+            self.compaction.threshold_percent.get(),
+        ) {
+            return Ok(());
+        }
+        let Some(trigger) = auto_compact_trigger(
+            tokens,
+            config.context_window,
+            threshold,
+            "async_pre_sampling",
+        ) else {
+            return Ok(());
+        };
+        if self.maybe_pre_prune_at(&trigger, threshold, false).await? {
+            return Ok(());
+        }
+        let Some(materialized) = self
+            .chat_state_handle
+            .materialize_timeline(self.session_id_string())
+            .await
+        else {
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "background compaction",
+                "chat-state unavailable",
+            ));
+        };
+        if plan_compaction_range(
+            &materialized.surface,
+            &materialized.surface_ids,
+            config
+                .context_window
+                .get()
+                .saturating_mul(COMPACTION_RETAIN_PERCENT)
+                / 100,
+            MIN_COMPACTION_SOURCE_TOKENS,
+        )
+        .is_none()
+        {
+            return Ok(());
+        }
+        let id = uuid::Uuid::now_v7().to_string();
+        let source_items = materialized.surface.len();
+        let started = std::time::Instant::now();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let background = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        self.chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                chat_state::CompactionEvent::Started {
+                    id: id.clone(),
+                    mode: chat_state::CompactionMode::Background,
+                    source_items,
+                    prompt_index: self.chat_state_handle.get_prompt_index().await,
+                },
+            ))
+            .await
+            .map_err(|error| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "background compaction start",
+                    error.to_string(),
+                )
+            })?;
+        self.maybe_pre_compaction_flush(
+            tokens,
+            config.context_window.get(),
+            "async_pre_compaction",
+        )
+        .await;
+        match self
+            .prepare_compaction(
+                &id,
+                None,
+                ::diagnostics::events::CompactionTrigger::Auto,
+                cancel.clone(),
+                Some(background.clone()),
+            )
+            .await
+        {
+            Ok(prepared) => {
+                let worker = tokio::task::spawn_local(prepared.generation);
+                *self.compaction.background.borrow_mut() = Some(BackgroundCompaction {
+                    id,
+                    source_items,
+                    started,
+                    cancel,
+                    background,
+                    authority: prepared.authority,
+                    target: prepared.target,
+                    model_key: prepared.model_key,
+                    worker,
+                });
+            }
+            Err(error) => {
+                self.compaction.background_failed.set(true);
+                if let Err(error) = self
+                    .finish_compaction_transaction(
+                        &id,
+                        source_items,
+                        started,
+                        ::diagnostics::events::CompactionTrigger::Auto,
+                        Err(error),
+                        false,
+                    )
+                    .await
+                {
+                    if crate::session::commands::is_fatal_turn_boundary_error(&error)
+                        || Self::is_auth_compact_error(&error)
+                    {
+                        return Err(error);
+                    }
+                    tracing::warn!(%error, "background compaction preparation failed; synchronous recovery remains available");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `wait` promotes the existing job; it never starts another provider call.
+    async fn finish_background_compaction(
+        self: &Arc<Self>,
+        wait: bool,
+    ) -> Result<bool, acp::Error> {
+        let take = self
+            .compaction
+            .background
+            .borrow()
+            .as_ref()
+            .is_some_and(|pending| wait || pending.worker.is_finished());
+        if !take {
+            return Ok(false);
+        }
+        let _publication_lease = if wait {
+            // The promoting caller already owns the ordinary Auto lease.
+            None
+        } else {
+            let Some(lease) = self
+                .compaction
+                .lease
+                .try_enter(crate::session::compaction_config::CompactionOwner::Auto)
+            else {
+                return Ok(false);
+            };
+            Some(lease)
+        };
+        let mut pending = self
+            .compaction
+            .background
+            .borrow_mut()
+            .take()
+            .expect("checked background slot");
+        let Some(materialized) = self
+            .chat_state_handle
+            .materialize_timeline(self.session_id_string())
+            .await
+        else {
+            return Err(crate::session::commands::fatal_turn_boundary_error(
+                "background compaction publication",
+                "chat-state unavailable",
+            ));
+        };
+        let authority: Vec<_> = materialized
+            .active_control_contexts
+            .values()
+            .map(|context| context.surface_id)
+            .collect();
+        let model_key = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|config| {
+                (
+                    self.current_catalog_model_id(),
+                    config.api_backend,
+                    config.context_window.get(),
+                )
+            });
+        if authority != pending.authority
+            || model_key.as_ref() != Some(&pending.model_key)
+            || !compaction_range_is_current(&materialized.surface_ids, &pending.target)
+        {
+            *self.compaction.background.borrow_mut() = Some(pending);
+            self.cancel_background_compaction("compaction_source_invalidated")
+                .await?;
+            return Ok(false);
+        }
+        let foreground_started = std::time::Instant::now();
+        let tokens_before = self.chat_state_handle.get_projected_tokens().await;
+        let (cancel, _cancel_scope) = self.compaction.cancel.enter();
+        if wait {
+            pending
+                .background
+                .store(false, std::sync::atomic::Ordering::Release);
+            self.chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                    chat_state::CompactionEvent::Promoted {
+                        id: pending.id.clone(),
+                    },
+                ))
+                .await
+                .map_err(|error| {
+                    crate::session::commands::fatal_turn_boundary_error(
+                        "compaction promotion",
+                        error.to_string(),
+                    )
+                })?;
+            let context_window = self
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|config| config.context_window.get())
+                .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+            let percentage = token_estimation::usage_percentage_u8(tokens_before, context_window);
+            self.send_grow_notification(
+                crate::extensions::notification::SessionUpdate::AutoCompactStarted {
+                    tokens_used: tokens_before,
+                    context_window,
+                    percentage,
+                    reason: format!("Context window {percentage}% full"),
+                },
+            )
+            .await;
+        }
+        let generated = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                pending.cancel.cancel();
+                Err(acp::Error::internal_error().data(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG))
+            }
+            result = &mut pending.worker => result.unwrap_or_else(|error| Err(crate::session::commands::fatal_turn_boundary_error("background compaction worker", error.to_string()))),
+        };
+        let mut committed = false;
+        let generation_failed = generated.is_err();
+        let result = match generated {
+            Ok(generated) => {
+                self.commit_generated_compaction(&pending.id, generated, &mut committed)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        let mut result = self
+            .finish_compaction_transaction(
+                &pending.id,
+                pending.source_items,
+                pending.started,
+                ::diagnostics::events::CompactionTrigger::Auto,
+                result,
+                committed,
+            )
+            .await;
+        if wait
+            && result
+                .as_ref()
+                .is_err_and(is_compact_image_input_unsupported)
+            && self.recover_compaction_image_input().await?
+        {
+            // ImageShadows invalidate the old target, so the existing recovery
+            // legitimately opens a new transaction against the projected input.
+            result = self
+                .run_compact_inner(None, ::diagnostics::events::CompactionTrigger::Auto)
+                .await;
+        }
+        match result {
+            Ok(()) => {
+                let tokens_after = self.chat_state_handle.get_projected_tokens().await;
+                self.send_grow_notification(
+                    crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
+                        tokens_before,
+                        tokens_after,
+                        elapsed_ms: Some(
+                            if wait {
+                                foreground_started.elapsed()
+                            } else {
+                                pending.started.elapsed()
+                            }
+                            .as_millis() as i64,
+                        ),
+                        summary_preview: None,
+                        async_compact: !wait,
+                    },
+                )
+                .await;
+                Ok(true)
+            }
+            Err(error) => {
+                self.compaction.background_failed.set(true);
+                if !wait
+                    && !committed
+                    && !crate::session::commands::is_fatal_turn_boundary_error(&error)
+                    && !Self::is_auth_compact_error(&error)
+                {
+                    tracing::warn!(%error, generation_failed, "background compaction discarded; synchronous recovery remains available");
+                    return Ok(false);
+                }
+                if wait {
+                    if cancel.is_cancelled() {
+                        return self.emit_compact_cancelled(true).await.map(|()| true);
+                    }
+                    let context_window = self
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .map(|config| config.context_window.get())
+                        .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+                    self.suppress_auto_compaction(
+                        Self::classify_suppress_reason(&Self::acp_error_message(&error)),
+                        tokens_before,
+                        context_window,
+                    )
+                    .await;
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Check if auto-compact should be triggered based on context window usage.
     /// Returns Some(AutoCompactTriggerInfo) if threshold is reached, None otherwise.
     pub(crate) fn should_auto_compact(
@@ -1890,6 +2520,16 @@ impl SessionActor {
         &self,
         trigger_info: &AutoCompactTriggerInfo,
     ) -> Result<bool, acp::Error> {
+        self.maybe_pre_prune_at(trigger_info, self.compaction.threshold_percent.get(), true)
+            .await
+    }
+
+    async fn maybe_pre_prune_at(
+        &self,
+        trigger_info: &AutoCompactTriggerInfo,
+        threshold_percent: u8,
+        notify: bool,
+    ) -> Result<bool, acp::Error> {
         if !self.compaction.pre_prune.get() {
             return Ok(false);
         }
@@ -1911,7 +2551,6 @@ impl SessionActor {
             _ => return Ok(false),
         }
         let context_window = trigger_info.context_window;
-        let threshold_percent = self.compaction.threshold_percent.get();
         // Default per-item budget: 5% of the context window, lower bound 1.
         let item_budget: u64 = self
             .compaction
@@ -1998,21 +2637,24 @@ impl SessionActor {
         // The auto-compact attempt completes here (Started was already sent by
         // `run_compact_only`); `summary_preview` carries a short explanation
         // instead of a summary snippet.
-        self.send_grow_notification(
-            crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
-                tokens_before: trigger_info.tokens_used,
-                tokens_after,
-                elapsed_ms: Some(elapsed_ms),
-                summary_preview: Some(format!(
-                    "pruned {} tool result{} ({} → {} tokens)",
-                    report.pruned_count,
-                    if report.pruned_count == 1 { "" } else { "s" },
-                    report.tokens_before,
+        if notify {
+            self.send_grow_notification(
+                crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
+                    async_compact: false,
+                    tokens_before: trigger_info.tokens_used,
                     tokens_after,
-                )),
-            },
-        )
-        .await;
+                    elapsed_ms: Some(elapsed_ms),
+                    summary_preview: Some(format!(
+                        "pruned {} tool result{} ({} → {} tokens)",
+                        report.pruned_count,
+                        if report.pruned_count == 1 { "" } else { "s" },
+                        report.tokens_before,
+                        tokens_after,
+                    )),
+                },
+            )
+            .await;
+        }
         Ok(true)
     }
     /// Compact without auto-continue. The outer turn loop rebuilds and retries.
@@ -2056,6 +2698,9 @@ impl SessionActor {
             tracing::debug!("auto compact skipped: another compaction owns the lease");
             return Ok(());
         };
+        if self.finish_background_compaction(true).await? {
+            return Ok(());
+        }
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
         let projected_images = self.project_images_for_known_text_model().await?;
         if projected_images.total_images() > 0 {
@@ -2135,6 +2780,7 @@ impl SessionActor {
                 span.record("post_tokens", tokens_after as i64);
                 span.record("success", true);
                 self.send_grow_notification(GrowSessionUpdate::AutoCompactCompleted {
+                    async_compact: false,
                     tokens_before: trigger_info.tokens_used,
                     tokens_after,
                     elapsed_ms: Some(elapsed_ms),

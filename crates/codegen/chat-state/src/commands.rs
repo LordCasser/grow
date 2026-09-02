@@ -244,12 +244,11 @@ pub enum ChatStateCommand {
     },
 
     /// Commit the exact Surface range declared by the active compaction
-    /// summary. Both the optimistic revision and stable range identities are
-    /// checked inside the actor before the Timeline event is persisted.
+    /// summary. Stable range identities are checked inside the actor; unrelated
+    /// appends must not invalidate a frozen background summary.
     ReplaceCompactionRangeDurably {
         target: crate::SurfaceRange,
         items: Vec<ConversationItem>,
-        expected_surface_revision: u64,
         reply: oneshot::Sender<Result<(), TimelineWriteError>>,
     },
 

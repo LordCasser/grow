@@ -28,6 +28,7 @@ pub(crate) enum SidebandRunError {
 }
 
 pub(crate) struct SidebandRun {
+    background: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     timeline: chat_state::SidebandTimeline,
     persistence: NotificationSender,
     cancellation: tokio_util::sync::CancellationToken,
@@ -173,6 +174,7 @@ impl SessionActor {
             },
         ))?;
         let mut run = SidebandRun {
+            background: None,
             timeline,
             persistence: self.notifications.clone(),
             cancellation: if finalizer {
@@ -397,11 +399,22 @@ impl SidebandRun {
         provider: F,
     ) -> Result<F::Output, SidebandRunError> {
         self.provider_attempt_started()?;
-        tokio::select! {
+        let result = tokio::select! {
             biased;
             _ = self.cancellation.cancelled() => Err(SidebandRunError::Cancelled),
             output = provider => Ok(output),
+        };
+        if let Some(id) = &self.admitted_attempt_id {
+            self.goal_usage_window.mark_attempt_returned(id);
         }
+        result
+    }
+
+    pub(crate) fn set_background(
+        &mut self,
+        background: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        self.background = background;
     }
 
     fn provider_attempt_started(&mut self) -> Result<(), SidebandRunError> {
@@ -421,10 +434,11 @@ impl SidebandRun {
         }
         self.admitted_attempt_id = self
             .goal_usage_window
-            .begin_model_attempt(
+            .begin_model_attempt_with_background(
                 &self.usage_owner_id,
                 self.usage_epoch,
                 self.expected_goal_id.as_deref(),
+                self.background.clone(),
             )
             .map_err(SidebandRunError::Admission)?;
         Ok(())
@@ -798,6 +812,7 @@ mod tests {
         let (goal_tx, _goal_rx) = tokio::sync::mpsc::unbounded_channel();
         (
             SidebandRun {
+                background: None,
                 timeline,
                 persistence,
                 cancellation: tokio_util::sync::CancellationToken::new(),

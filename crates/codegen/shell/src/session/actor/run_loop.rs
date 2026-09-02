@@ -263,6 +263,7 @@ async fn begin_graceful_shutdown(
     cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<(), String> {
     session.session_activities.close_admission();
+    session.cancel_background_compaction("session_shutdown").await.map_err(|error| error.to_string())?;
     session.sideband_cancel.cancel();
     session
         .user_input_generation

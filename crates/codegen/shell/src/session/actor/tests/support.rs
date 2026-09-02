@@ -524,6 +524,8 @@ pub(crate) async fn create_test_actor_ex(
         startup_hints: StartupHints::default(),
         subagent_capabilities: None,
         compaction: crate::session::compaction_config::CompactionConfig {
+            background: Default::default(),
+            background_failed: std::cell::Cell::new(false),
             lease: Default::default(),
             threshold_percent: std::cell::Cell::new(threshold_percent),
             memory_flush_enabled: false,

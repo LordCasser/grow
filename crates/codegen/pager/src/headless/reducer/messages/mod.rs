@@ -541,12 +541,15 @@ impl Reducer for MessagesReducer {
                     self.buffer_tool_result(u);
                 }
             }
-            StreamEvent::Lifecycle(Lifecycle::CompactCompleted { pre_tokens }) => {
+            StreamEvent::Lifecycle(Lifecycle::CompactCompleted {
+                pre_tokens,
+                async_compact,
+            }) => {
                 self.flush_boundary(&mut out);
                 out.push(to_line(&MessagesLine::System(SystemLine::CompactBoundary(
                     CompactBoundaryLine {
                         compact_metadata: CompactMetadata {
-                            trigger: "auto",
+                            trigger: if async_compact { "async" } else { "auto" },
                             pre_tokens,
                         },
                         session_id: self.session_id().to_string(),

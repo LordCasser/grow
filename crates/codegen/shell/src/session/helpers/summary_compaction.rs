@@ -61,12 +61,14 @@ pub(crate) struct ShellCompactionSampler {
     /// Wall-clock budget (secs) forwarded to `generate_session_compact` as the
     /// reasoning-runaway backstop; `0` disables it.
     wall_clock_budget_secs: u64,
+    deadline: Option<std::time::Instant>,
     cancel: tokio_util::sync::CancellationToken,
     sideband: std::sync::Arc<tokio::sync::Mutex<SidebandRun>>,
     sideband_feedback: std::sync::Arc<Mutex<Option<String>>>,
     /// Full output of the most recent successful sample (for L5 telemetry).
     last_success: Mutex<Option<CompactOutput>>,
     image_input_unsupported: std::sync::atomic::AtomicBool,
+    infrastructure_error: Mutex<Option<String>>,
 }
 
 impl ShellCompactionSampler {
@@ -87,11 +89,14 @@ impl ShellCompactionSampler {
             sampling_config,
             idle_timeout,
             wall_clock_budget_secs,
+            deadline: (wall_clock_budget_secs > 0)
+                .then(|| std::time::Instant::now() + Duration::from_secs(wall_clock_budget_secs)),
             cancel,
             sideband,
             sideband_feedback,
             last_success: Mutex::new(None),
             image_input_unsupported: std::sync::atomic::AtomicBool::new(false),
+            infrastructure_error: Mutex::new(None),
         }
     }
 
@@ -103,6 +108,24 @@ impl ShellCompactionSampler {
     pub(crate) fn take_image_input_unsupported(&self) -> bool {
         self.image_input_unsupported
             .swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    pub(crate) fn take_infrastructure_error(&self) -> Option<String> {
+        self.infrastructure_error.lock().unwrap().take()
+    }
+
+    fn sideband_error(&self, error: SidebandRunError) -> CompactionSampleError {
+        if matches!(
+            &error,
+            SidebandRunError::Parent(_)
+                | SidebandRunError::Persistence(_)
+                | SidebandRunError::InterruptedAppendRecovered
+        ) {
+            let message = error.to_string();
+            *self.infrastructure_error.lock().unwrap() = Some(message.clone());
+            return CompactionSampleError::Deterministic(message);
+        }
+        sideband_error_to_sample_error(error)
     }
 }
 
@@ -116,6 +139,20 @@ impl CompactionSampler for ShellCompactionSampler {
         _prompt: &CompactionPrompt,
         _timeout: Duration,
     ) -> Result<LlmCompactionOutput, CompactionSampleError> {
+        let remaining_secs = match self.deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(CompactionSampleError::Deterministic(
+                        "compaction wall-clock budget exhausted".into(),
+                    ));
+                }
+                remaining
+                    .as_secs()
+                    .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+            }
+            None => self.wall_clock_budget_secs,
+        };
         let feedback = self.sideband_feedback.lock().unwrap().take();
         // Append the canonical summarization prompt as the final user message.
         let request_surface =
@@ -130,7 +167,7 @@ impl CompactionSampler for ShellCompactionSampler {
             .await
             .attempt_all_sources(&audit_request, self.client.api_backend(), feedback)
             .await
-            .map_err(sideband_error_to_sample_error)?;
+            .map_err(|error| self.sideband_error(error))?;
         let observed_usage = std::sync::Arc::new(Mutex::new(None));
         let usage_slot = std::sync::Arc::clone(&observed_usage);
         let usage_observer: crate::session::helpers::session_compact::CompactUsageObserver =
@@ -145,16 +182,22 @@ impl CompactionSampler for ShellCompactionSampler {
             self.client.clone(),
             &self.sampling_config,
             self.idle_timeout,
-            self.wall_clock_budget_secs,
+            remaining_secs,
             &self.cancel,
             usage_observer,
         );
         let sample = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => Err(CompactFailure::Cancelled),
+            _ = async {
+                match self.deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => Err(CompactFailure::Deterministic(acp::Error::internal_error().data("compaction wall-clock budget exhausted"))),
             result = async {
                 self.sideband.lock().await.run_provider(provider).await
-            } => result.map_err(sideband_error_to_sample_error)?,
+            } => result.map_err(|error| self.sideband_error(error))?,
         };
         // `generate_session_compact` drops its exactly-once meter before it
         // returns. Settle that exact provider attempt through the lifecycle
@@ -171,7 +214,7 @@ impl CompactionSampler for ShellCompactionSampler {
             .await
             .settle_goal_attempt(tokens)
             .await
-            .map_err(sideband_error_to_sample_error)?;
+            .map_err(|error| self.sideband_error(error))?;
 
         match sample {
             Ok(output) => {

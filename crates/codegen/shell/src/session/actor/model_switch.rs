@@ -1608,6 +1608,9 @@ impl SessionActor {
         Option<PendingControlSettlement>,
         Option<acp::Error>,
     ) {
+        if let Err(error) = self.cancel_background_compaction("control_authority_changed").await {
+            return (false, false, false, None, None, None, Some(error));
+        }
         match control {
             PendingStepControl::ModelReload(pending) => {
                 let mut workflow_admission = self.workflow_manager.lock().await;
