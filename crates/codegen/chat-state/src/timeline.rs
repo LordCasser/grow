@@ -2670,9 +2670,10 @@ impl Timeline {
         self.record(TimelineEventKind::Recovery(RecoveryEvent {
             action: "repair_surface_tool_pairing".into(),
             correlation_id: None,
-            reason: "surface contained duplicate or dangling tool results after interruption"
+            reason: "surface contained malformed tool exchanges or invalid tool pairing after interruption"
                 .into(),
             details: Some(serde_json::json!({
+                "quarantined_tool_exchanges": report.quarantined_tool_exchanges,
                 "deduplicated": report.duplicates_removed,
                 "stripped": report.stripped_tool_result_ids,
                 "synthesized": report.synthetic_results_inserted,
@@ -5520,18 +5521,30 @@ fn valid_integrity_repair(before: &[ConversationItem], replacement: &[Conversati
         return true;
     }
 
-    let mut interrupted = before.to_vec();
-    crate::compaction_utils::repair_history_with_reason(
-        &mut interrupted,
+    // Preserve the proof of already committed pairing-only repairs. Adding a
+    // new projection rule must not reinterpret the original source events.
+    for reason in [
+        DanglingToolCallReason::UserCancelled,
         DanglingToolCallReason::ProcessInterrupted,
-    );
-    if conversation_slices_match(&interrupted, replacement) {
-        return true;
+        DanglingToolCallReason::HarnessHalted {
+            class: "history_repair",
+        },
+    ] {
+        let mut paired = before.to_vec();
+        crate::compaction_utils::repair_tool_pairing_with_reason(&mut paired, reason);
+        if conversation_slices_match(&paired, replacement) {
+            return true;
+        }
+        let mut repaired = before.to_vec();
+        crate::compaction_utils::repair_history_with_reason(&mut repaired, reason);
+        if conversation_slices_match(&repaired, replacement) {
+            return true;
+        }
     }
-
-    let mut explicit = before.to_vec();
-    crate::compaction_utils::repair_history(&mut explicit);
-    conversation_slices_match(&explicit, replacement)
+    // Response admission cannot close healthy calls that have not run yet.
+    let mut quarantined = before.to_vec();
+    crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut quarantined) > 0
+        && conversation_slices_match(&quarantined, replacement)
 }
 
 fn conversation_slices_match(left: &[ConversationItem], right: &[ConversationItem]) -> bool {
@@ -5842,7 +5855,7 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
                         .collect::<Vec<_>>();
                     fold.surface.splice(start_index..=end_index, replacement);
                     if messages.cause == MessageCause::IntegrityRepair {
-                        rebuild_integrity_branch(&mut fold, event.seq, &messages.items);
+                        rebuild_integrity_branch(&mut fold, event.seq, &messages.items, &replaced);
                     }
                 }
             },
@@ -6082,20 +6095,52 @@ fn reset_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationIte
     append_branch_leaves(fold, event, items, true);
 }
 
-fn rebuild_integrity_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationItem]) {
+fn rebuild_integrity_branch(
+    fold: &mut BranchFold,
+    event: EventSeq,
+    items: &[ConversationItem],
+    previous: &[BranchProvenance],
+) {
+    let previous_items: Vec<_> = previous.iter().map(|entry| entry.value.clone()).collect();
+    let mut quarantines: Vec<_> =
+        crate::compaction_utils::malformed_tool_exchange_ranges(&previous_items)
+            .into_iter()
+            .map(|range| {
+                let birth = previous[range.clone()]
+                    .iter()
+                    .flat_map(|entry| &entry.leaves)
+                    .filter_map(|leaf| fold.leaf_birth.get(leaf).copied())
+                    .min()
+                    .unwrap_or(event);
+                (
+                    crate::compaction_utils::quarantined_tool_exchange(&previous_items[range]),
+                    birth,
+                )
+            })
+            .collect();
+    let old_order = std::mem::take(&mut fold.leaf_order);
     let referenced = fold
         .surface
         .iter()
         .flat_map(|entry| entry.leaves.iter().copied())
         .collect::<BTreeSet<_>>();
-    fold.leaf_order.retain(|id| referenced.contains(id));
     fold.leaf_values.retain(|id, _| referenced.contains(id));
     fold.leaf_birth.retain(|id, _| referenced.contains(id));
     fold.leaf_is_message.retain(|id, _| referenced.contains(id));
     for (item, entry) in fold.surface.iter().enumerate() {
         if entry.leaves.len() == 1 {
-            fold.leaf_values
-                .insert(entry.leaves[0], items[item].clone());
+            let id = entry.leaves[0];
+            if let std::collections::btree_map::Entry::Vacant(entry) = fold.leaf_birth.entry(id) {
+                let birth = quarantines
+                    .iter()
+                    .position(|(value, _)| conversation_items_match(value, &items[item]))
+                    .map(|index| quarantines.remove(index).1)
+                    .unwrap_or(event);
+                entry.insert(birth);
+                fold.leaf_is_message.insert(id, true);
+            }
+            fold.leaf_order.push(id);
+            fold.leaf_values.insert(id, items[item].clone());
         } else if entry.leaves.is_empty() {
             let id = SurfaceId {
                 event,
@@ -6105,8 +6150,19 @@ fn rebuild_integrity_branch(fold: &mut BranchFold, event: EventSeq, items: &[Con
             fold.leaf_values.insert(id, items[item].clone());
             fold.leaf_birth.insert(id, event);
             fold.leaf_is_message.insert(id, true);
+        } else {
+            // Compaction nodes still expand to their original ordered leaves.
+            fold.leaf_order.extend(
+                old_order
+                    .iter()
+                    .filter(|id| entry.leaves.contains(id))
+                    .copied(),
+            );
         }
     }
+    let mut seen = BTreeSet::new();
+    fold.leaf_order.retain(|id| seen.insert(*id));
+    fold.unloaded.retain(|id| referenced.contains(id));
 }
 
 fn replace_branch_leaves(
@@ -9464,6 +9520,58 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn poisoned_history_replays_its_original_repair_and_recovers_without_resurrection() {
+        let mut prompt = ConversationItem::user("first prompt");
+        prompt.set_prompt_index(0);
+        let bad = ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+            id: "".into(),
+            name: "".into(),
+            arguments: "{}".into(),
+        }]);
+        let mut timeline = Timeline::from_seed(vec![
+            prompt,
+            bad,
+            ConversationItem::tool_result("synthetic-old", "old real outcome"),
+        ])
+        .unwrap();
+        let mut original_repair = timeline.surface().to_vec();
+        sampling_types::dedup_duplicate_tool_results(&mut original_repair);
+        sampling_types::repair_dangling_tool_calls(
+            &mut original_repair,
+            DanglingToolCallReason::UserCancelled,
+        );
+        timeline
+            .replace_all(original_repair, MessageCause::IntegrityRepair)
+            .unwrap();
+        // This committed repair must retain its original meaning, even though
+        // it did not fix the malformed declaration that triggered the 400.
+        let mut timeline = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        let mut later = ConversationItem::user("later prompt");
+        later.set_prompt_index(1);
+        let later_seq = timeline.append(later, MessageCause::User).unwrap().seq;
+        let original_events = timeline.events().to_vec();
+        assert_eq!(timeline.recover_surface_integrity().unwrap().len(), 2);
+        assert_eq!(
+            serde_json::to_value(&timeline.events()[..original_events.len()]).unwrap(),
+            serde_json::to_value(&original_events).unwrap()
+        );
+        assert!(timeline.recover_surface_integrity().unwrap().is_empty());
+        let replay = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        let branch = replay.branch_transcript();
+        assert_eq!(branch.len(), 3);
+        assert!(branch[1].text_content().contains("old real outcome"));
+        assert_eq!(
+            replay.turn_items_since(later_seq).len(),
+            1,
+            "repair must not rebirth an older exchange in the current turn"
+        );
+        let rewind = replay.rewind_surface(1).unwrap();
+        assert_eq!(rewind.len(), 2);
+        assert!(rewind[1].text_content().contains("quarantined"));
+        assert!(replay.completed_compaction_unloaded_branch_ids().is_empty());
     }
 
     #[test]

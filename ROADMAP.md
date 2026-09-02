@@ -40,6 +40,8 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 
 以下项目不是 v2.1.0 的实现内容。它们只记录已经确认的边界、影响与未来验收条件，不能作为当前代码的第二事实源。
 
+- **LLM 非聚合失败的因果取证**：工具协议污染修复已保留聚合响应和 `IntegrityRepair` replacement，但这不等于覆盖解析失败、半截 SSE、空响应重试及所有 Sideband 失败中的原始证据。后续应沿现有 request/attempt/result 生命周期核对记录边界；凡参与重试、停止、计费或降级的部分输出和决定，都必须在所属 Timeline 中留有可验证的证据或不可变 artifact 引用。验收要求在流中断、解析错误、重试和崩溃窗口注入故障后仍能重建因果链，不能只保留成功 attempt 或另建调试日志充当事实源。此项与已实现的 Surface 工具身份/配对修复分开处理。
+
 - **Workflow 进度 checkpoint**：Spawn seed 与 lifecycle 可以在 manifest 缺失时恢复 Run identity、冻结契约和终态，但不能完整重建 `current_phase`、Agent 行、累计预算等中间进度。未来应新增有界 Timeline checkpoint 或 journal fold，并证明 sidecar 全失时的投影与正常恢复一致。
 - **Workflow Forgotten/tombstone**：当前 clear tombstone 仍位于 sidecar，历史 Timeline 不表达“该 Run 已被遗忘”。未来应设计 typed `Forgotten` 事实，并证明清理后重启不会复活旧 Run。
 - **Workflow restore cap 顺序**：当前恢复数量上限先于全部有效性与 tombstone 判定。未来应先解析权威身份和清理事实，再对有效候选施加稳定上限，避免坏记录挤占额度。

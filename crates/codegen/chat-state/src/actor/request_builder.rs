@@ -20,9 +20,8 @@ impl ChatStateActor {
     /// # Repair invariant
     ///
     /// This method durably repairs the actor's own Surface before cloning it,
-    /// so there is no need to run
-    /// `dedup_duplicate_tool_results` / `repair_dangling_tool_calls` on the
-    /// clone — those would be O(n) no-ops.
+    /// including malformed tool identities and pairing. Never silently repair
+    /// only the request clone: the exact replacement must be in the Timeline.
     pub(super) async fn build_conversation_request(
         &mut self,
         timeline_id: &str,

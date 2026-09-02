@@ -440,6 +440,10 @@ impl ChatStateActor {
             ChatStateCommand::PushAssistantResponse { item } => {
                 self.push_message(item).await;
             }
+            ChatStateCommand::PushResponseDurably { items, reply } => {
+                let result = self.push_response_durably(items).await;
+                let _ = reply.send(result);
+            }
             ChatStateCommand::PushToolResult { item } => {
                 self.push_message(item).await;
             }

@@ -16,7 +16,10 @@ use crate::{
 ///
 /// This is intentionally independent from the Timeline event schema: changing
 /// a debug projection must not pretend that the durable ledger format changed.
-pub const TRAJECTORY_SCHEMA_VERSION: u8 = 3;
+pub const TRAJECTORY_SCHEMA_VERSION: u8 = 4;
+
+/// Relations are summary metadata, never an unbounded copy of replacement refs.
+const MAX_REPAIR_SOURCE_LINKS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +72,13 @@ pub struct TrajectoryRow {
     pub outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_severity: Option<TrajectoryIssueSeverity>,
+    /// Local ledger coordinates; the UI qualifies them with this row's ledger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_source_seqs: Vec<u64>,
+    #[serde(default)]
+    pub repair_source_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repaired_by_seq: Option<u64>,
     pub summary: String,
     pub details: serde_json::Value,
 }
@@ -117,6 +127,10 @@ pub struct TrajectoryProjector {
     active_turn: Option<String>,
     active_step: Option<u32>,
     pending_control_rows: BTreeMap<ControlContextLayer, (SurfaceId, usize)>,
+    // Only live identity metadata, not message payloads or a second Surface.
+    tool_ids: BTreeMap<SurfaceId, Vec<String>>,
+    invalid_tool_sources: BTreeMap<SurfaceId, usize>,
+    recovery_items: BTreeSet<SurfaceId>,
 }
 
 impl TrajectoryProjector {
@@ -152,12 +166,19 @@ impl TrajectoryProjector {
             _ => {}
         }
 
+        let mut replaced_invalid_sources = Vec::new();
+        let mut replaced_recovery_items = 0;
         if let TimelineEventKind::Messages(MessageEvent {
             surface: SurfaceOp::Replace { shadowed, .. },
             ..
         }) = &event.kind
         {
             for id in shadowed {
+                self.tool_ids.remove(id);
+                if let Some(source) = self.invalid_tool_sources.remove(id) {
+                    replaced_invalid_sources.push(source);
+                }
+                replaced_recovery_items += usize::from(self.recovery_items.remove(id));
                 if let Some(&row_index) = self.surface_rows.get(id) {
                     let remaining = &mut self.current_items_per_row[row_index];
                     *remaining = remaining.saturating_sub(1);
@@ -249,6 +270,16 @@ impl TrajectoryProjector {
             projected.summary = describe_control_event(self.control_snapshot.as_ref(), control);
             self.control_snapshot = Some(control.snapshot.clone());
         }
+        if let TimelineEventKind::Messages(messages) = &event.kind {
+            self.project_tool_integrity(
+                event,
+                messages,
+                row_index,
+                &mut projected,
+                replaced_invalid_sources,
+                replaced_recovery_items,
+            );
+        }
         if projected.turn_id.is_none() {
             projected.turn_id.clone_from(&self.active_turn);
         }
@@ -303,6 +334,136 @@ impl TrajectoryProjector {
                 self.active_step = None;
             }
             _ => {}
+        }
+    }
+
+    fn project_tool_integrity(
+        &mut self,
+        event: &TimelineEvent,
+        messages: &MessageEvent,
+        row_index: usize,
+        projected: &mut TrajectoryRow,
+        replaced_sources: Vec<usize>,
+        replaced_recovery_items: usize,
+    ) {
+        let mut invalid_items = Vec::new();
+        let mut issues = BTreeSet::new();
+        if messages.items.iter().any(|item| matches!(item, sampling_types::ConversationItem::Assistant(a) if !a.tool_calls.is_empty())) {
+            let mut seen = self.tool_ids.values().flatten().map(String::as_str).collect();
+            for (index, item) in messages.items.iter().enumerate() {
+                if let sampling_types::ConversationItem::Assistant(assistant) = item {
+                    let mut invalid = false;
+                    for call in &assistant.tool_calls {
+                        if let Some(issue) = crate::compaction_utils::tool_identity_issue(call, &mut seen) {
+                            issues.insert(issue);
+                            invalid = true;
+                        }
+                    }
+                    if invalid {
+                        invalid_items.push(index);
+                    }
+                }
+            }
+        }
+        let mut recovery_items = 0;
+        for (index, item) in messages.items.iter().enumerate() {
+            let id = SurfaceId {
+                event: event.seq,
+                item: index as u32,
+            };
+            if let sampling_types::ConversationItem::Assistant(assistant) = item
+                && !assistant.tool_calls.is_empty()
+            {
+                self.tool_ids.insert(
+                    id,
+                    assistant
+                        .tool_calls
+                        .iter()
+                        .filter(|call| !call.id.trim().is_empty() && !call.name.trim().is_empty())
+                        .map(|call| call.id.to_string())
+                        .collect(),
+                );
+            }
+            if matches!(item, sampling_types::ConversationItem::User(user)
+                if user.synthetic_reason == Some(sampling_types::SyntheticReason::AutoRecovery))
+            {
+                self.recovery_items.insert(id);
+                recovery_items += 1;
+            }
+        }
+        // Pairing-only repair preserves invalid declarations. Keep their
+        // original event identity instead of blaming the replacement event.
+        let carries_sources = matches!(
+            messages.cause,
+            crate::MessageCause::IntegrityRepair | crate::MessageCause::ToolResultPrune
+        ) && invalid_items.len() == replaced_sources.len();
+        for (offset, index) in invalid_items.iter().enumerate() {
+            self.invalid_tool_sources.insert(
+                SurfaceId {
+                    event: event.seq,
+                    item: *index as u32,
+                },
+                if carries_sources {
+                    replaced_sources[offset]
+                } else {
+                    row_index
+                },
+            );
+        }
+        if messages.cause == crate::MessageCause::IntegrityRepair {
+            let removed = match &messages.surface {
+                SurfaceOp::Replace { shadowed, .. } => shadowed.len(),
+                SurfaceOp::Append => 0,
+            };
+            if !replaced_sources.is_empty()
+                && invalid_items.is_empty()
+                && recovery_items > replaced_recovery_items
+            {
+                let exchanges = replaced_sources.len();
+                let sources: BTreeSet<_> = replaced_sources.into_iter().collect();
+                projected.summary = format!(
+                    "Quarantined {exchanges} protocol-invalid tool exchange(s); non-executable evidence retained · {removed} → {} Surface items",
+                    messages.items.len()
+                );
+                projected.outcome = Some("quarantined".into());
+                projected.repair_source_count = sources.len();
+                projected.repair_source_seqs = sources
+                    .iter()
+                    .take(MAX_REPAIR_SOURCE_LINKS)
+                    .map(|index| self.rows[*index].seq)
+                    .collect();
+                for index in sources {
+                    self.rows[index].repaired_by_seq = Some(event.seq.get());
+                    self.rows[index].state = "quarantined".into();
+                    self.dirty_rows.insert(index);
+                }
+            } else {
+                projected.summary = format!(
+                    "Tool pairing repair · {removed} → {} Surface items; {} protocol-invalid exchange(s) remain",
+                    messages.items.len(),
+                    invalid_items.len()
+                );
+                if !invalid_items.is_empty() {
+                    projected.outcome = Some("invalid_tool_metadata".into());
+                    projected.issue_severity = Some(TrajectoryIssueSeverity::Error);
+                }
+            }
+        } else if !invalid_items.is_empty() {
+            if matches!(
+                messages.cause,
+                crate::MessageCause::Assistant | crate::MessageCause::Seed
+            ) {
+                projected.layer = "assistant".into();
+                projected.kind = "assistant.invalid_tool_metadata".into();
+                projected.state = "invalid".into();
+            }
+            projected.outcome = Some("invalid_tool_metadata".into());
+            projected.issue_severity = Some(TrajectoryIssueSeverity::Error);
+            projected.summary = format!(
+                "Protocol-invalid tool metadata: {} · {} exchange(s); source event retained",
+                issues.into_iter().collect::<Vec<_>>().join(", "),
+                invalid_items.len()
+            );
         }
     }
 
@@ -373,6 +534,9 @@ fn row(
         duration_ms,
         outcome,
         issue_severity,
+        repair_source_seqs: Vec::new(),
+        repair_source_count: 0,
+        repaired_by_seq: None,
         summary,
         details: serde_json::Value::Null,
     }
@@ -1357,14 +1521,20 @@ fn goal_tokens(goal: &serde_json::Value) -> i64 {
 }
 
 fn describe_message(event: &MessageEvent) -> ReturnTuple {
-    let text = event
-        .items
-        .iter()
-        .map(|item| item.text_content())
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let summary = truncate(&text, 240);
+    let summary = if event.cause == crate::MessageCause::IntegrityRepair {
+        // The projector supplies the action summary from typed transition
+        // metadata. Never concatenate the full replacement just to discard it.
+        "Surface integrity repair".into()
+    } else {
+        let text = event
+            .items
+            .iter()
+            .map(|item| item.text_content())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        truncate(&text, 240)
+    };
     let state = match event.surface {
         SurfaceOp::Append => "appended",
         SurfaceOp::Replace { .. } => "replaced",
@@ -1799,6 +1969,184 @@ mod tests {
 
     use super::*;
     use crate::MessageCause;
+
+    fn malformed_response() -> ConversationItem {
+        ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+            id: "".into(),
+            name: "".into(),
+            arguments: "{\"secret_marker\":50}".into(),
+        }])
+    }
+
+    #[test]
+    fn quarantine_is_an_auditable_relation_not_an_erased_response() {
+        let mut timeline =
+            Timeline::from_seed(vec![ConversationItem::system("system prefix ".repeat(100))])
+                .unwrap();
+        let raw = timeline
+            .append(malformed_response(), MessageCause::Assistant)
+            .unwrap();
+        let mut projector = TrajectoryProjector::default();
+        for event in timeline.events() {
+            projector.accept(event);
+        }
+        let invalid = &projector.rows()[1];
+        assert_eq!(invalid.state, "invalid");
+        assert!(invalid.repaired_by_seq.is_none());
+        assert!(invalid.summary.contains("empty tool id"));
+        assert_eq!(invalid.issue_severity, Some(TrajectoryIssueSeverity::Error));
+        projector.clear_dirty_rows();
+        let (_, events) = timeline.repair_surface_history().unwrap();
+        let repair_seq = events[0].seq.get();
+        for event in &events {
+            projector.accept(event);
+        }
+        assert!(projector.dirty_row_indices().any(|index| index == 1));
+        let snapshot = projector.snapshot(&timeline);
+        let original = &snapshot.rows[1];
+        let repair = snapshot.rows.last().unwrap();
+        assert_eq!(original.details, serde_json::to_value(&raw.kind).unwrap());
+        assert_eq!(original.visibility, SurfaceVisibility::Shadowed);
+        assert_eq!(original.state, "quarantined");
+        assert_eq!(original.repaired_by_seq, Some(repair_seq));
+        assert_eq!(
+            original.issue_severity,
+            Some(TrajectoryIssueSeverity::Error)
+        );
+        assert_eq!(repair.kind, "context.repair");
+        assert_eq!(repair.outcome.as_deref(), Some("quarantined"));
+        assert!(repair.issue_severity.is_none());
+        assert_eq!(repair.repair_source_seqs, vec![raw.seq.get()]);
+        assert_eq!(repair.repair_source_count, 1);
+        assert!(repair.summary.starts_with("Quarantined 1"));
+        assert!(!repair.summary.contains("system prefix"));
+        assert!(!repair.summary.contains("secret_marker"));
+        assert!(projector.rows().iter().all(|row| row.details.is_null()));
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            serde_json::to_value(timeline.trajectory()).unwrap()
+        );
+        assert!(
+            timeline
+                .events()
+                .iter()
+                .all(|event| !matches!(event.kind, TimelineEventKind::Tool(_)))
+        );
+    }
+
+    #[test]
+    fn pairing_only_repair_does_not_claim_quarantine_or_lose_the_original_source() {
+        let mut timeline = Timeline::default();
+        let raw = timeline
+            .append(malformed_response(), MessageCause::Assistant)
+            .unwrap();
+        let mut paired = timeline.surface().to_vec();
+        sampling_types::repair_dangling_tool_calls(
+            &mut paired,
+            sampling_types::DanglingToolCallReason::UserCancelled,
+        );
+        let old_repair = timeline
+            .replace_all(paired, MessageCause::IntegrityRepair)
+            .unwrap();
+        let prior = timeline.trajectory();
+        assert!(prior.rows[0].repaired_by_seq.is_none());
+        assert_eq!(
+            prior.rows[1].issue_severity,
+            Some(TrajectoryIssueSeverity::Error)
+        );
+        assert!(
+            prior.rows[1]
+                .summary
+                .contains("1 protocol-invalid exchange(s) remain")
+        );
+        timeline.repair_surface_history().unwrap();
+        let snapshot = timeline.trajectory();
+        let repair = snapshot.rows.last().unwrap();
+        assert_eq!(repair.repair_source_seqs, vec![raw.seq.get()]);
+        assert_ne!(repair.repair_source_seqs, vec![old_repair.seq.get()]);
+        assert_eq!(snapshot.rows[0].repaired_by_seq, Some(repair.seq));
+    }
+
+    #[test]
+    fn invalid_context_rebuild_is_not_mislabeled_as_a_new_model_response() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::user("start")]).unwrap();
+        timeline
+            .replace_all(vec![malformed_response()], MessageCause::ContextRebuild)
+            .unwrap();
+        let snapshot = timeline.trajectory();
+        let rebuilt = snapshot.rows.last().unwrap();
+        assert_eq!(rebuilt.kind, "context.rebuild");
+        assert_eq!(rebuilt.producer, "core");
+        assert_eq!(rebuilt.layer, "meta");
+        assert_eq!(rebuilt.issue_severity, Some(TrajectoryIssueSeverity::Error));
+    }
+
+    #[test]
+    fn repair_links_are_bounded_but_all_sources_get_backlinks() {
+        let mut timeline = Timeline::default();
+        for _ in 0..40 {
+            timeline
+                .append(malformed_response(), MessageCause::Assistant)
+                .unwrap();
+        }
+        timeline.repair_surface_history().unwrap();
+        let snapshot = timeline.trajectory();
+        let repair = snapshot.rows.last().unwrap();
+        assert_eq!(repair.repair_source_count, 40);
+        assert_eq!(repair.repair_source_seqs.len(), MAX_REPAIR_SOURCE_LINKS);
+        assert!(
+            snapshot.rows[..40]
+                .iter()
+                .all(|row| row.repaired_by_seq == Some(repair.seq))
+        );
+    }
+
+    #[test]
+    fn tool_identity_index_follows_replacement_boundaries_and_never_parses_user_text() {
+        let mut timeline = Timeline::default();
+        let valid = ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+            id: "same".into(),
+            name: "read_file".into(),
+            arguments: "{invalid".into(),
+        }]);
+        timeline
+            .append(valid.clone(), MessageCause::Assistant)
+            .unwrap();
+        timeline
+            .append(
+                ConversationItem::tool_result("same", "done"),
+                MessageCause::ToolResult,
+            )
+            .unwrap();
+        timeline
+            .append(valid.clone(), MessageCause::Assistant)
+            .unwrap();
+        let duplicate = timeline.trajectory();
+        assert!(duplicate.rows[0].issue_severity.is_none());
+        assert!(duplicate.rows[2].summary.contains("duplicate tool id"));
+        timeline.repair_surface_history().unwrap();
+        let repaired = timeline.trajectory();
+        assert_eq!(repaired.rows.last().unwrap().repair_source_seqs, vec![2]);
+        assert!(repaired.rows[0].repaired_by_seq.is_none());
+        timeline
+            .replace_all(
+                vec![ConversationItem::user(
+                    "The harness quarantined a protocol-invalid tool exchange",
+                )],
+                MessageCause::ContextRebuild,
+            )
+            .unwrap();
+        timeline.append(valid, MessageCause::Assistant).unwrap();
+        let rebuilt = timeline.trajectory();
+        assert!(rebuilt.rows.last().unwrap().issue_severity.is_none());
+        let mut projector = TrajectoryProjector::default();
+        for event in timeline.events() {
+            projector.accept(event);
+        }
+        assert_eq!(projector.tool_ids.len(), 1);
+        assert!(projector.invalid_tool_sources.is_empty());
+        assert!(projector.recovery_items.is_empty());
+    }
 
     #[test]
     fn projection_marks_replaced_messages_shadowed() {

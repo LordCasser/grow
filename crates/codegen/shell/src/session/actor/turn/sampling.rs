@@ -2115,20 +2115,25 @@ impl SessionActor {
     /// Propagate the model-reported token usage from a turn response into
     /// chat state, the per-prompt usage ledger, and per-turn signals.
     ///
-    /// The provider total replaces current-context pressure. Per-prompt and
-    /// lifetime billing remain independent `UsageLedger` transactions.
+    /// The provider total replaces current-context pressure only when the
+    /// response was admitted without quarantine. Repaired context retains its
+    /// local estimate; all reported usage still enters the independent billing
+    /// and output-budget ledgers.
     pub(crate) async fn record_response_token_usage(
         &self,
         response: &ConversationResponse,
         api_duration_ms: Option<u64>,
         response_model_id: Option<String>,
         admitted_goal_id: Option<&str>,
+        accept_context_anchor: bool,
     ) -> Result<(), String> {
         if let Some(ref u) = response.usage {
             self.tool_context
                 .record_task_model_output(u64::from(u.completion_tokens));
-            self.chat_state_handle
-                .record_provider_context_anchor(u64::from(u.total_tokens));
+            if accept_context_anchor {
+                self.chat_state_handle
+                    .record_provider_context_anchor(u64::from(u.total_tokens));
+            }
             self.chat_state_handle.record_last_turn_usage(u.clone());
             self.chat_state_handle.record_model_call_usage(
                 response_model_id,
@@ -2155,19 +2160,6 @@ impl SessionActor {
             });
         }
         Ok(())
-    }
-    pub(super) async fn record_assistant_response(&self, assistant_item: ConversationItem) {
-        self.signals_handle().record_assistant_message();
-        if let ConversationItem::Assistant(ref a) = assistant_item {
-            tracing::info!(model_id = ?a.model_id, "DEBUG record_assistant_response model_id");
-        }
-        if let ConversationItem::Assistant(ref a) = assistant_item
-            && let Some(first_call) = a.tool_calls.first()
-        {
-            tracing::info!("Assistant requested tool call: {}", first_call.id);
-        }
-        self.chat_state_handle
-            .push_assistant_response(assistant_item);
     }
 }
 

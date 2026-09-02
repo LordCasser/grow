@@ -176,6 +176,19 @@ impl ChatStateHandle {
             .send(ChatStateCommand::PushAssistantResponse { item });
     }
 
+    /// Return the number of quarantined exchanges only after both the raw
+    /// response and its repair are durable. A nonzero result forbids dispatch.
+    pub async fn push_response_durably(
+        &self,
+        items: Vec<ConversationItem>,
+    ) -> Result<usize, TimelineWriteError> {
+        self.query("PushResponseDurably", |reply| {
+            ChatStateCommand::PushResponseDurably { items, reply }
+        })
+        .await
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
+    }
+
     /// Record a tool result.
     pub fn push_tool_result(&self, item: ConversationItem) {
         let _ = self.cmd_tx.send(ChatStateCommand::PushToolResult { item });

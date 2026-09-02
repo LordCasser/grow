@@ -1474,16 +1474,20 @@ impl SessionActor {
             let response_model_id = response.assistant().and_then(|item| item.model_id.clone());
             let persisted_items = response.items.len();
             let response_items = std::mem::take(&mut response.items);
-            for item in response_items {
-                match item {
-                    sampling_types::ConversationItem::Assistant(_) => {
-                        self.record_assistant_response(item).await;
-                    }
-                    _ => {
-                        self.chat_state_handle.push_tool_result(item);
-                    }
+            for item in &response_items {
+                if matches!(item, sampling_types::ConversationItem::Assistant(_)) {
+                    self.signals_handle().record_assistant_message();
                 }
             }
+            let quarantined = self
+                .chat_state_handle
+                .push_response_durably(response_items)
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error().data(format!(
+                        "model response could not be durably admitted: {error}"
+                    ))
+                })?;
             // The response Surface facts must precede the provider anchor.
             // With usage, the anchor replaces their local estimates; without
             // usage, the estimates remain as fail-safe context pressure.
@@ -1492,6 +1496,7 @@ impl SessionActor {
                 Some(model_duration_ms),
                 response_model_id,
                 None,
+                quarantined == 0,
             )
             .await
             .map_err(|error| {
@@ -1499,6 +1504,17 @@ impl SessionActor {
             })?;
             if response.usage.is_some() {
                 self.send_available_commands_update().await;
+            }
+            if quarantined > 0 {
+                // The original provider output and its non-executable repair
+                // are both durable. Never dispatch even healthy siblings of
+                // this response, and never retry an action behind the user's
+                // back. A subsequent turn can use the repaired Surface.
+                return Err(acp::Error::invalid_params().data(
+                    "The model returned invalid tool-call metadata. The response was preserved \
+                     in the Timeline and the conversation was automatically repaired. Grow did \
+                     not dispatch any tools from this response; you can continue this session.",
+                ));
             }
             if let Some(text) = fallback_text {
                 tracing::warn!(

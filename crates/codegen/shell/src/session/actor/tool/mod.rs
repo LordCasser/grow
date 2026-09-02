@@ -54,6 +54,13 @@ impl SessionActor {
         &self,
         tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
     ) -> Result<ToolLoop, acp::Error> {
+        if tool_calls
+            .iter()
+            .any(|call| call.id.trim().is_empty() || call.function.name.trim().is_empty())
+        {
+            return Err(acp::Error::invalid_params()
+                .data("tool dispatch requires a durably admitted, nonempty call id and name"));
+        }
         tracing::Span::current().record("model_id", self.current_catalog_model_id());
         let mut final_result: Option<ToolLoop> = None;
         let mut deferred_followups: Vec<ConversationItem> = Vec::new();
@@ -139,10 +146,7 @@ impl SessionActor {
         final_result: &mut Option<ToolLoop>,
     ) -> Result<(), acp::Error> {
         let mut approved: Vec<PreparedToolCall> = Vec::new();
-        for mut call in tool_calls.into_iter() {
-            if call.id.is_empty() {
-                call.id = format!("synthetic-{}", uuid::Uuid::now_v7());
-            }
+        for call in tool_calls.into_iter() {
             let frozen_input = serde_json::from_str::<serde_json::Value>(
                 crate::session::helpers::tool_input_parsing::normalize_empty_arguments(
                     &call.function.arguments,

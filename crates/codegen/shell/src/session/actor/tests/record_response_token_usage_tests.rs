@@ -40,6 +40,44 @@ fn response_without_usage() -> ConversationResponse {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn quarantined_response_is_billed_without_restoring_its_context_anchor() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor
+                .chat_state_handle
+                .push_response_durably(vec![ConversationItem::assistant_tool_calls(vec![
+                    sampling_types::ToolCall {
+                        id: "".into(),
+                        name: "".into(),
+                        arguments: "{}".into(),
+                    },
+                ])])
+                .await
+                .unwrap();
+            let repaired_tokens = actor.chat_state_handle.get_projected_tokens().await;
+            actor
+                .record_response_token_usage(&response_with_usage(150_000), None, None, None, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                actor.chat_state_handle.get_projected_tokens().await,
+                repaired_tokens
+            );
+            let usage = actor
+                .chat_state_handle
+                .try_get_session_usage()
+                .await
+                .unwrap();
+            assert_eq!(usage.totals.model_calls, 1);
+            assert_eq!(usage.totals.input_tokens, 149_950);
+        })
+        .await;
+}
+
 /// A provider response with usage must replace the local projection with the
 /// provider's canonical context anchor while recording lifetime usage.
 #[tokio::test(flavor = "current_thread")]
@@ -63,6 +101,7 @@ async fn anchors_projected_context_from_response_usage() {
                     None,
                     Some("provider/model".into()),
                     None,
+                    true,
                 )
                 .await
                 .unwrap();
@@ -131,7 +170,7 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 cache_creation_prompt_tokens: 0,
             });
             actor
-                .record_response_token_usage(&first, None, None, Some("goal-1"))
+                .record_response_token_usage(&first, None, None, Some("goal-1"), true)
                 .await
                 .unwrap();
             assert_eq!(actor.goal_tokens_used(), 380);
@@ -146,7 +185,7 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 cache_creation_prompt_tokens: 0,
             });
             actor
-                .record_response_token_usage(&after_compaction, None, None, Some("goal-1"))
+                .record_response_token_usage(&after_compaction, None, None, Some("goal-1"), true)
                 .await
                 .unwrap();
 
@@ -183,7 +222,7 @@ async fn descendant_model_usage_is_submitted_to_the_root_goal_window() {
                 cache_creation_prompt_tokens: 0,
             });
             let settlement =
-                actor.record_response_token_usage(&response, None, None, Some("goal-1"));
+                actor.record_response_token_usage(&response, None, None, Some("goal-1"), true);
             tokio::pin!(settlement);
             let command = tokio::select! {
                 command = goal_rx.recv() => command.expect("Goal usage command"),
@@ -217,7 +256,7 @@ async fn preserves_projection_when_response_has_no_usage() {
             let _sync = actor.chat_state_handle.get_projected_tokens().await;
 
             actor
-                .record_response_token_usage(&response_without_usage(), None, None, None)
+                .record_response_token_usage(&response_without_usage(), None, None, None, true)
                 .await
                 .unwrap();
 
@@ -298,7 +337,7 @@ async fn build_session_info_used_reflects_recorded_response() {
                 .unwrap();
 
             actor
-                .record_response_token_usage(&response_with_usage(120_000), None, None, None)
+                .record_response_token_usage(&response_with_usage(120_000), None, None, None, true)
                 .await
                 .unwrap();
 
@@ -391,7 +430,7 @@ async fn stashes_per_turn_usage_in_chat_state() {
 
             // Use existing fixture: total=200_000 → prompt=199_950, completion=50.
             actor
-                .record_response_token_usage(&response_with_usage(200_000), None, None, None)
+                .record_response_token_usage(&response_with_usage(200_000), None, None, None, true)
                 .await
                 .unwrap();
 

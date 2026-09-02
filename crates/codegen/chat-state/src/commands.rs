@@ -168,6 +168,13 @@ pub enum ChatStateCommand {
     /// Record the assistant's response (text + tool calls).
     PushAssistantResponse { item: ConversationItem },
 
+    /// Persist the complete provider response, then quarantine malformed tool
+    /// exchanges before any reader or tool dispatcher can consume the Surface.
+    PushResponseDurably {
+        items: Vec<ConversationItem>,
+        reply: oneshot::Sender<Result<usize, TimelineWriteError>>,
+    },
+
     /// Record a tool result.
     PushToolResult { item: ConversationItem },
 

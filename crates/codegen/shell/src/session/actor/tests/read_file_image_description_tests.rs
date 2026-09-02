@@ -21,6 +21,15 @@ fn image_tool_result() -> ToolRunResult {
 
 async fn run_image_result(actor: &SessionActor) -> sampling_types::conversation::ToolResultItem {
     actor
+        .chat_state_handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
+            sampling_types::ToolCall {
+                id: "read-image-1".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        ]));
+    actor
         .handle_bridge_tool_success(
             &acp::ToolCallId::new("read-image-1"),
             "read-image-1",
@@ -181,6 +190,9 @@ async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_
                 effective_tool_name: None,
             };
 
+            actor.chat_state_handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                id: "read-pdf-1".into(), name: "read_file".into(), arguments: "{}".into(),
+            }]));
             let deferred = actor
                 .handle_bridge_tool_success(
                     &acp::ToolCallId::new("read-pdf-1"),

@@ -706,6 +706,164 @@ async fn push_tool_result_appends_and_persists() {
     ));
 }
 
+fn malformed_response() -> Vec<ConversationItem> {
+    vec![ConversationItem::assistant_tool_calls(vec![
+        sampling_types::ToolCall {
+            id: "healthy".into(),
+            name: "run".into(),
+            arguments: "{}".into(),
+        },
+        sampling_types::ToolCall {
+            id: "".into(),
+            name: "".into(),
+            arguments: "{\"limit\":50}".into(),
+        },
+    ])]
+}
+
+#[tokio::test]
+async fn response_repair_retains_raw_fact_and_allows_the_next_request() {
+    let mut h = TestHarness::new();
+    h.handle.begin_turn_capture();
+    let raw = malformed_response();
+    assert_eq!(
+        h.handle.push_response_durably(raw.clone()).await.unwrap(),
+        1
+    );
+    let records = h.drain_persistence();
+    assert_eq!(records.len(), 2);
+    let source = persisted_messages(&records[0]).unwrap();
+    assert_eq!(source.cause, crate::MessageCause::Assistant);
+    assert_eq!(
+        serde_json::to_value(&source.items).unwrap(),
+        serde_json::to_value(raw).unwrap()
+    );
+    let repair = persisted_messages(&records[1]).unwrap();
+    assert_eq!(repair.cause, crate::MessageCause::IntegrityRepair);
+    assert!(matches!(repair.surface, crate::SurfaceOp::Replace { .. }));
+    let capture = h.handle.take_turn_messages().await.unwrap();
+    assert!(!capture.compaction_occurred);
+    assert_eq!(capture.messages.len(), 1);
+    assert!(matches!(&capture.messages[0], ConversationItem::User(_)));
+
+    let events = h.handle.timeline_events().await.unwrap();
+    let mut replayed = crate::Timeline::from_events(events).unwrap();
+    assert!(replayed.recover_surface_integrity().unwrap().is_empty());
+    assert_eq!(
+        serde_json::to_value(replayed.branch_transcript()).unwrap(),
+        serde_json::to_value(replayed.surface()).unwrap()
+    );
+    assert!(
+        replayed
+            .completed_compaction_unloaded_branch_ids()
+            .is_empty()
+    );
+    assert_eq!(
+        h.handle
+            .push_response_durably(vec![ConversationItem::assistant("next response")])
+            .await
+            .unwrap(),
+        0
+    );
+    let request = h
+        .handle
+        .build_request("test", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        request.items.iter().all(
+            |item| !matches!(item, ConversationItem::Assistant(a) if !a.tool_calls.is_empty())
+        )
+    );
+    assert!(!h.handle.is_closed());
+}
+
+#[tokio::test]
+async fn response_repair_waits_for_both_durable_acknowledgements() {
+    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+    let handle = h.handle.clone();
+    let task =
+        tokio::spawn(async move { handle.push_response_durably(malformed_response()).await });
+    let raw_ack = h.persistence_rx.next_timeline_ack().await.unwrap();
+    assert!(!task.is_finished());
+    raw_ack.send(Ok(())).unwrap();
+    let repair_ack = h.persistence_rx.next_timeline_ack().await.unwrap();
+    assert!(!task.is_finished());
+    repair_ack
+        .send(Err(std::io::Error::other("transient repair write failure")))
+        .unwrap();
+    let retry = h.persistence_rx.next_timeline_ack().await.unwrap();
+    assert!(!task.is_finished());
+    retry.send(Ok(())).unwrap();
+    assert_eq!(task.await.unwrap().unwrap(), 1);
+    let records = h.drain_persistence();
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        serde_json::to_value(persisted_messages(&records[1]).unwrap()).unwrap(),
+        serde_json::to_value(persisted_messages(&records[2]).unwrap()).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn failed_response_repair_can_recover_from_only_the_durable_raw_prefix() {
+    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+    let handle = h.handle.clone();
+    let task =
+        tokio::spawn(async move { handle.push_response_durably(malformed_response()).await });
+    h.persistence_rx
+        .next_timeline_ack()
+        .await
+        .unwrap()
+        .send(Ok(()))
+        .unwrap();
+    h.persistence_rx
+        .next_timeline_ack()
+        .await
+        .unwrap()
+        .send(Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "repair writer failed",
+        )))
+        .unwrap();
+    assert!(
+        task.await.unwrap().is_err(),
+        "failed repair must not authorize dispatch"
+    );
+    let records = h.drain_persistence();
+    let PersistenceRecord::Timeline(raw) = &records[0] else {
+        panic!("missing raw response")
+    };
+    let mut replayed = crate::Timeline::from_events(vec![raw.clone()]).unwrap();
+    assert_eq!(replayed.recover_surface_integrity().unwrap().len(), 2);
+    assert!(replayed.recover_surface_integrity().unwrap().is_empty());
+    assert!(matches!(replayed.surface(), [ConversationItem::User(_)]));
+    assert_eq!(
+        serde_json::to_value(&replayed.events()[0]).unwrap(),
+        serde_json::to_value(raw).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn response_admission_does_not_close_healthy_pending_calls() {
+    let h = TestHarness::new();
+    let items = vec![ConversationItem::assistant_tool_calls(vec![
+        sampling_types::ToolCall {
+            id: "call".into(),
+            name: "not_registered".into(),
+            arguments: "{invalid".into(),
+        },
+    ])];
+    assert_eq!(
+        h.handle.push_response_durably(items.clone()).await.unwrap(),
+        0
+    );
+    assert_eq!(
+        serde_json::to_value(h.handle.get_conversation().await).unwrap(),
+        serde_json::to_value(items).unwrap()
+    );
+    assert_eq!(h.handle.timeline_events().await.unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn provider_context_anchor_emits_event() {
     let mut h = TestHarness::new();
@@ -4008,7 +4166,13 @@ async fn get_conversation_counts_mixed() {
     seed_test_system(&h.handle, "sys").await;
     h.handle.push_user_message(ConversationItem::user("q1"));
     h.handle
-        .push_assistant_response(ConversationItem::assistant("a1"));
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
+            sampling_types::ToolCall {
+                id: "c1".into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        ]));
     h.handle
         .push_tool_result(ConversationItem::tool_result("c1", "r1"));
     h.handle.push_user_message(ConversationItem::user("q2"));

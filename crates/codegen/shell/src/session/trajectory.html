@@ -777,13 +777,23 @@ function relationButton(label,title,action){
 function showRelations(row){
   const relation=$('relations');relation.replaceChildren();
   const actions=[];
-  if(row.parent_entry_id)actions.push(relationButton('Parent','Open causal parent '+row.parent_entry_id,()=>openParent(row.parent_entry_id)));
+  if(row.repaired_by_seq!=null)actions.push(relationButton('Repair #'+row.repaired_by_seq,'Open the committed quarantine',()=>openRelatedEntry(relatedLedgerEntry(row,row.repaired_by_seq))));
+  for(const seq of row.repair_source_seqs??[])actions.push(relationButton('Source #'+seq,'Open the protocol-invalid source event',()=>openRelatedEntry(relatedLedgerEntry(row,seq))));
+  if(row.parent_entry_id)actions.push(relationButton('Parent','Open causal parent '+row.parent_entry_id,()=>openRelatedEntry(row.parent_entry_id)));
   if(row.correlation_id)actions.push(relationButton('Pair','Show events with correlation '+row.correlation_id,()=>scopeRelated('correlation',row)));
   if(row.turn_id)actions.push(relationButton('Turn','Show events in internal turn '+row.turn_id,()=>scopeRelated('turn',row)));
   if(row.turn_id&&row.step_index!=null)actions.push(relationButton('Step','Show events in turn '+row.turn_id+', step '+row.step_index,()=>scopeRelated('step',row)));
   if(!actions.length)return;
   const label=document.createElement('span');label.className='relation-label';label.textContent='Related';
   relation.append(label,...actions)
+  if(row.repair_source_count>(row.repair_source_seqs??[]).length){
+    const note=document.createElement('span');note.className='relation-label';
+    note.textContent='Showing '+row.repair_source_seqs.length+' of '+row.repair_source_count+' sources; full replacement refs are in the canonical event.';
+    relation.append(note)
+  }
+}
+function relatedLedgerEntry(row,seq){
+  return row.entry_id.slice(0,row.entry_id.lastIndexOf('/')+1)+seq
 }
 function scopeRelated(kind,row){
   $('search').value='';
@@ -796,12 +806,12 @@ function scopeRelated(kind,row){
   }
   syncRelationScope();resetWindow()
 }
-function openParent(entry){
+function openRelatedEntry(entry){
   $('search').value='';
   for(const id of FILTER_IDS)$(id).value='';
   clearRelationScope();invalidateView();pollRevision++;pollController?.abort();
   windowRows=[];displayRows=[];hasEarlier=false;hasLater=false;latestData=null;selected=null;drawnRows=null;
-  closeInspector(null);ledgerMessage='Loading causal parent…';renderLedger();drawOverview(null);
+  closeInspector(null);ledgerMessage='Loading related event…';renderLedger();drawOverview(null);
   syncLocation(entry);focusOrLoad(entry).finally(poll)
 }
 function showSummary(row){

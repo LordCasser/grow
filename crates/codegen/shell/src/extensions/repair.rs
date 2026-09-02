@@ -3,9 +3,9 @@
 //!
 //! A `ToolResult` whose owning assistant `tool_call` is missing (e.g. a
 //! malformed historical import) makes every request
-//! 400 with "unexpected `tool_use_id` found in `tool_result` blocks". No
-//! in-band path can recover — compaction's sanitizer needs a model call that
-//! itself 400s — so the client invokes this method against the session.
+//! 400 with "unexpected `tool_use_id` found in `tool_result` blocks". This
+//! explicit entry point shares the deterministic repair used automatically
+//! before requests and at closed turn boundaries; it does not need a model call.
 //!
 //! Repairs via [`chat_state::compaction_utils::repair_history`]. Resident
 //! sessions go through `SessionCommand::RepairHistory` (serialized with
@@ -47,6 +47,8 @@ pub struct RepairSessionResponse {
     pub duplicates_removed: usize,
     /// `tool_call_id`s of orphaned/displaced `ToolResult`s stripped.
     pub stripped_tool_result_ids: Vec<String>,
+    /// Protocol-invalid exchanges replaced by non-executable evidence.
+    pub quarantined_tool_exchanges: usize,
     /// Synthetic `ToolResult`s inserted for unanswered tool calls.
     pub synthetic_results_inserted: usize,
 }
@@ -59,6 +61,7 @@ impl RepairSessionResponse {
             resident,
             duplicates_removed: report.duplicates_removed,
             stripped_tool_result_ids: report.stripped_tool_result_ids,
+            quarantined_tool_exchanges: report.quarantined_tool_exchanges,
             synthetic_results_inserted: report.synthetic_results_inserted,
         }
     }
@@ -142,6 +145,7 @@ async fn repair_on_disk(grow_root: &std::path::Path, session_id: &str, dry_run: 
         }
         tracing::warn!(
             session_id,
+            quarantined_tool_exchanges = report.quarantined_tool_exchanges,
             duplicates_removed = report.duplicates_removed,
             stripped_tool_result_ids = ?report.stripped_tool_result_ids,
             synthetic_results_inserted = report.synthetic_results_inserted,

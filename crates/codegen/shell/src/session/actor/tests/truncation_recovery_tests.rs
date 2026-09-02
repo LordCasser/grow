@@ -432,6 +432,72 @@ fn chat_completions_request_count(server: &MockInferenceServer) -> usize {
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
+/// A successful transport can still yield unusable tool metadata. Preserve
+/// that response and its repair, execute no siblings, and keep the next turn
+/// usable without retrying the failed action automatically.
+#[test]
+fn malformed_tool_response_does_not_poison_the_next_turn() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            for duplicate_ids in [false, true] {
+                let server = MockInferenceServer::start().await.unwrap();
+                server.enqueue_response("/v1/chat/completions", ScriptedResponse::sse(vec![
+                    SseEvent::data(json!({
+                        "id": "bad-response", "object": "chat.completion.chunk", "model": "test-model", "created": 1234567890,
+                        "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+                            {"index": 0, "id": "healthy", "type": "function",
+                             "function": {"name": "todo_write", "arguments": "{}"}},
+                            {"index": 1, "id": if duplicate_ids {"healthy"} else {""}, "type": "function",
+                             "function": {"name": if duplicate_ids {"todo_write"} else {""}, "arguments": "{\"limit\":50}"}}
+                        ]}, "finish_reason": "tool_calls"}],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+                    }).to_string()),
+                    SseEvent::data("[DONE]"),
+                ]));
+                server.enqueue_response("/v1/chat/completions", ScriptedResponse::sse(
+                    test_support::sse::chat_completion_script_exact("continued safely", "test-model"),
+                ));
+                let (actor, _gateway_rx) = actor_with_sampler(&server, sampling_types::ApiBackend::ChatCompletions).await;
+                let result = run_user_turn(&actor, "polluted").await;
+                assert!(result.is_err(), "malformed response must stop before dispatch");
+                let error = result.err().unwrap();
+                assert!(format!("{error:?}").contains("automatically repaired"), "unexpected error: {error:?}");
+                assert_eq!(chat_completions_request_count(&server), 1, "no hidden retry");
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert!(!events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Tool(_))),
+                    "even the healthy sibling must not enter tool execution");
+                let original = events.iter().position(|event| matches!(&event.kind,
+                    chat_state::TimelineEventKind::Messages(message)
+                        if message.cause == chat_state::MessageCause::Assistant
+                        && message.items.iter().any(|item| matches!(item, ConversationItem::Assistant(a) if a.tool_calls.len() == 2))
+                )).expect("raw provider response is retained");
+                let repair = events.iter().position(|event| matches!(&event.kind,
+                    chat_state::TimelineEventKind::Messages(message) if message.cause == chat_state::MessageCause::IntegrityRepair
+                )).expect("repair is retained");
+                assert!(original < repair);
+                let timeline = chat_state::Timeline::from_events(events).unwrap();
+                assert!(timeline.completed_compaction_unloaded_branch_ids().is_empty());
+                assert_eq!(actor.chat_state_handle.try_get_session_usage().await.unwrap().totals.model_calls, 1);
+
+                actor.state.lock().await.foreground = ForegroundState::Idle;
+                run_user_turn(&actor, "continue-after-repair").await.expect("same session must remain usable");
+                assert_eq!(chat_completions_request_count(&server), 2);
+                let requests = server.requests();
+                let last = requests.iter().filter(|request| request.path == "/v1/chat/completions").last().unwrap();
+                let body = last.body.as_ref().unwrap();
+                let messages = body["messages"].as_array().unwrap();
+                assert!(messages.iter().all(|message| message.get("tool_calls").is_none() && message.get("tool_call_id").is_none()));
+                assert!(body.to_string().contains("untrusted historical evidence"));
+                assert!(assistant_texts(&actor.chat_state_handle.get_conversation().await).iter().any(|text| text.contains("continued safely")));
+            }
+        }));
+    });
+}
+
 /// E2E truncation continue: mock truncates once at `max_tokens`; assert the
 /// partial response is persisted, the continue prompt is injected with
 /// `SyntheticReason::TruncationContinue`, the final output is the

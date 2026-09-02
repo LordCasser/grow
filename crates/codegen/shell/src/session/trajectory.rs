@@ -325,6 +325,11 @@ struct TrajectoryRowSummary {
     outcome: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     issue_severity: Option<chat_state::TrajectoryIssueSeverity>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    repair_source_seqs: Vec<u64>,
+    repair_source_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repaired_by_seq: Option<u64>,
     summary: String,
 }
 
@@ -350,6 +355,9 @@ impl From<&chat_state::TrajectoryRow> for TrajectoryRowSummary {
             duration_ms: row.duration_ms,
             outcome: row.outcome.as_deref().map(trajectory_wire_text),
             issue_severity: row.issue_severity,
+            repair_source_seqs: row.repair_source_seqs.clone(),
+            repair_source_count: row.repair_source_count,
+            repaired_by_seq: row.repaired_by_seq,
             summary: crate::util::truncate(&row.summary, TRAJECTORY_SUMMARY_CHARS).to_owned(),
         }
     }
@@ -380,6 +388,9 @@ impl TrajectoryRowSummary {
             duration_ms: self.duration_ms,
             outcome: self.outcome,
             issue_severity: self.issue_severity,
+            repair_source_seqs: self.repair_source_seqs,
+            repair_source_count: self.repair_source_count,
+            repaired_by_seq: self.repaired_by_seq,
             summary: self.summary,
             details,
         }
@@ -2506,6 +2517,9 @@ fn workflow_row(
         correlation_id: Some(entry.req_hash.clone()),
         duration_ms: None,
         issue_severity: chat_state::trajectory_issue_severity(state, outcome.as_deref()),
+        repair_source_seqs: Vec::new(),
+        repair_source_count: 0,
+        repaired_by_seq: None,
         outcome,
         summary: if pending {
             format!("{} · pending", entry.kind)
@@ -2987,6 +3001,9 @@ fn sideband_row(
         correlation_id: Some(event.sideband_id.clone()),
         duration_ms,
         issue_severity,
+        repair_source_seqs: Vec::new(),
+        repair_source_count: 0,
+        repaired_by_seq: None,
         outcome,
         summary,
         details: serde_json::Value::Null,
@@ -4335,6 +4352,128 @@ mod tests {
         assert!(detail.details_truncated);
         assert!(detail_wire.len() < 256 * 1024);
         assert!(full.len() > payload.len());
+    }
+
+    #[test]
+    fn quarantine_refresh_updates_source_links_filters_and_canonical_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let mut timeline =
+            chat_state::Timeline::from_seed(vec![sampling_types::ConversationItem::system(
+                "unrelated system prefix".repeat(100),
+            )])
+            .unwrap();
+        let raw = timeline
+            .append(
+                sampling_types::ConversationItem::assistant_tool_calls(vec![
+                    sampling_types::ToolCall {
+                        id: "".into(),
+                        name: "".into(),
+                        arguments: "{\"untrusted\":\"<script>no</script>\"}".into(),
+                    },
+                ]),
+                chat_state::MessageCause::Assistant,
+            )
+            .unwrap();
+        write_timeline(&path, &timeline);
+        let state = AppState {
+            session_id: "child-ledger".into(),
+            actor_ref: "subagent:child-ledger".into(),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+        let before = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        let raw_entry = format!("t:child-ledger/{}", raw.seq.get());
+        let before_raw = before
+            .rows
+            .iter()
+            .find(|row| row.entry_id == raw_entry)
+            .unwrap();
+        assert_eq!(before_raw.state, "invalid");
+        assert!(before_raw.repaired_by_seq.is_none());
+        let ordinal = before_raw.ordinal;
+        let (_, repairs) = timeline.repair_surface_history().unwrap();
+        let repair_seq = repairs[0].seq.get();
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        for event in repairs {
+            writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+        }
+        let refreshed = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        assert_eq!(refreshed.schema_version, 4);
+        let source = refreshed
+            .rows
+            .iter()
+            .find(|row| row.entry_id == raw_entry)
+            .unwrap();
+        assert_eq!(
+            source.ordinal, ordinal,
+            "refresh must not move the original row"
+        );
+        assert_eq!(source.repaired_by_seq, Some(repair_seq));
+        assert_eq!(source.visibility, chat_state::SurfaceVisibility::Shadowed);
+        let repair = refreshed
+            .rows
+            .iter()
+            .find(|row| row.seq == repair_seq)
+            .unwrap();
+        assert_eq!(repair.repair_source_seqs, vec![raw.seq.get()]);
+        assert!(repair.summary.starts_with("Quarantined 1"));
+        assert!(!repair.summary.contains("unrelated system prefix"));
+        let source_detail = query_event_cached(&state, &raw_entry).unwrap();
+        assert_eq!(source_detail.row.repaired_by_seq, Some(repair_seq));
+        assert_eq!(
+            source_detail.row.details,
+            serde_json::to_value(&raw.kind).unwrap()
+        );
+        let repair_detail =
+            query_event_cached(&state, &format!("t:child-ledger/{repair_seq}")).unwrap();
+        assert_eq!(repair_detail.row.repair_source_seqs, vec![raw.seq.get()]);
+        let errors = query_cached(
+            &state,
+            TrajectoryQuery {
+                issue: Some(TrajectoryIssueFilter::Error),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(errors.rows.len(), 1);
+        assert_eq!(errors.rows[0].entry_id, raw_entry);
+        let current = query_cached(
+            &state,
+            TrajectoryQuery {
+                visibility: Some("current".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(current.rows.len(), 1);
+        assert_eq!(current.rows[0].seq, repair_seq);
+        assert_eq!(state.cache.lock().unwrap().full_materialization_count, 1);
+        // Disk rebuild and incremental refresh must agree, including backlinks.
+        let rebuilt_state = AppState {
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+            ..state.clone()
+        };
+        let rebuilt = query_cached(&rebuilt_state, TrajectoryQuery::default()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&refreshed.rows).unwrap(),
+            serde_json::to_value(&rebuilt.rows).unwrap()
+        );
+    }
+
+    #[test]
+    fn page_links_repairs_within_the_selected_ledger_and_keeps_payloads_inert() {
+        assert!(PAGE.contains("relatedLedgerEntry(row,row.repaired_by_seq)"));
+        assert!(PAGE.contains("relatedLedgerEntry(row,seq)"));
+        assert!(PAGE.contains("row.entry_id.slice(0,row.entry_id.lastIndexOf('/')+1)+seq"));
+        assert!(PAGE.contains("row.repair_source_count>(row.repair_source_seqs??[]).length"));
+        assert!(PAGE.contains("button.textContent=label"));
+        assert!(PAGE.contains("$('details').textContent=JSON.stringify(detailRow,null,2)"));
     }
 
     #[test]

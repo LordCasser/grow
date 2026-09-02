@@ -92,6 +92,13 @@ async fn drain_interjections_pushes_synthetic_user_message_after_tool_result() {
             begin_test_active_causal_turn(&actor).await;
 
             const TOOL_RESULT_CONTENT: &str = "file contents: fn main() {}";
+            actor.chat_state_handle.push_assistant_response(
+                ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }]),
+            );
             actor
                 .chat_state_handle
                 .push_tool_result(ConversationItem::tool_result("call-1", TOOL_RESULT_CONTENT));
@@ -161,6 +168,13 @@ async fn drain_multiple_interjections_pushes_one_user_message_each_in_order() {
             begin_test_active_causal_turn(&actor).await;
 
             const TOOL_RESULT_CONTENT: &str = "tool output";
+            actor.chat_state_handle.push_assistant_response(
+                ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                    id: "call-1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }]),
+            );
             actor
                 .chat_state_handle
                 .push_tool_result(ConversationItem::tool_result("call-1", TOOL_RESULT_CONTENT));

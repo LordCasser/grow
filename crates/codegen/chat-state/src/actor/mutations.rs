@@ -1,9 +1,6 @@
 //! Mutation handlers for the ChatStateActor.
 
-use sampling_types::{
-    ConversationItem, DanglingToolCallReason, dedup_duplicate_tool_results,
-    repair_dangling_tool_calls,
-};
+use sampling_types::{ConversationItem, DanglingToolCallReason};
 
 use super::ChatStateActor;
 use crate::MessageCause;
@@ -82,7 +79,7 @@ impl ChatStateActor {
         committed
     }
 
-    /// Repair any dangling tool calls in the conversation and persist the fix.
+    /// Repair malformed exchanges and tool pairing at a closed write boundary.
     ///
     /// A "dangling" tool call is an assistant message with tool call IDs that
     /// lack matching `ToolResult` entries. This can happen when:
@@ -91,32 +88,21 @@ impl ChatStateActor {
     /// - The tokio task is aborted at an `.await` point
     ///
     /// This method repairs the state in-place and persists the fix to disk.
-    /// It is idempotent — calling it on a clean conversation is a cheap no-op
-    /// (single forward scan, no allocations).
+    /// It is idempotent — a clean conversation produces no Timeline event.
     ///
     /// Only call at write boundaries where the previous turn is definitively
     /// over (`push_user_message()` or a harness-declared halt).
     /// Do NOT call from read handlers — background tasks run concurrently with
     /// tool execution and would misidentify in-flight calls as dangling.
-    /// Repair dangling/duplicate tool results through the buffered append path.
+    /// Use the buffered append path for boundaries without a caller acknowledgement.
     pub(super) async fn ensure_conversation_integrity_with_reason(
         &mut self,
         reason: DanglingToolCallReason,
     ) {
         let mut conversation = self.state.timeline.surface().to_vec();
-        let deduped = dedup_duplicate_tool_results(&mut conversation);
-        if deduped > 0 {
-            tracing::info!(
-                deduped_count = deduped,
-                "Removed duplicate tool results in conversation"
-            );
-        }
-        let repaired = repair_dangling_tool_calls(&mut conversation, reason);
-        if repaired > 0 || deduped > 0 {
-            tracing::info!(
-                repaired_count = repaired,
-                "Repaired dangling tool calls in conversation"
-            );
+        let report = crate::compaction_utils::repair_history_with_reason(&mut conversation, reason);
+        if report.changed() {
+            tracing::info!(?report, "Repaired conversation at a closed write boundary");
             self.install_conversation_buffered(conversation, MessageCause::IntegrityRepair)
                 .await;
         }
@@ -130,18 +116,46 @@ impl ChatStateActor {
         reason: DanglingToolCallReason,
     ) -> Result<(), crate::commands::TimelineWriteError> {
         let mut conversation = self.state.timeline.surface().to_vec();
-        let deduped = dedup_duplicate_tool_results(&mut conversation);
-        let repaired = repair_dangling_tool_calls(&mut conversation, reason);
-        if repaired == 0 && deduped == 0 {
+        let report = crate::compaction_utils::repair_history_with_reason(&mut conversation, reason);
+        if !report.changed() {
             return Ok(());
         }
-        tracing::info!(
-            deduped_count = deduped,
-            repaired_count = repaired,
-            "Repaired conversation before durable boundary"
-        );
+        tracing::info!(?report, "Repaired conversation before durable boundary");
         self.replace_conversation_durably(conversation, MessageCause::IntegrityRepair)
             .await
+    }
+
+    /// The command loop remains serialized across the two durable appends:
+    /// raw response first, deterministic repair second. A crash between them
+    /// leaves recover_surface_integrity a complete, replayable source fact.
+    /// Healthy pending calls must NOT receive synthetic results here.
+    pub(super) async fn push_response_durably(
+        &mut self,
+        items: Vec<ConversationItem>,
+    ) -> Result<usize, crate::commands::TimelineWriteError> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        let tokens = super::state::estimate_conversation_tokens(&items);
+        let event = self
+            .state
+            .timeline
+            .prepare(crate::TimelineEventKind::Messages(crate::MessageEvent {
+                cause: MessageCause::Assistant,
+                items,
+                surface: crate::SurfaceOp::Append,
+            }))?;
+        self.commit_timeline_event(event).await?;
+        self.apply_projected_token_delta(0, tokens);
+
+        let mut conversation = self.state.timeline.surface().to_vec();
+        let quarantined =
+            crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut conversation);
+        if quarantined > 0 {
+            self.replace_conversation_durably(conversation, MessageCause::IntegrityRepair)
+                .await?;
+        }
+        Ok(quarantined)
     }
 
     /// Repair dangling tool calls after a harness-initiated halt.
@@ -154,9 +168,8 @@ impl ChatStateActor {
 
     /// Out-of-band history repair (`grow/session/repair`): run
     /// [`crate::compaction_utils::repair_history`] and persist changes via
-    /// the Timeline replacement transaction. Unlike
-    /// the turn-boundary integrity repair, this also removes orphaned
-    /// `ToolResult`s — the shape that bricks a session with provider 400s.
+    /// the Timeline replacement transaction, using the same quarantine and
+    /// pairing transform as automatic turn-boundary repair.
     /// `dry_run` only reports.
     pub(super) async fn repair_history(
         &mut self,
@@ -170,6 +183,7 @@ impl ChatStateActor {
         }
         if report.changed() {
             tracing::warn!(
+                quarantined_tool_exchanges = report.quarantined_tool_exchanges,
                 duplicates_removed = report.duplicates_removed,
                 stripped_tool_result_ids = ?report.stripped_tool_result_ids,
                 synthetic_results_inserted = report.synthetic_results_inserted,
