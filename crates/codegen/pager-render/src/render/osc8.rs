@@ -1,15 +1,15 @@
 //! Link detection for the scrollback render pass.
 //!
 //! Provides [`LinkOverlay`] / [`OverlayLink`] (link positions collected during
-//! rendering) and [`scan_lines_for_url_overlays`] for detecting plain-text URLs
-//! and absolute file paths across all block types. The collected links are
+//! rendering) and [`scan_text_for_links`] for detecting plain-text URLs
+//! and file paths in complete logical text. Consumers project the returned
+//! source ranges onto their visible rows. The collected links are
 //! handed to the terminal as `LinkSpan`s and emitted as OSC 8 hyperlinks by the
 //! frame diff (see `ratatui_inline::Terminal::flush_with_links`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use linkify::{LinkFinder, LinkKind};
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
@@ -174,15 +174,6 @@ impl LinkOverlay {
             .iter()
             .any(|l| l.screen_row == screen_row && l.col_start < col_end && col_start < l.col_end)
     }
-}
-
-fn link_finder() -> &'static LinkFinder {
-    static FINDER: OnceLock<LinkFinder> = OnceLock::new();
-    FINDER.get_or_init(|| {
-        let mut f = LinkFinder::new();
-        f.kinds(&[LinkKind::Url]);
-        f
-    })
 }
 
 /// One path segment without spaces (`main.rs`, `.grow`, `@scope`). Leading `.`
@@ -468,8 +459,10 @@ struct RowSegment {
 /// Scan ratatui [`Line`]s for plain-text URLs and file paths, appending
 /// corresponding [`OverlayLink`] entries to the overlay.
 ///
-/// Runs on all blocks. For markdown blocks, existing hyperlinks are
-/// already in the overlay; detected links that overlap are skipped.
+/// This convenience adapter requires complete, undecorated logical lines.
+/// It cannot recover source text discarded by cropping/truncation, or remove
+/// repeated display prefixes. Scrollback uses `scan_text_for_links` with its
+/// source-aware projection instead. Existing overlapping links are skipped.
 ///
 /// Each item is `(screen_row, line, joiner)` where `joiner` is the soft-wrap
 /// joiner to the *previous* row (see `BlockLine::joiner`): `None` = hard
@@ -482,7 +475,7 @@ struct RowSegment {
 /// styling boundaries never truncate a match.
 ///
 /// Detects three kinds of links:
-/// 1. **URLs** via the `linkify` crate (http, https, mailto).
+/// 1. **URLs** via the shared Markdown bare-URL boundary policy.
 /// 2. **Absolute and `~`-relative file paths** via regex, emitted as
 ///    `file://` URLs (a leading `~/` is expanded to the home directory).
 /// 3. **Relative file paths** (`images/1.png`) that uniquely match a generated
@@ -501,9 +494,8 @@ pub fn scan_lines_for_url_overlays<'a>(
 
     for (screen_row, line, joiner) in lines {
         // A `None` joiner is a hard break: flush the current group and start
-        // a new logical line. (A `Some` joiner with no accumulated rows —
-        // e.g. a wrap continuation scrolled in at the top of the viewport —
-        // also starts a new group; its fragment is scanned standalone.)
+        // a new logical line. A first row's joiner has no preceding text;
+        // callers must supply the complete logical line from that row.
         match joiner {
             Some(j) if !group_rows.is_empty() => group_text.push_str(j),
             _ => {
@@ -588,11 +580,23 @@ fn scan_logical_line(
     media_paths: &[PathBuf],
     overlay: &mut LinkOverlay,
 ) {
-    if text.is_empty() || rows.is_empty() {
+    scan_text_for_links(text, media_paths, |range, target, presentation| {
+        push_link_segments(text, rows, content_x, range, target, presentation, overlay)
+    });
+}
+
+/// Discover links in complete logical text. Byte ranges remain independent of
+/// wrapping, viewport clipping and terminal coordinate limits. The callback
+/// returns whether it accepted a link (used for path de-duplication).
+pub fn scan_text_for_links(
+    text: &str,
+    media_paths: &[PathBuf],
+    mut emit: impl FnMut(std::ops::Range<usize>, &LinkTarget, LinkPresentation) -> bool,
+) {
+    if text.is_empty() {
         return;
     }
     let scheme_filter = crate::terminal::hyperlinks::SchemeFilter::Standard;
-    let finder = link_finder();
     let path_re = file_path_regex();
     let quoted_path_re = quoted_file_path_regex();
     let rel_path_re = relative_file_path_regex();
@@ -604,25 +608,17 @@ fn scan_logical_line(
     // plain) so later passes do not double-link.
     let mut path_byte_ranges: Vec<std::ops::Range<usize>> = Vec::new();
 
-    for link in finder.links(text) {
-        let url = link.as_str();
+    for range in markdown::plain_url_ranges(text) {
+        let url = &text[range.clone()];
         if !crate::link_opener::is_safe_to_open(url, scheme_filter) {
             continue;
         }
         url_byte_ranges
             .get_or_insert_with(Vec::new)
-            .push(link.start()..link.end());
+            .push(range.clone());
 
         let target = LinkTarget::Url(Arc::from(url));
-        push_link_segments(
-            text,
-            rows,
-            content_x,
-            link.start()..link.end(),
-            &target,
-            LinkPresentation::Opaque,
-            overlay,
-        );
+        emit(range, &target, LinkPresentation::Opaque);
     }
 
     let range_overlaps_urls = |start: usize, end: usize| -> bool {
@@ -651,14 +647,10 @@ fn scan_logical_line(
         };
 
         // Clickable region is the path text only (not the quotes).
-        if push_link_segments(
-            text,
-            rows,
-            content_x,
+        if emit(
             path_m.start()..path_m.end(),
             &file_target,
             file_link_presentation(path_m.as_str(), &file_target, None),
-            overlay,
         ) {
             path_byte_ranges.push(path_m.start()..path_m.end());
         }
@@ -700,14 +692,10 @@ fn scan_logical_line(
             continue;
         };
 
-        if push_link_segments(
-            text,
-            rows,
-            content_x,
+        if emit(
             m.start()..path_end,
             &file_target,
             file_link_presentation(path, &file_target, None),
-            overlay,
         ) {
             path_byte_ranges.push(m.start()..path_end);
         }
@@ -749,15 +737,7 @@ fn scan_logical_line(
             };
             let path_end = m.start() + path.len();
 
-            if push_link_segments(
-                text,
-                rows,
-                content_x,
-                m.start()..path_end,
-                &file_target,
-                LinkPresentation::Opaque,
-                overlay,
-            ) {
+            if emit(m.start()..path_end, &file_target, LinkPresentation::Opaque) {
                 path_byte_ranges.push(m.start()..path_end);
             }
         }

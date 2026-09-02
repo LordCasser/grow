@@ -1,6 +1,6 @@
 //! ThinkingBlock - displays agent thinking/reasoning content with markdown support.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use unicode_width::UnicodeWidthStr;
 
@@ -12,7 +12,6 @@ use crate::scrollback::types::{
 use crate::theme::Theme;
 
 use super::markdown_content::MarkdownContent;
-use super::quote_bar::QuoteBarStrip;
 use crate::appearance::AppearanceConfig;
 
 /// TODO: hard-coded because `AppView::minimal_key_intercept` matches this chord
@@ -275,147 +274,54 @@ impl ThinkingBlock {
         output
     }
 
-    /// One wrapped markdown line → selectable, blended [`BlockLine`].
-    ///
-    /// Quote-bar exclusion must run before blending: blending rewrites span
-    /// fg colors, which would defeat the bar-style detection (it preserves
-    /// span structure, so the computed span indices stay valid after it).
-    ///
-    /// `emphasis` ([`body_emphasis_patch`]) is applied AFTER the blend for the
-    /// same reason: patching styles preserves span structure.
-    fn thinking_body_line(
-        line: &Line<'static>,
-        joiner: &Option<String>,
-        strip: &QuoteBarStrip,
-        bg_base: Color,
-        fg_default: Color,
-        blend_factor: f32,
-        emphasis: Option<Style>,
-    ) -> BlockLine {
-        let mut content = line.clone();
-        let selectable = strip.selectable(&mut content);
-        let mut blended = blend_line_with_default(content, bg_base, fg_default, blend_factor);
-        if let Some(emphasis) = emphasis {
-            for span in &mut blended.spans {
-                span.style = span.style.patch(emphasis);
+    /// Apply reasoning styling without changing the body's source projection.
+    fn styled_body(&self, ctx: &BlockContext, count: usize) -> BlockOutput {
+        let mut output = self.content.output_tail(ctx.width as usize, count);
+        let theme = Theme::current();
+        let emphasis = body_emphasis_patch(ctx);
+        for line in &mut output.lines {
+            line.background = None;
+            line.content = blend_line_with_default(
+                std::mem::take(&mut line.content),
+                theme.bg_base,
+                theme.text_primary,
+                ctx.appearance.scrollback.blocks.thinking.bg_blend,
+            );
+            if let Some(emphasis) = emphasis {
+                for span in &mut line.content.spans {
+                    span.style = span.style.patch(emphasis);
+                }
             }
         }
-        let mut block_line = BlockLine::styled(blended)
-            .with_selection_range(Some(0))
-            .with_joiner(joiner.clone());
-        block_line.selectable = selectable;
-        block_line
+        output
     }
 
-    /// Render truncated view: optional header + "…" + last N lines.
     fn render_truncated(&self, ctx: &BlockContext) -> BlockOutput {
-        let config = &ctx.appearance.scrollback.blocks.thinking;
-        let n = config.truncated_lines as usize;
-        let width = ctx.width as usize;
-        let blend_factor = config.bg_blend;
-        let emphasis = body_emphasis_patch(ctx);
-        let strip = QuoteBarStrip::new(!self.content.is_raw());
-
-        self.content.with_wrapped_lines(width, |wrapped| {
-            if wrapped.lines.is_empty() {
-                return self.render_empty_placeholder(ctx);
-            }
-
-            let theme = Theme::current();
-            let bg_base = theme.bg_base;
-            let fg_default = theme.text_primary;
-
-            let total = wrapped.lines.len();
-            if total <= n {
-                // Content fits within N lines, show all (with blending)
-                let output = BlockOutput {
-                    lines: wrapped
-                        .lines
-                        .iter()
-                        .zip(wrapped.joiners.iter())
-                        .map(|(line, joiner)| {
-                            Self::thinking_body_line(
-                                line,
-                                joiner,
-                                &strip,
-                                bg_base,
-                                fg_default,
-                                blend_factor,
-                                emphasis,
-                            )
-                        })
-                        .collect(),
-                };
-                return self.maybe_prepend_header(output, ctx);
-            }
-
-            // Build truncated output: "…" + last N lines
-            let theme = Theme::current();
-            let mut output_lines = Vec::with_capacity(n + 1);
-
-            // Ellipsis line
-            let ellipsis = Line::from(Span::styled("…", theme.muted()));
-            output_lines.push(ellipsis.into());
-
-            // Last N lines (with blending)
-            for i in (total - n)..total {
-                output_lines.push(Self::thinking_body_line(
-                    &wrapped.lines[i],
-                    &wrapped.joiners[i],
-                    &strip,
-                    bg_base,
-                    fg_default,
-                    blend_factor,
-                    emphasis,
-                ));
-            }
-
-            self.maybe_prepend_header(
-                BlockOutput {
-                    lines: output_lines,
-                },
-                ctx,
-            )
-        })
+        let total = self
+            .content
+            .with_wrapped_lines(ctx.width as usize, |wrapped| wrapped.lines.len());
+        if total == 0 {
+            return self.render_empty_placeholder(ctx);
+        }
+        let n = ctx.appearance.scrollback.blocks.thinking.truncated_lines as usize;
+        let mut output = self.styled_body(ctx, n);
+        if total > n {
+            output.lines.insert(
+                0,
+                BlockLine::separator(Line::from(Span::styled("…", Theme::current().muted()))),
+            );
+        }
+        self.maybe_prepend_header(output, ctx)
     }
 
-    /// Render expanded view: full content.
     fn render_expanded(&self, ctx: &BlockContext) -> BlockOutput {
-        let config = &ctx.appearance.scrollback.blocks.thinking;
-        let width = ctx.width as usize;
-        let blend_factor = config.bg_blend;
-        let emphasis = body_emphasis_patch(ctx);
-        let strip = QuoteBarStrip::new(!self.content.is_raw());
-
-        self.content.with_wrapped_lines(width, |wrapped| {
-            if wrapped.lines.is_empty() {
-                return self.render_empty_placeholder(ctx);
-            }
-
-            let theme = Theme::current();
-            let bg_base = theme.bg_base;
-            let fg_default = theme.text_primary;
-
-            let output = BlockOutput {
-                lines: wrapped
-                    .lines
-                    .iter()
-                    .zip(wrapped.joiners.iter())
-                    .map(|(line, joiner)| {
-                        Self::thinking_body_line(
-                            line,
-                            joiner,
-                            &strip,
-                            bg_base,
-                            fg_default,
-                            blend_factor,
-                            emphasis,
-                        )
-                    })
-                    .collect(),
-            };
-            self.maybe_prepend_header(output, ctx)
-        })
+        if self
+            .content
+            .with_wrapped_lines(ctx.width as usize, |wrapped| wrapped.lines.is_empty())
+        {
+            return self.render_empty_placeholder(ctx);
+        }
+        self.maybe_prepend_header(self.styled_body(ctx, usize::MAX), ctx)
     }
 
     /// Placeholder for empty thinking block — shows the same header

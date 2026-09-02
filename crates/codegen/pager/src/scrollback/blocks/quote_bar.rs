@@ -27,6 +27,33 @@ pub(crate) struct QuoteBarStrip {
 }
 
 impl QuoteBarStrip {
+    /// Display-only continuation prefix width without cloning/splitting spans.
+    pub(crate) fn prefix_width(&self, line: &Line<'_>) -> usize {
+        let Some(style) = self.bar_style else {
+            return 0;
+        };
+        if !line
+            .spans
+            .first()
+            .is_some_and(|s| s.content.as_ref() == "│" && s.style == style)
+        {
+            return 0;
+        }
+        let Some(mut remaining) = rendered_quote_prefix_len(line, style) else {
+            return 0;
+        };
+        let mut width = 0;
+        for span in &line.spans {
+            let end = remaining.min(span.content.len());
+            width += unicode_width::UnicodeWidthStr::width(&span.content[..end]);
+            remaining -= end;
+            if remaining == 0 {
+                break;
+            }
+        }
+        width
+    }
+
     pub(crate) fn new(enabled: bool) -> Self {
         Self {
             bar_style: enabled.then(quote_bar_style),

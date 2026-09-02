@@ -237,6 +237,15 @@ impl MarkdownContent {
         f(state.renderer.view().hyperlinks)
     }
 
+    pub(crate) fn with_link_content<R>(
+        &self,
+        f: impl FnOnce(&[Line<'static>], &[markdown::HyperlinkTarget]) -> R,
+    ) -> R {
+        let state = self.state.borrow();
+        let view = state.renderer.view();
+        f(view.lines, view.hyperlinks)
+    }
+
     /// Pre-wrap line ranges of the ` ```mermaid ` blocks in the current
     /// rendered output, reflecting the current render width.
     ///
@@ -417,35 +426,57 @@ impl MarkdownContent {
     /// background color (from the line's style, e.g., for code blocks).
     /// This is the common path used by [`AgentMessageBlock`](super::AgentMessageBlock).
     pub fn output(&self, width: usize) -> BlockOutput {
-        // Raw mode shows the source `>` markers verbatim — nothing to exclude.
+        self.output_tail(width, usize::MAX)
+    }
+
+    /// Preserve complete-source coordinates but clone/style only the retained
+    /// tail. Truncated streaming reasoning must not copy the hidden body.
+    pub(crate) fn output_tail(&self, width: usize, count: usize) -> BlockOutput {
+        use crate::scrollback::types::LinkSource;
+        use unicode_width::UnicodeWidthStr;
         let strip = QuoteBarStrip::new(!self.current_raw);
         self.with_wrapped_lines(width, |wrapped| {
             if wrapped.lines.is_empty() {
-                BlockOutput {
+                return BlockOutput {
                     lines: vec![Line::from("").into()],
-                }
-            } else {
-                BlockOutput {
-                    lines: wrapped
-                        .lines
-                        .iter()
-                        .zip(wrapped.joiners.iter())
-                        .map(|(line, joiner)| {
-                            let mut content = line.clone();
-                            let selectable = strip.selectable(&mut content);
-                            let mut block_line = BlockLine::styled(content)
-                                .with_selection_range(Some(MARKDOWN_BODY_RANGE))
-                                .with_joiner(joiner.clone());
-                            block_line.selectable = selectable;
-                            if let Some(bg) = line.style.bg {
-                                block_line.with_background(bg)
-                            } else {
-                                block_line
-                            }
-                        })
-                        .collect(),
-                }
+                };
             }
+            let first = wrapped.lines.len().saturating_sub(count);
+            let mut output = BlockOutput::new();
+            let mut line_index = 0;
+            let mut column = 0;
+            for (index, (line, joiner)) in wrapped.lines.iter().zip(wrapped.joiners).enumerate() {
+                if index > 0 && joiner.is_none() {
+                    line_index += 1;
+                    column = 0;
+                }
+                column += joiner.as_deref().map_or(0, UnicodeWidthStr::width);
+                let display_start = if joiner.is_some() {
+                    strip.prefix_width(line)
+                } else {
+                    0
+                };
+                let end = column + line.width().saturating_sub(display_start);
+                let source = LinkSource {
+                    line_index,
+                    columns: column..end,
+                    display_start,
+                };
+                column = end;
+                if index < first {
+                    continue;
+                }
+                let mut content = line.clone();
+                let selectable = strip.selectable(&mut content);
+                let mut block_line = BlockLine::styled(content)
+                    .with_selection_range(Some(MARKDOWN_BODY_RANGE))
+                    .with_joiner(joiner.clone());
+                block_line.selectable = selectable;
+                block_line.link_source = Some(source);
+                block_line.background = line.style.bg;
+                output.lines.push(block_line);
+            }
+            output
         })
     }
 }

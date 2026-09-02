@@ -1,7 +1,7 @@
 //! BlockContent trait, RenderBlock enum, and shared bullet rendering.
 
 use ratatui::style::Style;
-use ratatui::text::{Span, Text};
+use ratatui::text::{Line, Span, Text};
 
 use crate::appearance::AppearanceConfig;
 use crate::diff::DiffHunk;
@@ -1272,18 +1272,25 @@ impl RenderBlock {
         }
     }
 
-    /// Access pre-wrap hyperlink targets via a closure, avoiding allocation.
+    /// Access complete pre-wrap content and its authoritative Markdown links.
     ///
     /// The hyperlinks are in the markdown renderer's coordinate space
     /// (pre-wrap line index, display-cell column range). The caller is
     /// responsible for mapping through word-wrapping and entry layout to
     /// reach screen coordinates.
-    pub fn with_hyperlinks<R>(&self, f: impl FnOnce(&[markdown::HyperlinkTarget]) -> R) -> R {
+    pub(crate) fn with_link_content<R>(
+        &self,
+        f: impl FnOnce(&[Line<'_>], &[markdown::HyperlinkTarget]) -> R,
+    ) -> R {
         match self {
-            RenderBlock::AgentMessage(b) => b.content().with_hyperlinks(f),
-            RenderBlock::Thinking(b) => b.content().with_hyperlinks(f),
-            RenderBlock::Btw(b) => b.content().with_hyperlinks(f),
-            _ => f(&[]),
+            RenderBlock::AgentMessage(b) => b.content().with_link_content(f),
+            RenderBlock::Thinking(b) => b.content().with_link_content(f),
+            RenderBlock::Btw(b) => b.content().with_link_content(f),
+            RenderBlock::UserPrompt(b) => {
+                let lines: Vec<_> = b.text.lines().map(Line::raw).collect();
+                f(&lines, &[])
+            }
+            _ => f(&[], &[]),
         }
     }
 

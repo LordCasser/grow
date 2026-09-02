@@ -19,8 +19,7 @@ use super::text_selection::{
     VisibleBlockGeometry,
 };
 use super::types::{
-    DisplayMode, derive_selection_text, line_plain_text_into, selectable_cols,
-    selectable_cols_usize,
+    derive_selection_text, line_plain_text_into, selectable_cols, selectable_cols_usize,
 };
 use super::wrappers::{EntryRenderer, group_header_chrome_prefix_width};
 use crate::appearance::AppearanceConfig;
@@ -618,33 +617,6 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
         // synthetic label text with no links; the expanded verb slot's member
         // row keeps its links (row offsets already shifted past the header).
         if !is_group_header || verb_expanded_slot {
-            let content_line_offset = match &entry.block {
-                RenderBlock::Btw(_) if ctx.mode != DisplayMode::Collapsed => 2,
-                RenderBlock::Thinking(_)
-                    if ctx.mode != DisplayMode::Collapsed
-                        && appearance.scrollback.blocks.thinking.header =>
-                {
-                    2
-                }
-                _ => 0,
-            };
-            entry.block.with_hyperlinks(|hyperlinks| {
-                if !hyperlinks.is_empty() {
-                    map_hyperlinks_to_overlay(
-                        hyperlinks,
-                        cached_output,
-                        content_skip,
-                        first_visible_content_y,
-                        max_y,
-                        entry_row_layout.content.x,
-                        content_line_offset,
-                        cwd,
-                        media_paths,
-                        &mut result.link_overlay,
-                    );
-                }
-            });
-
             // Basename/relative tool headers need the stored absolute target.
             // Hit box = selectable path span (respects bullet prepend + Selectable shift).
             {
@@ -696,30 +668,20 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                 }
             }
 
-            // Scan post-wrap lines for plain-text URLs and file paths.
-            // For markdown blocks, markdown hyperlinks are already in the
-            // overlay (mapped above); explicit tool-link rows are authoritative.
-            {
-                let visible_lines = cached_output
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .skip(content_skip)
-                    .filter(|(_, bl)| bl.link_target.is_none())
-                    .map(|(idx, bl)| {
-                        let visible_offset = (idx - content_skip) as u16;
-                        let screen_row = first_visible_content_y + visible_offset;
-                        (screen_row, &bl.content, bl.joiner.as_deref())
-                    })
-                    .take_while(|(screen_row, _, _)| *screen_row < max_y);
-
-                crate::render::osc8::scan_lines_for_url_overlays(
-                    visible_lines,
+            collect_block_links(
+                &entry.block,
+                cached_output,
+                content_skip,
+                Rect::new(
                     entry_row_layout.content.x,
-                    media_paths,
-                    &mut result.link_overlay,
-                );
-            }
+                    first_visible_content_y,
+                    content_width.min(entry_row_layout.content.width),
+                    max_y.saturating_sub(first_visible_content_y),
+                ),
+                cwd,
+                media_paths,
+                &mut result.link_overlay,
+            );
         }
 
         // Collect inline media placements for visible media. Each media block
@@ -911,128 +873,315 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
 
 use super::types::BlockOutput;
 
-/// Map pre-wrap `HyperlinkTarget`s to screen-space `OverlayLink`s.
-///
-/// Walks the post-wrap `BlockOutput` lines, using joiner metadata to
-/// reconstruct the pre-wrap → post-wrap line mapping.  For each
-/// hyperlink, finds the wrapped line(s) it overlaps and emits an
-/// `OverlayLink` with the correct screen row and column offsets.
-///
-/// `content_line_offset` accounts for non-markdown header lines prepended
-/// by block types like `BtwBlock` (header + separator) and `ThinkingBlock`
-/// (header + blank when the header config is enabled).
-///
-/// Also used by the `/btw` inline panel (no header offset — pure markdown body).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn map_hyperlinks_to_overlay(
-    hyperlinks: &[markdown::HyperlinkTarget],
-    block_output: &BlockOutput,
+/// Visible source fragments, keyed by the original (pre-wrap) line index.
+/// Synthetic rows have no source, and retained tails keep their original index.
+fn link_source_rows(
+    output: &BlockOutput,
     content_skip: usize,
-    first_visible_screen_y: u16,
-    max_screen_y: u16,
-    content_x: u16,
-    content_line_offset: usize,
+    viewport: Rect,
+) -> std::collections::BTreeMap<usize, Vec<(usize, &crate::scrollback::types::LinkSource)>> {
+    let mut rows = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for (index, line) in output
+        .lines
+        .iter()
+        .enumerate()
+        .skip(content_skip)
+        .take(viewport.height as usize)
+    {
+        if let Some(source) = &line.link_source {
+            rows.entry(source.line_index)
+                .or_default()
+                .push((index, source));
+        }
+    }
+    rows
+}
+
+fn hyperlink_target(
+    h: &markdown::HyperlinkTarget,
     cwd: Option<&std::path::Path>,
     media_paths: &[std::path::PathBuf],
-    overlay: &mut LinkOverlay,
-) {
-    // Build mapping: pre-wrap line index → vec of
-    // (wrapped_idx, col_start_in_prewrap, col_end_in_prewrap, screen_prefix).
-    // A joiner of None means a new pre-wrap line starts.
-    let mut pre_wrap_segments: Vec<Vec<(usize, usize, usize, usize)>> = Vec::new();
-    let mut current_segments: Vec<(usize, usize, usize, usize)> = Vec::new();
-    let mut cumulative_col: usize = 0;
-
-    for (wrapped_idx, line) in block_output.lines.iter().enumerate() {
-        if line.joiner.is_none() && !current_segments.is_empty() {
-            pre_wrap_segments.push(std::mem::take(&mut current_segments));
-            cumulative_col = 0;
-        }
-        // Joiner represents the whitespace consumed at the wrap point —
-        // it occupies display columns in the pre-wrap line but doesn't
-        // appear in either wrapped line. Add BEFORE this segment so
-        // the column mapping stays aligned.
-        if let Some(ref joiner) = line.joiner {
-            cumulative_col += unicode_width::UnicodeWidthStr::width(joiner.as_str());
-        }
-        // Blockquote continuation rows re-inject `│ ` as visual chrome. It is
-        // excluded from selection and did not exist at this position in the
-        // pre-wrap source, so it must not advance source columns. It still
-        // shifts the clickable screen range to the right.
-        let screen_prefix = if line.joiner.is_some() {
-            selectable_cols_usize(&line.content, &line.selectable).map_or(0, |cols| cols.start)
-        } else {
-            0
-        };
-        let source_width = line.content.width().saturating_sub(screen_prefix);
-        current_segments.push((
-            wrapped_idx,
-            cumulative_col,
-            cumulative_col + source_width,
-            screen_prefix,
-        ));
-        cumulative_col += source_width;
-    }
-    if !current_segments.is_empty() {
-        pre_wrap_segments.push(current_segments);
-    }
-
-    // Map each hyperlink to screen-space OverlayLinks. Unsafe schemes
-    // (javascript:, data:, …) are dropped since OSC 8 URLs reach the terminal
-    // without the link_opener scheme filter. Local-file destinations such as
-    // relative session-output links resolve against known local paths.
-    let scheme_filter = crate::terminal::hyperlinks::SchemeFilter::Standard;
-    for h in hyperlinks {
-        let target = if crate::app::link_opener::is_safe_to_open(&h.url, scheme_filter) {
-            crate::render::osc8::LinkTarget::Url(Arc::from(h.url.as_str()))
-        } else if let Some(file_target) = match h.provenance {
+) -> Option<crate::render::osc8::LinkTarget> {
+    let filter = crate::terminal::hyperlinks::SchemeFilter::Standard;
+    if crate::app::link_opener::is_safe_to_open(&h.url, filter) {
+        Some(crate::render::osc8::LinkTarget::Url(Arc::from(
+            h.url.as_str(),
+        )))
+    } else {
+        match h.provenance {
             markdown::HyperlinkProvenance::Explicit => {
                 crate::render::osc8::explicit_local_link_to_file_target(&h.url, cwd, media_paths)
             }
             markdown::HyperlinkProvenance::Inferred => {
                 crate::render::osc8::local_link_to_file_target(&h.url, cwd, media_paths)
             }
-        } {
-            file_target
-        } else {
-            continue;
-        };
-        let adjusted_line = h.line_index + content_line_offset;
-        if adjusted_line >= pre_wrap_segments.len() {
-            continue;
-        }
-        let segments = &pre_wrap_segments[adjusted_line];
-        for &(wrapped_idx, seg_col_start, seg_col_end, screen_prefix) in segments {
-            // Check if hyperlink's column range overlaps this wrapped segment.
-            let overlap_start = h.column_range.start.max(seg_col_start);
-            let overlap_end = h.column_range.end.min(seg_col_end);
-            if overlap_start >= overlap_end {
-                continue;
-            }
-
-            // Check visibility (accounting for content_skip).
-            if wrapped_idx < content_skip {
-                continue;
-            }
-            let visible_offset = (wrapped_idx - content_skip) as u16;
-            let screen_row = first_visible_screen_y + visible_offset;
-            if screen_row >= max_screen_y {
-                continue;
-            }
-
-            let local_col_start = (screen_prefix + overlap_start - seg_col_start) as u16;
-            let local_col_end = (screen_prefix + overlap_end - seg_col_start) as u16;
-
-            overlay.push(OverlayLink {
-                screen_row,
-                col_start: content_x + local_col_start,
-                col_end: content_x + local_col_end,
-                target: target.clone(),
-                presentation: crate::render::osc8::LinkPresentation::Opaque,
-                id: Some(h.id),
-            });
         }
     }
+}
+
+/// Project a complete destination onto only the surviving source fragments.
+/// Coordinate narrowing happens here, never while recognizing source text.
+#[allow(clippy::too_many_arguments)]
+fn project_source_link(
+    columns: std::ops::Range<usize>,
+    rows: &[(usize, &crate::scrollback::types::LinkSource)],
+    content_skip: usize,
+    viewport: Rect,
+    target: &crate::render::osc8::LinkTarget,
+    presentation: crate::render::osc8::LinkPresentation,
+    id: Option<u32>,
+    overlay: &mut LinkOverlay,
+) -> bool {
+    let mut projected = Vec::new();
+    for &(index, source) in rows {
+        let start = columns.start.max(source.columns.start);
+        let end = columns.end.min(source.columns.end);
+        if start >= end || index < content_skip || index - content_skip >= viewport.height as usize
+        {
+            continue;
+        }
+        let complete = start == columns.start
+            && end == columns.end
+            && source.display_start + end - source.columns.start <= viewport.width as usize;
+        let start =
+            (source.display_start + start - source.columns.start).min(viewport.width as usize);
+        let end = (source.display_start + end - source.columns.start).min(viewport.width as usize);
+        if start >= end {
+            continue;
+        }
+        let Some(screen_row) = viewport.y.checked_add((index - content_skip) as u16) else {
+            continue;
+        };
+        let (Some(col_start), Some(col_end)) = (
+            viewport.x.checked_add(start as u16),
+            viewport.x.checked_add(end as u16),
+        ) else {
+            continue;
+        };
+        if overlay.overlaps(screen_row, col_start, col_end) {
+            return false;
+        }
+        projected.push(OverlayLink {
+            screen_row,
+            col_start,
+            col_end,
+            target: target.clone(),
+            presentation: if complete {
+                presentation
+            } else {
+                crate::render::osc8::LinkPresentation::Opaque
+            },
+            id,
+        });
+    }
+    let accepted = !projected.is_empty();
+    for link in projected {
+        overlay.push(link);
+    }
+    accepted
+}
+
+/// Map authoritative Markdown targets through source coordinates captured by
+/// the producer, not through the current output's header count or joiners.
+pub(crate) fn map_hyperlinks_to_overlay(
+    hyperlinks: &[markdown::HyperlinkTarget],
+    block_output: &BlockOutput,
+    content_skip: usize,
+    viewport: Rect,
+    cwd: Option<&std::path::Path>,
+    media_paths: &[std::path::PathBuf],
+    overlay: &mut LinkOverlay,
+) {
+    let rows = link_source_rows(block_output, content_skip, viewport);
+    for h in hyperlinks {
+        let Some(fragments) = rows.get(&h.line_index) else {
+            continue;
+        };
+        let Some(target) = hyperlink_target(h, cwd, media_paths) else {
+            continue;
+        };
+        project_source_link(
+            h.column_range.clone(),
+            fragments,
+            content_skip,
+            viewport,
+            &target,
+            crate::render::osc8::LinkPresentation::Opaque,
+            Some(h.id),
+            overlay,
+        );
+    }
+}
+
+/// Shared by fullscreen scrollback, minimal entry rendering and the /btw panel.
+/// Recognize whole source lines before clipping; layout never edits a target.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn collect_content_links(
+    source_lines: &[ratatui::text::Line<'_>],
+    hyperlinks: &[markdown::HyperlinkTarget],
+    output: &BlockOutput,
+    content_skip: usize,
+    viewport: Rect,
+    cwd: Option<&std::path::Path>,
+    media_paths: &[std::path::PathBuf],
+    overlay: &mut LinkOverlay,
+) {
+    use unicode_width::UnicodeWidthStr;
+    map_hyperlinks_to_overlay(
+        hyperlinks,
+        output,
+        content_skip,
+        viewport,
+        cwd,
+        media_paths,
+        overlay,
+    );
+    for (source_index, rows) in link_source_rows(output, content_skip, viewport) {
+        let Some(line) = source_lines.get(source_index) else {
+            continue;
+        };
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        crate::render::osc8::scan_text_for_links(
+            &text,
+            media_paths,
+            |range, target, presentation| {
+                let start = text[..range.start].width();
+                let columns = start..start + text[range].width();
+                // An explicit target remains authoritative even when its own
+                // fragment is offscreen. Do not manufacture a new tail URL.
+                if hyperlinks.iter().any(|h| {
+                    h.line_index == source_index
+                        && h.column_range.start < columns.end
+                        && columns.start < h.column_range.end
+                        && hyperlink_target(h, cwd, media_paths).is_some()
+                }) {
+                    return false;
+                }
+                project_source_link(
+                    columns,
+                    &rows,
+                    content_skip,
+                    viewport,
+                    target,
+                    presentation,
+                    None,
+                    overlay,
+                )
+            },
+        );
+    }
+
+    // Other block types expose rendered logical text rather than Markdown
+    // coordinates. Join the complete cached region, excluding display chrome;
+    // only project onto the viewport after discovery. Skipped rows and selection
+    // region changes are hard boundaries, never bridges between unrelated text.
+    use crate::scrollback::types::{LinkSource, Selectable};
+    let mut text = String::new();
+    let mut rows: Vec<(usize, LinkSource)> = Vec::new();
+    let mut previous_range = None;
+    let flush =
+        |text: &mut String, rows: &mut Vec<(usize, LinkSource)>, overlay: &mut LinkOverlay| {
+            if rows.iter().any(|(index, _)| {
+                *index >= content_skip && *index - content_skip < viewport.height as usize
+            }) {
+                let fragments: Vec<_> = rows
+                    .iter()
+                    .map(|(index, source)| (*index, source))
+                    .collect();
+                crate::render::osc8::scan_text_for_links(
+                    text,
+                    media_paths,
+                    |range, target, presentation| {
+                        let start = text[..range.start].width();
+                        let columns = start..start + text[range].width();
+                        project_source_link(
+                            columns,
+                            &fragments,
+                            content_skip,
+                            viewport,
+                            target,
+                            presentation,
+                            None,
+                            overlay,
+                        )
+                    },
+                );
+            }
+            text.clear();
+            rows.clear();
+        };
+    let mut column = 0;
+    for (index, line) in output.lines.iter().enumerate() {
+        let unavailable = line.link_source.is_some()
+            || line.link_target.is_some()
+            || matches!(line.selectable, Selectable::None);
+        if unavailable || line.joiner.is_none() || line.selection_range != previous_range {
+            flush(&mut text, &mut rows, overlay);
+            column = 0;
+        }
+        previous_range = line.selection_range;
+        if unavailable || (rows.is_empty() && line.joiner.is_some()) {
+            continue;
+        }
+        if let Some(joiner) = &line.joiner {
+            text.push_str(joiner);
+            column += joiner.width();
+        }
+        let span_range = match &line.selectable {
+            Selectable::All => 0..line.content.spans.len(),
+            Selectable::Spans(range) => {
+                let end = range.end.min(line.content.spans.len());
+                range.start.min(end)..end
+            }
+            Selectable::None => continue,
+        };
+        let display_start = line.content.spans[..span_range.start]
+            .iter()
+            .map(|s| s.width())
+            .sum();
+        let before = text.len();
+        for span in &line.content.spans[span_range] {
+            text.push_str(span.content.as_ref());
+        }
+        let width = text[before..].width();
+        rows.push((
+            index,
+            LinkSource {
+                line_index: 0,
+                columns: column..column + width,
+                display_start,
+            },
+        ));
+        column += width;
+    }
+    flush(&mut text, &mut rows, overlay);
+}
+
+pub(crate) fn collect_block_links(
+    block: &RenderBlock,
+    output: &BlockOutput,
+    content_skip: usize,
+    viewport: Rect,
+    cwd: Option<&std::path::Path>,
+    media_paths: &[std::path::PathBuf],
+    overlay: &mut LinkOverlay,
+) {
+    block.with_link_content(|lines, hyperlinks| {
+        collect_content_links(
+            lines,
+            hyperlinks,
+            output,
+            content_skip,
+            viewport,
+            cwd,
+            media_paths,
+            overlay,
+        )
+    });
 }
 
 #[cfg(test)]
@@ -2361,7 +2510,7 @@ mod tests {
     use ratatui::text::Line as RatatuiLine;
 
     fn make_block_output(specs: &[(&str, Option<&str>)]) -> BlockOutput {
-        BlockOutput {
+        let mut output = BlockOutput {
             lines: specs
                 .iter()
                 .map(|(text, joiner)| {
@@ -2370,7 +2519,9 @@ mod tests {
                     bl
                 })
                 .collect(),
-        }
+        };
+        output.mark_link_sources();
+        output
     }
 
     fn make_hyperlink(
@@ -2393,7 +2544,15 @@ mod tests {
         let output = make_block_output(&[("hello world", None)]);
         let links = [make_hyperlink(0, 0..5, "https://a.com", 1)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 10, 20, 4, 0, None, &[], &mut overlay);
+        map_hyperlinks_to_overlay(
+            &links,
+            &output,
+            0,
+            Rect::new(4, 10, 200, 10),
+            None,
+            &[],
+            &mut overlay,
+        );
 
         assert_eq!(overlay.links().len(), 1);
         let link = &overlay.links()[0];
@@ -2537,7 +2696,15 @@ mod tests {
         // Link spans the full pre-wrap line: cols 0..11
         let links = [make_hyperlink(0, 0..11, "https://b.com", 2)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 0, None, &[], &mut overlay);
+        map_hyperlinks_to_overlay(
+            &links,
+            &output,
+            0,
+            Rect::new(0, 0, 200, 10),
+            None,
+            &[],
+            &mut overlay,
+        );
 
         assert_eq!(overlay.links().len(), 2);
         // First segment: cols 0..5 on screen row 0
@@ -2570,14 +2737,23 @@ mod tests {
             BlockLine::styled(RatatuiLine::from(vec![Span::raw("│ "), Span::raw("cd")]));
         second.selectable = Selectable::Spans(1..2);
         second.joiner = Some(String::new());
-        let output = BlockOutput {
+        let mut output = BlockOutput {
             lines: vec![first, second],
         };
+        output.mark_link_sources();
         // Pre-wrap text is `│ abcd`: the quote prefix exists once in source,
         // while the second visual row repeats it only as decoration.
         let links = [make_hyperlink(0, 2..6, "https://b.com", 2)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 0, None, &[], &mut overlay);
+        map_hyperlinks_to_overlay(
+            &links,
+            &output,
+            0,
+            Rect::new(0, 0, 200, 10),
+            None,
+            &[],
+            &mut overlay,
+        );
 
         assert_eq!(overlay.links().len(), 2);
         assert_eq!(overlay.links()[0].col_start, 2);
@@ -2596,7 +2772,15 @@ mod tests {
         ];
         let mut overlay = LinkOverlay::new();
         // content_skip=2 means first 2 wrapped lines are above viewport
-        map_hyperlinks_to_overlay(&links, &output, 2, 0, 10, 0, 0, None, &[], &mut overlay);
+        map_hyperlinks_to_overlay(
+            &links,
+            &output,
+            2,
+            Rect::new(0, 0, 200, 10),
+            None,
+            &[],
+            &mut overlay,
+        );
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
@@ -2617,7 +2801,15 @@ mod tests {
         ];
         let mut overlay = LinkOverlay::new();
         // max_screen_y=2 → only rows 0..2 are visible (screen_y 0 and 1)
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 2, 0, 0, None, &[], &mut overlay);
+        map_hyperlinks_to_overlay(
+            &links,
+            &output,
+            0,
+            Rect::new(0, 0, 200, 2),
+            None,
+            &[],
+            &mut overlay,
+        );
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
@@ -2629,34 +2821,39 @@ mod tests {
     }
 
     #[test]
-    fn overlay_content_line_offset_skips_header_lines() {
-        // Simulates BtwBlock: header + separator + markdown body
-        let output = make_block_output(&[
-            ("/btw question", None), // header (offset 0)
-            ("", None),              // separator (offset 1)
-            ("body text", None),     // markdown body line 0
-        ]);
-        // Hyperlink on markdown body line_index=0, cols 0..4
+    fn overlay_synthetic_headers_have_no_source() {
+        let mut output = make_block_output(&[("body text", None)]);
+        output
+            .lines
+            .insert(0, BlockLine::separator(RatatuiLine::from("")));
+        output
+            .lines
+            .insert(0, BlockLine::separator(RatatuiLine::from("/btw question")));
         let links = [make_hyperlink(0, 0..4, "https://body.com", 1)];
         let mut overlay = LinkOverlay::new();
-        // content_line_offset=2 shifts line_index by 2
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 2, None, &[], &mut overlay);
-
+        map_hyperlinks_to_overlay(
+            &links,
+            &output,
+            0,
+            Rect::new(0, 0, 80, 10),
+            None,
+            &[],
+            &mut overlay,
+        );
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(overlay.links()[0].screen_row, 2);
-        assert_eq!(overlay.links()[0].col_start, 0);
-        assert_eq!(overlay.links()[0].col_end, 4);
-    }
-
-    #[test]
-    fn overlay_content_line_offset_out_of_range_is_safe() {
-        let output = make_block_output(&[("only line", None)]);
-        // line_index=0, but offset=5 pushes adjusted_line=5 past pre_wrap_segments
-        let links = [make_hyperlink(0, 0..4, "https://x.com", 1)];
-        let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 5, None, &[], &mut overlay);
-
-        assert!(overlay.is_empty());
+        output.lines.truncate(2);
+        let mut collapsed = LinkOverlay::new();
+        map_hyperlinks_to_overlay(
+            &links,
+            &output,
+            0,
+            Rect::new(0, 0, 80, 10),
+            None,
+            &[],
+            &mut collapsed,
+        );
+        assert!(collapsed.is_empty());
     }
 
     #[test]
@@ -2665,7 +2862,15 @@ mod tests {
         let output = make_block_output(&[("abcdef", None)]);
         let links = [make_hyperlink(0, 3..8, "https://partial.com", 1)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 5, 10, 2, 0, None, &[], &mut overlay);
+        map_hyperlinks_to_overlay(
+            &links,
+            &output,
+            0,
+            Rect::new(2, 5, 200, 5),
+            None,
+            &[],
+            &mut overlay,
+        );
 
         assert_eq!(overlay.links().len(), 1);
         let link = &overlay.links()[0];
@@ -2679,12 +2884,277 @@ mod tests {
         let output = make_block_output(&[("text", None)]);
         let links: &[markdown::HyperlinkTarget] = &[];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(links, &output, 0, 0, 10, 0, 0, None, &[], &mut overlay);
+        map_hyperlinks_to_overlay(
+            links,
+            &output,
+            0,
+            Rect::new(0, 0, 200, 10),
+            None,
+            &[],
+            &mut overlay,
+        );
 
         assert!(overlay.is_empty());
     }
 
     // ── URL scanning for non-markdown blocks ──
+
+    fn link_test_context(width: u16, mode: DisplayMode) -> crate::scrollback::types::BlockContext {
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.blocks.thinking.truncated_lines = 2;
+        crate::scrollback::types::BlockContext {
+            mode,
+            is_running: false,
+            width,
+            raw: false,
+            max_lines: None,
+            appearance,
+            is_selected: false,
+            cwd: None,
+        }
+    }
+
+    fn links_for_output(
+        block: &RenderBlock,
+        output: &BlockOutput,
+        width: u16,
+        skip: usize,
+        height: u16,
+    ) -> LinkOverlay {
+        let mut links = LinkOverlay::new();
+        collect_block_links(
+            block,
+            output,
+            skip,
+            Rect::new(0, 0, width, height),
+            None,
+            &[],
+            &mut links,
+        );
+        links
+    }
+
+    #[test]
+    fn overlay_thinking_fold_transition_never_links_the_header() {
+        let url = "https://example.test/reasoning";
+        let mut entry = ScrollbackEntry::new(RenderBlock::thinking_with_time(
+            format!("Found: [article]({url})"),
+            1900,
+        ));
+        let theme = Theme::current();
+        for mode in [
+            DisplayMode::Collapsed,
+            DisplayMode::Expanded,
+            DisplayMode::Collapsed,
+        ] {
+            entry.set_display_mode(mode);
+            let fullscreen = render_with_scratch(
+                std::slice::from_ref(&entry),
+                Rect::new(0, 0, 100, 12),
+                0,
+                None,
+            );
+            let minimal =
+                EntryRenderer::new(&entry, &theme).link_overlay(Rect::new(0, 0, 100, 12), &[]);
+            for overlay in [&fullscreen.link_overlay, &minimal] {
+                assert_eq!(
+                    overlay.is_empty(),
+                    mode == DisplayMode::Collapsed,
+                    "{mode:?}: {:?}",
+                    overlay.links()
+                );
+                let spans = overlay.resolved_spans(true);
+                assert_eq!(spans.len(), overlay.links().len());
+                assert!(spans.iter().all(|s| s.url.as_ref() == url));
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_thinking_tail_preserves_source_identity_and_quote_prefix() {
+        let hidden = "https://hidden.test/article";
+        let visible = "https://visible.test/a/long/path/to/an/article";
+        let block = RenderBlock::thinking(format!(
+            "[hidden]({hidden})\n\n> [visible article with a long label]({visible})"
+        ));
+        for header in [true, false] {
+            let mut ctx = link_test_context(22, DisplayMode::Truncated);
+            ctx.appearance.scrollback.blocks.thinking.header = header;
+            let output = block.output(&ctx);
+            let overlay = links_for_output(&block, &output, ctx.width, 0, 20);
+            assert!(!overlay.is_empty());
+            for link in overlay.links() {
+                assert_eq!(
+                    link.target,
+                    crate::render::osc8::LinkTarget::Url(Arc::from(visible))
+                );
+                assert!(output.lines[link.screen_row as usize].link_source.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_user_links_survive_width_crop_and_input_truncation() {
+        let urls = [
+            "https://a.test/first/article.pdf",
+            "https://b.test/second?next=https://inner.test/target",
+            "https://c.test/中文路径?q=天气，交通",
+        ];
+        let text = format!("中👩‍💻 e\u{301} {}、{}，{}", urls[0], urls[1], urls[2]);
+        let block = RenderBlock::user_prompt(text);
+        for width in [12, 19, 37, 90] {
+            for max_lines in [None, Some(1), Some(3)] {
+                let mut ctx = link_test_context(width, DisplayMode::Expanded);
+                ctx.max_lines = max_lines;
+                let output = block.output(&ctx);
+                let full = links_for_output(&block, &output, width, 0, 1000);
+                if max_lines.is_none() {
+                    assert!(!full.is_empty(), "width={width}");
+                    for url in urls {
+                        assert!(
+                            full.links().iter().any(|link| link.target
+                                == crate::render::osc8::LinkTarget::Url(Arc::from(url))),
+                            "missing {url}, width={width}"
+                        );
+                    }
+                }
+                for skip in 0..output.lines.len() {
+                    let visible = links_for_output(&block, &output, width, skip, 1);
+                    let expected: Vec<_> = full
+                        .links()
+                        .iter()
+                        .filter(|link| link.screen_row as usize == skip)
+                        .collect();
+                    assert_eq!(visible.links().len(), expected.len());
+                    for (link, original) in visible.links().iter().zip(expected) {
+                        assert_eq!(link.target, original.target);
+                        assert_eq!(
+                            (link.col_start, link.col_end),
+                            (original.col_start, original.col_end)
+                        );
+                        let cols = selectable_cols_usize(
+                            &output.lines[skip].content,
+                            &output.lines[skip].selectable,
+                        )
+                        .unwrap();
+                        assert!(
+                            link.col_start as usize >= cols.start
+                                && link.col_end as usize <= cols.end
+                        );
+                        assert!(urls.iter().any(|url| link.target
+                            == crate::render::osc8::LinkTarget::Url(Arc::from(*url))));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_source_columns_are_not_limited_to_terminal_u16() {
+        let url = "https://example.test/after-a-long-prefix";
+        let block = RenderBlock::user_prompt(format!("{} {url}", "x".repeat(66_000)));
+        let ctx = link_test_context(80, DisplayMode::Expanded);
+        let output = block.output(&ctx);
+        let overlay = links_for_output(&block, &output, 80, output.lines.len() - 1, 1);
+        assert!(!overlay.is_empty());
+        assert!(
+            overlay
+                .links()
+                .iter()
+                .all(|link| link.target == crate::render::osc8::LinkTarget::Url(Arc::from(url)))
+        );
+    }
+
+    #[test]
+    fn overlay_btw_header_and_response_have_distinct_sources() {
+        let question = "https://question.test/x";
+        let response = "https://response.test/y";
+        let block = RenderBlock::Btw(crate::scrollback::blocks::BtwBlock::new(
+            question,
+            format!("[answer]({response})"),
+        ));
+        for mode in [DisplayMode::Collapsed, DisplayMode::Expanded] {
+            let ctx = link_test_context(80, mode);
+            let output = block.output(&ctx);
+            let links = links_for_output(&block, &output, 80, 0, 20);
+            assert!(
+                links
+                    .links()
+                    .iter()
+                    .any(|l| l.target == crate::render::osc8::LinkTarget::Url(Arc::from(question)))
+            );
+            assert_eq!(
+                links
+                    .links()
+                    .iter()
+                    .any(|l| l.target == crate::render::osc8::LinkTarget::Url(Arc::from(response))),
+                mode == DisplayMode::Expanded
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_truncated_prompt_keeps_complete_url_and_file_destinations() {
+        for text in [
+            "https://a.test/long/path/to/the/real/article",
+            "/tmp/long/path/to/the/real/report.txt",
+        ] {
+            let block = RenderBlock::user_prompt(text);
+            let mut ctx = link_test_context(18, DisplayMode::Expanded);
+            let full = block.output(&ctx);
+            let full_links = links_for_output(&block, &full, 18, 0, 100);
+            ctx.max_lines = Some(1);
+            let truncated = block.output(&ctx);
+            let links = links_for_output(&block, &truncated, 18, 0, 1);
+            assert!(!links.is_empty(), "{text}");
+            assert_eq!(links.links()[0].target, full_links.links()[0].target);
+            assert_eq!(
+                links.links()[0].presentation,
+                LinkPresentation::Opaque,
+                "a partial path cannot be delegated to terminal-native path detection"
+            );
+            let end =
+                selectable_cols_usize(&truncated.lines[0].content, &truncated.lines[0].selectable)
+                    .unwrap()
+                    .end;
+            assert!(links.links()[0].col_end as usize <= end);
+        }
+    }
+
+    #[test]
+    fn overlay_generic_scan_excludes_chrome_and_respects_region_boundaries() {
+        use crate::scrollback::types::Selectable;
+        use ratatui::text::Span;
+        let first = BlockLine::styled(RatatuiLine::from(vec![
+            Span::raw("$ "),
+            Span::raw("https://a.test/long/"),
+        ]));
+        let mut second =
+            BlockLine::styled(RatatuiLine::from(vec![Span::raw("  "), Span::raw("path")]));
+        second.joiner = Some(String::new());
+        let mut output = BlockOutput {
+            lines: vec![first, second],
+        };
+        for line in &mut output.lines {
+            line.selectable = Selectable::Spans(1..2);
+            line.selection_range = Some(0);
+        }
+        let block = RenderBlock::stub("", Color::Blue);
+        let links = links_for_output(&block, &output, 80, 1, 1);
+        assert_eq!(links.links().len(), 1);
+        assert_eq!(links.links()[0].col_start, 2);
+        assert_eq!(
+            links.links()[0].target,
+            crate::render::osc8::LinkTarget::Url(Arc::from("https://a.test/long/path"))
+        );
+        output.lines[1].selection_range = Some(1);
+        assert!(links_for_output(&block, &output, 80, 1, 1).is_empty());
+        output.lines[1].selection_range = Some(0);
+        output
+            .lines
+            .insert(1, BlockLine::separator(RatatuiLine::from("…")));
+        assert!(links_for_output(&block, &output, 80, 2, 1).is_empty());
+    }
 
     #[test]
     fn execute_block_urls_get_overlay_links() {

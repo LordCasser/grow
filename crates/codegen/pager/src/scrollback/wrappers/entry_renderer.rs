@@ -471,34 +471,6 @@ impl<'a> EntryRenderer<'a> {
         let content_skip = skip_rows.saturating_sub(vpad_top) as usize;
         let first_content_y = content_area.y + u16::from(skip_rows < vpad_top);
         let max_y = content_area.bottom();
-        let content_line_offset = match &self.entry.block {
-            RenderBlock::Btw(_) if ctx.mode != DisplayMode::Collapsed => 2,
-            RenderBlock::Thinking(_)
-                if ctx.mode != DisplayMode::Collapsed
-                    && self.appearance().scrollback.blocks.thinking.header =>
-            {
-                2
-            }
-            _ => 0,
-        };
-
-        self.entry.block.with_hyperlinks(|hyperlinks| {
-            if !hyperlinks.is_empty() {
-                crate::scrollback::render::map_hyperlinks_to_overlay(
-                    hyperlinks,
-                    &output,
-                    content_skip,
-                    first_content_y,
-                    max_y,
-                    content_area.x,
-                    content_line_offset,
-                    self.cwd,
-                    media_paths,
-                    &mut overlay,
-                );
-            }
-        });
-
         for (idx, line) in output.lines.iter().enumerate().skip(content_skip) {
             let row = first_content_y.saturating_add((idx - content_skip) as u16);
             if row >= max_y {
@@ -539,23 +511,17 @@ impl<'a> EntryRenderer<'a> {
             });
         }
 
-        let visible_lines = output
-            .lines
-            .iter()
-            .enumerate()
-            .skip(content_skip)
-            .filter(|(_, line)| line.link_target.is_none())
-            .map(|(idx, line)| {
-                (
-                    first_content_y.saturating_add((idx - content_skip) as u16),
-                    &line.content,
-                    line.joiner.as_deref(),
-                )
-            })
-            .take_while(|(row, _, _)| *row < max_y);
-        crate::render::osc8::scan_lines_for_url_overlays(
-            visible_lines,
-            content_area.x,
+        crate::scrollback::render::collect_block_links(
+            &self.entry.block,
+            &output,
+            content_skip,
+            Rect::new(
+                content_area.x,
+                first_content_y,
+                text_width,
+                max_y.saturating_sub(first_content_y),
+            ),
+            self.cwd,
             media_paths,
             &mut overlay,
         );

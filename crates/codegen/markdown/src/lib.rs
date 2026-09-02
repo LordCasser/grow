@@ -43,6 +43,7 @@ pub mod streaming;
 pub mod style;
 mod syntax;
 mod url_scan;
+pub use url_scan::plain_url_ranges;
 
 // Re-export public API
 pub use buffers::{HyperlinkProvenance, MarkdownBuffers};

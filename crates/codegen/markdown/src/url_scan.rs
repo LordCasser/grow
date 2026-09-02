@@ -2,9 +2,96 @@
 
 use linkify::{LinkFinder, LinkKind};
 use ratatui::text::Line;
+use std::ops::Range;
+use std::sync::OnceLock;
 
 use crate::buffers::unicode_display_width;
 use crate::output::HyperlinkTarget;
+
+/// Infer bare URLs in prose, returning UTF-8 byte ranges into the unchanged input.
+/// Explicit Markdown destinations must never pass through these heuristics.
+/// Unicode whitespace and sentence wrappers delimit prose. CJK list punctuation
+/// delimits paths, but is retained inside query/fragment data unless it introduces
+/// another URL or ends the token. ASCII commas/semicolons split adjacent URLs only
+/// outside query/fragment data (a redirect or URL-list parameter is one URL).
+pub fn plain_url_ranges(text: &str) -> Vec<Range<usize>> {
+    static FINDER: OnceLock<LinkFinder> = OnceLock::new();
+    let finder = FINDER.get_or_init(|| {
+        let mut finder = LinkFinder::new();
+        finder.kinds(&[LinkKind::Url]);
+        finder
+    });
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    let prose_boundary = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\u{200b}'
+                    | '。'
+                    | '！'
+                    | '？'
+                    | '（'
+                    | '）'
+                    | '“'
+                    | '”'
+                    | '‘'
+                    | '’'
+                    | '「'
+                    | '」'
+                    | '『'
+                    | '』'
+            )
+    };
+    for token in text.split_inclusive(prose_boundary) {
+        let token_text = token.trim_end_matches(prose_boundary);
+        for link in finder.links(token_text) {
+            let candidate = link.as_str();
+            let base = offset + link.start();
+            let mut start = 0;
+            let mut in_data = false;
+            let mut emit = |from: usize, to: usize| {
+                let bounded = candidate[from..to].trim_end_matches(['，', '、', '；', '：']);
+                for part in finder.links(bounded) {
+                    ranges.push(base + from + part.start()..base + from + part.end());
+                }
+            };
+            // Partition each candidate in one pass. Repeatedly asking linkify
+            // to scan the remaining suffix is quadratic for comma-joined lists.
+            for (i, c) in candidate.char_indices() {
+                if matches!(c, '?' | '#') {
+                    in_data = true;
+                }
+                if !matches!(c, '，' | '、' | '；' | '：' | ',' | ';') {
+                    continue;
+                }
+                let after = &candidate[i + c.len_utf8()..];
+                let next_url = ["https://", "http://"].iter().any(|scheme| {
+                    after
+                        .get(..scheme.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+                });
+                let split = match c {
+                    '，' | '、' | '；' | '：' => !in_data || next_url || after.is_empty(),
+                    ',' | ';' => !in_data && next_url,
+                    _ => false,
+                };
+                if split {
+                    emit(start, i);
+                    start = i + c.len_utf8();
+                    in_data = false;
+                }
+            }
+            if start == 0 {
+                ranges.push(base..offset + link.end());
+            } else {
+                emit(start, candidate.len());
+            }
+        }
+        offset += token.len();
+    }
+    ranges
+}
 
 /// Scan `lines` for plain URLs and return new `HyperlinkTarget` entries
 /// that don't overlap any existing target in `existing`.
@@ -37,45 +124,39 @@ pub(crate) fn detect_plain_urls_with_offset(
 ) -> (Vec<HyperlinkTarget>, u32) {
     let mut result = Vec::new();
     let mut current_id = next_id;
-    let mut finder = LinkFinder::new();
-    finder.kinds(&[LinkKind::Url]);
-
     for (i, line) in lines.iter().enumerate() {
         let line_index = line_index_offset + i;
-        let mut display_col: usize = 0;
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        for range in plain_url_ranges(&text) {
+            let before = &text[..range.start];
+            let matched = &text[range];
 
-        for span in &line.spans {
-            let span_text: &str = span.content.as_ref();
+            let col_start = unicode_display_width(before);
+            let col_end = col_start + unicode_display_width(matched);
+            let url = matched.to_string();
 
-            for link in finder.links(span_text) {
-                let before = &span_text[..link.start()];
-                let matched = &span_text[link.start()..link.end()];
+            // Dedup: skip if any existing or already-added target overlaps
+            // on the same line. Overlap: cand.start < ex.end && ex.start < cand.end.
+            let overlaps = existing.iter().chain(result.iter()).any(|h| {
+                h.line_index == line_index
+                    && col_start < h.column_range.end
+                    && h.column_range.start < col_end
+            });
 
-                let col_start = display_col + unicode_display_width(before);
-                let col_end = col_start + unicode_display_width(matched);
-                let url = link.as_str().to_string();
-
-                // Dedup: skip if any existing or already-added target overlaps
-                // on the same line. Overlap: cand.start < ex.end && ex.start < cand.end.
-                let overlaps = existing.iter().chain(result.iter()).any(|h| {
-                    h.line_index == line_index
-                        && col_start < h.column_range.end
-                        && h.column_range.start < col_end
+            if !overlaps {
+                result.push(HyperlinkTarget {
+                    line_index,
+                    column_range: col_start..col_end,
+                    url,
+                    id: current_id,
+                    provenance: crate::HyperlinkProvenance::Inferred,
                 });
-
-                if !overlaps {
-                    result.push(HyperlinkTarget {
-                        line_index,
-                        column_range: col_start..col_end,
-                        url,
-                        id: current_id,
-                        provenance: crate::HyperlinkProvenance::Inferred,
-                    });
-                    current_id += 1;
-                }
+                current_id += 1;
             }
-
-            display_col += unicode_display_width(span_text);
         }
     }
 
@@ -87,6 +168,144 @@ mod tests {
     use super::*;
     use crate::StreamingMarkdownRenderer;
     use crate::style::test_style;
+
+    #[test]
+    fn prose_boundaries_preserve_original_targets() {
+        for separator in [
+            "，", "、", ",", ";", "， ", "\u{a0}", "\u{3000}", "\u{200b}", "\n", "\t",
+        ] {
+            let text = format!("https://a.test/x{separator}https://b.test/y");
+            let urls: Vec<_> = plain_url_ranges(&text)
+                .into_iter()
+                .map(|r| &text[r])
+                .collect();
+            assert_eq!(
+                urls,
+                ["https://a.test/x", "https://b.test/y"],
+                "{separator:?}"
+            );
+        }
+        for text in [
+            "（https://a.test/x）",
+            "“https://a.test/x”",
+            "https://a.test/x。下一句",
+            "https://a.test/x，解释",
+        ] {
+            let urls: Vec<_> = plain_url_ranges(text)
+                .into_iter()
+                .map(|r| &text[r])
+                .collect();
+            assert_eq!(urls, ["https://a.test/x"], "{text}");
+        }
+        for text in [
+            "https://a.test/a,b",
+            "https://a.test/?ids=1,2",
+            "https://a.test/a;version=2",
+            "https://a.test/?next=https://b.test/x",
+            "https://a.test/?urls=https://b.test/x,https://c.test/y",
+            "https://a.test/中文路径?q=天气，交通",
+            "https://a.test/a%2Cb%EF%BC%8Cc",
+            "https://a.test/x(foo)",
+        ] {
+            assert_eq!(plain_url_ranges(text), [0..text.len()], "{text}");
+        }
+    }
+
+    #[test]
+    fn plain_url_crosses_style_spans() {
+        let lines = [Line::from(vec![
+            ratatui::text::Span::raw("中文 https://"),
+            ratatui::text::Span::styled(
+                "a.test/",
+                ratatui::style::Style::default().fg(ratatui::style::Color::Red),
+            ),
+            ratatui::text::Span::raw("path，说明"),
+        ])];
+        let (links, _) = detect_plain_urls(&lines, &[], 0);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://a.test/path");
+        assert_eq!(links[0].column_range, 5..24);
+    }
+
+    #[test]
+    fn explicit_destination_bypasses_prose_heuristics() {
+        let url = "https://a.test/中文，路径?q=天气，交通";
+        let links = finish_and_get_hyperlinks(&format!("[文档]({url})"));
+        assert!(links.iter().any(
+            |link| link.provenance == crate::HyperlinkProvenance::Explicit && link.url == url
+        ));
+    }
+
+    #[test]
+    fn streaming_chunk_boundaries_do_not_freeze_partial_urls() {
+        let text = "中文 https://a.test/path，https://b.test/?next=https://inner.test/x\n";
+        let expected = finish_and_get_hyperlinks(text);
+        for split in text.char_indices().map(|(i, _)| i) {
+            let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
+            renderer.push_and_render(&text[..split], None);
+            renderer.push_and_render(&text[split..], None);
+            let actual = renderer.view().hyperlinks;
+            assert_eq!(actual.len(), expected.len(), "split={split}");
+            for (actual, expected) in actual.iter().zip(&expected) {
+                assert_eq!(actual.url, expected.url, "split={split}");
+                assert_eq!(actual.column_range, expected.column_range);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_prose_and_table_links_use_the_same_boundaries() {
+        let first = "https://a.test/a-very-long-directory/another-long-directory/report-one.pdf";
+        let second = "https://b.test/a-very-long-directory/another-long-directory/report-two.pdf";
+        for text in [
+            format!("{first}、{second}，说明"),
+            format!("| 文档 |\n|---|\n| {first}、{second}，说明 |\n"),
+        ] {
+            let links = finish_and_get_hyperlinks(&text);
+            for url in [first, second] {
+                assert!(links.iter().any(|link| link.url == url), "{links:?}");
+            }
+            assert!(
+                links
+                    .iter()
+                    .all(|link| !link.url.contains('、') && !link.url.contains('，'))
+            );
+        }
+    }
+
+    #[test]
+    fn punctuation_runs_after_queries_do_not_enter_destinations() {
+        for separator in ["，", "，、", "，，", "， "] {
+            let text = format!("https://a.test/?ids=1,2{separator}HTTPS://b.test/path");
+            let urls: Vec<_> = plain_url_ranges(&text)
+                .into_iter()
+                .map(|r| &text[r])
+                .collect();
+            assert_eq!(urls, ["https://a.test/?ids=1,2", "HTTPS://b.test/path"]);
+        }
+    }
+
+    #[test]
+    fn many_adjacent_urls_preserve_each_range() {
+        let urls: Vec<_> = (0..500)
+            .map(|i| format!("https://example.test/article/{i}"))
+            .collect();
+        let text = urls.join("，");
+        let actual: Vec<_> = plain_url_ranges(&text)
+            .into_iter()
+            .map(|range| &text[range])
+            .collect();
+        assert_eq!(actual, urls);
+    }
+
+    #[test]
+    fn entity_separators_do_not_become_compact_url_data() {
+        let first = "https://a.test/a-very-long-directory/another-long-directory/report-one.pdf";
+        let second = "https://b.test/a-very-long-directory/another-long-directory/report-two.pdf";
+        let links = finish_and_get_hyperlinks(&format!("{first}&nbsp;{second}"));
+        assert!(links.iter().any(|link| link.url == first), "{links:?}");
+        assert!(links.iter().any(|link| link.url == second), "{links:?}");
+    }
 
     /// Helper: render markdown via StreamingMarkdownRenderer::finish() and
     /// return the hyperlinks from the finalized output.

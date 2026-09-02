@@ -13,9 +13,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Widget};
 use unicode_width::UnicodeWidthStr;
 
-use crate::render::osc8::{LinkOverlay, scan_lines_for_url_overlays};
+use crate::render::osc8::LinkOverlay;
 use crate::scrollback::blocks::markdown_content::MarkdownContent;
-use crate::scrollback::render::map_hyperlinks_to_overlay;
+use crate::scrollback::render::collect_content_links;
 use crate::scrollback::text_selection::{
     ResolvedSelectableLine, ResolvedSelectionModel, VisibleBlockGeometry,
 };
@@ -400,39 +400,26 @@ pub fn render_btw_panel(
                     drag_startable: true,
                 });
             }
-            // Markdown hyperlinks + plain-text URL / file-path scan (parity
-            // with scrollback's map_hyperlinks + scan_lines_for_url_overlays).
+            // Same source-aware link pipeline as fullscreen and minimal.
             if let Some(overlay) = link_overlay {
                 let max_screen_y = body_y.saturating_add(visible_count as u16);
-                content.with_hyperlinks(|hyperlinks| {
-                    if hyperlinks.is_empty() {
-                        return;
-                    }
-                    map_hyperlinks_to_overlay(
+                content.with_link_content(|lines, hyperlinks| {
+                    collect_content_links(
+                        lines,
                         hyperlinks,
                         &block_output,
                         content_skip,
-                        body_y,
-                        max_screen_y,
-                        content_x,
-                        /* content_line_offset */ 0,
+                        Rect::new(
+                            content_x,
+                            body_y,
+                            content_width as u16,
+                            max_screen_y.saturating_sub(body_y),
+                        ),
                         cwd,
                         media_paths,
                         overlay,
                     );
                 });
-                let visible_lines = block_output
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .skip(content_skip)
-                    .map(|(idx, bl)| {
-                        let visible_offset = (idx - content_skip) as u16;
-                        let screen_row = body_y + visible_offset;
-                        (screen_row, &bl.content, bl.joiner.as_deref())
-                    })
-                    .take_while(|(screen_row, _, _)| *screen_row < max_screen_y);
-                scan_lines_for_url_overlays(visible_lines, content_x, media_paths, overlay);
             }
         }
         BtwOverlayState::Error { error, .. } => {
@@ -773,7 +760,7 @@ mod tests {
     #[test]
     fn done_state_scans_file_paths_like_scrollback() {
         // Absolute path text (not a markdown hyperlink) should still become a
-        // file:// overlay via scan_lines_for_url_overlays.
+        // file:// overlay via the shared source-aware collector.
         let path = "/Users/test/project/src/main.rs";
         let state = BtwOverlayState::done("q".to_string(), format!("See {path} for details."));
         let (_model, overlay) = render_with_links(&state, 80, 8);
@@ -825,6 +812,26 @@ mod tests {
             link.screen_row, 4,
             "link should be on last visible body row"
         );
+    }
+
+    #[test]
+    fn wrapped_btw_url_keeps_outer_destination_when_scrolled() {
+        let url = "https://a.test/?next=https://b.test/x";
+        let text = format!("start\n\n{url}\n\nend");
+        let mut seen = false;
+        for scroll in 0..8 {
+            let state = done_with_scroll(&text, scroll);
+            let (_, links) = render_with_links(&state, 24, 5);
+            seen |= !links.is_empty();
+            for link in links.links() {
+                assert_eq!(
+                    link.target,
+                    crate::render::osc8::LinkTarget::Url(std::sync::Arc::from(url))
+                );
+                assert!(link.screen_row < 5);
+            }
+        }
+        assert!(seen);
     }
 
     /// Regression: a long question must not push the [Esc] hint off the top

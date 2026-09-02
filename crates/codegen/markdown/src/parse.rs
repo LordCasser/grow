@@ -9,7 +9,6 @@
 use std::ops::Range;
 
 use anstyle::Style;
-use linkify::{LinkFinder, LinkKind};
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Tag, TagEnd, TextMergeWithOffset};
 use ratatui::text::{Line, Span};
 
@@ -191,14 +190,30 @@ fn trim_reference_token(token: &str) -> (usize, &str) {
 /// wrapping (which would invalidate selection and hyperlink coordinates).
 fn prose_reference_candidates(text: &str, base: usize) -> Vec<(Range<usize>, String, String)> {
     let mut candidates = Vec::new();
-    let mut finder = LinkFinder::new();
-    finder.kinds(&[LinkKind::Url]);
-
-    for link in finder.links(text) {
-        let raw = link.as_str();
+    for range in crate::plain_url_ranges(text) {
+        let raw = &text[range.clone()];
+        // Prose is scanned in source coordinates, before HTML entities are
+        // rendered. A list separator may be the semicolon of an entity;
+        // never compact a prefix that cuts that entity in half. Let the
+        // rendered-text scan recognize links after the entity transforms.
+        if text[range.end..].starts_with(';')
+            && let Some(amp) = raw.rfind('&')
+        {
+            let entity = &text[range.start + amp..range.end + 1];
+            if html_escape::decode_html_entities(entity).as_ref() != entity {
+                continue;
+            }
+        }
         let target = html_escape::decode_html_entities(raw).into_owned();
+        if target != raw
+            && !matches!(crate::plain_url_ranges(&target).as_slice(), [range] if range.start == 0 && range.end == target.len())
+        {
+            // Decoding introduced a boundary (e.g. &nbsp;); the source match
+            // was not one URL. Do not give it an authoritative compact target.
+            continue;
+        }
         if let Some(display) = reference_display_name(&target) {
-            candidates.push(((base + link.start())..(base + link.end()), target, display));
+            candidates.push(((base + range.start)..(base + range.end), target, display));
         }
     }
 

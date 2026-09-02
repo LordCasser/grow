@@ -137,6 +137,15 @@ impl BlockContext {
     }
 }
 
+/// Coordinates of real source text represented by one display row. Captured
+/// before headers, truncation and other presentation-only transformations.
+#[derive(Debug, Clone)]
+pub struct LinkSource {
+    pub line_index: usize,
+    pub columns: Range<usize>,
+    pub display_start: usize,
+}
+
 /// A single line of block output.
 #[derive(Debug, Clone)]
 pub struct BlockLine {
@@ -169,6 +178,7 @@ pub struct BlockLine {
     pub joiner: Option<String>,
     /// Semantic link target when paint text cannot recover it (tool headers).
     pub link_target: Option<crate::render::osc8::LinkTarget>,
+    pub link_source: Option<LinkSource>,
 }
 
 impl Default for BlockLine {
@@ -184,6 +194,7 @@ impl Default for BlockLine {
             selection_text: None,
             joiner: None,
             link_target: None,
+            link_source: None,
         }
     }
 }
@@ -364,6 +375,15 @@ pub fn shift_selection_metadata_for_prefix(line: &mut BlockLine, prefix_span_cou
     if prefix_span_count == 0 {
         return;
     }
+    if let Some(source) = &mut line.link_source {
+        source.display_start += line
+            .content
+            .spans
+            .iter()
+            .take(prefix_span_count)
+            .map(Span::width)
+            .sum::<usize>();
+    }
 
     line.selectable = match &line.selectable {
         Selectable::All => Selectable::Spans(prefix_span_count..line.content.spans.len()),
@@ -474,6 +494,34 @@ impl From<BlockOutput> for RenderedBlockOutput {
 }
 
 impl BlockOutput {
+    /// Record Markdown's pre-wrap positions while the complete body is still
+    /// present. Repeated quote bars are display-only on continuation rows.
+    #[cfg(test)]
+    pub(crate) fn mark_link_sources(&mut self) {
+        let mut line_index = 0;
+        let mut column = 0;
+        for (index, line) in self.lines.iter_mut().enumerate() {
+            if index > 0 && line.joiner.is_none() {
+                line_index += 1;
+                column = 0;
+            }
+            if let Some(joiner) = &line.joiner {
+                column += joiner.width();
+            }
+            let display_start = if line.joiner.is_some() {
+                selectable_cols_usize(&line.content, &line.selectable).map_or(0, |cols| cols.start)
+            } else {
+                0
+            };
+            let width = line.content.width().saturating_sub(display_start);
+            line.link_source = Some(LinkSource {
+                line_index,
+                columns: column..column + width,
+                display_start,
+            });
+            column += width;
+        }
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -538,9 +586,9 @@ impl BlockOutput {
 ///
 /// A row whose `joiner` is `None` starts a new pre-wrap line; soft-wrap
 /// continuations (`Some(_)`) stay on the current one. The first row is always
-/// index 0. This is the single source of truth for the pre-wrap → post-wrap
-/// mapping used by Mermaid treatment-row insertion (fallback caption / affordance
-/// row) and the hyperlink overlay.
+/// index 0. Used by Mermaid treatment-row insertion on the complete body.
+/// Hyperlinks instead retain producer-captured `link_source` coordinates so
+/// later insertion or truncation cannot renumber their source lines.
 pub(crate) fn prewrap_index_per_row(lines: &[BlockLine]) -> Vec<usize> {
     let mut indices = Vec::with_capacity(lines.len());
     let mut prewrap = 0usize;
@@ -594,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn block_line_exhaustive_literal_keeps_legacy_shape() {
+    fn block_line_exhaustive_literal_includes_link_source() {
         let _line = BlockLine {
             content: Line::default(),
             background: None,
@@ -606,6 +654,7 @@ mod tests {
             selection_text: None,
             joiner: None,
             link_target: None,
+            link_source: None,
         };
     }
 

@@ -310,6 +310,11 @@ impl UserPromptBlock {
                     Line::from(vec![Span::styled(indent, prefix_style)])
                 };
                 let block_line = with_band(BlockLine {
+                    link_source: Some(crate::scrollback::types::LinkSource {
+                        line_index: logical_idx,
+                        columns: 0..0,
+                        display_start: prefix_width,
+                    }),
                     selectable: if has_visible_prefix {
                         Selectable::Spans(1..1) // empty content range past prefix
                     } else {
@@ -365,6 +370,7 @@ impl UserPromptBlock {
             let (wrapped, wrap_joiners) =
                 word_wrap_line_with_joiners(&content_line, RtOptions::new(base_content_width));
             let wrapped_count = wrapped.len();
+            let mut source_column = 0;
 
             for (wrap_idx, (wrapped_line, wrap_joiner)) in
                 wrapped.into_iter().zip(wrap_joiners).enumerate()
@@ -388,6 +394,9 @@ impl UserPromptBlock {
                 } else {
                     wrap_joiner
                 };
+                source_column += joiner.as_deref().map_or(0, UnicodeWidthStr::width);
+                let source_start = source_column;
+                source_column += wrapped_line.width();
 
                 if will_be_last && has_more {
                     // This is the last allowed line and there's more content.
@@ -402,6 +411,11 @@ impl UserPromptBlock {
                         .into_iter()
                         .next()
                         .unwrap_or_else(Line::default);
+                    let link_source = crate::scrollback::types::LinkSource {
+                        line_index: logical_idx,
+                        columns: source_start..source_start + final_content.width(),
+                        display_start: prefix_width,
+                    };
 
                     // Build final line with prefix, content, and ellipsis
                     let mut spans = vec![Span::styled(line_prefix.to_string(), prefix_style)];
@@ -414,6 +428,7 @@ impl UserPromptBlock {
                     let content_start = if has_visible_prefix { 1 } else { 0 };
                     let content_end = spans.len() - 1; // exclude ellipsis
                     let block_line = with_band(BlockLine {
+                        link_source: Some(link_source),
                         content: Line::from(spans),
                         selectable: if content_start < content_end {
                             Selectable::Spans(content_start..content_end)
@@ -436,6 +451,11 @@ impl UserPromptBlock {
                 }));
                 let content_end = spans.len();
                 let block_line = with_band(BlockLine {
+                    link_source: Some(crate::scrollback::types::LinkSource {
+                        line_index: logical_idx,
+                        columns: source_start..source_column,
+                        display_start: prefix_width,
+                    }),
                     content: Line::from(spans),
                     selectable: if has_visible_prefix {
                         Selectable::Spans(1..content_end)
