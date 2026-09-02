@@ -176,6 +176,14 @@ pub fn agent_prompt(agent: &AgentView) -> &PromptWidget {
     &agent.prompt
 }
 
+pub fn agent_behavior_switch_hint(agent: &AgentView) -> Option<&str> {
+    agent.behavior_switch_target?;
+    agent
+        .mode_switch_banner
+        .as_ref()
+        .map(|(message, _)| message.as_str())
+}
+
 pub fn agent_prompt_mut(agent: &mut AgentView) -> &mut PromptWidget {
     &mut agent.prompt
 }

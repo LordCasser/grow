@@ -86,6 +86,8 @@ Goal turn 的 lifecycle mutation authority 以当前 prompt、Goal id、definiti
 
 确认窗是 transient 用户交互状态，不持久化。只有用户的 mode selection/明确 slash control会调用该路径；runtime completion 不通过它“顺手切模式”。
 
+Pager 收到 `confirmation_required` 后，在 Shell 确认窗内锁定输入框并提示 `Enter` 确认、其他任意键取消。`Enter` 通过现有 selection 通道重选目标，取消则重选当前权威 Behavior 以清除 Shell latch；两者均吞掉本次输入并保留草稿，粘贴按取消处理。提示到期、切换结果返回或会话重载时清除交互状态。
+
 Plan/Goal lifecycle 工具是采样批次的状态屏障。一个 provider batch 只要包含
 `PlanControl` 或 Goal lifecycle update，就只执行按 provider 顺序出现的第一个控制调用；
 同批其他读写、执行和后续控制调用全部通过统一 cancellation/result 路径闭合，然后重新采样。

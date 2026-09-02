@@ -239,9 +239,13 @@ pub fn draw_live(
                 return (cursor, None);
             }
             let status_h = 1u16.min(area.height);
-            let overlay_h =
+            let confirming_behavior = minimal_api::agent_behavior_switch_hint(agent).is_some();
+            let overlay_h = if confirming_behavior {
+                0
+            } else {
                 super::overlay::overlay_rows(minimal_api::agent_prompt(agent), area.width)
-                    .min(area.height.saturating_sub(status_h + 1));
+                    .min(area.height.saturating_sub(status_h + 1))
+            };
             let info_h = if overlay_h == 0 {
                 1u16.min(area.height.saturating_sub(status_h + 1))
             } else {
@@ -386,7 +390,9 @@ pub fn draw_live(
                     },
                     row_inset,
                 );
-                if let Some(hint) = &pending_hint {
+                if let Some(hint) = minimal_api::agent_behavior_switch_hint(agent) {
+                    render_exit_hint(frame.buffer_mut(), info_area, &theme, hint);
+                } else if let Some(hint) = &pending_hint {
                     render_exit_hint(frame.buffer_mut(), info_area, &theme, hint);
                 } else {
                     render_prompt_info(
@@ -407,7 +413,11 @@ pub fn draw_live(
                 None,
             );
             (
-                result.cursor_pos,
+                if confirming_behavior {
+                    None
+                } else {
+                    result.cursor_pos
+                },
                 result
                     .post_flush_escapes
                     .map(pager::terminal::overlay::PostFlush::from),

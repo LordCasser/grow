@@ -966,6 +966,9 @@ pub struct AgentView {
     /// Behavior transition. Full brightness for 2 s, then
     /// fades out over the final 0.3 s.
     pub(crate) mode_switch_banner: Option<(String, Instant)>,
+    /// Target of the Shell-owned confirmation shown by `mode_switch_banner`.
+    /// Enter reselects this target; any other key reselects the current Behavior.
+    pub(crate) behavior_switch_target: Option<tools::types::BehaviorId>,
     /// Session announcement banner (critical or promo) is showing (set at
     /// start of `draw`). Ephemeral-tip occluder — unlike short-lived
     /// mode-switch, an announcement can last the session, so tips must not

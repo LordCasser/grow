@@ -108,6 +108,7 @@ impl AgentView {
         session_id: agent_client_protocol::schema::v1::SessionId,
     ) {
         if self.session.session_id.as_ref() != Some(&session_id) {
+            self.clear_behavior_switch_confirmation();
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.session.last_seen_event_id = None;
             self.session.last_applied_event_seq = None;
@@ -118,6 +119,7 @@ impl AgentView {
     }
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
+        self.clear_behavior_switch_confirmation();
         if self.session.session_id.take().is_some() {
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.clear_minimal_btw_lifecycle();
@@ -302,6 +304,7 @@ impl AgentView {
             last_word_select_probe: None,
             sticky_toast: None,
             mode_switch_banner: None,
+            behavior_switch_target: None,
             session_banner_active: false,
             pinned_promo_cta_live: false,
             block_viewer: None,
@@ -428,6 +431,7 @@ impl AgentView {
     /// replay-window entry: the fresh/restore load ctor paths and the
     /// reconnect/fork reuse paths.
     pub(crate) fn begin_replay_window(&mut self) {
+        self.clear_behavior_switch_confirmation();
         self.clear_transport_interactions_for_replay();
         self.clear_minimal_btw_lifecycle();
         self.reset_inline_media_loader();

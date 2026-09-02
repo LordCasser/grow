@@ -2815,14 +2815,14 @@ impl AgentView {
                 self.prompt.set_scroll(s);
             }
             prompt_cursor_pos = prompt_result_inner.cursor_pos;
-            if leader_active {
+            if leader_active || self.behavior_switch_target.is_some() {
                 prompt_cursor_pos = None;
             }
             if let Some(escapes) = prompt_result_inner.post_flush_escapes {
                 prompt_post_flush = Some(escapes.into());
             }
         }
-        if self.prompt.file_search_visible() {
+        if self.behavior_switch_target.is_none() && self.prompt.file_search_visible() {
             use crate::views::file_search::dropdown::{MAX_DROPDOWN_ROWS, render_dropdown};
             let item_count = self.prompt.file_search.result_count();
             let item_rows = (item_count as u16).min(MAX_DROPDOWN_ROWS);
@@ -2896,7 +2896,10 @@ impl AgentView {
         } else {
             self.dropdown_items_area = None;
         }
-        if !self.prompt.file_search_visible() && self.prompt.slash_open() {
+        if self.behavior_switch_target.is_none()
+            && !self.prompt.file_search_visible()
+            && self.prompt.slash_open()
+        {
             use crate::views::slash_dropdown::{
                 desired_item_rows, render_dropdown as render_slash,
             };
@@ -2934,7 +2937,8 @@ impl AgentView {
             self.slash_dropdown_items_area = None;
             self.slash_dropdown_hit = Default::default();
         }
-        if !self.prompt.slash_open()
+        if self.behavior_switch_target.is_none()
+            && !self.prompt.slash_open()
             && !self.prompt.file_search_visible()
             && self.prompt.completion_dropdown_open()
         {

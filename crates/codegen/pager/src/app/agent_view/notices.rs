@@ -265,15 +265,32 @@ impl AgentView {
     /// Triggered after a Behavior transition.
     /// Renders at full visibility for 2 s, then fades out over the final 0.3 s.
     pub fn show_mode_switch_banner(&mut self, mode_name: &str) {
+        self.clear_behavior_switch_confirmation();
         let msg = format!("Switched to mode: {}", mode_name);
         self.mode_switch_banner = Some((msg, Instant::now() + MODE_BANNER_DURATION));
     }
 
-    pub fn show_behavior_switch_warning(&mut self, message: &str, remaining_ms: u64) {
-        // The Shell owns the confirmation latch. The Pager merely renders its
-        // deadline and never intercepts Enter/Esc as a second control protocol.
+    pub fn show_behavior_switch_warning(
+        &mut self,
+        target: tools::types::BehaviorId,
+        remaining_ms: u64,
+    ) {
+        // Keep the Shell's deadline and selection protocol; only the keyboard
+        // interaction changes. Never optimistically apply the target here.
         let lifetime = Duration::from_millis(remaining_ms.max(1));
-        self.mode_switch_banner = Some((message.to_string(), Instant::now() + lifetime));
+        let message = format!(
+            "Enter: switch to {} · Any other key: cancel",
+            target.display_label()
+        );
+        self.behavior_switch_target = Some(target);
+        self.leader_key_started_at = None;
+        self.mode_switch_banner = Some((message, Instant::now() + lifetime));
+    }
+
+    pub(crate) fn clear_behavior_switch_confirmation(&mut self) {
+        if self.behavior_switch_target.take().is_some() {
+            self.mode_switch_banner = None;
+        }
     }
 
     /// Expire the mode-switch banner at its absolute deadline.
@@ -284,6 +301,7 @@ impl AgentView {
             .is_some_and(|(_, deadline)| now >= *deadline)
         {
             self.mode_switch_banner = None;
+            self.behavior_switch_target = None;
             return true;
         }
         false

@@ -285,9 +285,7 @@ fn reselecting_authoritative_behavior_reaches_shell_to_clear_confirmation() {
     );
 }
 
-/// A second explicit user selection is the only Pager action that can confirm
-/// a Shell-owned interrupt window. The first confirmation-required update has
-/// already restored the confirmed source identity and cleared optimistic state.
+/// Enter confirms by reissuing the same target through the selection channel.
 #[test]
 fn repeated_behavior_selection_reissues_the_same_target() {
     let mut app = test_app_with_agent();
@@ -314,6 +312,66 @@ fn repeated_behavior_selection_reissues_the_same_target() {
         agent.session.effective_behavior(),
         tools::types::BehaviorId::Normal
     );
+}
+
+#[test]
+fn behavior_switch_confirmation_captures_keys_before_global_and_minimal_shortcuts() {
+    use crate::app::root::InputOutcome;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use tools::types::BehaviorId;
+
+    for screen_mode in [
+        crate::app::ScreenMode::Fullscreen,
+        crate::app::ScreenMode::Minimal,
+    ] {
+        for (key, expected) in [
+            (
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                BehaviorId::Normal,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+                BehaviorId::Plan,
+            ),
+            (
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                BehaviorId::Plan,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+                BehaviorId::Plan,
+            ),
+            (
+                KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+                BehaviorId::Plan,
+            ),
+        ] {
+            let mut app = test_app_with_agent();
+            app.screen_mode = screen_mode;
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.behavior_mode = BehaviorId::Plan;
+            agent.session.plan_mode_active = true;
+            agent.prompt.set_text("unsent draft");
+            agent.show_behavior_switch_warning(BehaviorId::Normal, 8_000);
+
+            let InputOutcome::Action(action) = app.handle_input(&Event::Key(key)) else {
+                panic!("confirmation must consume {key:?}");
+            };
+            let effects = dispatch(action, &mut app);
+            assert!(
+                matches!(
+                    effects.as_slice(),
+                    [Effect::SwitchBehavior { mode, .. }] if *mode == expected
+                ),
+                "{key:?} must send the explicit decision to the Shell: {effects:?}"
+            );
+            let agent = &app.agents[&AgentId(0)];
+            assert_eq!(agent.prompt.text(), "unsent draft");
+            assert_eq!(agent.session.behavior_mode, BehaviorId::Plan);
+            assert!(agent.behavior_switch_target.is_none());
+            assert!(app.pending_action.is_none());
+        }
+    }
 }
 
 /// Multi-agent fan-out: a Behavior control belongs to its exact active

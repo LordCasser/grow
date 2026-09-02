@@ -307,7 +307,11 @@ fn compute_target(
 
     // Otherwise size to fit the prompt (it expands as you type) plus any
     // prompt-anchored dropdown.
-    let overlay_h = overlay_rows(minimal_api::agent_prompt(agent), width);
+    let overlay_h = if minimal_api::agent_behavior_switch_hint(agent).is_some() {
+        0
+    } else {
+        overlay_rows(minimal_api::agent_prompt(agent), width)
+    };
     let cap = ceiling.saturating_sub(overlay_h + 1).max(1);
     let prompt_h = agent
         .prompt

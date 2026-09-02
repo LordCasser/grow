@@ -1842,6 +1842,9 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
         return false;
     }
     let previous = agent.session.behavior_mode;
+    if previous != mode {
+        agent.clear_behavior_switch_confirmation();
+    }
     agent.session.behavior_mode = mode;
     if mode != BehaviorId::Workflow {
         agent.show_workflows = false;
@@ -1859,13 +1862,19 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
     {
         let status = change.get("status").and_then(serde_json::Value::as_str);
         if status == Some("confirmation_required") {
-            if let Some(message) = change.get("message").and_then(serde_json::Value::as_str) {
+            if let Some(target) = change
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .and_then(BehaviorId::try_from_id)
+            {
                 let remaining_ms = change
                     .get("remainingMs")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(1);
-                agent.show_behavior_switch_warning(message, remaining_ms);
+                agent.show_behavior_switch_warning(target, remaining_ms);
             }
+        } else if matches!(status, Some("applied" | "rejected")) {
+            agent.clear_behavior_switch_confirmation();
         }
     }
     let was_active = agent.session.plan_mode_active;

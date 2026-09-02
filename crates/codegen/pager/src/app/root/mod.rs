@@ -1461,6 +1461,14 @@ impl AppView {
         );
         let normalized = self.keyboard_normalizer.rescue(ev);
         let ev: &Event = &normalized;
+        if let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get_mut(&id)
+            && agent.active_subagent.is_none()
+            && let Some(outcome) = agent.handle_behavior_switch_confirmation(ev)
+        {
+            self.pending_action = None;
+            return outcome;
+        }
         let key_event = match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => Some(k),
             _ => None,

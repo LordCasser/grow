@@ -23,6 +23,32 @@ use std::time::Instant;
 pub(super) const LEADER_KEY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl AgentView {
+    /// Capture the confirmation before composer, overlay, and global shortcuts.
+    /// Both decisions use ordinary Shell selections, including source reselection
+    /// to clear its latch. The deciding event must never edit or submit the draft.
+    pub(crate) fn handle_behavior_switch_confirmation(
+        &mut self,
+        ev: &Event,
+    ) -> Option<InputOutcome> {
+        self.maintain_mode_banner(Instant::now());
+        let target = self.behavior_switch_target?;
+        let confirm = match ev {
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                key.code == KeyCode::Enter && key.modifiers.is_empty()
+            }
+            Event::Paste(_) => false,
+            Event::Key(_) | Event::Mouse(_) => return Some(InputOutcome::Unchanged),
+            _ => return None,
+        };
+        let mode = if confirm {
+            target
+        } else {
+            self.session.behavior_mode
+        };
+        self.clear_behavior_switch_confirmation();
+        Some(InputOutcome::Action(Action::SetBehaviorMode(mode)))
+    }
+
     pub(crate) fn leader_key_deadline(&self) -> Option<Instant> {
         self.leader_key_started_at
             .map(|started| started + LEADER_KEY_TIMEOUT)
@@ -80,6 +106,7 @@ impl AgentView {
         let pane_owns_prompt = minimal_logical_prompt || self.active_pane == AgentPane::Prompt;
         let owned_elsewhere = !matches!(self.prompt_mode, super::PromptMode::Normal)
             || self.active_subagent.is_some()
+            || self.behavior_switch_target.is_some()
             || !pane_owns_prompt
             || self.active_modal.is_some()
             || self.extensions_modal.is_some()
@@ -540,6 +567,9 @@ impl AgentView {
                 return child_view.handle_input_inner(ev, registry, prompt_paging, effects);
             }
             return InputOutcome::Unchanged;
+        }
+        if let Some(outcome) = self.handle_behavior_switch_confirmation(ev) {
+            return outcome;
         }
         if self.dismiss_jump_picker_if_suppressed()
             && let Event::Key(key) = ev
@@ -1976,11 +2006,12 @@ mod leader_key_tests {
     }
 
     #[test]
-    fn behavior_switch_warning_does_not_capture_enter() {
+    fn behavior_switch_confirmation_enter_preserves_draft() {
         let mut effects = Vec::new();
         let registry = ActionRegistry::defaults();
         let mut agent = make_agent();
-        agent.show_behavior_switch_warning("Select Plan again to confirm", 8_000);
+        agent.session.behavior_mode = tools::types::BehaviorId::Goal;
+        agent.show_behavior_switch_warning(tools::types::BehaviorId::Normal, 8_000);
         agent.prompt.set_text("preserve this draft");
 
         let outcome = agent.handle_input(
@@ -1990,8 +2021,65 @@ mod leader_key_tests {
         );
         assert!(matches!(
             outcome,
-            InputOutcome::Action(Action::SendPrompt(ref text)) if text == "preserve this draft"
+            InputOutcome::Action(Action::SetBehaviorMode(tools::types::BehaviorId::Normal))
         ));
+        assert_eq!(agent.prompt.text(), "preserve this draft");
+        assert_eq!(agent.session.behavior_mode, tools::types::BehaviorId::Goal);
+        assert!(agent.mode_switch_banner.is_none());
+        assert!(agent.behavior_switch_target.is_none());
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn behavior_switch_confirmation_other_input_cancels_without_editing() {
+        for event in [
+            bare('x'),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Event::Paste("discard this paste".into()),
+        ] {
+            let mut agent = make_agent();
+            agent.session.behavior_mode = tools::types::BehaviorId::Goal;
+            agent.show_behavior_switch_warning(tools::types::BehaviorId::Normal, 8_000);
+            agent.prompt.set_text("draft");
+            let mut effects = Vec::new();
+            let outcome = agent.handle_input(&event, &ActionRegistry::defaults(), &mut effects);
+            assert!(
+                matches!(
+                    outcome,
+                    InputOutcome::Action(Action::SetBehaviorMode(tools::types::BehaviorId::Goal))
+                ),
+                "{event:?} must cancel the switch"
+            );
+            assert_eq!(agent.prompt.text(), "draft");
+            assert!(agent.behavior_switch_target.is_none());
+            assert!(effects.is_empty());
+        }
+    }
+
+    #[test]
+    fn behavior_switch_confirmation_expires_without_switching() {
+        let mut agent = make_agent();
+        agent.show_behavior_switch_warning(tools::types::BehaviorId::Normal, 8_000);
+        let deadline = agent.mode_switch_banner.as_ref().unwrap().1;
+        assert!(agent.maintain_mode_banner(deadline));
+        assert!(agent.behavior_switch_target.is_none());
+        assert!(agent.mode_switch_banner.is_none());
+    }
+
+    #[test]
+    fn behavior_switch_confirmation_ignores_key_release() {
+        let mut agent = make_agent();
+        agent.show_behavior_switch_warning(tools::types::BehaviorId::Normal, 8_000);
+        let mut key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        key.kind = crossterm::event::KeyEventKind::Release;
+        assert!(matches!(
+            agent.handle_behavior_switch_confirmation(&Event::Key(key)),
+            Some(InputOutcome::Unchanged)
+        ));
+        assert!(agent.behavior_switch_target.is_some());
     }
 
     #[test]

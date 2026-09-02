@@ -384,10 +384,9 @@
     }
 
     /// A `confirmation_required` update keeps the authoritative source mode
-    /// and renders the Shell-owned window. Pager input owns no confirmation
-    /// latch; only selecting the same target again can confirm it.
+    /// and projects the Shell-owned target into the keyboard confirmation.
     #[test]
-    fn behavior_change_confirmation_required_is_display_only() {
+    fn behavior_switch_confirmation_required_preserves_authoritative_mode() {
         let mut agent = make_agent(Some("s1"));
         agent.session.behavior_mode = tools::types::BehaviorId::Plan;
         agent.session.plan_mode_active = true;
@@ -403,6 +402,9 @@
             agent.mode_switch_banner.is_some(),
             "the warning banner must be visible"
         );
+        assert_eq!(agent.behavior_switch_target, Some(tools::types::BehaviorId::Normal));
+        let hint = &agent.mode_switch_banner.as_ref().unwrap().0;
+        assert!(hint.contains("Enter") && hint.contains("Any other key"));
         assert!(!matches!(
             behavior_mode_update_resolution(&behavior_change_update(
                 "confirmation_required",
@@ -411,6 +413,30 @@
             )),
             Some(crate::app::session::BehaviorControlResolution::Applied)
         ));
+    }
+
+    #[test]
+    fn behavior_switch_confirmation_clears_on_terminal_outcome_and_reload() {
+        for status in ["applied", "rejected"] {
+            let mut agent = make_agent(Some("s1"));
+            detect_plan_mode_change(
+                &behavior_change_update("confirmation_required", "plan", "normal"),
+                &mut agent,
+            );
+            detect_plan_mode_change(
+                &behavior_change_update(status, "plan", "normal"),
+                &mut agent,
+            );
+            assert!(agent.behavior_switch_target.is_none());
+            assert!(agent.mode_switch_banner.is_none());
+        }
+        let mut agent = make_agent(Some("s1"));
+        detect_plan_mode_change(
+            &behavior_change_update("confirmation_required", "plan", "normal"),
+            &mut agent,
+        );
+        agent.begin_replay_window();
+        assert!(agent.behavior_switch_target.is_none());
     }
 
     #[test]
