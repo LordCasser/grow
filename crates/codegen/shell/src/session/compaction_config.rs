@@ -84,6 +84,7 @@ pub struct PreviousModelInfo {
 pub struct CompactCancelGate {
     token: RefCell<tokio_util::sync::CancellationToken>,
     holders: AtomicUsize,
+    background: Cell<bool>,
 }
 
 /// Decrements the holder count when a compaction scope ends.
@@ -100,9 +101,26 @@ impl CompactCancelGate {
     /// including a token already cancelled by stop. A later independent enter
     /// after holders drain installs a fresh token.
     pub fn enter(&self) -> (tokio_util::sync::CancellationToken, CompactCancelScope<'_>) {
+        self.enter_scope(None)
+    }
+
+    /// Transfer a background job's cancellation authority to its foreground
+    /// publisher without replacing the token observed by generation/commit.
+    pub(crate) fn enter_background(
+        &self,
+        token: tokio_util::sync::CancellationToken,
+    ) -> (tokio_util::sync::CancellationToken, CompactCancelScope<'_>) {
+        self.enter_scope(Some(token))
+    }
+
+    fn enter_scope(
+        &self,
+        background: Option<tokio_util::sync::CancellationToken>,
+    ) -> (tokio_util::sync::CancellationToken, CompactCancelScope<'_>) {
         let prev = self.holders.fetch_add(1, Ordering::AcqRel);
         let token = if prev == 0 {
-            let token = tokio_util::sync::CancellationToken::new();
+            self.background.set(background.is_some());
+            let token = background.unwrap_or_default();
             self.token.replace(token.clone());
             token
         } else {
@@ -118,6 +136,12 @@ impl CompactCancelGate {
     pub fn request_cancel(&self) {
         if self.holders.load(Ordering::Acquire) > 0 {
             self.token.borrow().cancel();
+        }
+    }
+
+    pub(crate) fn request_background_cancel(&self) {
+        if self.background.get() {
+            self.request_cancel();
         }
     }
 
@@ -189,6 +213,26 @@ mod compaction_lease_tests {
 #[cfg(test)]
 mod compact_cancel_gate_tests {
     use super::*;
+
+    #[test]
+    fn background_invalidation_tracks_the_original_token_through_publication() {
+        let gate = CompactCancelGate::default();
+        let original = tokio_util::sync::CancellationToken::new();
+        let (published, scope) = gate.enter_background(original.clone());
+        let (nested, nested_scope) = gate.enter();
+        gate.request_background_cancel();
+        assert!(original.is_cancelled());
+        assert!(published.is_cancelled());
+        assert!(nested.is_cancelled());
+        drop(nested_scope);
+        drop(scope);
+        let (foreground, _scope) = gate.enter();
+        gate.request_background_cancel();
+        assert!(
+            !foreground.is_cancelled(),
+            "an unrelated synchronous scope is not a background job"
+        );
+    }
 
     #[test]
     fn request_cancel_trips_shared_token() {

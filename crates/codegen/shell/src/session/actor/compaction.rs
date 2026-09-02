@@ -1894,6 +1894,9 @@ impl SessionActor {
         &self,
         reason: &str,
     ) -> Result<(), acp::Error> {
+        // A foreground publisher may already own the job locally. Its scope
+        // retains the same cancellation token until the transaction is closed.
+        self.compaction.cancel.request_background_cancel();
         let pending = self.compaction.background.borrow_mut().take();
         if let Some(mut pending) = pending {
             pending
@@ -1942,14 +1945,16 @@ impl SessionActor {
 
     /// Run only after pending controls and Goal settlement at a closed Step.
     /// Ready summaries are published here; a running summary is never awaited.
-    pub(crate) async fn background_compaction_boundary(self: &Arc<Self>) -> Result<(), acp::Error> {
+    pub(crate) async fn background_compaction_boundary(
+        self: &Arc<Self>,
+    ) -> Result<bool, acp::Error> {
         if self.events.has_active_step() {
             return Err(crate::session::commands::fatal_turn_boundary_error(
                 "background compaction",
                 "publication attempted inside an active Step",
             ));
         }
-        self.finish_background_compaction(false).await?;
+        let committed = self.finish_background_compaction(false).await?;
         if self.compaction.background.borrow().is_some()
             || self.compaction.background_failed.get()
             || self.compaction.lease.is_in_flight()
@@ -1965,21 +1970,21 @@ impl SessionActor {
                 != SUPPRESS_NONE
             || self.goal_provider_admission_closed()
         {
-            return Ok(());
+            return Ok(committed);
         }
         {
             let state = self.state.lock().await;
             if state.pending_manual_compact.is_some()
                 || !matches!(state.foreground, super::ForegroundState::RegularTurn(_))
             {
-                return Ok(());
+                return Ok(committed);
             }
         }
         let Some(threshold) = pre_compact_threshold(self.compaction.threshold_percent.get()) else {
-            return Ok(());
+            return Ok(committed);
         };
         let Some(config) = self.chat_state_handle.get_sampling_config().await else {
-            return Ok(());
+            return Ok(committed);
         };
         let tokens = self.chat_state_handle.get_projected_tokens().await;
         // A direct jump to the hard threshold belongs to the existing sync path.
@@ -1988,7 +1993,7 @@ impl SessionActor {
             config.context_window.get(),
             self.compaction.threshold_percent.get(),
         ) {
-            return Ok(());
+            return Ok(committed);
         }
         let Some(trigger) = auto_compact_trigger(
             tokens,
@@ -1996,10 +2001,10 @@ impl SessionActor {
             threshold,
             "async_pre_sampling",
         ) else {
-            return Ok(());
+            return Ok(committed);
         };
         if self.maybe_pre_prune_at(&trigger, threshold, false).await? {
-            return Ok(());
+            return Ok(committed);
         }
         let Some(materialized) = self
             .chat_state_handle
@@ -2023,7 +2028,7 @@ impl SessionActor {
         )
         .is_none()
         {
-            return Ok(());
+            return Ok(committed);
         }
         let id = uuid::Uuid::now_v7().to_string();
         let source_items = materialized.surface.len();
@@ -2098,7 +2103,42 @@ impl SessionActor {
                 }
             }
         }
-        Ok(())
+        Ok(committed)
+    }
+
+    async fn background_compaction_source_is_current(
+        &self,
+        pending: &BackgroundCompaction,
+    ) -> Result<bool, acp::Error> {
+        let materialized = self
+            .chat_state_handle
+            .materialize_timeline(self.session_id_string())
+            .await
+            .ok_or_else(|| {
+                crate::session::commands::fatal_turn_boundary_error(
+                    "background compaction publication",
+                    "chat-state unavailable",
+                )
+            })?;
+        let authority: Vec<_> = materialized
+            .active_control_contexts
+            .values()
+            .map(|context| context.surface_id)
+            .collect();
+        let model_key = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|config| {
+                (
+                    self.current_catalog_model_id(),
+                    config.api_backend,
+                    config.context_window.get(),
+                )
+            });
+        Ok(authority == pending.authority
+            && model_key.as_ref() == Some(&pending.model_key)
+            && compaction_range_is_current(&materialized.surface_ids, &pending.target))
     }
 
     /// `wait` promotes the existing job; it never starts another provider call.
@@ -2134,35 +2174,13 @@ impl SessionActor {
             .borrow_mut()
             .take()
             .expect("checked background slot");
-        let Some(materialized) = self
-            .chat_state_handle
-            .materialize_timeline(self.session_id_string())
-            .await
-        else {
-            return Err(crate::session::commands::fatal_turn_boundary_error(
-                "background compaction publication",
-                "chat-state unavailable",
-            ));
-        };
-        let authority: Vec<_> = materialized
-            .active_control_contexts
-            .values()
-            .map(|context| context.surface_id)
-            .collect();
-        let model_key = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|config| {
-                (
-                    self.current_catalog_model_id(),
-                    config.api_backend,
-                    config.context_window.get(),
-                )
-            });
-        if authority != pending.authority
-            || model_key.as_ref() != Some(&pending.model_key)
-            || !compaction_range_is_current(&materialized.surface_ids, &pending.target)
+        let (cancel, _cancel_scope) = self
+            .compaction
+            .cancel
+            .enter_background(pending.cancel.clone());
+        if !self
+            .background_compaction_source_is_current(&pending)
+            .await?
         {
             *self.compaction.background.borrow_mut() = Some(pending);
             self.cancel_background_compaction("compaction_source_invalidated")
@@ -2171,7 +2189,6 @@ impl SessionActor {
         }
         let foreground_started = std::time::Instant::now();
         let tokens_before = self.chat_state_handle.get_projected_tokens().await;
-        let (cancel, _cancel_scope) = self.compaction.cancel.enter();
         if wait {
             pending
                 .background
@@ -2218,8 +2235,19 @@ impl SessionActor {
         let generation_failed = generated.is_err();
         let result = match generated {
             Ok(generated) => {
-                self.commit_generated_compaction(&pending.id, generated, &mut committed)
-                    .await
+                // The provider wait is not a control lock. Revalidate the frozen
+                // authority and range, while the shared token covers changes
+                // arriving during the later commit awaits as well.
+                match self.background_compaction_source_is_current(&pending).await {
+                    Ok(true) => {
+                        self.commit_generated_compaction(&pending.id, generated, &mut committed)
+                            .await
+                    }
+                    Ok(false) => {
+                        Err(acp::Error::internal_error().data("compaction_source_invalidated"))
+                    }
+                    Err(error) => Err(error),
+                }
             }
             Err(error) => Err(error),
         };
@@ -2838,6 +2866,102 @@ impl SessionActor {
 #[cfg(test)]
 mod context_recall_tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn goal_settlement_stays_unique_when_background_cancellation_fails() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _notifications) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal("goal-1".into(), "finish".into(), Some(100), "now".into())
+                    .unwrap();
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
+                actor.sync_goal_usage_window();
+                actor.apply_captured_goal_usage("goal-1", 90).await.unwrap();
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                        chat_state::CompactionEvent::Started {
+                            id: "failed-background".into(),
+                            mode: chat_state::CompactionMode::Background,
+                            source_items: 0,
+                            prompt_index: 0,
+                        },
+                    ))
+                    .await
+                    .unwrap();
+                let worker = tokio::task::spawn_local(async {
+                    Err(crate::session::commands::fatal_turn_boundary_error(
+                        "background Sideband result",
+                        "injected persistence failure",
+                    ))
+                });
+                while !worker.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+                // No range is ever committed: the worker has already failed.
+                let anchor = chat_state::SurfaceId {
+                    event: chat_state::EventSeq::new(0),
+                    item: 0,
+                };
+                *actor.compaction.background.borrow_mut() = Some(BackgroundCompaction {
+                    id: "failed-background".into(),
+                    source_items: 0,
+                    started: std::time::Instant::now(),
+                    cancel: Default::default(),
+                    background: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                    authority: vec![],
+                    target: chat_state::SurfaceRange {
+                        start: anchor,
+                        end: anchor,
+                        shadowed: vec![anchor],
+                    },
+                    model_key: ("test-model".into(), ApiBackend::Messages, 100_000),
+                    worker,
+                });
+                let attempt = actor
+                    .goal_usage_window
+                    .begin_model_attempt(&actor.session_id_string(), 0, Some("goal-1"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                actor
+                    .goal_usage_window
+                    .claim_attempt_settlement(&attempt, Some(10));
+                let error = actor
+                    .settle_claimed_goal_usage_attempt(&attempt)
+                    .await
+                    .unwrap_err();
+                assert!(error.contains("injected persistence failure"));
+                assert_eq!(actor.goal_tokens_used(), 100);
+                assert!(
+                    actor
+                        .goal_usage_window
+                        .attempt_settlement(&attempt)
+                        .is_none()
+                );
+                // Fatal teardown still runs the regular shutdown settlement barrier.
+                actor.settle_goal_usage_for_shutdown().await.unwrap();
+                assert_eq!(
+                    actor.goal_tokens_used(),
+                    100,
+                    "the durable charge cannot be applied twice"
+                );
+                assert!(
+                    !actor
+                        .settle_claimed_goal_usage_attempt(&attempt)
+                        .await
+                        .unwrap()
+                );
+            })
+            .await;
+    }
 
     #[test]
     fn model_switch_compaction_requires_both_window_shrink_and_pressure() {

@@ -391,18 +391,22 @@ impl SidebandRun {
 
     /// Poll-bind the Goal admission lease to the provider future. If an outer
     /// cancellation/timeout branch wins before this future is polled, no Goal
-    /// attempt exists. Once polled, admission and the provider's first poll
-    /// happen in the same task poll, so an unknown result is legitimately
-    /// fail-closed rather than a pre-wire false positive.
+    /// attempt exists. Admission can wait for prior settlements; once granted,
+    /// it and the provider's first poll happen in the same task poll, so an
+    /// unknown result is legitimately fail-closed rather than a pre-wire false
+    /// positive.
     pub(crate) async fn run_provider<F: std::future::Future>(
         &mut self,
         provider: F,
     ) -> Result<F::Output, SidebandRunError> {
-        self.provider_attempt_started()?;
+        let cancellation = self.cancellation.clone();
         let result = tokio::select! {
             biased;
-            _ = self.cancellation.cancelled() => Err(SidebandRunError::Cancelled),
-            output = provider => Ok(output),
+            _ = cancellation.cancelled() => Err(SidebandRunError::Cancelled),
+            output = async {
+                self.provider_attempt_started().await?;
+                Ok(provider.await)
+            } => output,
         };
         if let Some(id) = &self.admitted_attempt_id {
             self.goal_usage_window.mark_attempt_returned(id);
@@ -417,7 +421,7 @@ impl SidebandRun {
         self.background = background;
     }
 
-    fn provider_attempt_started(&mut self) -> Result<(), SidebandRunError> {
+    async fn provider_attempt_started(&mut self) -> Result<(), SidebandRunError> {
         if self.admitted_attempt_id.is_some() {
             return Err(SidebandRunError::Admission(
                 "sideband provider attempt already started".into(),
@@ -440,6 +444,7 @@ impl SidebandRun {
                 self.expected_goal_id.as_deref(),
                 self.background.clone(),
             )
+            .await
             .map_err(SidebandRunError::Admission)?;
         Ok(())
     }
@@ -999,8 +1004,8 @@ mod tests {
         assert!(matches!(append.await, Err(SidebandRunError::Cancelled)));
     }
 
-    #[test]
-    fn sideband_usage_uses_the_goal_window_at_attempt_admission() {
+    #[tokio::test]
+    async fn sideband_usage_uses_the_goal_window_at_attempt_admission() {
         let (mut run, _persistence_rx) = test_run();
         let (goal_tx, _goal_rx) = tokio::sync::mpsc::unbounded_channel();
         let window = crate::session::actor::goal_support::GoalUsageWindow::new(
@@ -1010,6 +1015,7 @@ mod tests {
         run.goal_usage_window = window.clone();
         let admitted = window
             .begin_model_attempt("test-session", 0, Some("goal-1"))
+            .await
             .unwrap()
             .unwrap();
         run.admitted_attempt_id = Some(admitted.clone());
@@ -1023,18 +1029,23 @@ mod tests {
         run.admitted_attempt_id = None;
 
         assert_eq!(
-            window.begin_model_attempt("test-session", 0, None).unwrap(),
+            window
+                .begin_model_attempt("test-session", 0, None)
+                .await
+                .unwrap(),
             None
         );
         assert!(
             window
                 .begin_model_attempt("test-session", 0, Some("goal-1"))
+                .await
                 .is_err(),
             "a turn admitted under a closed Goal cannot start another provider attempt"
         );
         window.sync(Some("goal-1".into()));
         let restarted = window
             .begin_model_attempt("test-session", 0, Some("goal-1"))
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1078,7 +1089,7 @@ mod tests {
             run.admitted_attempt_id.is_none(),
             "a durable plan is not yet a provider call"
         );
-        run.provider_attempt_started().unwrap();
+        run.provider_attempt_started().await.unwrap();
         let attempt_id = run
             .admitted_attempt_id
             .clone()
@@ -1133,8 +1144,75 @@ mod tests {
         assert!(run.admitted_attempt_id.is_none());
         let probe = window
             .begin_model_attempt("test-session", 0, Some("goal-1"))
+            .await
             .expect("pre-cancellation must not leave a hidden attempt fence")
             .expect("active Goal must still admit a provider attempt");
+        window.finish_attempt(&probe);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_final_admission_never_polls_sideband_provider() {
+        let (mut run, mut persistence_rx) = test_run();
+        let (goal_tx, _goal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let window = crate::session::actor::goal_support::GoalUsageWindow::new(
+            goal_tx,
+            Some("goal-1".into()),
+        );
+        run.goal_usage_window = window.clone();
+        run.expected_goal_id = Some("goal-1".into());
+        let prior = window
+            .begin_model_attempt_with_background(
+                &run.usage_owner_id,
+                run.usage_epoch,
+                Some("goal-1"),
+                Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                    true,
+                ))),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let request = provider_request();
+        let mut attempt = Box::pin(run.attempt_all_sources(
+            &request,
+            sampling_types::ApiBackend::Responses,
+            None,
+        ));
+        let message = tokio::select! {
+            message = persistence_rx.recv() => message.expect("durable attempt append"),
+            result = &mut attempt => panic!("attempt returned before persistence ack: {result:?}"),
+        };
+        let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+            respond_to, ..
+        } = message
+        else {
+            panic!("unexpected persistence message");
+        };
+        respond_to.send(Ok(())).unwrap();
+        attempt.await.unwrap();
+
+        // Return after the early fence and durable Attempt, before provider poll.
+        window.mark_attempt_returned(&prior);
+        let cancelled = run.cancellation.clone();
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        let mut provider = Box::pin(run.run_provider(async {
+            polled.store(true, std::sync::atomic::Ordering::Release);
+        }));
+        tokio::select! {
+            biased;
+            result = &mut provider => panic!("unconfirmed usage must block: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        cancelled.cancel();
+        assert!(matches!(provider.await, Err(SidebandRunError::Cancelled)));
+        assert!(!polled.load(std::sync::atomic::Ordering::Acquire));
+        assert!(run.admitted_attempt_id.is_none());
+        assert!(window.finish_attempt(&prior));
+        let probe = window
+            .begin_model_attempt(&run.usage_owner_id, run.usage_epoch, Some("goal-1"))
+            .await
+            .unwrap()
+            .unwrap();
         window.finish_attempt(&probe);
     }
 
@@ -1187,6 +1265,7 @@ mod tests {
                 );
                 let attempt_id = window
                     .begin_model_attempt("test-session", 0, Some("goal-1"))
+                    .await
                     .unwrap()
                     .unwrap();
                 run.goal_usage_window = window.clone();
@@ -1275,6 +1354,7 @@ mod tests {
                 run.admitted_attempt_id = run
                     .goal_usage_window
                     .begin_model_attempt(&run.usage_owner_id, run.usage_epoch, Some("goal-1"))
+                    .await
                     .unwrap();
                 tokio::time::timeout(
                     std::time::Duration::from_secs(1),
@@ -1322,6 +1402,7 @@ mod tests {
                 run.admitted_attempt_id = run
                     .goal_usage_window
                     .begin_model_attempt(&run.usage_owner_id, run.usage_epoch, Some("goal-1"))
+                    .await
                     .unwrap();
                 let mut response = provider_response_with_usage();
                 response.usage = None;

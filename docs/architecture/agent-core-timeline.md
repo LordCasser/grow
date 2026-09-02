@@ -152,6 +152,10 @@ Timeline 校验器强制 summary 引用的 Sideband spawn 已存在、purpose �
 
 Goal 结算屏障只放行同一有效执行代里仍在运行的后台摘要，已返回但未确认的结算、旧执行代、转前台或取消的请求仍必须等待。每次 provider attempt 继续归属启动时捕获的 Goal，逐次且唯一计费；额度耗尽或 usage 不完整仍关闭 admission。后台启动和结果就绪不发送前台 compacting 通知。未提升的成功提交只显示一次 `async compact` 生效提示并更新 token 用量；提升后沿用同步开始、完成、失败和取消通知，前台等待耗时从提升开始计算。Trajectory 直接展示 Timeline 的后台 Started、可选 Promoted、摘要引用和终态，总耗时仍从最初启动计算，不新增事实日志。
 
+结算检查必须落在真实 provider 准入处。请求装配前通过一次屏障还不够，因为摘要可能在 sampler 准备或 `RequestStarted` 持久化期间返回。主采样的 scope capture 和 Sideband 都在同一把 Goal usage 锁下检查待结算 attempt、登记新 attempt；等待可以取消，尚未准入的请求不产生 usage。记账成功后先确认该 attempt 已结算，再执行可能失败的取消收尾，避免退出清算重复累加已经持久化的 tokens。
+
+提升只转移执行所有权，不更换取消身份。前台 publisher 接管原摘要的 cancellation token，直到事务终态落盘；即使后台任务槽已经取走，Goal/Control 失效仍能取消它。等待返回后重新验证冻结的身份与范围，提交期间继续检查同一 token。提交成功也会使本轮工具清单失效重建，包括新 Turn 的第一步，保证首次出现摘要时 `context_recall` 已经可用。Pager 的异步完成通知只更新上下文用量和生效提示，不清空后台期间更新的 Todo。
+
 replacement 还必须重投影提交时的权威活状态，而不能依赖旧 reminder 恰好落在保留范围内。跨 harness 的 Agent 状态包含当前 session 自己的 bash/monitor、todo、subagent 和 MCP；共享 terminal 的任务必须按 `owner_session_id` 隔离，root、child 与 sibling 不得互见。Shell 另外从运行时 owner 获取非消费型 Workflow Run 快照和 root session 的 scheduler/loop 快照；该读取不推进 ordinary-turn reminder revision、不复制 Run/loop，也不向 child 暴露 parent scheduler。Goal 与 Behavior 继续由 typed Control context 重投影，Plan 继续从 hash 校验后的 artifact 重投影。这样 compaction 只重建模型视图，不成为任何运行机制的第二事实源。
 
 压缩后的上下文恢复不是“解包 summary”。Grow 暴露特殊内置工具 `context_recall {query}`，agent 只描述当前缺少的事实、决定、约束或先前工作，不接触 Timeline Ref。工具实现先在 chat-state actor 内一次冻结 `timeline high-water + surface_revision + current Surface/SurfaceId + branch transcript/SurfaceId + unloaded_surface_ids`；shell 随后从同一份冻结 Surface 派生受预算约束的 `need_context`，而不是另发一次读取。`unloaded_surface_ids` 只来自已经 completed 的 compaction target，并与当前 rewind 分支的原始叶子取交集，失败、半提交、已 rewind 的范围以及仍在 live Surface 的尾部都不能成为 archive。

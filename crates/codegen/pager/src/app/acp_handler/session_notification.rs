@@ -428,9 +428,16 @@ fn handle_session_notification_inner(
         | GrowSessionUpdate::MemoryDreamCompleted { .. }
         | GrowSessionUpdate::MemorySessionSaved { .. }) => {
             let changed = apply_session_event(update, &mut agent.session, &mut agent.scrollback);
-            if let GrowSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update {
+            if let GrowSessionUpdate::AutoCompactCompleted {
+                tokens_after,
+                async_compact,
+                ..
+            } = update
+            {
                 refresh_context_used(agent, *tokens_after);
-                agent.todo.update_todos(Vec::new());
+                if !async_compact {
+                    agent.todo.update_todos(Vec::new());
+                }
             }
             changed
         }

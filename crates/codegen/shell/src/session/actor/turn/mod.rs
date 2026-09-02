@@ -877,7 +877,7 @@ impl SessionActor {
         let mut structured_output_reminder_installed = false;
         loop {
             let using_prestarted_step = std::mem::take(&mut step_already_started);
-            let mut agent_changed_for_step = false;
+            let mut tools_changed_for_step = false;
             if !using_prestarted_step {
                 let control_boundary =
                     if self.events.next_step_index() == 0 && !self.events.has_active_step() {
@@ -967,7 +967,7 @@ impl SessionActor {
                         return Err(e);
                     }
                 }
-                self.background_compaction_boundary().await?;
+                tools_changed_for_step = self.background_compaction_boundary().await?;
                 if model_changed || agent_changed {
                     // The request projection epoch changed. A provider
                     // overflow on the replacement route/Agent gets its own
@@ -991,7 +991,7 @@ impl SessionActor {
                     // cannot satisfy the replacement Agent's contract.
                     turn_tools_called.clear();
                     structured_output_retries = 0;
-                    agent_changed_for_step = true;
+                    tools_changed_for_step = true;
                 }
                 if identical_tool_calls.run_len >= identical_tool_calls.hard_stop_threshold() {
                     let run_len = identical_tool_calls.run_len;
@@ -1059,7 +1059,9 @@ impl SessionActor {
                 }
             }
             loop_index += 1;
-            if (!using_prestarted_step && loop_index > 1) || agent_changed_for_step {
+            if (!using_prestarted_step && loop_index > 1) || tools_changed_for_step {
+                // A first compaction can expose Recall even in the first Step
+                // of a new Turn, after the initial tool manifest was prepared.
                 // Capability grants become visible at the next model sample, not
                 // at the next outer user turn. Refresh only after the previous
                 // tool batch has fully completed, so a model response cannot

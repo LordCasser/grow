@@ -91,6 +91,26 @@ fn async_compaction_promotes_the_same_provider_request() {
 }
 
 #[test]
+fn async_compaction_first_cross_turn_commit_refreshes_recall_tools() {
+    async_compaction_scenario("cross_turn");
+}
+
+#[test]
+fn async_compaction_promoted_job_is_cancelled_by_control_transition() {
+    async_compaction_scenario("promote_control");
+}
+
+#[test]
+fn async_compaction_promoted_job_with_incomplete_usage_cannot_commit() {
+    async_compaction_scenario("promote_incomplete");
+}
+
+#[test]
+fn async_compaction_rechecks_model_after_promotion_wait() {
+    async_compaction_scenario("promote_model");
+}
+
+#[test]
 fn async_compaction_cancel_discards_late_provider_result() {
     async_compaction_scenario("cancel");
 }
@@ -139,6 +159,7 @@ fn async_compaction_scenario(action: &'static str) {
         rt.block_on(tokio::task::LocalSet::new().run_until(async {
             use test_support::{InferenceEndpoint, InferenceRequestMatcher};
             let server = MockInferenceServer::start().await.unwrap();
+            let promotes = matches!(action, "promote" | "timeout" | "promote_control" | "promote_incomplete" | "promote_model");
             let summary = format!("background compacted summary: {}", "Old decisions and verified evidence. ".repeat(35));
             let summary_response = if action == "failure" {
                 ScriptedResponse::json(400, json!({"type":"error","error":{"type":"invalid_request_error","message":"unsupported summary parameter"}}))
@@ -165,7 +186,14 @@ fn async_compaction_scenario(action: &'static str) {
                 messages_turn_with_usage(&[("foreground response after freeze", END_TURN)], END_TURN, 74_000));
             let (actor, mut notifications) = actor_with_sampler_cw_ex(&server, sampling_types::ApiBackend::Messages, 100_000, None, if action == "timeout" { 2 } else { 0 }).await;
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
-            if matches!(action, "goal" | "budget") {
+            if action == "cross_turn" {
+                use tools::implementations::{context_recall::ContextRecallImpl, grow_build::todo::TodoWriteTool};
+                use tools::registry::types::ToolConfig;
+                *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                    ToolConfig::for_tool::<TodoWriteTool>(), ToolConfig::for_tool::<ContextRecallImpl>(),
+                ]).await;
+            }
+            if matches!(action, "goal" | "budget" | "promote_incomplete") {
                 actor.goal_tracker.lock().create_goal("async-goal".into(), "verify concurrent accounting".into(), Some(if action == "budget" { 75_000 } else { 500_000 }), "now".into()).unwrap();
                 actor.behavior.lock().select_behavior(tool_types::BehaviorId::Goal);
                 actor.sync_goal_usage_window();
@@ -207,7 +235,7 @@ fn async_compaction_scenario(action: &'static str) {
                 let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
                 config.context_window = std::num::NonZeroU64::new(110_000).unwrap();
                 actor.chat_state_handle.update_sampling_config(config);
-            } else if action == "promote" || action == "timeout" {
+            } else if promotes {
                 if action == "timeout" { tokio::time::sleep(std::time::Duration::from_millis(1_200)).await; }
                 actor.chat_state_handle.push_user_message_durably(ConversationItem::user("late input ".repeat(4_000))).await.unwrap();
                 promotion = Some(tokio::task::spawn_local({ let actor = actor.clone(); async move {
@@ -223,17 +251,46 @@ fn async_compaction_scenario(action: &'static str) {
                     }
                 }).await.expect("existing computation is promoted");
                 assert!(!promotion.as_ref().unwrap().is_finished());
+                if action == "promote_control" {
+                    let (behavior, goal) = actor.capture_control_authorities();
+                    actor.persist_behavior_transition_durably(behavior, goal).await.unwrap();
+                } else if action == "promote_incomplete" {
+                    // The root receives another provider's unmetered outcome
+                    // while the promoted summary still owns the HTTP request.
+                    actor.apply_captured_goal_usage_incomplete("async-goal").await.unwrap();
+                } else if action == "promote_model" {
+                    let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                    config.context_window = std::num::NonZeroU64::new(110_000).unwrap();
+                    actor.chat_state_handle.update_sampling_config(config);
+                }
             }
             if action == "timeout" {
                 let error = tokio::time::timeout(std::time::Duration::from_millis(1_100), promotion.take().unwrap()).await.expect("promotion must use the original deadline, not a fresh two seconds").unwrap().unwrap_err();
                 assert!(format!("{error:?}").contains("wall-clock budget"));
             }
             auxiliary.release();
-            if !matches!(action, "cancel" | "budget" | "control" | "timeout" | "rewind") {
+            if !matches!(action, "cancel" | "budget" | "control" | "timeout" | "rewind" | "promote_control" | "promote_incomplete") {
                 tokio::time::timeout(std::time::Duration::from_secs(5), auxiliary.wait_satisfied()).await.expect("auxiliary expectation completed");
             }
             if let Some(promotion) = promotion {
-                tokio::time::timeout(std::time::Duration::from_secs(10), promotion).await.unwrap().unwrap().unwrap();
+                let result = tokio::time::timeout(std::time::Duration::from_secs(10), promotion).await.unwrap().unwrap();
+                if action == "promote_model" {
+                    assert!(format!("{:?}", result.unwrap_err()).contains("compaction_source_invalidated"));
+                } else if matches!(action, "promote_control" | "promote_incomplete") {
+                    assert!(format!("{:?}", result.unwrap_err()).contains("compact cancelled"));
+                } else { result.unwrap(); }
+            } else if action == "cross_turn" {
+                tokio::time::timeout(std::time::Duration::from_secs(5), actor.session_activities.wait_idle()).await.unwrap();
+                assert!(actor.chat_state_handle.get_last_compaction_prompt_index().await.is_none());
+                let mut next = server.expect_response("first sample after idle summary",
+                    InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
+                    messages_turn(&[("next turn response", END_TURN)], END_TURN));
+                run_user_turn(&actor, "async-next-turn").await.unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), next.wait_satisfied()).await.unwrap();
+                let requests = server.request_bodies();
+                assert!(requests.last().unwrap()["tools"].as_array().unwrap().iter().any(|tool|
+                    tool["name"] == tools::implementations::context_recall::CONTEXT_RECALL_TOOL_NAME
+                ), "the first request after commit must expose Recall");
             } else if !matches!(action, "cancel" | "budget" | "control" | "timeout" | "rewind") {
                 tokio::time::timeout(std::time::Duration::from_secs(10), async {
                     while actor.compaction.background.borrow().is_some() {
@@ -244,9 +301,9 @@ fn async_compaction_scenario(action: &'static str) {
             }
             let events = actor.chat_state_handle.timeline_events().await.unwrap();
             let completed = events.iter().filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Completed { .. }))).count();
-            let should_commit = matches!(action, "publish" | "promote" | "goal");
+            let should_commit = matches!(action, "publish" | "promote" | "goal" | "cross_turn");
             assert_eq!(completed, usize::from(should_commit));
-            assert_eq!(server.messages_request_count(), 3, "promotion must not issue another summary request");
+            assert_eq!(server.messages_request_count(), 3 + usize::from(action == "cross_turn"), "promotion must not issue another summary request");
             let surface = actor.chat_state_handle.get_conversation().await;
             let text = surface.iter().map(ConversationItem::text_content).collect::<Vec<_>>().join("\n");
             assert_eq!(text.contains("foreground response after freeze"), action != "rewind");
@@ -258,7 +315,11 @@ fn async_compaction_scenario(action: &'static str) {
             let (notifications, completions) = drain_session_updates(&mut notifications);
             assert_eq!(completions.len(), usize::from(should_commit));
             if should_commit { assert_eq!(completions[0]["update"]["async_compact"], action != "promote"); }
-            assert_eq!(notifications.iter().filter(|kind| *kind == "auto_compact_started").count(), usize::from(matches!(action, "promote" | "timeout")));
+            assert_eq!(notifications.iter().filter(|kind| *kind == "auto_compact_started").count(), usize::from(promotes));
+            if action == "promote_incomplete" {
+                assert_eq!(actor.goal_tracker.lock().status(), Some(crate::session::goal_tracker::GoalStatus::Paused));
+                assert_eq!(actor.behavior.lock().behavior(), tool_types::BehaviorId::Normal);
+            }
             if action == "failure" {
                 assert!(actor.compaction.background_failed.get());
                 actor.state.lock().await.foreground = ForegroundState::RegularTurn(running_task_stub("same-turn"));
@@ -271,7 +332,7 @@ fn async_compaction_scenario(action: &'static str) {
             if action == "budget" {
                 tokio::time::timeout(std::time::Duration::from_secs(2), actor.goal_usage_window.wait_for_owner_settlements_through(&actor.session_id_string(), 0)).await.expect("cancelled summary accounting must settle without a wait cycle");
                 assert_eq!(actor.goal_tokens_used(), 148_025);
-                assert!(actor.goal_usage_window.begin_model_attempt(&actor.session_id_string(), 0, Some("async-goal")).is_err());
+                assert!(actor.goal_usage_window.begin_model_attempt(&actor.session_id_string(), 0, Some("async-goal")).await.is_err());
             }
         }));
     });

@@ -21,6 +21,22 @@ struct GoalUsageWindowState {
     pending_attempts: std::collections::HashMap<String, GoalUsageAttemptOwner>,
 }
 
+impl GoalUsageWindowState {
+    fn has_unsettled_owner_attempt(&self, session_id: &str, epoch: u64) -> bool {
+        self.pending_attempts.values().any(|attempt| {
+            let live_background = attempt.epoch == epoch
+                && attempt.epoch == self.owner_epochs.get(session_id).copied().unwrap_or(0)
+                && !attempt.returned
+                && attempt.settlement.is_none()
+                && matches!(&self.provider_window, GoalProviderWindow::Active(goal) if goal == &attempt.goal_id)
+                && attempt.background.as_ref().is_some_and(|background| {
+                    background.load(std::sync::atomic::Ordering::Acquire)
+                });
+            attempt.session_id == session_id && attempt.epoch <= epoch && !live_background
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 enum GoalProviderWindow {
     #[default]
@@ -92,6 +108,7 @@ impl GoalUsageWindow {
             (Some(goal_id), false, false) => GoalProviderWindow::Active(goal_id),
             (None, _, _) => GoalProviderWindow::Inactive,
         };
+        self.settlement_changed.notify_waiters();
     }
 
     pub(crate) fn active_goal_id(&self) -> Option<String> {
@@ -132,6 +149,8 @@ impl GoalUsageWindow {
             return false;
         }
         state.provider_window = GoalProviderWindow::Exhausted(goal_id.to_owned());
+        drop(state);
+        self.settlement_changed.notify_waiters();
         true
     }
 
@@ -148,94 +167,97 @@ impl GoalUsageWindow {
         let mut state = self.state.lock();
         let epoch = state.owner_epochs.entry(session_id.to_owned()).or_default();
         *epoch = epoch.saturating_add(1);
-        *epoch
+        let epoch = *epoch;
+        drop(state);
+        self.settlement_changed.notify_waiters();
+        epoch
     }
 
-    /// Admit one real provider attempt into the Goal usage ledger. The opaque
-    /// id, rather than the mutable active Goal id, follows the attempt through
-    /// retries, Stop, and owner-future destruction. A later provider admission
-    /// can wait for this id to settle without keeping the cancelling UI open.
-    pub(crate) fn begin_model_attempt(
+    /// Admit at the provider's first poll, atomically with the owner settlement
+    /// fence. A live background call may coexist; a returned or unconfirmed
+    /// attempt must settle before another scope can be captured.
+    pub(crate) async fn begin_model_attempt(
         &self,
         session_id: &str,
         epoch: u64,
         expected_goal_id: Option<&str>,
     ) -> Result<Option<String>, String> {
         self.begin_model_attempt_with_background(session_id, epoch, expected_goal_id, None)
+            .await
     }
 
-    pub(crate) fn begin_model_attempt_with_background(
+    pub(crate) async fn begin_model_attempt_with_background(
         &self,
         session_id: &str,
         epoch: u64,
         expected_goal_id: Option<&str>,
         background: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Option<String>, String> {
-        let mut state = self.state.lock();
-        let current_epoch = state.owner_epochs.get(session_id).copied().unwrap_or(0);
-        if epoch != current_epoch {
-            return Err(format!(
-                "provider admission belongs to closed session epoch {epoch} (current {current_epoch})"
-            ));
+        loop {
+            let changed = self.settlement_changed.notified();
+            {
+                let mut state = self.state.lock();
+                let current_epoch = state.owner_epochs.get(session_id).copied().unwrap_or(0);
+                if epoch != current_epoch {
+                    return Err(format!(
+                        "provider admission belongs to closed session epoch {epoch} (current {current_epoch})"
+                    ));
+                }
+                let active_goal_id = match &state.provider_window {
+                    GoalProviderWindow::Active(goal_id) => Some(goal_id.clone()),
+                    GoalProviderWindow::Inactive => None,
+                    GoalProviderWindow::Exhausted(goal_id) => {
+                        return Err(format!(
+                            "provider admission is closed because Goal {goal_id} exhausted its token budget"
+                        ));
+                    }
+                    GoalProviderWindow::UsageIncomplete(goal_id) => {
+                        return Err(format!(
+                            "provider admission is closed because Goal {goal_id} has incomplete token usage"
+                        ));
+                    }
+                };
+                let goal_id = match (expected_goal_id, active_goal_id) {
+                    (Some(expected), Some(active)) if expected == active => Some(active),
+                    (Some(expected), active) => {
+                        return Err(format!(
+                            "provider admission belongs to closed Goal {expected} (active Goal: {})",
+                            active.as_deref().unwrap_or("none")
+                        ));
+                    }
+                    (None, active) => active,
+                };
+                if !state.has_unsettled_owner_attempt(session_id, epoch) {
+                    let Some(goal_id) = goal_id else {
+                        return Ok(None);
+                    };
+                    let attempt_id = uuid::Uuid::now_v7().to_string();
+                    state.pending_attempts.insert(
+                        attempt_id.clone(),
+                        GoalUsageAttemptOwner {
+                            goal_id,
+                            session_id: session_id.to_owned(),
+                            epoch,
+                            background,
+                            returned: false,
+                            settlement: None,
+                        },
+                    );
+                    return Ok(Some(attempt_id));
+                }
+            }
+            changed.await;
         }
-        let active_goal_id = match &state.provider_window {
-            GoalProviderWindow::Active(goal_id) => Some(goal_id.clone()),
-            GoalProviderWindow::Inactive => None,
-            GoalProviderWindow::Exhausted(goal_id) => {
-                return Err(format!(
-                    "provider admission is closed because Goal {goal_id} exhausted its token budget"
-                ));
-            }
-            GoalProviderWindow::UsageIncomplete(goal_id) => {
-                return Err(format!(
-                    "provider admission is closed because Goal {goal_id} has incomplete token usage"
-                ));
-            }
-        };
-        let goal_id = match (expected_goal_id, active_goal_id) {
-            (Some(expected), Some(active)) if expected == active => active,
-            (Some(expected), active) => {
-                return Err(format!(
-                    "provider admission belongs to closed Goal {expected} (active Goal: {})",
-                    active.as_deref().unwrap_or("none")
-                ));
-            }
-            (None, Some(active)) => active,
-            (None, None) => return Ok(None),
-        };
-        let attempt_id = uuid::Uuid::now_v7().to_string();
-        state.pending_attempts.insert(
-            attempt_id.clone(),
-            GoalUsageAttemptOwner {
-                goal_id,
-                session_id: session_id.to_owned(),
-                epoch,
-                background,
-                returned: false,
-                settlement: None,
-            },
-        );
-        Ok(Some(attempt_id))
     }
 
     pub(crate) async fn wait_for_owner_settlements_through(&self, session_id: &str, epoch: u64) {
         loop {
             let changed = self.settlement_changed.notified();
-            let pending_prior = {
-                let state = self.state.lock();
-                state.pending_attempts.values().any(|attempt| {
-                    let live_background = attempt.epoch == epoch
-                        && attempt.epoch == state.owner_epochs.get(session_id).copied().unwrap_or(0)
-                        && !attempt.returned
-                        && attempt.settlement.is_none()
-                        && matches!(&state.provider_window, GoalProviderWindow::Active(goal) if goal == &attempt.goal_id)
-                        && attempt.background.as_ref().is_some_and(|background| {
-                            background.load(std::sync::atomic::Ordering::Acquire)
-                        });
-                    attempt.session_id == session_id && attempt.epoch <= epoch && !live_background
-                })
-            };
-            if !pending_prior {
+            if !self
+                .state
+                .lock()
+                .has_unsettled_owner_attempt(session_id, epoch)
+            {
                 return;
             }
             changed.await;
@@ -478,6 +500,26 @@ impl SessionActor {
         goal_id: &str,
         tokens: i64,
     ) -> Result<bool, String> {
+        let outcome = self
+            .account_captured_goal_usage(goal_id, tokens)
+            .await
+            .map(|applied| {
+                if applied {
+                    GoalUsageIncompleteApply::Recorded
+                } else {
+                    GoalUsageIncompleteApply::Ignored
+                }
+            });
+        self.finish_goal_usage_apply_at_step_boundary(outcome).await
+    }
+
+    /// Commit the charge before fallible cancellation/terminal effects. Attempt
+    /// settlement must remove its id after this succeeds, even if cleanup fails.
+    async fn account_captured_goal_usage(
+        &self,
+        goal_id: &str,
+        tokens: i64,
+    ) -> Result<bool, String> {
         let _transaction = self.goal_transaction_gate.lock().await;
         let Some(previous) = self.goal_tracker.lock().snapshot().cloned() else {
             return Ok(false);
@@ -507,9 +549,6 @@ impl SessionActor {
         };
         if exhausted {
             self.goal_usage_window.close_goal_admission(goal_id);
-            self.cancel_background_compaction("goal_budget_exhausted")
-                .await
-                .map_err(|error| error.to_string())?;
         }
         self.goal_notify_sender()
             .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
@@ -534,6 +573,11 @@ impl SessionActor {
         outcome: Result<GoalUsageIncompleteApply, String>,
     ) -> Result<bool, String> {
         let outcome = outcome?;
+        if self.goal_usage_window.provider_admission_closed() {
+            self.cancel_background_compaction("goal_admission_closed")
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         if outcome == GoalUsageIncompleteApply::Stopped {
             self.arm_terminal_preemption_if_running().await;
         }
@@ -613,7 +657,7 @@ impl SessionActor {
         };
         let applied = match tokens {
             Some(tokens) => {
-                if self.apply_captured_goal_usage(&goal_id, tokens).await? {
+                if self.account_captured_goal_usage(&goal_id, tokens).await? {
                     GoalUsageIncompleteApply::Recorded
                 } else {
                     GoalUsageIncompleteApply::Ignored
@@ -1663,6 +1707,7 @@ mod tests {
                 let attempt_id = actor
                     .goal_usage_window
                     .begin_model_attempt(&actor.session_id_string(), 0, Some("goal-1"))
+                    .await
                     .unwrap()
                     .unwrap();
                 assert!(
@@ -1687,6 +1732,7 @@ mod tests {
                     actor
                         .goal_usage_window
                         .begin_model_attempt(&actor.session_id_string(), 0, Some("goal-1"),)
+                        .await
                         .is_err(),
                     "known budget exhaustion must close provider admission before StepEnded"
                 );
@@ -1694,6 +1740,7 @@ mod tests {
                     actor
                         .goal_usage_window
                         .begin_model_attempt(&actor.session_id_string(), 0, None)
+                        .await
                         .is_err(),
                     "an unbound descendant or sideband cannot bypass the exhausted global window"
                 );
@@ -1764,6 +1811,7 @@ mod tests {
                 let attempt_id = actor
                     .goal_usage_window
                     .begin_model_attempt(&actor.session_id_string(), 0, Some("goal-1"))
+                    .await
                     .unwrap()
                     .unwrap();
                 assert!(
@@ -1790,6 +1838,7 @@ mod tests {
                     actor
                         .goal_usage_window
                         .begin_model_attempt(&actor.session_id_string(), 0, None)
+                        .await
                         .is_err()
                 );
 
@@ -1983,6 +2032,7 @@ mod tests {
         let window = GoalUsageWindow::new(tx.clone(), Some("goal-1".into()));
         let attempt_id = window
             .begin_model_attempt("root", 0, Some("goal-1"))
+            .await
             .unwrap()
             .expect("active Goal attempt");
         let next_epoch = window.advance_owner_epoch("root");
@@ -2032,6 +2082,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn final_admission_rechecks_background_return_after_preflight() {
+        for terminal in ["settled", "budget", "incomplete", "epoch", "goal"] {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let window = GoalUsageWindow::new(tx, Some("goal-1".into()));
+            let background = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let prior = window
+                .begin_model_attempt_with_background("root", 0, Some("goal-1"), Some(background))
+                .await
+                .unwrap()
+                .unwrap();
+            window.wait_for_owner_settlements_through("root", 0).await;
+            // The summary returns during sampler preparation / RequestStarted.
+            window.mark_attempt_returned(&prior);
+            let mut admission = Box::pin(window.begin_model_attempt("root", 0, Some("goal-1")));
+            tokio::select! {
+                biased;
+                result = &mut admission => panic!("unconfirmed usage admitted a request: {result:?}"),
+                _ = tokio::task::yield_now() => {}
+            }
+            assert_eq!(window.state.lock().pending_attempts.len(), 1);
+            match terminal {
+                "settled" => {
+                    assert!(window.finish_attempt(&prior));
+                }
+                "budget" => {
+                    assert!(window.close_goal_admission("goal-1"));
+                }
+                "incomplete" => window.sync_with_goal_state(Some("goal-1".into()), false, true),
+                "epoch" => {
+                    window.advance_owner_epoch("root");
+                }
+                "goal" => window.sync(Some("goal-2".into())),
+                _ => unreachable!(),
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(1), admission)
+                .await
+                .expect("settlement or revocation wakes final admission");
+            if terminal == "settled" {
+                let admitted = result.unwrap().unwrap();
+                assert!(window.finish_attempt(&admitted));
+            } else {
+                assert!(result.is_err(), "{terminal} must close final admission");
+                assert_eq!(window.state.lock().pending_attempts.len(), 1);
+                window.finish_attempt(&prior);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn background_attempt_only_bypasses_fence_while_live_in_current_epoch() {
         for boundary in [
             "returned",
@@ -2052,6 +2151,7 @@ mod tests {
                     Some("goal-1"),
                     Some(background.clone()),
                 )
+                .await
                 .unwrap()
                 .unwrap();
             tokio::time::timeout(
@@ -2121,6 +2221,7 @@ mod tests {
         let _mailbox_owner = tx;
         let attempt_id = window
             .begin_model_attempt("root", 0, Some("goal-1"))
+            .await
             .unwrap()
             .unwrap();
 
@@ -2181,10 +2282,12 @@ mod tests {
 
                 let root_attempt = window
                     .begin_model_attempt("root-session", 0, Some("goal-1"))
+                    .await
                     .unwrap()
                     .unwrap();
                 let child_attempt = window
                     .begin_model_attempt(&child_id, 0, Some("goal-1"))
+                    .await
                     .unwrap()
                     .unwrap();
 
@@ -2207,9 +2310,11 @@ mod tests {
                 );
                 assert!(window.attempt_goal_id(&root_attempt).is_some());
                 assert_eq!(window.active_goal_id().as_deref(), Some("goal-1"));
+                window.finish_attempt(&root_attempt);
                 assert!(
                     window
                         .begin_model_attempt("root-session", 0, Some("goal-1"))
+                        .await
                         .unwrap()
                         .is_some(),
                     "child teardown must not close root provider admission"
@@ -2222,16 +2327,18 @@ mod tests {
             .await;
     }
 
-    #[test]
-    fn root_shutdown_preserves_claimed_known_usage_and_fail_closes_unreported_calls() {
+    #[tokio::test]
+    async fn root_shutdown_preserves_claimed_known_usage_and_fail_closes_unreported_calls() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let window = GoalUsageWindow::new(tx, Some("goal-1".into()));
         let known = window
             .begin_model_attempt("root", 0, Some("goal-1"))
+            .await
             .unwrap()
             .unwrap();
         let unknown = window
             .begin_model_attempt("child", 0, Some("goal-1"))
+            .await
             .unwrap()
             .unwrap();
         assert!(window.claim_attempt_settlement(&known, Some(73)));

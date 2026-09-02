@@ -397,6 +397,7 @@ async fn unexpected_turn_owner_failure_closes_every_open_causal_child() {
             actor
                 .goal_usage_window
                 .begin_model_attempt(&actor.session_id_string(), usage_epoch, Some("goal-1"))
+                .await
                 .unwrap()
                 .expect("Goal-owned provider attempt");
             install_test_foreground(&actor, "panicked-turn").await;

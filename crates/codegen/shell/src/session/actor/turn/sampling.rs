@@ -1891,11 +1891,14 @@ impl SessionActor {
         );
         let expected_goal_id = self.events.current_goal_id();
         let scope_capture: sampler::AttemptScopeCapture = std::sync::Arc::new(move || {
-            goal_usage_window.begin_model_attempt(
-                &goal_usage_owner,
-                goal_usage_epoch,
-                expected_goal_id.as_deref(),
-            )
+            let window = goal_usage_window.clone();
+            let owner = goal_usage_owner.clone();
+            let expected_goal_id = expected_goal_id.clone();
+            Box::pin(async move {
+                window
+                    .begin_model_attempt(&owner, goal_usage_epoch, expected_goal_id.as_deref())
+                    .await
+            })
         });
         let goal_usage_window = self.goal_usage_window.clone();
         let usage_state = self.chat_state_handle.clone();

@@ -577,8 +577,13 @@ async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -
     }
 }
 
-fn capture_attempt_scope(capture: Option<&AttemptScopeCapture>) -> Result<Option<String>, String> {
-    capture.map_or(Ok(None), |capture| capture())
+async fn capture_attempt_scope(
+    capture: Option<&AttemptScopeCapture>,
+) -> Result<Option<String>, String> {
+    match capture {
+        Some(capture) => capture().await,
+        None => Ok(None),
+    }
 }
 
 fn take_started_attempt_scope(slot: &Mutex<Option<Option<String>>>) -> Option<String> {
@@ -638,7 +643,7 @@ async fn run_one_attempt(
                     return Ok(cancelled_attempt_from_scope_slot(&scope_slot));
                 },
                 result = async {
-                    let scope = capture_attempt_scope(scope_capture)?;
+                    let scope = capture_attempt_scope(scope_capture).await?;
                     *branch_scope.lock().expect("attempt scope slot poisoned") = Some(scope);
                     let opened = client.conversation_stream(request).await;
                     Ok::<_, String>(opened)
@@ -680,7 +685,7 @@ async fn run_one_attempt(
                     return Ok(cancelled_attempt_from_scope_slot(&scope_slot));
                 },
                 result = async {
-                    let scope = capture_attempt_scope(scope_capture)?;
+                    let scope = capture_attempt_scope(scope_capture).await?;
                     *branch_scope.lock().expect("attempt scope slot poisoned") = Some(scope);
                     let opened = client.conversation_stream_responses(request).await;
                     Ok::<_, String>(opened)
@@ -734,7 +739,7 @@ async fn run_one_attempt(
                     return Ok(cancelled_attempt_from_scope_slot(&scope_slot));
                 },
                 result = async {
-                    let scope = capture_attempt_scope(scope_capture)?;
+                    let scope = capture_attempt_scope(scope_capture).await?;
                     *branch_scope.lock().expect("attempt scope slot poisoned") = Some(scope);
                     let opened = client.conversation_stream_messages(request).await;
                     Ok::<_, String>(opened)
@@ -1095,21 +1100,21 @@ mod tests {
     use super::*;
     use futures_util::stream;
 
-    #[test]
-    fn attempt_scope_capture_is_evaluated_once_per_attempt() {
+    #[tokio::test]
+    async fn attempt_scope_capture_is_evaluated_once_per_attempt() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls_for_capture = Arc::clone(&calls);
         let capture: AttemptScopeCapture = Arc::new(move || {
             let n = calls_for_capture.fetch_add(1, Ordering::Relaxed);
-            Ok(Some(format!("scope-{n}")))
+            Box::pin(async move { Ok(Some(format!("scope-{n}"))) })
         });
 
         assert_eq!(
-            capture_attempt_scope(Some(&capture)),
+            capture_attempt_scope(Some(&capture)).await,
             Ok(Some("scope-0".into()))
         );
         assert_eq!(
-            capture_attempt_scope(Some(&capture)),
+            capture_attempt_scope(Some(&capture)).await,
             Ok(Some("scope-1".into()))
         );
         assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -1128,7 +1133,7 @@ mod tests {
         let calls_for_capture = Arc::clone(&calls);
         let capture: AttemptScopeCapture = Arc::new(move || {
             calls_for_capture.fetch_add(1, Ordering::Relaxed);
-            Ok(Some("must-not-be-created".into()))
+            Box::pin(async { Ok(Some("must-not-be-created".into())) })
         });
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -1155,6 +1160,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_during_admission_never_starts_provider_for_every_backend() {
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = SamplingClient::new(SamplerConfig {
+                base_url: format!("http://{}", listener.local_addr().unwrap()),
+                model: "test-model".into(),
+                api_backend: backend,
+                ..SamplerConfig::default()
+            })
+            .unwrap();
+            let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+            let capture: AttemptScopeCapture = Arc::new(move || {
+                let entered_tx = entered_tx.clone();
+                Box::pin(async move {
+                    entered_tx.send(()).unwrap();
+                    std::future::pending().await
+                })
+            });
+            let cancel = CancellationToken::new();
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let mut attempt = Box::pin(run_one_attempt(
+                &client,
+                ConversationRequest::default(),
+                RequestId::from("cancel-admission"),
+                Duration::from_secs(1),
+                &event_tx,
+                &cancel,
+                None,
+                Arc::new(AtomicBool::new(false)),
+                Some(&capture),
+            ));
+            tokio::select! {
+                biased;
+                _ = &mut attempt => panic!("admission must wait"),
+                _ = entered_rx.recv() => {}
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), listener.accept())
+                    .await
+                    .is_err()
+            );
+            cancel.cancel();
+            let attempt = tokio::time::timeout(Duration::from_secs(1), attempt)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(attempt.outcome, AttemptOutcome::Cancelled));
+            assert!(!attempt.provider_started);
+            assert!(attempt.scope.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn cancel_during_stream_open_settles_the_first_poll_scope_for_every_backend() {
         for backend in [
             ApiBackend::ChatCompletions,
@@ -1178,7 +1240,7 @@ mod tests {
             let (scope_tx, mut scope_rx) = mpsc::unbounded_channel();
             let capture: AttemptScopeCapture = Arc::new(move || {
                 let _ = scope_tx.send(());
-                Ok(Some("scope-on-wire".into()))
+                Box::pin(async { Ok(Some("scope-on-wire".into())) })
             });
             let (usage_tx, mut usage_rx) = mpsc::unbounded_channel();
             let sink: AttemptUsageSink = Arc::new(move |usage| {

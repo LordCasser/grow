@@ -966,6 +966,24 @@
     }
 
     #[test]
+    fn async_compaction_notification_preserves_latest_todos() {
+        let mut app = make_app_with_agent("s1");
+        assert!(handle(plan_update_msg("s1", &["old task"], Some("todo-old"), false), &mut app));
+        assert!(handle(plan_update_msg("s1", &["new task while summary runs"], Some("todo-new"), false), &mut app));
+        assert!(handle(make_ext_session_notification("s1", GrowSessionUpdate::AutoCompactCompleted {
+            async_compact: true,
+            tokens_before: 74_000,
+            tokens_after: 20_000,
+            elapsed_ms: Some(2_000),
+            summary_preview: None,
+        }), &mut app));
+        assert_eq!(todo_contents(&app, AgentId(0)), vec!["new task while summary runs"]);
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert_eq!(agent.session.context_state.as_ref().unwrap().used, 20_000);
+        assert!(scrollback_has_system_text(agent, "async compact applied"));
+    }
+
+    #[test]
     fn apply_async_compaction_preserves_foreground_prompt_and_notifies_once() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();

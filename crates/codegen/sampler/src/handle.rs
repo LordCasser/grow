@@ -15,9 +15,11 @@ use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
 
 /// Captures the logical accounting scope at the moment a provider attempt is
-/// admitted. The sampler remains unaware of Goal/session semantics.
+/// admitted, waiting for pending settlements if necessary. Cancellation before
+/// admission must not create a usage scope. The sampler remains unaware of
+/// Goal/session semantics.
 pub type AttemptScopeCapture =
-    std::sync::Arc<dyn Fn() -> Result<Option<String>, String> + Send + Sync>;
+    std::sync::Arc<dyn Fn() -> BoxFuture<'static, Result<Option<String>, String>> + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub enum AttemptUsage {
