@@ -2199,7 +2199,7 @@ pub enum TaskResult {
     CompactComplete {
         agent_id: AgentId,
         track_foreground: bool,
-        result: Result<CompactRequestStatus, String>,
+        result: Result<CompactRequestStatus, acp::Error>,
     },
     /// Background task kill result. `outcome` is `None` when the agent
     /// returned an error envelope or an unparseable payload (treated as
@@ -2489,7 +2489,7 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         request: crate::slash::HostCommandRequest,
-        error: Option<String>,
+        error: Option<acp::Error>,
     },
     /// The independent Trajectory server either reached its ready boundary or
     /// failed before it could accept browser requests.

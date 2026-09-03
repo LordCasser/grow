@@ -312,7 +312,7 @@ pub enum SessionCommand {
     /// model as user input.
     ExecuteSlashCommand {
         invocation: HostCommandInvocation,
-        respond_to: oneshot::Sender<Result<(), String>>,
+        respond_to: oneshot::Sender<acp::Result<()>>,
     },
     /// Append a user-authored `session/title` fact to the canonical Timeline.
     /// The actor owns this mutation so it serializes against automatic title

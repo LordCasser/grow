@@ -32,15 +32,6 @@ pub(super) fn spawn_manual_compaction(
                         .map(|_| crate::session::CompactConversationStatus::Completed)
                         .map_err(Clone::clone);
                     let _ = respond_to.send(response);
-                } else if let Err(error) = &result {
-                    session
-                        .send_host_turn_slash_command_error(
-                            "Scheduled compaction failed",
-                            format!(
-                                "Reason: {error}\nThe session remains usable; retry /compact or continue after reducing context."
-                            ),
-                        )
-                        .await;
                 }
                 None
             }

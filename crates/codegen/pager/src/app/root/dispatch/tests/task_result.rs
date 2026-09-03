@@ -54,7 +54,7 @@ fn apply_grow_session_update(
 }
 
 #[test]
-fn child_slash_transport_failure_is_rendered_in_the_child_view() {
+fn child_slash_rejection_is_rendered_in_the_child_view() {
     let mut app = test_app_with_agent();
     let root_id = AgentId(0);
     let child_sid = acp::SessionId::new("child-command-session");
@@ -77,7 +77,7 @@ fn child_slash_transport_failure_is_rendered_in_the_child_view() {
                 "/workflow child",
                 "Run a child workflow",
             ),
-            error: Some("transport unavailable".into()),
+            error: Some(acp::Error::invalid_request().data("command unavailable")),
         },
         &mut app,
     );
@@ -97,6 +97,116 @@ fn child_slash_transport_failure_is_rendered_in_the_child_view() {
             if notice.category == crate::scrollback::blocks::NoticeCategory::Command
                 && notice.tone == crate::scrollback::blocks::NoticeTone::Error
     ));
+}
+
+#[test]
+fn command_transport_loss_is_unknown_until_a_durable_result_arrives() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = app.agents[&id].session.session_id.clone().unwrap();
+    let request = crate::slash::HostCommandRequest::new("/goal clear", "Clear Goal");
+    let baseline = app.agents[&id].scrollback.len();
+    dispatch_task_result(
+        TaskResult::SlashCommandExecuted {
+            agent_id: id,
+            session_id: session_id.clone(),
+            request: request.clone(),
+            error: Some(acp::Error::internal_error().data("connection lost")),
+        },
+        &mut app,
+    );
+    assert_eq!(app.agents[&id].scrollback.len(), baseline);
+    assert!(
+        app.agents[&id]
+            .session
+            .live_status(300)
+            .unwrap()
+            .contains("outcome unknown")
+    );
+    apply_grow_session_update(
+        &mut app,
+        session_id.0.as_ref(),
+        shell::extensions::notification::SessionUpdate::UiNotice(
+            shell::extensions::notification::UiNotice {
+                correlation_id: request.invocation_id.clone(),
+                category: shell::extensions::notification::UiNoticeCategory::Command,
+                subject: Some(request.command.clone()),
+                description: None,
+                message: "Goal cleared.".into(),
+                tone: shell::extensions::notification::UiNoticeTone::Success,
+                details: None,
+            },
+        ),
+    );
+    assert!(app.agents[&id].session.live_status(300).is_none());
+    dispatch_task_result(
+        TaskResult::SlashCommandExecuted {
+            agent_id: id,
+            session_id,
+            request,
+            error: Some(acp::Error::internal_error().data("late connection error")),
+        },
+        &mut app,
+    );
+    assert_eq!(app.agents[&id].scrollback.len(), baseline + 1);
+    assert!(app.agents[&id].session.live_status(300).is_none());
+}
+
+#[test]
+fn compact_rpc_acknowledgement_does_not_append_another_completion() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let baseline = app.agents[&id].scrollback.len();
+    for track_foreground in [false, true] {
+        if track_foreground {
+            app.agents
+                .get_mut(&id)
+                .unwrap()
+                .session
+                .start_command(crate::app::session::AgentCommand::Compact);
+        }
+        dispatch_task_result(
+            TaskResult::CompactComplete {
+                agent_id: id,
+                track_foreground,
+                result: Ok(crate::app::actions::CompactRequestStatus::Completed),
+            },
+            &mut app,
+        );
+        assert_eq!(app.agents[&id].scrollback.len(), baseline);
+    }
+}
+
+#[test]
+fn compact_cancel_rpc_does_not_echo_the_backend_terminal() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let sid = app.agents[&id].session.session_id.clone().unwrap();
+    let baseline = app.agents[&id].scrollback.len();
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .session
+        .start_command(crate::app::session::AgentCommand::Compact);
+    apply_grow_session_update(
+        &mut app,
+        sid.0.as_ref(),
+        shell::extensions::notification::SessionUpdate::AutoCompactCancelled {
+            reason: shell::extensions::notification::AutoCompactCancelReason::UserCancelled,
+        },
+    );
+    dispatch_task_result(
+        TaskResult::CompactComplete {
+            agent_id: id,
+            track_foreground: true,
+            result: Err(shell::session::mark_control_terminal_published(
+                acp::Error::internal_error().data("compact cancelled"),
+            )),
+        },
+        &mut app,
+    );
+    assert_eq!(app.agents[&id].scrollback.len(), baseline + 1);
+    assert!(app.agents[&id].session.live_status(200).is_none());
 }
 
 #[test]

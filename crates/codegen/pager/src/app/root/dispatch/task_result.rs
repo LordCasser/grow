@@ -1285,14 +1285,36 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && let Some(agent) =
                     find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
             {
+                if shell::session::control_terminal_was_published(&error)
+                    || agent.scrollback.has_command_result(&request.invocation_id)
+                {
+                    return vec![];
+                }
+                if agent.session.pending_memory_browse.as_deref() == Some(&request.invocation_id) {
+                    agent.session.pending_memory_browse = None;
+                }
+                let rejected = matches!(
+                    error.code,
+                    acp::ErrorCode::InvalidRequest
+                        | acp::ErrorCode::InvalidParams
+                        | acp::ErrorCode::MethodNotFound
+                );
+                let reason = crate::app::root::effects::sanitize_user_error(&error.to_string());
+                if !rejected {
+                    // An absent acknowledgement is not proof of execution
+                    // failure. Never append a competing terminal or retry a
+                    // state mutation automatically after a transport loss.
+                    agent.session.set_live_feedback(request.invocation_id, NoticeTone::Warning,
+                        format!("{}: outcome unknown. Reconnect and check session state before retrying. {reason}", request.command));
+                    return vec![];
+                }
+                agent.session.clear_live_feedback(&request.invocation_id);
                 agent.scrollback.push_block(RenderBlock::terminal_notice(
                     format!("command:{}:rejected", request.invocation_id),
                     NoticeTone::Error,
                     NoticeCategory::Command,
-                    format!("{} failed", request.command),
-                    Some(format!(
-                        "Reason: {error}\nRecovery: verify the command arguments and retry."
-                    )),
+                    format!("{} was rejected: {reason}\nCheck the command arguments and session state before retrying.", request.command),
+                    Some(request.description),
                 ));
             }
             vec![]

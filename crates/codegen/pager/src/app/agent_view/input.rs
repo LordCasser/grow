@@ -509,6 +509,11 @@ impl AgentView {
         prompt_paging: bool,
         effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
+        if matches!(ev, Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::Esc)
+            && let Some(invocation) = self.session.pending_memory_browse.take()
+        {
+            self.session.clear_live_feedback(&invocation);
+        }
         self.sync_command_selection_context();
         if self.scrollback_drag_latched() {
             let live_drag_event = matches!(

@@ -1734,6 +1734,7 @@ pub(super) fn make_mcp_initialized_notif_for(session_id: &str) -> acp::ExtNotifi
 }
 mod permissions;
 mod session_events;
+mod command_feedback;
 mod coordination;
 mod follow_ups;
 mod settings;

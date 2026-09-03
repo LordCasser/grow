@@ -785,6 +785,21 @@ impl SessionActor {
         )
     }
 
+    /// The path mutation and adoption are one user operation, with reload
+    /// statistics available in details instead of a second command result.
+    pub(super) async fn report_plugin_path_change(self: &Arc<Self>, message: &str) {
+        use crate::extensions::notification::UiNoticeTone;
+        if let Some(handle) = &self.plugin_registry_handle {
+            let details = self.reload_plugins_impl(handle, false).await;
+            self.send_host_turn_slash_command_notice(UiNoticeTone::Success, message, Some(details))
+                .await;
+        } else {
+            self.send_host_turn_slash_command_warning(&format!(
+                "{message}\nThe current session has no plugin registry; start a new session to apply the change."
+            )).await;
+        }
+    }
+
     /// This session's `_meta.pluginDirs`, recovered from the registry it was
     /// built with; empty when the session has none.
     pub(crate) fn session_plugin_dirs(&self) -> Vec<std::path::PathBuf> {

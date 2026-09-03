@@ -512,29 +512,12 @@ impl SessionActor {
         prompt_id: &str,
         message: String,
     ) -> bool {
-        let slash_detail = match message.strip_prefix("Turn failed: ") {
-            Some(rest) => rest.to_owned(),
-            None => message.clone(),
-        };
-        let paused = self
-            .auto_pause_goal_if_active_with_message_for_prompt(
-                crate::session::goal_tracker::GoalPauseReason::TurnError,
-                message,
-                Some(prompt_id),
-            )
-            .await;
-        if paused {
-            let summary =
-                format!("Goal stopped due to turn error: {slash_detail}. Restart it to retry.");
-            self.send_lifecycle_notice(
-                "goal",
-                crate::extensions::notification::UiNoticeTone::Warning,
-                &summary,
-                Some("Recovery: use /goal restart after correcting the turn failure.".into()),
-            )
-            .await;
-        }
-        paused
+        self.auto_pause_goal_if_active_with_message_for_prompt(
+            crate::session::goal_tracker::GoalPauseReason::TurnError,
+            message,
+            Some(prompt_id),
+        )
+        .await
     }
 
     /// Extract the best human-readable detail from a turn error.

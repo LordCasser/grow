@@ -7,6 +7,7 @@ fn ui_notice_block(
     event_id: Option<String>,
 ) -> RenderBlock {
     let tone = match notice.tone {
+        shell::extensions::notification::UiNoticeTone::Progress => NoticeTone::Progress,
         shell::extensions::notification::UiNoticeTone::Info => NoticeTone::Info,
         shell::extensions::notification::UiNoticeTone::Success => NoticeTone::Success,
         shell::extensions::notification::UiNoticeTone::Warning => NoticeTone::Warning,
@@ -36,23 +37,50 @@ fn ui_notice_block(
         metadata.push(details);
     }
     let details = (!metadata.is_empty()).then(|| metadata.join("\n"));
-    match event_id {
+    let mut block = match event_id {
         Some(event_id) => {
             RenderBlock::terminal_notice(event_id, tone, category, notice.message, details)
         }
         None => RenderBlock::typed_notice(tone, category, notice.message, details),
+    };
+    if category == NoticeCategory::Command
+        && let RenderBlock::Notice(block) = &mut block
+    {
+        block.command_invocation_id = Some(notice.correlation_id);
     }
+    block
 }
 
 /// Timeline audit identity and transcript presentation are different things:
 /// source tools own their UI; target events update one passive tool-style row.
 fn apply_ui_notice(
-    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    agent: &mut AgentView,
     mut notice: shell::extensions::notification::UiNotice,
     event_id: Option<String>,
     is_replay: bool,
 ) -> bool {
     use crate::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
+    if notice.tone == shell::extensions::notification::UiNoticeTone::Progress {
+        if is_replay
+            || agent.session.loading_replay
+            || agent.scrollback.has_command_result(&notice.correlation_id)
+        {
+            return false;
+        }
+        agent.session.set_live_feedback(
+            notice.correlation_id,
+            NoticeTone::Progress,
+            notice.message,
+        );
+        return true;
+    }
+    if notice.category == shell::extensions::notification::UiNoticeCategory::Command {
+        agent.session.clear_live_feedback(&notice.correlation_id);
+        if agent.session.pending_memory_browse.as_deref() == Some(&notice.correlation_id) {
+            agent.session.pending_memory_browse = None;
+        }
+    }
+    let scrollback = &mut agent.scrollback;
     if notice.category == shell::extensions::notification::UiNoticeCategory::Coordination {
         match notice.subject.as_deref() {
             Some("outgoing inquiry" | "outgoing inquiry completed") => return false,
@@ -458,12 +486,9 @@ fn handle_session_notification_inner(
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let controls_pending_before = agent.session.controls_pending();
     let changed = match session_notif.update {
-        GrowSessionUpdate::UiNotice(output) => apply_ui_notice(
-            &mut agent.scrollback,
-            output,
-            meta.event_id.clone(),
-            meta.is_replay,
-        ),
+        GrowSessionUpdate::UiNotice(output) => {
+            apply_ui_notice(agent, output, meta.event_id.clone(), meta.is_replay)
+        }
         GrowSessionUpdate::ControlStateUpdate(update) => {
             apply_control_state_update(agent, update, meta.event_id.clone(), meta.is_replay)
         }
@@ -477,7 +502,12 @@ fn handle_session_notification_inner(
         | GrowSessionUpdate::MemoryFlushCompleted { .. }
         | GrowSessionUpdate::MemoryDreamCompleted { .. }
         | GrowSessionUpdate::MemorySessionSaved { .. }) => {
-            let changed = apply_session_event(update, &mut agent.session, &mut agent.scrollback);
+            let changed = apply_session_event(
+                update,
+                &mut agent.session,
+                &mut agent.scrollback,
+                meta.event_id.as_deref(),
+            );
             if let GrowSessionUpdate::AutoCompactCompleted {
                 tokens_after,
                 async_compact,
@@ -1240,7 +1270,21 @@ fn handle_session_notification_inner(
                 agent.session.apply_agent_name(Some(agent_name))
             }
         }
-        GrowSessionUpdate::MemoryFiles { files } => {
+        GrowSessionUpdate::MemoryFiles {
+            invocation_id,
+            files,
+        } => {
+            if meta.is_replay
+                || agent.session.loading_replay
+                || agent.session.pending_memory_browse.as_deref() != Some(&invocation_id)
+            {
+                return false;
+            }
+            agent.session.pending_memory_browse = None;
+            agent.session.clear_live_feedback(&invocation_id);
+            if agent.active_modal.is_some() {
+                return false;
+            }
             let entries = crate::views::memory_modal::build_entries(files);
             let modal_state = crate::views::memory_modal::MemoryModalState::new(entries);
             agent.active_modal = Some(crate::views::modal::ActiveModal::MemoryBrowser {
@@ -1366,14 +1410,10 @@ pub(super) fn handle_child_session_notification(
     agent: &mut AgentView,
 ) -> bool {
     let changed = match update {
-        GrowSessionUpdate::UiNotice(output) => {
-            agent
-                .subagent_views
-                .get_mut(child_sid)
-                .is_some_and(|child| {
-                    apply_ui_notice(&mut child.scrollback, output, event_id, is_replay)
-                })
-        }
+        GrowSessionUpdate::UiNotice(output) => agent
+            .subagent_views
+            .get_mut(child_sid)
+            .is_some_and(|child| apply_ui_notice(child, output, event_id, is_replay)),
         GrowSessionUpdate::ControlStateUpdate(update) => agent
             .subagent_views
             .get_mut(child_sid)
@@ -1428,6 +1468,7 @@ pub(super) fn handle_child_session_notification(
                     &update,
                     &mut child_view.session,
                     &mut child_view.scrollback,
+                    event_id.as_deref(),
                 );
                 if let Some(tokens_after) = compact_tokens {
                     refresh_context_used(child_view, tokens_after);
@@ -1448,7 +1489,12 @@ pub(super) fn handle_child_session_notification(
         | GrowSessionUpdate::MemoryDreamCompleted { .. }
         | GrowSessionUpdate::MemorySessionSaved { .. }) => {
             if let Some(child_view) = agent.subagent_views.get_mut(child_sid) {
-                apply_session_event(update, &mut child_view.session, &mut child_view.scrollback)
+                apply_session_event(
+                    update,
+                    &mut child_view.session,
+                    &mut child_view.scrollback,
+                    event_id.as_deref(),
+                )
             } else {
                 false
             }
@@ -1666,6 +1712,7 @@ pub(super) fn apply_session_event(
     update: &GrowSessionUpdate,
     session: &mut AgentSession,
     scrollback: &mut crate::scrollback::state::ScrollbackState,
+    event_id: Option<&str>,
 ) -> bool {
     match update {
         GrowSessionUpdate::AutoCompactStarted { percentage, .. } => {
@@ -1687,28 +1734,44 @@ pub(super) fn apply_session_event(
             tokens_after,
             elapsed_ms,
             async_compact,
+            manual,
             ..
         } => {
             if *async_compact {
-                scrollback.push_block(RenderBlock::notice(format!(
-                    "async compact applied · {tokens_before} → {tokens_after} tokens"
-                )));
+                let message =
+                    format!("async compact applied · {tokens_before} → {tokens_after} tokens");
+                scrollback.push_block(match event_id {
+                    Some(id) => RenderBlock::terminal_notice(
+                        id,
+                        NoticeTone::Info,
+                        NoticeCategory::Ui,
+                        message,
+                        None,
+                    ),
+                    None => RenderBlock::notice(message),
+                });
                 return true;
             }
             tracing::info!("Auto-compact completed: {tokens_after} tokens after");
             session.set_compaction_activity(None);
             session.clear_live_feedback("compaction");
             session.compact_held_prompt = None;
-            if session.loading_replay {
-                scrollback.push_block(RenderBlock::session_event(
+            if *manual || session.loading_replay {
+                scrollback.push_block(RenderBlock::session_event_with_id(
                     SessionEvent::CompactionCompleted {
                         tokens_before: *tokens_before,
                         tokens_after: *tokens_after,
                         elapsed_ms: *elapsed_ms,
                     },
+                    event_id.map(str::to_owned),
                 ));
             } else {
-                session.defer_compaction(*tokens_before, *tokens_after, *elapsed_ms);
+                session.defer_compaction(
+                    *tokens_before,
+                    *tokens_after,
+                    *elapsed_ms,
+                    event_id.map(str::to_owned),
+                );
             }
             true
         }
@@ -1716,9 +1779,12 @@ pub(super) fn apply_session_event(
             tracing::error!(error = %error, "Auto-compaction failed");
             session.set_compaction_activity(None);
             session.clear_live_feedback("compaction");
-            scrollback.push_block(RenderBlock::session_event(SessionEvent::CompactionFailed {
-                error: error.clone(),
-            }));
+            scrollback.push_block(RenderBlock::session_event_with_id(
+                SessionEvent::CompactionFailed {
+                    error: error.clone(),
+                },
+                event_id.map(str::to_owned),
+            ));
             true
         }
         GrowSessionUpdate::AutoCompactCancelled { .. } => {
@@ -1726,8 +1792,9 @@ pub(super) fn apply_session_event(
             session.set_compaction_activity(None);
             session.clear_live_feedback("compaction");
             session.compact_held_prompt = None;
-            scrollback.push_block(RenderBlock::session_event(
+            scrollback.push_block(RenderBlock::session_event_with_id(
                 SessionEvent::CompactionCancelled,
+                event_id.map(str::to_owned),
             ));
             true
         }

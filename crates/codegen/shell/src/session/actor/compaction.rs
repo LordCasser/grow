@@ -452,6 +452,36 @@ impl SessionActor {
         self: &Arc<Self>,
         user_context: Option<String>,
     ) -> Result<(), acp::Error> {
+        use crate::extensions::notification::SessionUpdate;
+        match self.run_manual_compact(user_context).await {
+            Ok(update) => {
+                self.send_grow_notification(update).await;
+                Ok(())
+            }
+            Err(error) => {
+                let update = if error.data.as_ref().and_then(serde_json::Value::as_str)
+                    == Some(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG)
+                {
+                    SessionUpdate::AutoCompactCancelled {
+                        reason:
+                            crate::extensions::notification::AutoCompactCancelReason::UserCancelled,
+                    }
+                } else {
+                    SessionUpdate::AutoCompactFailed {
+                        error: Self::acp_error_message(&error),
+                    }
+                };
+                self.send_grow_notification(update).await;
+                Err(crate::session::mark_control_terminal_published(error))
+            }
+        }
+    }
+
+    async fn run_manual_compact(
+        self: &Arc<Self>,
+        user_context: Option<String>,
+    ) -> Result<crate::extensions::notification::SessionUpdate, acp::Error> {
+        let started = std::time::Instant::now();
         self.cancel_background_compaction("manual_compaction")
             .await?;
         let Some(_exclusive) = self
@@ -495,15 +525,14 @@ impl SessionActor {
         let span = tracing::Span::current();
         span.record("post_tokens", tokens_after as i64);
         span.record("success", true);
-        self.send_grow_notification(GrowSessionUpdate::AutoCompactCompleted {
+        Ok(GrowSessionUpdate::AutoCompactCompleted {
+            manual: true,
             async_compact: false,
             tokens_before: total_tokens,
             tokens_after,
-            elapsed_ms: None,
+            elapsed_ms: Some(started.elapsed().as_millis().min(i64::MAX as u128) as i64),
             summary_preview: None,
         })
-        .await;
-        Ok(())
     }
     async fn emit_compact_cancelled(&self, auto_trigger: bool) -> Result<(), acp::Error> {
         if auto_trigger {
@@ -2289,6 +2318,7 @@ impl SessionActor {
                             .as_millis() as i64,
                         ),
                         summary_preview: None,
+                        manual: false,
                         async_compact: !wait,
                     },
                 )
@@ -2668,6 +2698,7 @@ impl SessionActor {
         if notify {
             self.send_grow_notification(
                 crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
+                    manual: false,
                     async_compact: false,
                     tokens_before: trigger_info.tokens_used,
                     tokens_after,
@@ -2808,6 +2839,7 @@ impl SessionActor {
                 span.record("post_tokens", tokens_after as i64);
                 span.record("success", true);
                 self.send_grow_notification(GrowSessionUpdate::AutoCompactCompleted {
+                    manual: false,
                     async_compact: false,
                     tokens_before: trigger_info.tokens_used,
                     tokens_after,

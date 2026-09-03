@@ -461,6 +461,7 @@ impl RenderBlock {
         match self {
             Self::Notice(block) => block.event_id.as_deref(),
             Self::Subagent(block) => block.event_id.as_deref(),
+            Self::SessionEvent(block) => block.event_id.as_deref(),
             _ => None,
         }
     }
@@ -516,6 +517,11 @@ impl RenderBlock {
             }
             (Self::Stub(left), Self::Stub(right)) => left.text == right.text,
             (Self::SessionEvent(left), Self::SessionEvent(right)) => {
+                if let (Some(left_id), Some(right_id)) =
+                    (left.event_id.as_deref(), right.event_id.as_deref())
+                {
+                    return left_id == right_id;
+                }
                 format!("{left:?}") == format!("{right:?}")
             }
             (Self::BgTask(left), Self::BgTask(right)) => {
@@ -899,6 +905,12 @@ impl RenderBlock {
     /// Create a session event block.
     pub fn session_event(event: SessionEvent) -> Self {
         RenderBlock::SessionEvent(SessionEventBlock::new(event))
+    }
+
+    pub fn session_event_with_id(event: SessionEvent, event_id: Option<String>) -> Self {
+        let mut block = SessionEventBlock::new(event);
+        block.event_id = event_id;
+        RenderBlock::SessionEvent(block)
     }
 
     /// Create a "Task started" background task block.

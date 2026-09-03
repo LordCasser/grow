@@ -161,6 +161,308 @@ fn completed_goal_control_cancel_trigger(
     }
 }
 
+#[cfg(test)]
+mod feedback_contract_tests {
+    use super::*;
+    use crate::extensions::notification::{
+        SessionNotification, SessionUpdate, UiNotice, UiNoticeCategory, UiNoticeTone,
+    };
+
+    fn invocation(id: &str, command: &str) -> crate::session::HostCommandInvocation {
+        crate::session::HostCommandInvocation {
+            command: command.into(),
+            description: "Manage Goal".into(),
+            invocation_id: id.into(),
+        }
+    }
+
+    fn update(message: acp_transport::AcpClientMessage) -> Option<SessionNotification> {
+        let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+            return None;
+        };
+        serde_json::from_str(args.request.params.get()).ok()
+    }
+
+    fn notices(rx: &mut acp_transport::AcpClientRx) -> Vec<UiNotice> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(update)
+            .filter_map(|notification| {
+                if let SessionUpdate::UiNotice(notice) = notification.update {
+                    Some(notice)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn seed_goal(actor: &SessionActor) {
+        actor
+            .goal_tracker
+            .lock()
+            .create_goal(
+                "goal-feedback".into(),
+                "ship it".into(),
+                Some(100),
+                "now".into(),
+            )
+            .unwrap();
+        actor
+            .behavior
+            .lock()
+            .select_behavior(tool_types::BehaviorId::Goal);
+    }
+
+    #[tokio::test]
+    async fn explicit_goal_pause_has_one_command_result_but_runtime_stop_has_a_lifecycle_fact() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut rx) = crate::session::actor::tests::support::build_actor().await;
+                seed_goal(&actor);
+                notices(&mut rx);
+                HOST_COMMAND_INVOCATION
+                    .scope(
+                        invocation("pause", "/goal pause"),
+                        actor.execute_builtin_slash_command(BuiltinAction::GoalPause),
+                    )
+                    .await
+                    .unwrap();
+                let output = notices(&mut rx);
+                assert_eq!(output.len(), 1);
+                assert_eq!(output[0].category, UiNoticeCategory::Command);
+                assert_eq!(output[0].correlation_id, "pause");
+                actor.goal_tracker.lock().clear();
+                seed_goal(&actor);
+                let previous = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+                assert!(actor.goal_tracker.lock().budget_limit());
+                HOST_COMMAND_INVOCATION
+                    .scope(
+                        invocation("flush", "/flush"),
+                        actor.commit_goal_stop_or_restore(previous),
+                    )
+                    .await
+                    .unwrap();
+                let output = notices(&mut rx);
+                assert_eq!(output.len(), 1);
+                assert_eq!(output[0].category, UiNoticeCategory::Lifecycle);
+                assert!(output[0].message.contains("/goal budget"));
+                actor
+                    .goal_notify_sender()
+                    .emit_goal_updated(&actor.goal_tracker.lock(), 100);
+                assert!(
+                    notices(&mut rx).is_empty(),
+                    "checkpoints cannot invent lifecycle events"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn queued_goal_result_keeps_its_invocation_on_apply_reject_clear_and_shutdown() {
+        tokio::task::LocalSet::new().run_until(async {
+            for outcome in ["apply", "reject", "clear", "shutdown"] {
+                let (actor, mut rx) = crate::session::actor::tests::support::build_actor().await;
+                seed_goal(&actor);
+                notices(&mut rx);
+                actor.state.lock().await.foreground = ForegroundState::ApplyingControl;
+                let result = HOST_COMMAND_INVOCATION.scope(invocation("queued-edit", "/goal edit revised"), actor.admit_goal_definition_control(
+                    "goal-feedback".into(), PendingGoalDefinitionMutation::Edit { objective: "revised".into(), token_budget: None }
+                )).await.unwrap();
+                assert_eq!(result, None);
+                let updates = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(update).collect::<Vec<_>>();
+                let progress = updates.iter().find(|notification| matches!(&notification.update, SessionUpdate::UiNotice(notice) if notice.tone == UiNoticeTone::Progress)).unwrap();
+                assert_eq!(progress.meta.as_ref().unwrap()["transient"], true);
+                assert!(progress.meta.as_ref().unwrap().get("eventId").is_none());
+                match outcome {
+                    "clear" => { HOST_COMMAND_INVOCATION.scope(invocation("clear", "/goal clear"), actor.execute_builtin_slash_command(BuiltinAction::GoalClear)).await.unwrap(); }
+                    "shutdown" => actor.cancel_uncommitted_controls_for_shutdown().await,
+                    _ => {
+                        if outcome == "reject" { actor.goal_tracker.lock().clear(); }
+                        actor.state.lock().await.foreground = ForegroundState::Idle;
+                        actor.apply_pending_step_controls_if_idle().await;
+                    }
+                }
+                let terminal = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    loop {
+                        let notification = update(rx.recv().await.expect("gateway open"));
+                        if let Some(SessionNotification { update: SessionUpdate::UiNotice(notice), .. }) = notification
+                            && notice.correlation_id == "queued-edit" {
+                            break notice;
+                        }
+                    }
+                }).await.expect("queued command terminal");
+                assert_eq!(terminal.subject.as_deref(), Some("/goal edit revised"));
+                assert_eq!(terminal.category, UiNoticeCategory::Command);
+                assert_eq!(terminal.tone, match outcome { "apply" => UiNoticeTone::Success, "reject" => UiNoticeTone::Error, _ => UiNoticeTone::Warning });
+                assert!(!notices(&mut rx).iter().any(|notice| notice.correlation_id == "queued-edit"));
+            }
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn disabled_memory_returns_one_actionable_notice_without_a_browser_result() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut rx) = crate::session::actor::tests::support::build_actor().await;
+                *actor.memory.storage.borrow_mut() = None;
+                notices(&mut rx);
+                HOST_COMMAND_INVOCATION
+                    .scope(
+                        invocation("memory", "/memory"),
+                        actor.execute_builtin_slash_command(BuiltinAction::MemoryBrowse),
+                    )
+                    .await
+                    .unwrap();
+                let updates = std::iter::from_fn(|| rx.try_recv().ok())
+                    .filter_map(update)
+                    .collect::<Vec<_>>();
+                assert!(!updates.iter().any(|notification| matches!(
+                    notification.update,
+                    SessionUpdate::MemoryFiles { .. }
+                )));
+                let output = updates
+                    .iter()
+                    .filter_map(|notification| {
+                        if let SessionUpdate::UiNotice(notice) = &notification.update {
+                            Some(notice)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(output.len(), 1);
+                assert_eq!(output[0].tone, UiNoticeTone::Warning);
+                assert!(output[0].message.contains("/memory on"));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn memory_query_success_is_ephemeral_and_correlated() {
+        tokio::task::LocalSet::new().run_until(async {
+            let (actor, mut rx) = crate::session::actor::tests::support::build_actor().await;
+            let temp = tempfile::tempdir().unwrap();
+            *actor.memory.storage.borrow_mut() = Some(memory::MemoryStorage::new_flat(temp.path(), temp.path()));
+            notices(&mut rx);
+            HOST_COMMAND_INVOCATION.scope(invocation("memory", "/memory"), actor.execute_builtin_slash_command(BuiltinAction::MemoryBrowse)).await.unwrap();
+            let updates = std::iter::from_fn(|| rx.try_recv().ok()).filter_map(update).collect::<Vec<_>>();
+            let result = updates.iter().find(|notification| matches!(&notification.update, SessionUpdate::MemoryFiles { invocation_id, .. } if invocation_id == "memory")).unwrap();
+            assert_eq!(result.meta.as_ref().unwrap()["transient"], true);
+            assert!(result.meta.as_ref().unwrap().get("eventId").is_none());
+            assert!(!updates.iter().any(|notification| matches!(notification.update, SessionUpdate::UiNotice(_))));
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn plugin_path_change_without_registry_reports_partial_success_once() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut rx) = crate::session::actor::tests::support::build_actor().await;
+                assert!(actor.plugin_registry_handle.is_none());
+                notices(&mut rx);
+                HOST_COMMAND_INVOCATION
+                    .scope(
+                        invocation("plugins", "/plugins add ./plugin"),
+                        actor.report_plugin_path_change("Plugin path added."),
+                    )
+                    .await;
+                let output = notices(&mut rx);
+                assert_eq!(output.len(), 1);
+                assert_eq!(output[0].tone, UiNoticeTone::Warning);
+                assert!(output[0].message.contains("start a new session"));
+            })
+            .await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_memory_returns_error_without_opening_browser() {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut rx) = crate::session::actor::tests::support::build_actor().await;
+                let temp = tempfile::tempdir().unwrap();
+                let storage = memory::MemoryStorage::new_flat(temp.path(), temp.path());
+                let sessions = storage.sessions_dir();
+                std::fs::create_dir_all(&sessions).unwrap();
+                std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0)).unwrap();
+                if std::fs::read_dir(&sessions).is_ok() {
+                    // Privileged test runners can bypass mode bits.
+                    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                    return;
+                }
+                *actor.memory.storage.borrow_mut() = Some(storage);
+                notices(&mut rx);
+                let result = HOST_COMMAND_INVOCATION
+                    .scope(
+                        invocation("memory", "/memory"),
+                        actor.execute_builtin_slash_command(BuiltinAction::MemoryBrowse),
+                    )
+                    .await;
+                std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                result.unwrap();
+                let updates = std::iter::from_fn(|| rx.try_recv().ok())
+                    .filter_map(update)
+                    .collect::<Vec<_>>();
+                assert!(!updates.iter().any(|notification| matches!(
+                    notification.update,
+                    SessionUpdate::MemoryFiles { .. }
+                )));
+                let output = updates
+                    .iter()
+                    .filter_map(|notification| {
+                        if let SessionUpdate::UiNotice(notice) = &notification.update {
+                            Some(notice)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(output.len(), 1);
+                assert_eq!(output[0].tone, UiNoticeTone::Error);
+                assert!(output[0].message.contains("permissions"));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_error_has_one_backend_terminal_and_marks_its_rpc() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut rx) = crate::session::actor::tests::support::build_actor().await;
+                notices(&mut rx);
+                let _lease = actor
+                    .compaction
+                    .lease
+                    .try_enter(crate::session::compaction_config::CompactionOwner::Manual)
+                    .unwrap();
+                let error = actor.run_compact(None).await.unwrap_err();
+                assert!(crate::session::control_terminal_was_published(&error));
+                let updates = std::iter::from_fn(|| rx.try_recv().ok())
+                    .filter_map(update)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    updates
+                        .iter()
+                        .filter(|notification| matches!(
+                            notification.update,
+                            SessionUpdate::AutoCompactFailed { .. }
+                        ))
+                        .count(),
+                    1
+                );
+                assert!(
+                    !updates.iter().any(|notification| matches!(
+                        notification.update,
+                        SessionUpdate::UiNotice(_)
+                    ))
+                );
+            })
+            .await;
+    }
+}
+
 pub(super) struct GoalControlCancellation {
     pub(super) trigger: &'static str,
     /// Goal owner frozen before the control mutation. The post-cancel terminal
@@ -323,12 +625,15 @@ impl SessionActor {
         }
     }
 
-    pub(super) async fn update_goal_token_budget(&self, token_budget: Option<i64>) -> String {
+    pub(super) async fn update_goal_token_budget(
+        &self,
+        token_budget: Option<i64>,
+    ) -> Option<String> {
         if token_budget.is_some_and(|budget| budget <= 0) {
-            return "Goal token budget must be a positive integer.".to_string();
+            return Some("Goal token budget must be a positive integer.".to_string());
         }
         let Some(goal) = self.goal_tracker.lock().snapshot().cloned() else {
-            return "当前没有活跃目标。使用 /goal set <objective> 开始。".to_string();
+            return Some("当前没有活跃目标。使用 /goal set <objective> 开始。".to_string());
         };
         let was_budget_limited =
             goal.status == crate::session::goal_tracker::GoalStatus::BudgetLimited;
@@ -336,26 +641,28 @@ impl SessionActor {
             || "unlimited".to_string(),
             |budget| format!("{budget} tokens"),
         );
-        match self
-            .admit_goal_definition_control(
-                goal.goal_id,
-                PendingGoalDefinitionMutation::Budget { token_budget },
-            )
-            .await
-        {
-            Ok(None) => {
-                format!("Goal budget change scheduled for the next step boundary: {budget_label}.")
-            }
-            Ok(Some(false)) => token_budget.map_or_else(
-                || "Goal token budget is already unlimited.".to_string(),
-                |budget| format!("Goal token budget is already {budget} tokens."),
-            ),
-            Ok(Some(true)) if was_budget_limited => {
-                format!("User set current Goal budget to {budget_label}. Restart it to continue.")
-            }
-            Ok(Some(true)) => format!("User set current Goal budget to {budget_label}."),
-            Err(error) => format!("Goal budget was not changed: {error}"),
-        }
+        Some(
+            match self
+                .admit_goal_definition_control(
+                    goal.goal_id,
+                    PendingGoalDefinitionMutation::Budget { token_budget },
+                )
+                .await
+            {
+                Ok(None) => return None,
+                Ok(Some(false)) => token_budget.map_or_else(
+                    || "Goal token budget is already unlimited.".to_string(),
+                    |budget| format!("Goal token budget is already {budget} tokens."),
+                ),
+                Ok(Some(true)) if was_budget_limited => {
+                    format!(
+                        "User set current Goal budget to {budget_label}. Restart it to continue."
+                    )
+                }
+                Ok(Some(true)) => format!("User set current Goal budget to {budget_label}."),
+                Err(error) => format!("Goal budget was not changed: {error}"),
+            },
+        )
     }
 
     /// Execute a built-in slash command (e.g. `/compact`, `/always-approve`).
@@ -771,11 +1078,7 @@ impl SessionActor {
                                 },
                             );
                             let msg = format!("Added plugin path: {path_str}");
-                            self.send_host_turn_slash_command_success(&msg).await;
-                            if let Some(ref handle) = self.plugin_registry_handle {
-                                let reload_msg = self.reload_plugins_impl(handle, false).await;
-                                self.send_host_turn_slash_command_output(&reload_msg).await;
-                            }
+                            self.report_plugin_path_change(&msg).await;
                         }
                         Err(e) => {
                             ::diagnostics::session_ctx::log_event(
@@ -819,11 +1122,7 @@ impl SessionActor {
                                 ::diagnostics::events::PluginRemoved { success: true },
                             );
                             let msg = format!("Removed plugin path: {path_str}");
-                            self.send_host_turn_slash_command_success(&msg).await;
-                            if let Some(ref handle) = self.plugin_registry_handle {
-                                let reload_msg = self.reload_plugins_impl(handle, false).await;
-                                self.send_host_turn_slash_command_output(&reload_msg).await;
-                            }
+                            self.report_plugin_path_change(&msg).await;
                         }
                         Err(e) => {
                             ::diagnostics::session_ctx::log_event(
@@ -1051,7 +1350,7 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::MemoryBrowse => {
-                let file_infos = if let Some(ref storage) = *self.memory.storage.borrow() {
+                let file_infos: Vec<_> = if let Some(ref storage) = *self.memory.storage.borrow() {
                     match storage.list_memory_files() {
                         Ok(files) => files
                             .into_iter()
@@ -1084,27 +1383,35 @@ impl SessionActor {
                                 error = %e,
                                 "failed to list memory files",
                             );
-                            self.send_host_turn_slash_command_output(&format!(
-                                "Failed to list memory files: {e}"
-                            ))
+                            self.send_host_turn_slash_command_error(
+                                "Memory files could not be listed",
+                                format!("Reason: {e}\nCheck memory storage permissions, then retry /memory."),
+                            )
                             .await;
-                            vec![]
+                            return ok_end_turn(0, None);
                         }
                     }
                 } else {
-                    self.send_host_turn_slash_command_output(
-                        "Memory is not enabled for this session.",
+                    self.send_host_turn_slash_command_warning(
+                        "Memory is not enabled for this session. Use /memory on, then retry /memory.",
                     )
                     .await;
-                    vec![]
+                    return ok_end_turn(0, None);
                 };
                 tracing::info!(
                     session_id = %self.session_info.id.0,
                     file_count = file_infos.len(),
                     "memory browse: listing files",
                 );
-                self.send_grow_notification(GrowSessionUpdate::MemoryFiles { files: file_infos })
-                    .await;
+                // A query result is a response to live user intent, not history.
+                if let Ok(invocation_id) =
+                    HOST_COMMAND_INVOCATION.try_with(|invocation| invocation.invocation_id.clone())
+                {
+                    self.send_transient_passive_notification(GrowSessionUpdate::MemoryFiles {
+                        invocation_id,
+                        files: file_infos,
+                    });
+                }
                 ok_end_turn(0, None)
             }
             BuiltinAction::MemoryToggle { enabled } => {
@@ -1222,12 +1529,7 @@ impl SessionActor {
                     )
                     .await
                 {
-                    Ok(None) => {
-                        self.send_host_turn_slash_command_output(&format!(
-                            "Goal edit scheduled for the next step boundary.\nObjective: {objective}"
-                        ))
-                        .await;
-                    }
+                    Ok(None) => {} // Queued feedback and final result are actor-owned.
                     Ok(Some(false)) => {
                         self.send_host_turn_slash_command_output(
                             "Goal already has that objective and token budget; nothing changed.",
@@ -1423,13 +1725,15 @@ impl SessionActor {
                     return ok_end_turn(0, None);
                 }
                 self.arm_terminal_preemption_if_running().await;
-                if let Some((goal_id, _)) = retired_goal_owner.as_ref() {
+                let cancelled = if let Some((goal_id, _)) = retired_goal_owner.as_ref() {
                     let mut admission = self.state.lock().await;
                     admission.pending_step_controls.cancel_goal_definitions(
                         goal_id,
                         "The Goal was cleared before this scheduled definition change applied.",
-                    );
-                }
+                    )
+                } else {
+                    Vec::new()
+                };
                 self.goal_tracker.lock().clear();
                 self.sync_goal_usage_window();
                 if selected == tool_types::BehaviorId::Goal {
@@ -1444,6 +1748,16 @@ impl SessionActor {
                 }
                 drop(transaction);
                 drop(boundary);
+                for invocation in cancelled {
+                    HOST_COMMAND_INVOCATION
+                        .scope(
+                            invocation,
+                            self.send_host_turn_slash_command_warning(
+                                "Scheduled Goal update cancelled because the Goal was cleared.",
+                            ),
+                        )
+                        .await;
+                }
                 if let Some((goal_id, definition_revision)) = retired_goal_owner {
                     self.cancel_goal_owned_work(&goal_id, definition_revision)
                         .await;
@@ -1456,8 +1770,9 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::GoalBudget { token_budget } => {
-                let message = self.update_goal_token_budget(token_budget).await;
-                self.send_host_turn_slash_command_output(&message).await;
+                if let Some(message) = self.update_goal_token_budget(token_budget).await {
+                    self.send_host_turn_slash_command_output(&message).await;
+                }
                 ok_end_turn(0, None)
             }
         }
@@ -1599,7 +1914,7 @@ mod out_of_band_goal_control_tests {
                     .definition_revision;
                 assert_eq!(
                     actor.update_goal_token_budget(Some(100)).await,
-                    "Goal token budget is already 100 tokens."
+                    Some("Goal token budget is already 100 tokens.".to_string())
                 );
                 assert_eq!(
                     actor
@@ -1612,12 +1927,12 @@ mod out_of_band_goal_control_tests {
                 );
                 assert_eq!(
                     actor.update_goal_token_budget(Some(0)).await,
-                    "Goal token budget must be a positive integer."
+                    Some("Goal token budget must be a positive integer.".to_string())
                 );
 
                 assert_eq!(
                     actor.update_goal_token_budget(Some(200)).await,
-                    "User set current Goal budget to 200 tokens."
+                    Some("User set current Goal budget to 200 tokens.".to_string())
                 );
                 let materialized = actor
                     .chat_state_handle
@@ -1637,7 +1952,7 @@ mod out_of_band_goal_control_tests {
                 assert!(directive.text_content().contains("token budget: 200"));
                 assert_eq!(
                     actor.update_goal_token_budget(None).await,
-                    "User set current Goal budget to unlimited."
+                    Some("User set current Goal budget to unlimited.".to_string())
                 );
                 let mut projected = false;
                 while let Ok(message) = gateway_rx.try_recv() {
@@ -1696,7 +2011,7 @@ mod out_of_band_goal_control_tests {
                 drop(boundary);
                 assert_eq!(
                     update.await.unwrap(),
-                    "User set current Goal budget to 200 tokens."
+                    Some("User set current Goal budget to 200 tokens.".to_string())
                 );
                 let after = actor.goal_tracker.lock().snapshot().cloned().unwrap();
                 assert_eq!(after.definition_revision, 2);

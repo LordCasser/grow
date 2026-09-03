@@ -200,6 +200,7 @@ impl TurnActivity {
 }
 #[derive(Debug, Clone)]
 pub struct PendingCompaction {
+    pub event_id: Option<String>,
     pub tokens_before: u64,
     pub estimate_after: u64,
     pub elapsed_ms: Option<i64>,
@@ -519,8 +520,10 @@ impl AcpUpdateTracker {
         tokens_before: u64,
         estimate_after: u64,
         elapsed_ms: Option<i64>,
+        event_id: Option<String>,
     ) {
         self.pending_compaction = Some(PendingCompaction {
+            event_id,
             tokens_before,
             estimate_after,
             elapsed_ms,
@@ -846,12 +849,13 @@ impl AcpUpdateTracker {
             }
         }
         if let Some(pending) = self.pending_compaction.take() {
-            scrollback.push_block(RenderBlock::session_event(
+            scrollback.push_block(RenderBlock::session_event_with_id(
                 SessionEvent::CompactionCompleted {
                     tokens_before: pending.tokens_before,
                     tokens_after: pending.last_used.unwrap_or(pending.estimate_after),
                     elapsed_ms: pending.elapsed_ms,
                 },
+                pending.event_id,
             ));
         }
         self.last_thinking_elapsed_ms = None;

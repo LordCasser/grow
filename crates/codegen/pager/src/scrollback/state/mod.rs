@@ -326,6 +326,16 @@ impl Default for ScrollbackState {
 }
 
 impl ScrollbackState {
+    /// Authoritative command facts win over an out-of-order RPC error or
+    /// transient progress. This does not deduplicate durable notices.
+    pub(crate) fn has_command_result(&self, invocation_id: &str) -> bool {
+        self.iter_entries().any(|(_, entry)| {
+            matches!(&entry.block,
+            RenderBlock::Notice(notice)
+                if notice.command_invocation_id.as_deref() == Some(invocation_id))
+        })
+    }
+
     /// Create a new empty state.
     pub fn new() -> Self {
         Self {

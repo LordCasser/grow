@@ -69,7 +69,7 @@ pub(super) async fn latch_termination_and_cancel_controls(
     requested: TerminationState,
 ) -> Result<(), String> {
     let _gate = session.step_control_gate.lock().await;
-    let pending_behavior = {
+    let (pending_behavior, cancelled) = {
         let mut state = session.state.lock().await;
         state.termination.request(requested);
         if matches!(requested, TerminationState::Graceful)
@@ -77,9 +77,12 @@ pub(super) async fn latch_termination_and_cancel_controls(
         {
             return Err("session already crossed a fatal persistence boundary".to_string());
         }
-        state.pending_step_controls.cancel_for_shutdown();
-        state.pending_behavior_control.take()
+        let cancelled = state.pending_step_controls.cancel_for_shutdown();
+        (state.pending_behavior_control.take(), cancelled)
     };
+    if matches!(requested, TerminationState::Graceful) {
+        session.publish_cancelled_goal_commands(cancelled).await;
+    }
     if let Some(pending) = pending_behavior {
         let _ = pending.responds_to.send(Err(
             acp::Error::internal_error().data("session is shutting down")
@@ -1372,7 +1375,11 @@ pub(super) async fn run_session(
                                 .cancel_turn_for_goal_control(control, &mut replay_buffer)
                                 .await
                             {
-                                let _ = respond_to.send(Err(format!("{error:?}")));
+                                // The Goal control already committed and owns
+                                // its result. Cleanup failure terminates the
+                                // session, not the successfully applied command.
+                                tracing::error!(?error, "Goal control cleanup failed after commit");
+                                let _ = respond_to.send(Ok(()));
                                 terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                                 return;
                             }
@@ -1386,7 +1393,7 @@ pub(super) async fn run_session(
                             )
                             .await;
                         }
-                        let _ = respond_to.send(result.map(|_| ()));
+                        let _ = respond_to.send(result.map(|_| ()).map_err(|error| acp::Error::invalid_request().data(error)));
                     }
                     SessionCommand::SetSessionTitle { title, respond_to } => {
                         // A user title wins permanently. Taking the capability

@@ -969,7 +969,9 @@ pub struct AgentSession {
     /// presentation-only, never persisted, and never projected into model
     /// context. Clearing is key-checked so completion of an older operation
     /// cannot erase a newer status that replaced it.
-    live_feedback: Option<(&'static str, crate::scrollback::blocks::UiFeedback)>,
+    live_feedback: Option<(String, crate::scrollback::blocks::UiFeedback)>,
+    /// Only this live query may open the Memory browser. Replay cannot do so.
+    pub(crate) pending_memory_browse: Option<String>,
     /// Latest server-authoritative model state observed while a local route
     /// control is outstanding. Applying it immediately would make the local
     /// completion appear unchanged; dropping it would let a second client leave
@@ -1288,6 +1290,7 @@ impl AgentSession {
             controls: SessionControlState::default(),
             shell_controls: ShellControlState::default(),
             live_feedback: None,
+            pending_memory_browse: None,
             pending_authoritative_model_change: None,
             pending_authoritative_agent_change: None,
             agent_metadata_revision: 0,
@@ -1351,6 +1354,8 @@ impl AgentSession {
     }
 
     pub(crate) fn begin_replay(&mut self) {
+        self.pending_memory_browse = None;
+        self.live_feedback = None;
         self.prompt_history_loading = true;
         self.loading_replay = true;
         self.replay_live_cursor_seen = false;
@@ -2058,17 +2063,17 @@ impl AgentSession {
 
     pub(crate) fn set_live_feedback(
         &mut self,
-        key: &'static str,
+        key: impl Into<String>,
         tone: crate::scrollback::blocks::NoticeTone,
         message: impl Into<String>,
     ) {
         self.live_feedback = Some((
-            key,
+            key.into(),
             crate::scrollback::blocks::UiFeedback::new(tone, message),
         ));
     }
 
-    pub(crate) fn clear_live_feedback(&mut self, key: &'static str) {
+    pub(crate) fn clear_live_feedback(&mut self, key: &str) {
         if self
             .live_feedback
             .as_ref()
@@ -2637,9 +2642,10 @@ impl AgentSession {
         tokens_before: u64,
         estimate_after: u64,
         elapsed_ms: Option<i64>,
+        event_id: Option<String>,
     ) {
         self.tracker
-            .defer_compaction(tokens_before, estimate_after, elapsed_ms);
+            .defer_compaction(tokens_before, estimate_after, elapsed_ms, event_id);
     }
     pub fn note_context_used(&mut self, used: u64) {
         self.tracker.note_context_used(used);

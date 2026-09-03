@@ -563,9 +563,9 @@ async fn handle_command_execute(agent: &MvpAgent, args: &acp::ExtRequest) -> Ext
             description: request.description,
             invocation_id: request.invocation_id,
         })
-        .await
-        .map_err(|message| acp::Error::invalid_request().data(message))?;
-    to_raw_response(&serde_json::json!({ "status": "executed" }))
+        .await?;
+    // Acceptance may precede the Step boundary; the notice owns completion.
+    to_raw_response(&serde_json::json!({ "status": "accepted" }))
 }
 
 async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {

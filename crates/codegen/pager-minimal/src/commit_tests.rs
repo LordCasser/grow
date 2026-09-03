@@ -578,7 +578,7 @@ fn commit_leading_run_advances_frontier_and_marks_committed_once() {
 fn command_notice_keeps_compact_metadata_when_stamped_and_committed() {
     for (tone, expected) in [
         (NoticeTone::Success, DisplayMode::Collapsed),
-        (NoticeTone::Error, DisplayMode::Expanded),
+        (NoticeTone::Error, DisplayMode::Collapsed),
     ] {
         let mut state = ScrollbackState::new();
         state.push_block(RenderBlock::terminal_notice(
@@ -627,6 +627,26 @@ fn terminal_notice_commits_once_during_a_running_turn() {
         "a committed terminal notice must never be printed twice"
     );
     assert_eq!(emitted, vec![0]);
+}
+
+#[test]
+fn compaction_result_replay_never_commits_a_second_native_row() {
+    let mut state = ScrollbackState::new();
+    let result = |after| {
+        RenderBlock::session_event_with_id(
+            pager::scrollback::blocks::SessionEvent::CompactionCompleted {
+                tokens_before: 90_000,
+                tokens_after: after,
+                elapsed_ms: Some(500),
+            },
+            Some("compact-result".into()),
+        )
+    };
+    state.push_block(result(20_000));
+    assert_eq!(commit_collect(&mut state), vec![0]);
+    state.push_block(result(21_000));
+    assert!(commit_collect(&mut state).is_empty());
+    assert_eq!(state.len(), 1);
 }
 
 #[test]

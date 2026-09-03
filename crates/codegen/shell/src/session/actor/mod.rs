@@ -472,6 +472,7 @@ struct PendingGoalDefinitionControl {
     /// revisions are intentionally not captured: multiple edits admitted in
     /// one step compose in FIFO order against this same long-lived Goal.
     goal_id: String,
+    invocation: Option<crate::session::HostCommandInvocation>,
     mutation: PendingGoalDefinitionMutation,
     /// Present only for an idle admission, where the caller may safely wait
     /// for the immediately drained durable result. Active-turn commands return
@@ -999,7 +1000,12 @@ impl PendingStepControls {
         }
     }
 
-    fn cancel_goal_definitions(&mut self, goal_id: &str, message: &str) {
+    fn cancel_goal_definitions(
+        &mut self,
+        goal_id: &str,
+        message: &str,
+    ) -> Vec<crate::session::HostCommandInvocation> {
+        let mut cancelled = Vec::new();
         self.ordered.retain_mut(|pending| {
             let PendingStepControl::GoalDefinition(goal) = &mut pending.value else {
                 return true;
@@ -1009,12 +1015,16 @@ impl PendingStepControls {
             }
             if let Some(respond_to) = goal.responds_to.take() {
                 let _ = respond_to.send(Err(message.to_owned()));
+            } else if let Some(invocation) = goal.invocation.take() {
+                cancelled.push(invocation);
             }
             false
         });
+        cancelled
     }
 
-    fn cancel_for_shutdown(&mut self) {
+    fn cancel_for_shutdown(&mut self) -> Vec<crate::session::HostCommandInvocation> {
+        let mut cancelled = Vec::new();
         let error = || acp::Error::internal_error().data("session is shutting down");
         if let Some(pending) = self.sampling.take() {
             let _ = pending.value.respond_to.send(Err(error()));
@@ -1033,6 +1043,8 @@ impl PendingStepControls {
                 PendingStepControl::GoalDefinition(mut pending) => {
                     if let Some(respond_to) = pending.responds_to.take() {
                         let _ = respond_to.send(Err("session is shutting down".to_string()));
+                    } else if let Some(invocation) = pending.invocation.take() {
+                        cancelled.push(invocation);
                     }
                 }
                 PendingStepControl::ModelSelection(_) | PendingStepControl::AgentSelection(_) => {
@@ -1040,6 +1052,7 @@ impl PendingStepControls {
                 }
             }
         }
+        cancelled
     }
 }
 
@@ -1984,7 +1997,7 @@ impl SessionActor {
     /// Append durable, UI-only output for a Shell-owned command or lifecycle
     /// control. It never enters ChatState and never masquerades as assistant
     /// prose. The outer notification metadata supplies the immutable event id;
-    /// `invocation_id` groups multiple terminal rows from one command.
+    /// `invocation_id` correlates progress with its final result.
     async fn send_host_turn_slash_command_output(&self, text: &str) {
         self.send_host_turn_slash_command_notice(
             crate::extensions::notification::UiNoticeTone::Info,
@@ -2007,7 +2020,7 @@ impl SessionActor {
                 description: "Session lifecycle control".to_string(),
                 invocation_id: format!("session-control-{}", uuid::Uuid::now_v7()),
             });
-        self.send_ui_notice(crate::extensions::notification::UiNotice {
+        let notice = crate::extensions::notification::UiNotice {
             correlation_id: invocation.invocation_id,
             category: crate::extensions::notification::UiNoticeCategory::Command,
             subject: Some(invocation.command),
@@ -2015,8 +2028,14 @@ impl SessionActor {
             message: message.to_string(),
             tone,
             details,
-        })
-        .await;
+        };
+        if tone == crate::extensions::notification::UiNoticeTone::Progress {
+            self.send_transient_passive_notification(
+                crate::extensions::notification::SessionUpdate::UiNotice(notice),
+            );
+        } else {
+            self.send_ui_notice(notice).await;
+        }
     }
 
     async fn send_lifecycle_notice(
@@ -2052,6 +2071,9 @@ impl SessionActor {
         &self,
         notice: crate::extensions::notification::UiNotice,
     ) -> Result<(), String> {
+        if notice.tone == crate::extensions::notification::UiNoticeTone::Progress {
+            return Err("command progress is transient and cannot be persisted".into());
+        }
         let update = crate::extensions::notification::SessionUpdate::UiNotice(notice);
         self.send_grow_passive_notification(update.clone(), update)
             .await
@@ -2076,11 +2098,16 @@ impl SessionActor {
         .await;
     }
 
-    async fn send_host_turn_slash_command_error(&self, message: &str, details: impl Into<String>) {
+    /// Cause and next action are visible even when command metadata is folded.
+    async fn send_host_turn_slash_command_error(
+        &self,
+        message: &str,
+        explanation: impl Into<String>,
+    ) {
         self.send_host_turn_slash_command_notice(
             crate::extensions::notification::UiNoticeTone::Error,
-            message,
-            Some(details.into()),
+            &format!("{message}\n{}", explanation.into()),
+            None,
         )
         .await;
     }

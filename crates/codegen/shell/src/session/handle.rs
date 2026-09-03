@@ -474,16 +474,18 @@ impl SessionHandle {
     pub(crate) async fn execute_slash_command(
         &self,
         invocation: crate::session::HostCommandInvocation,
-    ) -> Result<(), String> {
+    ) -> acp::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(SessionCommand::ExecuteSlashCommand {
                 invocation,
                 respond_to: tx,
             })
-            .map_err(|_| "session actor is not available".to_string())?;
-        rx.await
-            .map_err(|_| "session actor stopped before executing the command".to_string())?
+            .map_err(|_| acp::Error::invalid_request().data("session actor is not available"))?;
+        rx.await.map_err(|_| {
+            acp::Error::internal_error()
+                .data("session actor stopped before acknowledging the command; outcome unknown")
+        })?
     }
     /// Replace the live session's client-registered hooks (see `SessionCommand::SetClientHooks`).
     pub(crate) fn set_client_hooks(&self, hooks: crate::extensions::hooks::ClientHooks) {

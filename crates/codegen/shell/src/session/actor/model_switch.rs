@@ -1345,11 +1345,22 @@ impl SessionActor {
                 goal_id,
                 mutation,
                 responds_to,
+                invocation: HOST_COMMAND_INVOCATION.try_with(Clone::clone).ok(),
             });
         if should_drain {
             admission.foreground = ForegroundState::ApplyingControl;
         }
         drop(admission);
+        if !should_drain {
+            // Publish before releasing the boundary: application cannot race
+            // ahead of its queued feedback and leave a stale spinner behind.
+            self.send_host_turn_slash_command_notice(
+                crate::extensions::notification::UiNoticeTone::Progress,
+                "Goal update queued for the next step boundary.",
+                None,
+            )
+            .await;
+        }
         drop(gate);
         if should_drain {
             self.drain_claimed_pending_step_controls().await;
@@ -1450,7 +1461,7 @@ impl SessionActor {
                 applied_agent,
                 applied_behavior,
                 retired_goal_owner,
-                deferred_error,
+                deferred_goal_result,
                 mut terminal_settlement,
                 fatal_error,
             ) = self.apply_pending_control(control, workspace_binding).await;
@@ -1541,14 +1552,8 @@ impl SessionActor {
                 self.cancel_goal_owned_work(&goal_id, definition_revision)
                     .await;
             }
-            if let Some(error) = deferred_error {
-                self.send_host_turn_slash_command_error(
-                    "Scheduled Goal update was rejected",
-                    format!(
-                        "Reason: {error}\nRecovery: inspect /goal status, correct the definition, and retry."
-                    ),
-                )
-                .await;
+            if let Some((invocation, outcome)) = deferred_goal_result {
+                self.publish_deferred_goal_result(invocation, outcome).await;
             }
             model_changed |= applied_model;
             agent_changed |= applied_agent;
@@ -1604,11 +1609,14 @@ impl SessionActor {
         bool,
         bool,
         Option<(String, u64)>,
-        Option<String>,
+        Option<(crate::session::HostCommandInvocation, Result<bool, String>)>,
         Option<PendingControlSettlement>,
         Option<acp::Error>,
     ) {
-        if let Err(error) = self.cancel_background_compaction("control_authority_changed").await {
+        if let Err(error) = self
+            .cancel_background_compaction("control_authority_changed")
+            .await
+        {
             return (false, false, false, None, None, None, Some(error));
         }
         match control {
@@ -1711,10 +1719,10 @@ impl SessionActor {
                     .err()
                     .filter(|error| crate::session::commands::is_fatal_turn_boundary_error(error))
                     .cloned();
-                let deferred_error = result
+                let outcome = result
                     .as_ref()
-                    .err()
-                    .map(|error| {
+                    .map(|(changed, _, _)| *changed)
+                    .map_err(|error| {
                         error
                             .data
                             .as_ref()
@@ -1725,8 +1733,11 @@ impl SessionActor {
                             })
                             .map(str::to_owned)
                             .unwrap_or_else(|| error.to_string())
-                    })
-                    .filter(|_| pending.responds_to.as_ref().is_none());
+                    });
+                let deferred_goal_result = pending
+                    .invocation
+                    .filter(|_| pending.responds_to.is_none())
+                    .map(|invocation| (invocation, outcome));
                 if let Some(respond_to) = pending.responds_to {
                     let _ = respond_to.send(
                         result
@@ -1739,12 +1750,29 @@ impl SessionActor {
                     false,
                     behavior_changed,
                     retired_goal_owner,
-                    deferred_error,
+                    deferred_goal_result,
                     None,
                     fatal,
                 )
             }
         }
+    }
+
+    async fn publish_deferred_goal_result(
+        &self,
+        invocation: crate::session::HostCommandInvocation,
+        outcome: Result<bool, String>,
+    ) {
+        HOST_COMMAND_INVOCATION.scope(invocation, async {
+            match outcome {
+                Ok(true) => self.send_host_turn_slash_command_success("Goal definition updated.").await,
+                Ok(false) => self.send_host_turn_slash_command_output("Goal already has that definition; nothing changed.").await,
+                Err(error) => self.send_host_turn_slash_command_error(
+                    "Scheduled Goal update was rejected",
+                    format!("Reason: {error}\nInspect /goal status, correct the definition, and retry."),
+                ).await,
+            }
+        }).await;
     }
 
     fn spawn_claimed_pending_step_control_drain(self: &std::sync::Arc<Self>) {
@@ -1835,11 +1863,13 @@ impl SessionActor {
             let _gate = self.step_control_gate.lock().await;
             let mut admission = self.state.lock().await;
             if !admission.termination.is_open() {
-                admission.pending_step_controls.cancel_for_shutdown();
+                let cancelled = admission.pending_step_controls.cancel_for_shutdown();
                 admission.applying_step_control = None;
                 if matches!(admission.foreground, ForegroundState::ApplyingControl) {
                     admission.foreground = ForegroundState::Idle;
                 }
+                drop(admission);
+                self.publish_cancelled_goal_commands(cancelled).await;
                 return;
             }
             debug_assert!(matches!(
@@ -1856,8 +1886,15 @@ impl SessionActor {
                 continue;
             };
             drop(admission);
-            let (_, _, _, retired_goal_owner, deferred_error, mut terminal_settlement, fatal_error) =
-                self.apply_pending_control(control, workspace_binding).await;
+            let (
+                _,
+                _,
+                _,
+                retired_goal_owner,
+                deferred_goal_result,
+                mut terminal_settlement,
+                fatal_error,
+            ) = self.apply_pending_control(control, workspace_binding).await;
             {
                 let mut admission = self.state.lock().await;
                 if admission.applying_step_control.as_ref() == projection.as_ref() {
@@ -1934,14 +1971,8 @@ impl SessionActor {
                 self.cancel_goal_owned_work(&goal_id, definition_revision)
                     .await;
             }
-            if let Some(error) = deferred_error {
-                self.send_host_turn_slash_command_error(
-                    "Scheduled Goal update was rejected",
-                    format!(
-                        "Reason: {error}\nRecovery: inspect /goal status, correct the definition, and retry."
-                    ),
-                )
-                .await;
+            if let Some((invocation, outcome)) = deferred_goal_result {
+                self.publish_deferred_goal_result(invocation, outcome).await;
             }
         }
     }
@@ -1951,17 +1982,42 @@ impl SessionActor {
     /// can cancel Agent preparation and queued desired state immediately.
     pub(super) async fn cancel_uncommitted_controls_for_shutdown(&self) {
         let _gate = self.step_control_gate.lock().await;
-        let pending_behavior = {
+        let (pending_behavior, cancelled) = {
             let mut state = self.state.lock().await;
-            state.pending_step_controls.cancel_for_shutdown();
-            state.pending_behavior_control.take()
+            let cancelled = state.pending_step_controls.cancel_for_shutdown();
+            (state.pending_behavior_control.take(), cancelled)
         };
+        self.publish_cancelled_goal_commands(cancelled).await;
         if let Some(pending) = pending_behavior {
             let _ = pending.responds_to.send(Err(
                 acp::Error::internal_error().data("session is shutting down")
             ));
         }
         self.idle_arbiter.notify_waiters();
+    }
+
+    pub(super) async fn publish_cancelled_goal_commands(
+        &self,
+        invocations: Vec<crate::session::HostCommandInvocation>,
+    ) {
+        // Shutdown can hold the admission gate. Enqueue before its existing
+        // persistence barrier instead of awaiting a UI ack under that gate.
+        let sender = self.goal_notify_sender();
+        for invocation in invocations {
+            sender.send_update(crate::extensions::notification::SessionUpdate::UiNotice(
+                crate::extensions::notification::UiNotice {
+                    correlation_id: invocation.invocation_id,
+                    category: crate::extensions::notification::UiNoticeCategory::Command,
+                    subject: Some(invocation.command),
+                    description: Some(invocation.description),
+                    tone: crate::extensions::notification::UiNoticeTone::Warning,
+                    message:
+                        "Scheduled Goal update cancelled because the session is shutting down."
+                            .into(),
+                    details: None,
+                },
+            ));
+        }
     }
 
     /// Apply an admitted Agent selection while the caller owns the idle

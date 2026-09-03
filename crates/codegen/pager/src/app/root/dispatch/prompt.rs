@@ -722,6 +722,8 @@ pub(super) fn dispatch_send_prompt_inner(
             }
             CommandResult::HostCommand(request) => {
                 if let Some(session_id) = agent.session.session_id.clone() {
+                    agent.session.pending_memory_browse = (request.command.trim() == "/memory")
+                        .then(|| request.invocation_id.clone());
                     if consume_input {
                         agent.prompt.set_text("");
                     }
@@ -1292,10 +1294,14 @@ pub(super) fn handle_compact_complete(
     app: &mut AppView,
     agent_id: AgentId,
     track_foreground: bool,
-    result: Result<crate::app::actions::CompactRequestStatus, String>,
+    result: Result<crate::app::actions::CompactRequestStatus, acp::Error>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if !track_foreground {
+            if let Err(error) = result {
+                show_compact_request_error(agent, &error);
+                return vec![];
+            }
             let message = match result {
                 Ok(crate::app::actions::CompactRequestStatus::Scheduled) => {
                     "Compaction scheduled after the current turn.".to_string()
@@ -1304,20 +1310,19 @@ pub(super) fn handle_compact_complete(
                     "Compaction is already pending or running.".to_string()
                 }
                 Ok(crate::app::actions::CompactRequestStatus::Completed) => {
-                    "Conversation compacted.".to_string()
+                    // The durable Shell completion event owns the result.
+                    return vec![];
                 }
-                Err(error) => format!("Compaction request failed: {error}"),
+                Err(_) => unreachable!("handled above"),
             };
-            agent.scrollback.push_block(RenderBlock::notice(message));
+            agent.session.set_live_feedback(
+                "compaction",
+                crate::scrollback::blocks::NoticeTone::Info,
+                message,
+            );
             return vec![];
         }
         // Defensive: only process if we're still in a compact command state.
-        let was_cancelling = matches!(
-            agent.session.state,
-            AgentState::CommandCancelling {
-                command: AgentCommand::Compact,
-            }
-        );
         if !matches!(
             agent.session.state,
             AgentState::CommandRunning {
@@ -1331,39 +1336,28 @@ pub(super) fn handle_compact_complete(
             return vec![];
         }
 
-        let elapsed = agent.turn_elapsed();
         agent.session.finish_command();
 
         match &result {
             Ok(crate::app::actions::CompactRequestStatus::Completed) => {
-                agent.scrollback.push_block(RenderBlock::session_event(
-                    SessionEvent::CompactCompleted {
-                        elapsed: elapsed.unwrap_or_default(),
-                    },
-                ));
+                // The durable Shell completion event owns the result.
             }
             Ok(crate::app::actions::CompactRequestStatus::Scheduled) => {
-                agent.scrollback.push_block(RenderBlock::notice(
-                    "Compaction scheduled after the current turn.".to_string(),
-                ));
+                agent.session.set_live_feedback(
+                    "compaction",
+                    crate::scrollback::blocks::NoticeTone::Progress,
+                    "Compaction scheduled after the current turn.",
+                );
             }
             Ok(crate::app::actions::CompactRequestStatus::AlreadyRunning) => {
-                agent.scrollback.push_block(RenderBlock::notice(
-                    "Compaction is already pending or running.".to_string(),
-                ));
-            }
-            Err(err) if was_cancelling || err.contains("compact cancelled") => {
-                agent.scrollback.push_block(RenderBlock::session_event(
-                    SessionEvent::CompactionCancelled,
-                ));
+                agent.session.set_live_feedback(
+                    "compaction",
+                    crate::scrollback::blocks::NoticeTone::Progress,
+                    "Compaction is already pending or running.",
+                );
             }
             Err(err) => {
-                tracing::error!(agent = ?agent_id, error = %err, "Compaction failed");
-                agent.scrollback.push_block(RenderBlock::session_event(
-                    SessionEvent::CompactionFailed {
-                        error: String::new(),
-                    },
-                ));
+                show_compact_request_error(agent, err);
             }
         }
 
@@ -1379,6 +1373,33 @@ pub(super) fn handle_compact_complete(
         return drain.effects;
     }
     vec![]
+}
+
+fn show_compact_request_error(agent: &mut AgentView, error: &acp::Error) {
+    if shell::session::control_terminal_was_published(error) {
+        return;
+    }
+    let reason = super::super::effects::sanitize_user_error(&error.to_string());
+    if matches!(
+        error.code,
+        acp::ErrorCode::InvalidRequest
+            | acp::ErrorCode::InvalidParams
+            | acp::ErrorCode::MethodNotFound
+    ) {
+        agent.session.clear_live_feedback("compaction");
+        agent.scrollback.push_block(RenderBlock::typed_notice(
+            crate::scrollback::blocks::NoticeTone::Error,
+            crate::scrollback::blocks::NoticeCategory::Command,
+            format!("Compaction was rejected: {reason}\nCheck session state, then retry /compact."),
+            None,
+        ));
+    } else {
+        agent.session.set_live_feedback(
+            "compaction",
+            crate::scrollback::blocks::NoticeTone::Warning,
+            "Compaction outcome unknown. Reconnect and check session state before retrying.",
+        );
+    }
 }
 
 pub(super) fn handle_suggestion_debounce_expired(

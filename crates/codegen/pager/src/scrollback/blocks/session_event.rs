@@ -86,11 +86,6 @@ pub enum SessionEvent {
     /// vs the server's max_prompt_length, or compaction suppressed/failed). One actionable
     /// prompt, replacing the CompactionFailed + RetryFailed + TurnFailed stack.
     ContextTooLarge,
-    /// Manual `/compact` command completed.
-    CompactCompleted {
-        /// Wall-clock elapsed time for the command.
-        elapsed: Duration,
-    },
     /// Hook annotation projected from a completed Timeline occurrence.
     HookAnnotation {
         /// Durable Hook occurrence that owns this annotation.
@@ -111,20 +106,6 @@ pub enum SessionEvent {
         path: String,
         /// What triggered the save: "session-end", "flush", or "dream".
         trigger: String,
-    },
-    /// A long-lived Goal was created.
-    GoalCreated,
-    GoalObjectiveUpdated,
-    GoalPaused,
-    GoalBlocked,
-    GoalBudgetLimited,
-    GoalRestarted,
-    /// A `/goal` finished (status → Complete). Carries the goal's total
-    /// elapsed time across all its turns, distinct from the per-turn
-    /// "Worked for" marker.
-    GoalCompleted {
-        /// Goal end-to-end elapsed time (`GoalUpdated.elapsed_ms`).
-        elapsed: Duration,
     },
     /// A session recap — a short "where was I" summary of the session so far.
     /// Surfaced on demand via `/recap` (`auto = false`) or automatically when
@@ -210,9 +191,6 @@ impl SessionEvent {
                  Use /new to start a new session."
                     .to_string()
             }
-            SessionEvent::CompactCompleted { elapsed } => {
-                format!("Compaction completed in {}.", format_duration(*elapsed))
-            }
             SessionEvent::HookAnnotation { message, .. } => message.clone(),
             SessionEvent::ModelUnavailable {
                 new_model_id,
@@ -228,20 +206,6 @@ impl SessionEvent {
             SessionEvent::MemorySaved { path, trigger } => {
                 let short_path = crate::util::abbreviate_path(path);
                 format!("Memory saved ({trigger}) \u{2192} {short_path}  \u{00b7}  /memory to view")
-            }
-            SessionEvent::GoalCreated => "Long-term Goal created.".to_string(),
-            SessionEvent::GoalObjectiveUpdated => {
-                "Goal objective updated; automatic continuation is active.".to_string()
-            }
-            SessionEvent::GoalPaused => "Goal paused.".to_string(),
-            SessionEvent::GoalBlocked => "Goal blocked.".to_string(),
-            SessionEvent::GoalBudgetLimited => "Goal token budget exhausted.".to_string(),
-            SessionEvent::GoalRestarted => "Goal restarted.".to_string(),
-            SessionEvent::GoalCompleted { elapsed } => {
-                format!(
-                    "Goal complete \u{2014} {} end-to-end.",
-                    format_duration(*elapsed)
-                )
             }
             SessionEvent::Recap { summary, auto: _ } => {
                 // Always "Recap —" (manual `/recap` and auto return-from-away).
@@ -293,6 +257,7 @@ fn format_tokens(tokens: u64) -> String {
 /// styling differentiation (e.g., red text for failures).
 #[derive(Debug, Clone)]
 pub struct SessionEventBlock {
+    pub event_id: Option<String>,
     /// The typed event data.
     pub event: SessionEvent,
     /// Stop/stop_failure hook runs folded into a turn-terminal marker
@@ -310,6 +275,7 @@ impl SessionEventBlock {
     pub fn new(event: SessionEvent) -> Self {
         Self {
             event,
+            event_id: None,
             stop_hooks: Vec::new(),
             prompt_id: None,
         }
@@ -324,6 +290,7 @@ impl SessionEventBlock {
         debug_assert!(stop_hooks.is_empty() || event.is_turn_terminal());
         Self {
             event,
+            event_id: None,
             stop_hooks,
             prompt_id,
         }
@@ -650,31 +617,6 @@ mod tests {
             elapsed: Duration::from_secs(10),
         };
         assert_eq!(event.message(), "Turn cancelled by user in 10s.");
-    }
-
-    #[test]
-    fn goal_completed_message_shows_end_to_end_time() {
-        let event = SessionEvent::GoalCompleted {
-            elapsed: Duration::from_secs(619),
-        };
-        assert_eq!(event.message(), "Goal complete \u{2014} 10m19s end-to-end.");
-    }
-
-    #[test]
-    fn goal_transition_messages_are_concise_system_statuses() {
-        let cases = [
-            (SessionEvent::GoalCreated, "Long-term Goal created."),
-            (
-                SessionEvent::GoalObjectiveUpdated,
-                "Goal objective updated; automatic continuation is active.",
-            ),
-            (SessionEvent::GoalPaused, "Goal paused."),
-            (SessionEvent::GoalBlocked, "Goal blocked."),
-            (SessionEvent::GoalRestarted, "Goal restarted."),
-        ];
-        for (event, expected) in cases {
-            assert_eq!(event.message(), expected);
-        }
     }
 
     #[test]

@@ -1323,18 +1323,14 @@ pub(crate) fn execute(
                     );
                     let result = match acp_send(req, &tx).await {
                         Ok(response) => serde_json::from_str::<serde_json::Value>(response.0.get())
-                            .map_err(|error| sanitize_user_error(&format!(
-                                "invalid compact response: {error}"
-                            )))
+                            .map_err(|error| acp::Error::internal_error().data(format!("invalid compact response: {error}")))
                             .and_then(|value| {
                                 serde_json::from_value(
                                     value.get("status").cloned().unwrap_or_default(),
                                 )
-                                .map_err(|error| sanitize_user_error(&format!(
-                                    "invalid compact status: {error}"
-                                )))
+                                .map_err(|error| acp::Error::internal_error().data(format!("invalid compact status: {error}")))
                             }),
-                        Err(error) => Err(sanitize_user_error(&error.to_string())),
+                        Err(error) => Err(error),
                     };
                     TaskResult::CompactComplete {
                         agent_id,
@@ -3218,9 +3214,7 @@ pub(crate) fn execute(
                         .expect("serialize commands/execute params")
                         .into(),
                 );
-                let error = acp_send(ext_request, &tx).await.err().map(|error| {
-                    sanitize_user_error(&format!("couldn't execute command: {error}"))
-                });
+                let error = acp_send(ext_request, &tx).await.err();
                 TaskResult::SlashCommandExecuted {
                     agent_id,
                     session_id,

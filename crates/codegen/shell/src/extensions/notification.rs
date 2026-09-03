@@ -438,6 +438,8 @@ pub enum SubagentPermissionOutcome {
 #[derive(Debug, Default, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UiNoticeTone {
+    /// Live feedback only; must not be appended to Timeline.
+    Progress,
     #[default]
     Info,
     Success,
@@ -588,6 +590,10 @@ pub enum SessionUpdate {
     },
     /// Auto-compact completed successfully
     AutoCompactCompleted {
+        /// A manual operation owns an immediate, self-contained result; it
+        /// must not wait for a subsequent model turn to settle token counts.
+        #[serde(default)]
+        manual: bool,
         /// Published without ever blocking foreground sampling.
         async_compact: bool,
         /// Tokens used before compaction.
@@ -960,7 +966,10 @@ pub enum SessionUpdate {
     /// durable ImageShadows in its request projection.
     ImageProjected { notes: Vec<String> },
     /// Memory file listing for the pager's /memory modal.
-    MemoryFiles { files: Vec<MemoryFileInfo> },
+    MemoryFiles {
+        invocation_id: String,
+        files: Vec<MemoryFileInfo>,
+    },
     WorkflowUpdated {
         run_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1439,6 +1448,7 @@ mod tests {
     #[test]
     fn memory_files_variant_roundtrips_through_json() {
         let update = SessionUpdate::MemoryFiles {
+            invocation_id: "browse-1".into(),
             files: vec![
                 MemoryFileInfo {
                     path: "/home/user/.grow/memory/MEMORY.md".into(),
@@ -1469,7 +1479,10 @@ mod tests {
 
     #[test]
     fn memory_files_empty_list_serializes() {
-        let update = SessionUpdate::MemoryFiles { files: vec![] };
+        let update = SessionUpdate::MemoryFiles {
+            invocation_id: "browse-2".into(),
+            files: vec![],
+        };
         let json = serde_json::to_value(&update).unwrap();
         assert_eq!(json["sessionUpdate"], "memory_files");
         assert!(json["files"].as_array().unwrap().is_empty());

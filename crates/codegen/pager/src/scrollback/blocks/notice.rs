@@ -98,6 +98,9 @@ pub struct NoticeBlock {
     /// Stable identity for a durable domain event. Ad-hoc local notices have
     /// no identity because identical text may legitimately occur twice.
     pub event_id: Option<String>,
+    /// Causal command identity, not a dedup key: separate durable facts may
+    /// share it. Used only to suppress stale progress/RPC fallback feedback.
+    pub command_invocation_id: Option<String>,
     pub tone: NoticeTone,
     pub category: NoticeCategory,
     pub text: String,
@@ -128,6 +131,7 @@ impl NoticeBlock {
         let text = text.into();
         Self {
             event_id: None,
+            command_invocation_id: None,
             tone: NoticeTone::Info,
             category: NoticeCategory::Ui,
             text,
@@ -146,6 +150,7 @@ impl NoticeBlock {
     ) -> Self {
         Self {
             event_id: None,
+            command_invocation_id: None,
             tone,
             category,
             text: text.into(),
@@ -162,6 +167,7 @@ impl NoticeBlock {
     ) -> Self {
         Self {
             event_id: Some(event_id.into()),
+            command_invocation_id: None,
             tone,
             category,
             text: text.into(),
@@ -253,12 +259,8 @@ impl BlockContent for NoticeBlock {
     }
 
     fn default_display_mode(&self) -> DisplayMode {
-        // Routine command metadata belongs in details. Keep actionable failure
-        // and warning details visible without requiring another gesture.
-        if self.has_details()
-            && !(self.category == NoticeCategory::Command
-                && matches!(self.tone, NoticeTone::Warning | NoticeTone::Error))
-        {
+        // Cause and recovery belong in the visible body, not in metadata.
+        if self.has_details() {
             DisplayMode::Collapsed
         } else {
             DisplayMode::Expanded
@@ -279,8 +281,8 @@ mod tests {
         for (tone, mode) in [
             (NoticeTone::Info, DisplayMode::Collapsed),
             (NoticeTone::Success, DisplayMode::Collapsed),
-            (NoticeTone::Warning, DisplayMode::Expanded),
-            (NoticeTone::Error, DisplayMode::Expanded),
+            (NoticeTone::Warning, DisplayMode::Collapsed),
+            (NoticeTone::Error, DisplayMode::Collapsed),
         ] {
             let notice = NoticeBlock::terminal(
                 "event",
@@ -323,5 +325,36 @@ mod tests {
         context.mode = DisplayMode::Expanded;
         assert!(notice.output(&context).lines.len() > collapsed.lines.len());
         assert!(!NoticeBlock::new("ordinary lifecycle message").is_foldable());
+    }
+
+    #[test]
+    fn collapsed_command_error_keeps_cause_and_recovery_visible() {
+        let notice = NoticeBlock::terminal(
+            "error",
+            NoticeTone::Error,
+            NoticeCategory::Command,
+            "Goal edit rejected: no Goal exists.\nUse /goal set to create one.",
+            Some("Command: /goal edit revised\nCatalog metadata and diagnostic detail".into()),
+        );
+        let output = notice.output(&BlockContext {
+            width: 100,
+            mode: notice.default_display_mode(),
+            is_running: false,
+            raw: false,
+            max_lines: None,
+            appearance: AppearanceConfig::default(),
+            is_selected: false,
+            cwd: None,
+        });
+        let text = output
+            .lines
+            .iter()
+            .map(|line| line.content.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("no Goal exists"));
+        assert!(text.contains("Use /goal set"));
+        assert!(!text.contains("Catalog metadata"));
+        assert!(notice.detail_text().contains("Catalog metadata"));
     }
 }

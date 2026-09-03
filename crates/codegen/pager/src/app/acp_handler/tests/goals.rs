@@ -70,52 +70,15 @@ fn retired_blackboard_wire_state_is_rejected() {
 }
 
 #[test]
-fn lifecycle_transitions_append_deduplicated_goal_events() {
+fn goal_replay_only_hydrates_state_even_in_goal_behavior() {
     let mut app = make_app_with_agent("sess-A");
-    app.agents
-        .get_mut(&AgentId(0))
-        .unwrap()
-        .session
-        .behavior_mode = tools::types::BehaviorId::Goal;
-
-    assert!(send_goal_update(&mut app, "active", "ship it"));
-    assert!(matches!(
-        last_session_event(&app.agents[&AgentId(0)].scrollback),
-        Some(SessionEvent::GoalCreated)
-    ));
-    let created_len = app.agents[&AgentId(0)].scrollback.len();
-
-    assert!(send_goal_update(&mut app, "active", "ship it"));
-    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), created_len);
-
-    assert!(send_goal_update(&mut app, "active", "ship it safely"));
-    assert!(matches!(
-        last_session_event(&app.agents[&AgentId(0)].scrollback),
-        Some(SessionEvent::GoalObjectiveUpdated)
-    ));
-
-    for (status, expected) in [
-        ("paused", SessionEvent::GoalPaused),
-        ("active", SessionEvent::GoalRestarted),
-        ("blocked", SessionEvent::GoalBlocked),
-        ("budget_limited", SessionEvent::GoalBudgetLimited),
-    ] {
-        assert!(send_goal_update(&mut app, status, "ship it safely"));
-        let actual = last_session_event(&app.agents[&AgentId(0)].scrollback)
-            .expect("status transition event");
-        assert_eq!(actual.message(), expected.message());
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.behavior_mode = tools::types::BehaviorId::Goal;
+    agent.session.loading_replay = true;
+    for status in ["active", "paused", "active", "complete"] {
+        assert!(send_goal_update(&mut app, status, "ship it"));
+        assert!(app.agents[&AgentId(0)].scrollback.is_empty());
     }
-
-    assert!(send_goal_update(&mut app, "complete", "ship it safely"));
-    assert!(matches!(
-        last_session_event(&app.agents[&AgentId(0)].scrollback),
-        Some(SessionEvent::GoalCompleted { .. })
-    ));
-
-    let before_clear = app.agents[&AgentId(0)].scrollback.len();
-    assert!(send_goal_update(&mut app, "cleared", ""));
-    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), before_clear);
-    assert!(app.agents[&AgentId(0)].session.goal_state.is_none());
 }
 
 #[test]
@@ -125,6 +88,7 @@ fn goal_controls_outside_goal_behavior_keep_state_without_duplicate_history() {
     use shell::extensions::notification::{UiNotice, UiNoticeCategory, UiNoticeTone};
 
     for behavior in [
+        tools::types::BehaviorId::Goal,
         tools::types::BehaviorId::Normal,
         tools::types::BehaviorId::Clarify,
         tools::types::BehaviorId::Plan,

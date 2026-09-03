@@ -645,7 +645,7 @@
             percentage: 85,
             reason: "threshold".into(),
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, None));
         assert!(
             session.in_flight_prompt.is_none(),
             "compaction start implies server activity — cancel must not rewind prompt"
@@ -676,7 +676,7 @@
             let update = GrowSessionUpdate::AutoCompactFailed {
                 error: error.into(),
             };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, None));
             assert_eq!(
                 session.compact_held_prompt.as_ref().map(|p| p.text.as_str()),
                 Some("retry after login"),
@@ -699,7 +699,7 @@
         let update = GrowSessionUpdate::ImageDropped {
             notes: notes.clone(),
         };
-        let changed = apply_session_event(&update, &mut session, &mut scrollback);
+        let changed = apply_session_event(&update, &mut session, &mut scrollback, None);
         assert!(changed);
         assert_eq!(scrollback.len(), before + 1);
         let entry = scrollback.entries_mut().last().expect("entry pushed");
@@ -979,6 +979,7 @@
         assert!(handle(plan_update_msg("s1", &["old task"], Some("todo-old"), false), &mut app));
         assert!(handle(plan_update_msg("s1", &["new task while summary runs"], Some("todo-new"), false), &mut app));
         assert!(handle(make_ext_session_notification("s1", GrowSessionUpdate::AutoCompactCompleted {
+            manual: false,
             async_compact: true,
             tokens_before: 74_000,
             tokens_after: 20_000,
@@ -1003,13 +1004,14 @@
             chip_elements: Vec::new(),
         });
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            manual: false,
             async_compact: true,
             tokens_before: 74_000,
             tokens_after: 20_000,
             elapsed_ms: Some(2_000),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, None));
         assert_eq!(session.in_flight_prompt.as_ref().unwrap().text, "still working");
         assert!(session.compact_held_prompt.is_none());
         assert_eq!(scrollback.len(), 1);
@@ -1023,13 +1025,14 @@
         let mut scrollback = ScrollbackState::new();
         session.set_compaction_activity(Some(TurnActivity::AutoCompacting));
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            manual: false,
             async_compact: false,
             tokens_before: 858_000,
             tokens_after: 66_000,
             elapsed_ms: Some(500),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, None));
         assert_eq!(
             scrollback.len(),
             0,
@@ -1061,13 +1064,14 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            manual: false,
             async_compact: false,
             tokens_before: 90_000,
             tokens_after: 20_000,
             elapsed_ms: Some(500),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, None));
         session.finish_turn(&mut scrollback,
         );
         match last_session_event(&scrollback) {
@@ -1087,13 +1091,14 @@
         session.loading_replay = true;
         let mut scrollback = ScrollbackState::new();
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            manual: false,
             async_compact: false,
             tokens_before: 90_000,
             tokens_after: 20_000,
             elapsed_ms: Some(500),
             summary_preview: None,
         };
-        assert!(apply_session_event(&update, &mut session, &mut scrollback));
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, None));
         match last_session_event(&scrollback) {
             Some(SessionEvent::CompactionCompleted { tokens_after, .. }) => {
                 assert_eq!(
@@ -1113,6 +1118,7 @@
             .set_compaction_activity(Some(TurnActivity::AutoCompacting));
 
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            manual: false,
             async_compact: false,
             tokens_before: 858_000,
             tokens_after: 66_000,
@@ -1122,7 +1128,7 @@
         assert!(apply_session_event(
             &update,
             &mut agent.session,
-            &mut agent.scrollback));
+            &mut agent.scrollback, None));
 
         refresh_context_used(&mut agent, 66_000);
         confirm_context_used(&mut agent, 43_000);
@@ -1151,7 +1157,7 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         let update = GrowSessionUpdate::MemoryFlushStarted;
-        assert!(!apply_session_event(&update, &mut session, &mut scrollback));
+        assert!(!apply_session_event(&update, &mut session, &mut scrollback, None));
     }
 
     // ── handle_child_session_notification ──────────────────────────────
@@ -1169,6 +1175,7 @@
             .insert(child_sid.into(), Box::new(child_view));
 
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            manual: false,
             async_compact: false,
             tokens_before: 90000,
             tokens_after: 25000,
@@ -1255,6 +1262,7 @@
             .insert(child_sid.into(), make_subagent_info(child_sid));
 
         let update = GrowSessionUpdate::AutoCompactCompleted {
+            manual: false,
             async_compact: false,
             tokens_before: 90000,
             tokens_after: 25000,

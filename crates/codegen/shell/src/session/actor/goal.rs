@@ -871,7 +871,81 @@ impl SessionActor {
         }
         self.sync_goal_usage_window();
         self.send_available_commands_update().await;
+        self.publish_goal_lifecycle_transition(Some(&previous));
         Ok(())
+    }
+
+    /// Emit only committed runtime transitions, never checkpoints or replay.
+    /// Explicit slash invocations own their confirmation instead.
+    fn publish_goal_lifecycle_transition(
+        &self,
+        previous: Option<&crate::session::goal_tracker::GoalState>,
+    ) {
+        use crate::extensions::notification::UiNoticeTone;
+        use crate::session::goal_tracker::GoalStatus;
+        // Only a Goal control owns this confirmation. A budget stop during
+        // /flush or /compact is an independent lifecycle fact, even though
+        // those operations also run in a host-command context.
+        if HOST_COMMAND_INVOCATION
+            .try_with(|invocation| {
+                invocation
+                    .command
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|command| command.eq_ignore_ascii_case("/goal"))
+            })
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let Some(goal) = self.goal_tracker.lock().snapshot().cloned() else {
+            return;
+        };
+        let previous = previous.filter(|previous| previous.goal_id == goal.goal_id);
+        if previous.is_some_and(|previous| previous.status == goal.status) {
+            return;
+        }
+        let (tone, summary) = match goal.status {
+            GoalStatus::Active if previous.is_none() => {
+                (UiNoticeTone::Success, "Goal created and activated.")
+            }
+            GoalStatus::Active => (UiNoticeTone::Success, "Goal restarted."),
+            GoalStatus::Paused => (
+                UiNoticeTone::Warning,
+                "Goal paused. Use /goal restart when ready.",
+            ),
+            GoalStatus::Blocked => (
+                UiNoticeTone::Warning,
+                "Goal blocked. Resolve the blocker, then use /goal restart.",
+            ),
+            GoalStatus::BudgetLimited => (
+                UiNoticeTone::Warning,
+                "Goal token budget reached. Change /goal budget and restart to continue.",
+            ),
+            GoalStatus::Complete => (UiNoticeTone::Success, "Goal completed."),
+        };
+        let message = match (goal.status, goal.status_message.as_deref()) {
+            (GoalStatus::Paused | GoalStatus::Blocked, Some(reason)) => {
+                format!("{summary}\n{reason}")
+            }
+            _ => summary.to_owned(),
+        };
+        // This runs inside the Goal commit gate. Use the existing ordered
+        // Goal notification queue; waiting for a UI append acknowledgement
+        // here could keep Stop from acquiring that gate after a lost ack.
+        self.goal_notify_sender().send_update(
+            crate::extensions::notification::SessionUpdate::UiNotice(
+                crate::extensions::notification::UiNotice {
+                    correlation_id: format!("lifecycle-goal-{}", uuid::Uuid::now_v7()),
+                    category: crate::extensions::notification::UiNoticeCategory::Lifecycle,
+                    subject: Some("goal".into()),
+                    description: None,
+                    message,
+                    tone,
+                    details: None,
+                },
+            ),
+        );
     }
 
     /// Commit an already-validated Goal mutation together with Goal Behavior.
@@ -930,6 +1004,7 @@ impl SessionActor {
             }
             self.sync_goal_usage_window();
             self.send_available_commands_update().await;
+            self.publish_goal_lifecycle_transition(previous.as_ref());
             return Ok(());
         }
 
@@ -988,6 +1063,7 @@ impl SessionActor {
             BehaviorId::Goal.as_id(),
         ));
         self.send_available_commands_update().await;
+        self.publish_goal_lifecycle_transition(previous.as_ref());
         Ok(())
     }
 
