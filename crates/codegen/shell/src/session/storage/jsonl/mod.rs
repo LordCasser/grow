@@ -21,7 +21,8 @@ pub(crate) enum AppendDurability {
     Buffered,
     Durable,
 }
-/// JSONL storage under `{root}/sessions/{url_encoded_cwd}/{session_id}/`.
+/// JSONL storage under `{root}/sessions/{encoded_cwd}/{session_id}/`.
+/// Long CWDs use the shared bounded slug/hash encoding.
 #[derive(Clone)]
 pub struct JsonlStorageAdapter {
     dir_mode: SessionDirMode,
@@ -1706,11 +1707,11 @@ impl JsonlStorageAdapter {
         target_name: &std::ffi::OsStr,
         build: impl FnOnce(&super::ContainedDirectory) -> io::Result<T>,
     ) -> io::Result<(T, super::ContainedDirectory)> {
-        let staging_name = std::ffi::OsString::from(format!(
-            ".{}.{}.staging",
-            target_name.to_string_lossy(),
-            uuid::Uuid::now_v7().simple()
-        ));
+        // Staging identity is independent of the final name. Appending a
+        // UUID to that name can exceed NAME_MAX even when the final name is
+        // legal, and needlessly lengthens every staged artifact's path.
+        let staging_name =
+            std::ffi::OsString::from(format!(".{}.staging", uuid::Uuid::now_v7().simple()));
         let staging = match parent.create_child(&staging_name, "session staging directory") {
             Ok(staging) => staging,
             Err(error) => {
@@ -2281,11 +2282,8 @@ impl JsonlStorageAdapter {
         let parent = self.open_session_parent(&info)?;
         let name_string = info.id.to_string();
         let name = std::ffi::OsStr::new(&name_string);
-        let quarantine_name = std::ffi::OsString::from(format!(
-            ".{}.{}.deleting",
-            info.id,
-            uuid::Uuid::now_v7().simple()
-        ));
+        let quarantine_name =
+            std::ffi::OsString::from(format!(".{}.deleting", uuid::Uuid::now_v7().simple()));
         parent.rename_child_no_replace(name, &quarantine_name)?;
         if let Err(error) = parent.sync() {
             tracing::warn!(
@@ -2335,7 +2333,7 @@ impl JsonlStorageAdapter {
             .lock()
             .map_err(|_| io::Error::other("session writer lease cache poisoned"))?
             .remove(&key);
-        let lease_name = format!(".{}.writer.lock", info.id);
+        let lease_name = Self::writer_lease_name(&info.id);
         match parent.remove_file(std::ffi::OsStr::new(&lease_name), true) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -2362,6 +2360,22 @@ impl JsonlStorageAdapter {
         Ok(())
     }
 
+    fn writer_lease_name(id: &acp::SessionId) -> String {
+        let name = format!(".{id}.writer.lock");
+        let component_len = if cfg!(windows) {
+            name.encode_utf16().count()
+        } else {
+            name.len()
+        };
+        if component_len <= 255 {
+            return name;
+        }
+        // Locks must be deterministic across adapters/processes. Keep legal
+        // existing lock names; use a disjoint suffix for oversized names so a
+        // short ID equal to the digest cannot alias this lease.
+        format!(".writer-{}.lock", blake3::hash(id.0.as_bytes()).to_hex())
+    }
+
     fn try_acquire_writer_lease(&self, info: &Info) -> io::Result<bool> {
         let key = format!("{}\0{}", info.id, info.cwd);
         let mut leases = self
@@ -2372,7 +2386,7 @@ impl JsonlStorageAdapter {
             return Ok(true);
         }
         let parent = self.open_session_parent(info)?;
-        let lease_name = format!(".{}.writer.lock", info.id);
+        let lease_name = Self::writer_lease_name(&info.id);
         let lease = parent.open_read_write_create(std::ffi::OsStr::new(&lease_name))?;
         match lease.try_lock_exclusive() {
             Ok(()) => {}

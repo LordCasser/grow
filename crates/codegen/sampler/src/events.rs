@@ -155,6 +155,10 @@ pub struct SamplingErrorInfo {
     /// (charge-the-budget behavior) for payloads from older peers.
     #[serde(default, skip_serializing_if = "SentCredential::is_unknown")]
     pub credential: SentCredential,
+    /// Provider-reported usage retained when a terminal response fails local
+    /// protocol validation. A failed call can still have consumed tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<sampling_types::TokenUsage>,
 }
 
 /// Coarse-grained classification of a sampling failure.
@@ -259,6 +263,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             doom_loop_triggers,
             doom_loop_aborted_at_chunk,
             credential,
+            usage: None,
         }
     }
 }

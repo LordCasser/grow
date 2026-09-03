@@ -62,6 +62,7 @@ fn spawn_agent_process(
 struct TextCapture {
     chunks: std::sync::Mutex<Vec<String>>,
     notification_count: AtomicU32,
+    grow_notifications: std::sync::Mutex<Vec<serde_json::Value>>,
 }
 
 /// ACP client impl: auto-approves permissions, captures text chunks.
@@ -71,6 +72,18 @@ struct TestAcpClient {
 
 #[async_trait::async_trait(?Send)]
 impl acp_transport::AcpClientHandler for TestAcpClient {
+    async fn ext_notification(&self, args: acp::ExtNotification) -> acp::Result<()> {
+        if matches!(
+            args.method.as_ref(),
+            "grow/session_notification" | "grow/session/update"
+        ) {
+            self.capture.grow_notifications.lock().unwrap().push(
+                serde_json::from_str(args.params.get())
+                    .expect("valid constructed Grow notification"),
+            );
+        }
+        Ok(())
+    }
     async fn request_permission(
         &self,
         args: acp::RequestPermissionRequest,
@@ -283,6 +296,10 @@ impl GrowStdioClient {
 
     pub fn notification_count(&self) -> u32 {
         self.capture.notification_count.load(Ordering::SeqCst)
+    }
+
+    pub fn grow_notifications(&self) -> Vec<serde_json::Value> {
+        self.capture.grow_notifications.lock().unwrap().clone()
     }
 
     pub fn stderr(&self) -> String {

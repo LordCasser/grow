@@ -63,8 +63,9 @@ pub fn grow_application_in(home: &std::path::Path) -> PathBuf {
     home.join("bin").join(name)
 }
 
-/// Max bytes for a single directory name component (macOS APFS, Linux ext4,
-/// NTFS all enforce 255 bytes).
+/// Conservative component limit for common filesystems. URL-encoded names
+/// are ASCII, so their byte count also equals their Windows UTF-16 length.
+/// This is not a bound on the full path (Windows MAX_PATH is separate).
 const MAX_DIRNAME_BYTES: usize = 255;
 
 /// Encode a CWD string into a filesystem-safe directory name component.
@@ -191,6 +192,26 @@ mod tests {
         let a = format!("/Users/test/{}", "中".repeat(30));
         let b = format!("/Users/test/{}", "日".repeat(30));
         assert_ne!(encode_cwd_dirname(&a), encode_cwd_dirname(&b));
+    }
+
+    #[test]
+    fn windows_cwd_encoding_respects_component_boundary() {
+        let prefix = r"C:\workspace\";
+        let padding = MAX_DIRNAME_BYTES - urlencoding::encode(prefix).len();
+        let at_limit = format!("{prefix}{}", "a".repeat(padding));
+        assert_eq!(encode_cwd_dirname(&at_limit).len(), MAX_DIRNAME_BYTES);
+        assert_eq!(
+            encode_cwd_dirname(&at_limit),
+            urlencoding::encode(&at_limit)
+        );
+
+        let over_limit = format!("{at_limit}a");
+        let encoded = encode_cwd_dirname(&over_limit);
+        assert!(encoded.is_ascii());
+        assert!(encoded.len() <= 57);
+        assert!(!encoded.contains('%'));
+        // A shared leaf / truncated slug must never discard path identity.
+        assert_ne!(encoded, encode_cwd_dirname(&format!("{at_limit}b")));
     }
 
     #[test]

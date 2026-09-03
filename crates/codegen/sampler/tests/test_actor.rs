@@ -993,6 +993,155 @@ fn responses_config(base_url: String, doom_loop: Option<DoomLoopRecoveryPolicy>)
     cfg
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_custom_events_are_skipped_between_real_output_and_after_completion() {
+    let app = Router::new().route(
+        "/v1/responses",
+        post(|| async {
+            let mut events = vec![];
+            for event in sse::responses_api_script_exact("hello 杭州", "test-model") {
+                events.push(Event::default().event("ping").data(r#"{"type":"ping"}"#));
+                events.push(
+                    Event::default()
+                        .event("vendor.metrics")
+                        .data(r#"{"type":"vendor.metrics","load":1}"#),
+                );
+                events.extend(sse_events_to_axum(vec![event]));
+            }
+            // A completed response cannot be invalidated by subsequent bytes.
+            events.push(Event::default().data("not JSON"));
+            Sse::new(stream::iter(
+                events.into_iter().map(Ok::<_, std::convert::Infallible>),
+            ))
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let client = sampler::SamplingClient::new(responses_config(server.base_url(), None)).unwrap();
+    let response = client
+        .conversation_collect(user_request("hi"))
+        .await
+        .unwrap();
+    assert_eq!(response.assistant_text(), "hello 杭州");
+    assert!(response.usage.is_some());
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_custom_only_stream_times_out_and_real_errors_are_not_hidden() {
+    for heartbeat_only in [true, false] {
+        let app = Router::new().route("/v1/responses", post(move || async move {
+            let wire = async_stream::stream! {
+                loop {
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(r#"{"type":"ping"}"#));
+                    if !heartbeat_only {
+                        yield Ok(Event::default().event("ping").data(r#"{"type":"error","code":"invalid_request_error","message":"real failure","param":null,"sequence_number":1}"#));
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            Sse::new(wire)
+        }));
+        let server = MockServer::spawn(app).await;
+        let mut config = responses_config(server.base_url(), None);
+        config.idle_timeout_secs = Some(1);
+        let client = sampler::SamplingClient::new(config).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            client.conversation_collect(user_request("hi")),
+        )
+        .await
+        .expect("custom frames must not reset idle deadline");
+        let error = result.unwrap_err();
+        if heartbeat_only {
+            assert!(
+                matches!(error, sampling_types::SamplingError::IdleTimeout { .. }),
+                "{error:?}"
+            );
+        } else {
+            assert!(error.to_string().contains("real failure"), "{error:?}");
+        }
+        server.shutdown();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn all_endpoints_ignore_custom_frames_without_hiding_failure_or_extending_idle() {
+    for (backend, path) in [
+        (ApiBackend::ChatCompletions, "/v1/chat/completions"),
+        (ApiBackend::Responses, "/v1/responses"),
+        (ApiBackend::Messages, "/v1/messages"),
+    ] {
+        // 0: heartbeat-only, 1: real error disguised by an SSE event name,
+        // 2: clean text with custom events interleaved, 3: missing terminal.
+        for mode in 0..4 {
+            let app = Router::new().route(path, post(move || async move {
+                let wire = async_stream::stream! {
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(r#"{"type":"vendor.keepalive"}"#));
+                    match mode {
+                        0 => loop {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            yield Ok(Event::default().data(r#"{"type":"vendor.metrics","data":{}}"#));
+                        },
+                        1 => yield Ok(Event::default().event("ping").data(r#"{"type":"error","error":{"type":"invalid_request_error","message":"constructed real error"}}"#)),
+                        2 => {
+                            let events = match path {
+                                "/v1/chat/completions" => sse::chat_completion_events("safe text", "test-model"),
+                                "/v1/responses" => sse::responses_api_events("safe text", "test-model"),
+                                _ => sse::messages_api_events("safe text", "test-model", "end_turn"),
+                            };
+                            for event in events {
+                                yield Ok(Event::default().data(r#"{"type":"vendor.extension"}"#));
+                                yield Ok(event);
+                            }
+                        },
+                        _ => {},
+                    }
+                };
+                Sse::new(wire)
+            }));
+            let server = MockServer::spawn(app).await;
+            let mut cfg = test_config(server.base_url(), "test-model");
+            cfg.api_backend = backend.clone();
+            cfg.idle_timeout_secs = Some(1);
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+            let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+            let result = tokio::time::timeout(
+                Duration::from_secs(4),
+                handle.submit_and_collect(RequestId::from("extensions-test"), user_request("hi")),
+            )
+            .await
+            .unwrap();
+            if mode == 2 {
+                assert_eq!(result.unwrap().0.assistant_text(), "safe text");
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    match mode {
+                        0 => error.to_string().contains("idle"),
+                        1 => error.to_string().contains("constructed real error"),
+                        _ => error.to_string().contains("protocol:"),
+                    },
+                    "{backend:?} mode={mode}: {error:?}"
+                );
+            }
+            let events = drain_until_terminal(&mut event_rx, Duration::from_secs(1)).await;
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, SamplingEvent::Retrying { .. })),
+                "no hidden retries: {events:?}"
+            );
+            assert_eq!(
+                handle.active_count().await,
+                0,
+                "terminal must release request ownership"
+            );
+            server.shutdown();
+        }
+    }
+}
+
 /// Server-reported doom-loop triggers flow through the actor rung onto the
 /// completed response, without retries. The trigger is non-confident
 /// (`@response` channel), so the recovery — which resamples only confident

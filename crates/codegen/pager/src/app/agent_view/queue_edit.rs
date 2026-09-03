@@ -393,6 +393,7 @@ impl AgentView {
                         }
                     }
                     entry.text = new_text;
+                    entry.requires_review = false;
                     entry.images = std::mem::take(&mut images);
                     entry.chip_elements = chip_elements;
                     entry.skill_token_ranges = skill_token_ranges;

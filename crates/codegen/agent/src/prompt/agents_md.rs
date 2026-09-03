@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::prompt::ignore::{build_gitignore, is_ignored};
+use tools::reminders::neutralize_reminder_tags;
 
 /// Represents an agent config file with its path and content.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -268,21 +269,6 @@ pub fn format_agents_md_section(configs: &[AgentConfigFile]) -> Option<String> {
 /// Verbatim leading bytes [`render_agents_md`] emits for every reminder block.
 const AGENTS_MD_REMINDER_PREFIX: &str =
     "\n\n<system-reminder>\nAs you answer the user's questions, you can use the following context";
-
-/// Reminder-tag spellings are neutralized case-insensitively so project text
-/// cannot forge harness delimiters.
-const SYSTEM_REMINDER_TAG_PATTERN: &str = r"(?i)<(\s*/?\s*system[-_]reminder)";
-
-/// Literal pattern only — compile failure is a programmer bug, not a runtime input error.
-static SYSTEM_REMINDER_TAG_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(SYSTEM_REMINDER_TAG_PATTERN).unwrap());
-
-/// HTML-escape leading `<` so untrusted AGENTS.md cannot break out of / forge harness framing.
-fn neutralize_reminder_tags(content: &str) -> String {
-    SYSTEM_REMINDER_TAG_RE
-        .replace_all(content, "&lt;$1")
-        .into_owned()
-}
 
 fn render_agents_md(configs: &[AgentConfigFile]) -> Option<String> {
     if configs.is_empty() {
@@ -722,7 +708,6 @@ mod tests {
     /// CI pin: pattern must compile, and must hit the tag shapes we neutralize (not bare words).
     #[test]
     fn system_reminder_tag_pattern_compiles_and_matches() {
-        let re = regex::Regex::new(SYSTEM_REMINDER_TAG_PATTERN).unwrap();
         for sample in [
             "<system-reminder>",
             "</system-reminder>",
@@ -732,7 +717,11 @@ mod tests {
             "<SYSTEM_REMINDER",
             r#"<system-reminder role="x""#,
         ] {
-            assert!(re.is_match(sample), "should match: {sample}");
+            assert_ne!(
+                neutralize_reminder_tags(sample),
+                sample,
+                "should match: {sample}"
+            );
         }
         // Prefix match by design (attrs ok); only reject shapes that are not the tag name.
         for sample in [
@@ -741,7 +730,11 @@ mod tests {
             "<systemx-reminder>",
             "not a tag",
         ] {
-            assert!(!re.is_match(sample), "should not match: {sample}");
+            assert_eq!(
+                neutralize_reminder_tags(sample),
+                sample,
+                "should not match: {sample}"
+            );
         }
     }
 

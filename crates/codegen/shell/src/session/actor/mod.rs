@@ -1520,6 +1520,9 @@ pub(crate) struct SessionActor {
     pub(crate) chat_state_handle: chat_state::ChatStateHandle,
     /// Current running prompt/turn id, shared with SessionHandle.
     pub(crate) current_prompt_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Request failure awaiting the owning prompt's final recovery outcome.
+    /// UI projection only: diagnostics and request accounting remain immediate.
+    pub(crate) pending_sampling_failure: parking_lot::Mutex<Option<(String, RetryState)>>,
     pub(crate) unattributed_background_usage: std::sync::atomic::AtomicBool,
     /// Open blocking reverse-requests (permission / question / plan-approval),
     /// keyed by `tool_call_id`. Shared with `SessionHandle` so the roster can

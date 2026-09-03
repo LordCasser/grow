@@ -18,12 +18,9 @@ impl AgentView {
     /// Resolve the absolute path to the plan file for this session.
     fn plan_file_path(&self) -> Option<std::path::PathBuf> {
         let session_id = self.session.session_id.as_ref()?;
-        let cwd_str = self.session.cwd.to_string_lossy().into_owned();
-        let encoded_cwd = urlencoding::encode(&cwd_str);
+        let cwd_str = self.session.cwd.to_string_lossy();
         Some(
-            shell::util::grow_home::grow_home()
-                .join("sessions")
-                .join(encoded_cwd.as_ref())
+            shell::util::grow_home::sessions_cwd_dir(&cwd_str)
                 .join(session_id.0.as_ref())
                 .join("plan.md"),
         )
@@ -684,6 +681,20 @@ mod plan_chip_tests {
             },
             ScrollbackState::new(),
         )
+    }
+    #[test]
+    fn long_cwd_plan_uses_the_session_storage_namespace() {
+        let mut agent = make_agent();
+        agent.session.cwd = std::path::PathBuf::from(format!(
+            r"C:\Users\dev\Documents\{}\project",
+            "中文目录\\".repeat(30),
+        ));
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("plan-session"));
+        let cwd = agent.session.cwd.to_string_lossy();
+        let expected = shell::util::grow_home::sessions_cwd_dir(&cwd)
+            .join("plan-session")
+            .join("plan.md");
+        assert_eq!(agent.plan_file_path(), Some(expected));
     }
     #[test]
     fn plan_chip_hidden_after_exit_by_default() {

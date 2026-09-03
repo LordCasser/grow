@@ -767,6 +767,20 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::Failed { request_id, error } => {
+                if let Some(usage) = &error.usage {
+                    // Rejection does not undo billed output. Keep independent
+                    // ledgers without anchoring context to unadmitted content.
+                    // Goal attempt usage was already settled by the sampler.
+                    self.tool_context
+                        .record_task_model_output(u64::from(usage.completion_tokens));
+                    self.chat_state_handle.record_last_turn_usage(usage.clone());
+                    self.chat_state_handle
+                        .record_model_call_usage(None, usage.clone(), None, None);
+                    self.signals_handle().record_response_output_usage(
+                        usage.completion_tokens,
+                        usage.reasoning_tokens,
+                    );
+                }
                 let timeline_error = crate::util::truncate(&error.message, 500).to_string();
                 self.events.request_failed(
                     request_id.as_str(),

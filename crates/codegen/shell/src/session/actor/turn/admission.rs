@@ -578,7 +578,7 @@ impl SessionActor {
                 mut context,
                 query,
                 skill_information: skill_info,
-                images: mut raw_images,
+                images: raw_images,
             } = match parse_prompt_with_skills(
                 &prompt_blocks,
                 self.tool_context.cwd.to_path_buf(),
@@ -594,18 +594,9 @@ impl SessionActor {
                     return Err(err);
                 }
             };
-            let recovered = crate::session::placeholder_images::recover_orphan_placeholders(
-                &query,
-                &mut raw_images,
-                std::path::Path::new(&self.session_info.cwd),
-            );
-            if recovered > 0 {
-                tracing::info!(
-                    session_id = %self.session_info.id,
-                    recovered,
-                    "server-side placeholder fallback: loaded orphan image(s) from disk",
-                );
-            }
+            // Only explicit ACP blocks carry attachments. Display placeholders
+            // cannot authorize reading a file that was never in the reviewed
+            // immutable input (or resurrect an attachment on a text-only retry).
             let query =
                 crate::session::placeholder_images::strip_paths_from_image_placeholders(query);
             let user_images = self

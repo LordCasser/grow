@@ -107,6 +107,9 @@ pub struct QueuedPrompt {
     /// Images attached to this prompt. Drained from `PromptWidget` at
     /// submission time. Preserved across queue text edits.
     pub images: Vec<crate::prompt_images::PastedImage>,
+    /// A failed submission kept behind a newer composer draft. Never retry it
+    /// automatically; an explicit queue edit/save or send-now releases it.
+    pub requires_review: bool,
     /// Whether this prompt should display as a skill invocation (teal accent).
     /// Only meaningful when `wire_blocks` is `Some`.
     pub display_as_skill: bool,
@@ -131,6 +134,7 @@ impl QueuedPrompt {
             kind,
             wire_blocks: None,
             images: Vec::new(),
+            requires_review: false,
             display_as_skill: false,
             skill_token_ranges: Vec::new(),
             chip_elements: Vec::new(),
@@ -1005,14 +1009,9 @@ pub struct AgentSession {
     /// `ResumeSessionInWorktreeResponse`. Adding a rendering consumer is
     /// out of scope for now.
     pub restore_degree: Option<workspace::session::git::RestoreDegree>,
-    /// Set when a rate-limit `RetryState::Exhausted` fires, so the subsequent
-    /// `TurnFailed` from the RPC error path can be suppressed (the retry
-    /// handler already displayed a user-friendly message). Cleared on `finish_turn`.
-    pub rate_limited: bool,
-    /// Set when a `RetryState::Failed` with `error_type == "encrypted_content_mismatch"`
-    /// fires, so the subsequent `TurnFailed` can be suppressed (the retry handler
-    /// already displayed a user-friendly message). Cleared on `finish_turn`.
-    pub model_incompatible: bool,
+    /// The retry-failure UI already reported this turn's terminal error.
+    /// Both completion rails suppress a duplicate marker/toast. Reset at turn boundaries.
+    pub model_failure_reported: bool,
     pub(crate) tracker: AcpUpdateTracker,
     /// ACP-advertised slash commands. Seeded from `InitializeResponse.meta`,
     /// updated by `AvailableCommandsUpdate`. The prompt-side registry syncs
@@ -1299,8 +1298,7 @@ impl AgentSession {
             prompt_history_loading: false,
             loading_replay: false,
             restore_degree: None,
-            rate_limited: false,
-            model_incompatible: false,
+            model_failure_reported: false,
             tracker: AcpUpdateTracker::new(),
             available_commands: Vec::new(),
             available_commands_generation: 0,
@@ -2582,6 +2580,7 @@ impl AgentSession {
     ///
     /// Called by `maybe_drain_queue` when a prompt is being sent.
     pub fn start_turn(&mut self, scrollback: &mut ScrollbackState) {
+        self.model_failure_reported = false;
         self.tracker.finish_turn(scrollback);
         self.compact_held_prompt = None;
         self.tracker.set_session_cwd(&self.cwd);
@@ -2594,8 +2593,7 @@ impl AgentSession {
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
         self.tracker.finish_turn(scrollback);
         self.state = AgentState::Idle;
-        self.rate_limited = false;
-        self.model_incompatible = false;
+        self.model_failure_reported = false;
         self.in_flight_prompt = None;
         self.compact_held_prompt = None;
         self.current_prompt_id = None;
@@ -2773,7 +2771,7 @@ impl AgentSession {
             .zip(id_strings.iter())
             .map(|(p, id)| CombineGate {
                 id: id.as_str(),
-                is_plain_prompt: p.kind == QueueEntryKind::Prompt,
+                is_plain_prompt: p.kind == QueueEntryKind::Prompt && !p.requires_review,
                 is_synthetic: false,
                 is_expanded_skill: !p.wire_matches_display(),
                 is_bash: p.kind == QueueEntryKind::BashCommand,

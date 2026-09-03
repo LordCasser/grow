@@ -18,7 +18,7 @@ use indexmap::IndexMap;
 use reqwest::header::{
     ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use sampling_types::error::{try_parse_stream_error, user_facing_api_error_message};
 use sampling_types::{
@@ -37,12 +37,7 @@ pub use sampling_types::ApiBackend;
 const AGENT_PRODUCT: &str = "grow-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 
-/// Parse the `Retry-After` response header as delta-seconds.
-/// Our inference backends only emit integer seconds (never HTTP-date),
-/// so we only handle that form. HTTP-dates silently return `None` and
-/// the caller falls back to exponential backoff.
-/// Capped at 120s to prevent absurdly long sleeps from a misbehaving upstream.
-/// On `response.completed` / `response.incomplete`, this also rewrites
+/// Deserialize a known Responses event. On completed/incomplete, rewrite
 /// `response.usage.total_tokens` in place to the live context length
 /// (`context_details.input_tokens + context_details.output_tokens`)
 /// when the API emits the optional `context_details` extension.
@@ -52,13 +47,103 @@ const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 /// `ResponseUsage` unchanged so local usage diagnostics stay correct. When
 /// the API doesn't emit `context_details` (older deployments) `total_tokens`
 /// passes through unchanged.
+#[cfg(test)]
 fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
-    let mut event = serde_json::from_str::<rs::ResponseStreamEvent>(data).map_err(|error| {
-        tracing::error!(%error, raw_data = %data, "Failed to deserialize ResponseStreamEvent from stream");
-        SamplingError::Serialization(error)
-    })?;
+    let mut event = serde_json::from_str::<rs::ResponseStreamEvent>(data)
+        .map_err(SamplingError::Serialization)?;
     apply_terminal_event_overrides(&mut event, data);
     Ok(event)
+}
+
+/// Only an unknown top-level discriminator is extensible. In particular, a
+/// known event with a malformed payload (including unknown nested variants)
+/// must not disappear into the extension path.
+fn decode_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> {
+    let mut event = decode_tagged_event::<rs::ResponseStreamEvent>(data)?;
+    if let Some(event) = &mut event {
+        apply_terminal_event_overrides(event, data);
+    }
+    Ok(event)
+}
+
+fn decode_tagged_event<T: serde::de::DeserializeOwned>(data: &str) -> Result<Option<T>> {
+    match serde_json::from_str::<T>(data) {
+        Ok(event) => Ok(Some(event)),
+        Err(error) => {
+            #[derive(Deserialize)]
+            struct Envelope {
+                #[serde(rename = "type")]
+                kind: String,
+            }
+            if let Ok(envelope) = serde_json::from_str::<Envelope>(data)
+                && !envelope.kind.trim().is_empty()
+                && is_unknown_event_type::<T>(&envelope.kind)
+            {
+                // Full frames belong only in the opt-in sampling log. Custom
+                // frames make no progress and never reach the L2 idle timer.
+                return Ok(None);
+            }
+            Err(SamplingError::Serialization(error))
+        }
+    }
+}
+
+fn is_unknown_event_type<T: serde::de::DeserializeOwned>(kind: &str) -> bool {
+    // Ask the SDK's discriminator, not a duplicated list of event names. The
+    // probe contains ONLY `type`, so unknown_variant cannot come from a nested
+    // payload. Known variants instead report missing fields (or succeed).
+    #[derive(Debug)]
+    struct TagProbeError(bool);
+    impl std::fmt::Display for TagProbeError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("stream event tag probe")
+        }
+    }
+    impl std::error::Error for TagProbeError {}
+    impl serde::de::Error for TagProbeError {
+        fn custom<T: std::fmt::Display>(_: T) -> Self {
+            Self(false)
+        }
+        fn unknown_variant(_: &str, _: &'static [&'static str]) -> Self {
+            Self(true)
+        }
+    }
+    let probe =
+        serde::de::value::MapDeserializer::<_, TagProbeError>::new([("type", kind)].into_iter());
+    matches!(T::deserialize(probe), Err(TagProbeError(true)))
+}
+
+fn decode_chat_chunk(data: &str) -> Result<Option<ChatCompletionChunk>> {
+    let parsed = serde_json::from_str::<ChatCompletionChunk>(data).and_then(|chunk| {
+        if chunk.object == "chat.completion.chunk" {
+            Ok(chunk)
+        } else {
+            Err(serde::de::Error::custom(
+                "Chat stream protocol: unexpected chunk object",
+            ))
+        }
+    });
+    match parsed {
+        Ok(chunk) => Ok(Some(chunk)),
+        Err(error) => {
+            // Chat has no tagged event enum. Recognize the normal chunk shape
+            // BEFORE considering extensions: a custom `type` must not disguise
+            // malformed choices or a known error envelope.
+            if let Ok(serde_json::Value::Object(envelope)) = serde_json::from_str(data) {
+                let kind = envelope.get("type").and_then(serde_json::Value::as_str);
+                let object = envelope.get("object").and_then(serde_json::Value::as_str);
+                if !envelope.contains_key("choices")
+                    && !envelope.contains_key("error")
+                    && kind != Some("error")
+                    && object != Some("chat.completion.chunk")
+                    && kind.or(object).is_some_and(|kind| !kind.trim().is_empty())
+                {
+                    return Ok(None);
+                }
+            }
+            Err(SamplingError::Serialization(error))
+        }
+    }
 }
 
 /// On terminal Responses API events (`response.completed` /
@@ -972,27 +1057,19 @@ impl SamplingClient {
                         );
 
                         if let Some(stream_error) = try_parse_stream_error(data) {
-                            Some(Err(stream_error))
+                            Some(Some(Err(stream_error)))
                         } else {
-                            Some(
-                                serde_json::from_str::<ChatCompletionChunk>(data).map_err(|e| {
-                                    tracing::error!(
-                                        error = %e,
-                                        raw_data = %data,
-                                        "Failed to deserialize ChatCompletionChunk from stream"
-                                    );
-                                    SamplingError::Serialization(e)
-                                }),
-                            )
+                            Some(decode_chat_chunk(data).transpose())
                         }
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        Some(Err(SamplingError::EventStreamError(e.to_string())))
+                        Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
                     }
                 };
                 std::future::ready(item)
             })
+            .filter_map(std::future::ready)
             .boxed();
 
         Ok((chunks, model_metadata))
@@ -1314,7 +1391,7 @@ impl SamplingClient {
                         } else if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Some(Err(stream_error)))
                         } else {
-                            Some(Some(deserialize_response_event(data)))
+                            Some(decode_response_event(data).transpose())
                         }
                     }
                     Err(e) => {
@@ -1580,29 +1657,22 @@ impl SamplingClient {
                         );
 
                         if let Some(stream_error) = try_parse_stream_error(data) {
-                            Some(Err(stream_error))
+                            Some(Some(Err(stream_error)))
                         } else {
                             Some(
-                                serde_json::from_str::<messages::MessageStreamEvent>(data).map_err(
-                                    |e| {
-                                        tracing::error!(
-                                            error = %e,
-                                            raw_data = %data,
-                                            "Failed to deserialize MessageStreamEvent from stream"
-                                        );
-                                        SamplingError::Serialization(e)
-                                    },
-                                ),
+                                decode_tagged_event::<messages::MessageStreamEvent>(data)
+                                    .transpose(),
                             )
                         }
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        Some(Err(SamplingError::EventStreamError(e.to_string())))
+                        Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
                     }
                 };
                 std::future::ready(item)
             })
+            .filter_map(std::future::ready)
             .boxed();
 
         Ok((events, model_metadata))
@@ -2459,6 +2529,102 @@ mod tests {
             crate::attribution::SamplingConsumer::ChatCompletions,
             Some("bearer-tail-12"),
         );
+    }
+
+    #[test]
+    fn unknown_response_events_are_skipped_but_malformed_known_events_fail() {
+        for kind in [
+            "ping",
+            "keepalive",
+            "vendor.metrics",
+            "response.future_extension",
+        ] {
+            let data = serde_json::json!({"type": kind, "payload": {"arbitrary": true}});
+            assert!(
+                decode_response_event(&data.to_string()).unwrap().is_none(),
+                "{kind}"
+            );
+        }
+        for data in [
+            r#"{"type":"ping""#,
+            r#"{"payload":1}"#,
+            r#"{"type":7}"#,
+            r#"{"type":""}"#,
+            r#"{"type":"response.output_text.delta"}"#,
+            r#"{"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"unknown_nested_type"}}"#,
+            r#"{"type":"error"}"#,
+        ] {
+            assert!(decode_response_event(data).is_err(), "{data}");
+        }
+        let event = decode_response_event(
+            r#"{"type":"error","sequence_number":1,"message":"upstream failure","code":"server_error","param":null}"#,
+        ).unwrap().unwrap();
+        assert!(matches!(event, rs::ResponseStreamEvent::ResponseError(_)));
+    }
+
+    #[test]
+    fn messages_extensions_do_not_hide_known_protocol_errors() {
+        for kind in ["keepalive", "vendor.metrics", "message.future_event"] {
+            let data = serde_json::json!({"type": kind, "payload": {"type": "anything"}});
+            assert!(
+                decode_tagged_event::<messages::MessageStreamEvent>(&data.to_string())
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for data in [
+            r#"{"type":"keepalive""#,
+            r#"{"type":"   "}"#,
+            r#"{"type":42}"#,
+            r#"{"payload":1}"#,
+            r#"{"type":"message_start"}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"custom_delta"}}"#,
+            r#"{"type":"error"}"#,
+        ] {
+            assert!(
+                decode_tagged_event::<messages::MessageStreamEvent>(data).is_err(),
+                "{data}"
+            );
+        }
+        assert!(matches!(
+            decode_tagged_event::<messages::MessageStreamEvent>(r#"{"type":"ping"}"#).unwrap(),
+            Some(messages::MessageStreamEvent::Ping)
+        ));
+        let data =
+            r#"{"type":"error","error":{"type":"authentication_error","message":"test failure"}}"#;
+        assert!(try_parse_stream_error(data).is_some());
+        assert!(matches!(
+            decode_tagged_event::<messages::MessageStreamEvent>(data).unwrap(),
+            Some(messages::MessageStreamEvent::Error { .. })
+        ));
+    }
+
+    #[test]
+    fn chat_extensions_never_disguise_a_known_chunk_or_error() {
+        for data in [
+            r#"{"type":"ping"}"#,
+            r#"{"type":"vendor.telemetry","payload":123}"#,
+            r#"{"object":"vendor.keepalive"}"#,
+        ] {
+            assert!(decode_chat_chunk(data).unwrap().is_none(), "{data}");
+        }
+        for data in [
+            r#"{"type":"ping""#,
+            r#"{"type":42}"#,
+            r#"{"type":""}"#,
+            r#"{}"#,
+            r#"{"object":"chat.completion.chunk","type":"vendor.extension"}"#,
+            r#"{"type":"ping","choices":"invalid"}"#,
+            r#"{"type":"error"}"#,
+            r#"{"type":"keepalive","error":{}}"#,
+        ] {
+            assert!(decode_chat_chunk(data).is_err(), "{data}");
+        }
+        let mut chunk = serde_json::json!({"id":"test", "object":"chat.completion.chunk",
+            "model":"test-model", "created":0, "type":"vendor.annotation", "choices":[]});
+        assert!(decode_chat_chunk(&chunk.to_string()).unwrap().is_some());
+        chunk["object"] = serde_json::json!("vendor.keepalive");
+        assert!(decode_chat_chunk(&chunk.to_string()).is_err());
     }
 
     /// `response.completed` carrying

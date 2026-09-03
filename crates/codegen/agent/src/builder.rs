@@ -836,23 +836,6 @@ impl AgentBuilder {
                 .ok()
                 .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()));
             let gitignore = crate::prompt::ignore::build_gitignore(git_root.as_deref());
-            let canonical_cwd = dunce::canonicalize(&self.working_directory)
-                .unwrap_or_else(|_| self.working_directory.clone());
-            let canonical_root = git_root.as_ref().and_then(|r| dunce::canonicalize(r).ok());
-            let chain: Vec<PathBuf> = if let Some(ref root) = canonical_root {
-                let mut dirs = Vec::new();
-                let mut current = Some(canonical_cwd.as_path());
-                while let Some(dir) = current {
-                    dirs.push(dir.to_path_buf());
-                    if dir == root.as_path() {
-                        break;
-                    }
-                    current = dir.parent();
-                }
-                dirs
-            } else {
-                vec![]
-            };
             if let Some(gi) = gitignore.as_ref()
                 && let Some(root) = git_root.as_ref()
             {
@@ -861,7 +844,7 @@ impl AgentBuilder {
                     .await;
             }
             tool_bridge
-                .seed_agents_md(initial_paths, git_root.clone(), chain, gitignore)
+                .seed_agents_md(initial_paths, git_root.clone(), gitignore)
                 .await;
             let listing_skills = if preloaded_skill_paths.is_empty() {
                 skill_info.clone()

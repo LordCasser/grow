@@ -14,6 +14,7 @@
 //!
 //! All reminders are collected and appended in `call_new_tool()`.
 
+pub(crate) mod agents_md;
 pub mod lsp_diagnostics;
 pub mod skill_discovery;
 pub mod task_completion;
@@ -23,6 +24,14 @@ pub use skill_discovery::SkillDiscoveryReminder;
 
 /// The default system-reminder tag name (hyphen).
 pub const DEFAULT_REMINDER_TAG: &str = "system-reminder";
+
+/// Project-authored text must not close or forge harness reminder framing.
+pub fn neutralize_reminder_tags(content: &str) -> String {
+    static TAGS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)<(\s*/?\s*system[-_]reminder)").unwrap()
+    });
+    TAGS.replace_all(content, "&lt;$1").into_owned()
+}
 
 /// Wrap plain text in `<system-reminder>` tags (default hyphen variant).
 /// Input:  `"Some reminder text"`

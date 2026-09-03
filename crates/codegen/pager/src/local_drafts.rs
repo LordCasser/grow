@@ -848,6 +848,7 @@ mod tests {
                     agent_id,
                     session_id,
                     blocks: Vec::new(),
+                    images: Vec::new(),
                     prompt_id: "blocks".into(),
                 }
             } else {

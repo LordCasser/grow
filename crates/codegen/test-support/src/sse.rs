@@ -627,12 +627,33 @@ pub fn responses_api_reasoning_then_tool_call_events(
         seq += 1;
     }
 
+    // Announce the function item before streaming its argument fragments.
+    // item_id is the output item identity, not the tool result's call_id.
+    let item_id = format!("item_{call_id}");
+    events.push(SseEvent::data(
+        json!({
+            "type": "response.output_item.added",
+            "sequence_number": seq,
+            "output_index": 1,
+            "item": {
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "name": name,
+                "arguments": "",
+                "status": "in_progress"
+            }
+        })
+        .to_string(),
+    ));
+    seq += 1;
+
     // Then the tool invocation.
     events.push(SseEvent::data(
         json!({
             "type": "response.function_call_arguments.delta",
             "sequence_number": seq,
-            "item_id": call_id,
+            "item_id": item_id,
             "output_index": 1,
             "delta": arguments
         })
@@ -663,6 +684,7 @@ pub fn responses_api_reasoning_then_tool_call_events(
                     },
                     {
                         "type": "function_call",
+                        "id": item_id,
                         "call_id": call_id,
                         "name": name,
                         "arguments": arguments
@@ -942,6 +964,15 @@ mod tests {
             .iter()
             .position(|t| *t == "response.function_call_arguments.delta")
             .expect("must stream a function-call arguments delta");
+        let tool_added = types
+            .iter()
+            .position(|t| *t == "response.output_item.added")
+            .expect("must announce the function before argument deltas");
+        assert!(tool_added < args_delta);
+        assert_eq!(
+            parsed[tool_added]["item"]["id"],
+            parsed[args_delta]["item_id"]
+        );
         assert!(
             first_reasoning < args_delta,
             "reasoning deltas must precede the tool call"
@@ -964,6 +995,7 @@ mod tests {
             "completed output must carry the reasoning item first"
         );
         assert_eq!(output[1]["type"].as_str(), Some("function_call"));
+        assert_eq!(output[1]["id"], parsed[tool_added]["item"]["id"]);
         assert_eq!(output[1]["call_id"].as_str(), Some("call_1"));
         assert_eq!(output[1]["name"].as_str(), Some("read_file"));
         assert!(

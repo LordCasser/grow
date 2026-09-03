@@ -6,6 +6,171 @@ pub(super) struct AdmittedInput {
     pub input_id: String,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::input_inbox::{self, InputPayload};
+
+    async fn admit_image(actor: &SessionActor) -> String {
+        actor
+            .admit_human_input(
+                chat_state::InputIntent::Prompt,
+                input_inbox::tests::image_payload(),
+                Some("prompt-1".into()),
+                chat_state::InputRoute::Fifo,
+                vec![],
+            )
+            .await
+            .unwrap()
+            .input_id
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn large_input_recovery_reuses_admission_and_snapshot() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+                let input_id = admit_image(&actor).await;
+                let before = actor.chat_state_handle.timeline_events().await.unwrap();
+                actor.restore_pending_human_inputs().await.unwrap();
+                let state = actor.state.lock().await;
+                let restored = state.pending_inputs.front().unwrap();
+                assert_eq!(restored.input_ids, vec![input_id]);
+                let InputPayload::Prompt { prompt_blocks, .. } =
+                    input_inbox::tests::image_payload();
+                assert_eq!(
+                    serde_json::to_value(&restored.prompt_blocks).unwrap(),
+                    serde_json::to_value(prompt_blocks).unwrap()
+                );
+                drop(state);
+                assert_eq!(
+                    before.len(),
+                    actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .unwrap()
+                        .len(),
+                    "recovery must not repeat Hooks or admission"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_input_attachment_is_invalidated_without_blocking_other_inputs() {
+        tokio::task::LocalSet::new().run_until(async {
+            let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+            let missing_id = admit_image(&actor).await;
+            let image_dir = actor.session_dir.join("artifacts/inputs/images");
+            for path in std::fs::read_dir(&image_dir).unwrap() {
+                std::fs::remove_file(path.unwrap().path()).unwrap();
+            }
+            let mut text = input_inbox::tests::image_payload();
+            let InputPayload::Prompt { prompt_blocks, prompt_id, .. } = &mut text;
+            prompt_blocks.retain(|block| matches!(block, acp::ContentBlock::Text(_)));
+            *prompt_id = "healthy".into();
+            let healthy_id = actor.admit_human_input(chat_state::InputIntent::Prompt, text, Some("healthy".into()), chat_state::InputRoute::Fifo, vec![]).await.unwrap().input_id;
+            actor.restore_pending_human_inputs().await.unwrap();
+            let state = actor.state.lock().await;
+            assert_eq!(state.pending_inputs.len(), 1);
+            assert_eq!(state.pending_inputs.front().unwrap().input_ids, vec![healthy_id]);
+            drop(state);
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(events.iter().any(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Input(chat_state::InputEvent::Dismissed { input_ids, reason: chat_state::InputDismissReason::Invalidated }) if input_ids == &vec![missing_id.clone()]
+            )));
+            assert_eq!(actor.chat_state_handle.submitted_input_payload_hashes().await.unwrap().len(), 2, "invalidated snapshots remain audit roots");
+        }).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_failure_retry_has_one_submission_and_gc_keeps_consumed_images() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+                let artifact_path = actor.session_dir.join("artifacts");
+                std::fs::write(&artifact_path, b"fault injection").unwrap();
+                let failure = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Prompt,
+                        input_inbox::tests::image_payload(),
+                        Some("prompt-1".into()),
+                        chat_state::InputRoute::Fifo,
+                        vec![],
+                    )
+                    .await;
+                assert!(failure.is_err());
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .submitted_input_payload_hashes()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                std::fs::remove_file(artifact_path).unwrap();
+                let input_id = admit_image(&actor).await;
+                let turn = chat_state::TurnId(1);
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Turn(
+                        chat_state::TurnEvent::Started {
+                            id: turn,
+                            input_ids: vec![input_id.clone()],
+                            identity: crate::session::PromptOrigin::User
+                                .turn_identity(crate::session::TurnKind::User),
+                            model_id: "test".into(),
+                            input_message_count: 0,
+                            prompt_index: 0,
+                            prompt_text: "image".into(),
+                            input_kind: chat_state::TurnInputKind::Prompt,
+                            redirect_kind: None,
+                        },
+                    ))
+                    .await
+                    .unwrap();
+                actor
+                    .consume_fifo_inputs(
+                        vec![input_id],
+                        turn,
+                        sampling_types::ConversationItem::user("consumed image"),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .get_pending_allowed_inputs()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                actor
+                    .reconcile_input_payloads(&tokio_util::sync::CancellationToken::new())
+                    .await;
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let refs = events
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Input(
+                            chat_state::InputEvent::Submitted { payload_ref, .. },
+                        ) => Some(payload_ref),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(refs.len(), 1);
+                assert_eq!(
+                    input_inbox::read_payload(&actor.session_directory, refs[0])
+                        .unwrap()
+                        .hook_prompt(),
+                    input_inbox::tests::image_payload().hook_prompt()
+                );
+            })
+            .await;
+    }
+}
+
 impl SessionActor {
     pub(super) async fn admit_human_input(
         &self,
@@ -38,14 +203,16 @@ impl SessionActor {
         prompt_id: Option<String>,
     ) -> Result<(String, chat_state::InputAdmissionDecision), String> {
         let input_id = format!("input-{}", uuid::Uuid::now_v7());
-        let hook_prompt = payload.hook_prompt();
         let artifact_guard = self.input_artifact_gate.lock().await;
         let directory = self
             .session_directory
             .try_clone()
             .map_err(|error| format!("input artifact directory unavailable: {error}"))?;
-        let payload_ref = tokio::task::spawn_blocking(move || {
-            crate::session::input_inbox::write_payload(&directory, &payload)
+        let (payload_ref, hook_prompt) = tokio::task::spawn_blocking(move || {
+            let reference = crate::session::input_inbox::write_payload(&directory, &payload)?;
+            // Serialization/decoded-image budgets have now been checked. The
+            // Hook reviews this exact snapshot, never a mutable source path.
+            Ok::<_, std::io::Error>((reference, payload.hook_prompt()))
         })
         .await
         .map_err(|error| format!("input artifact writer failed: {error}"))?
@@ -216,8 +383,31 @@ impl SessionActor {
                 crate::session::input_inbox::read_payload(&directory, &payload_ref)
             })
             .await
-            .map_err(|error| format!("input artifact reader failed: {error}"))?
-            .map_err(|error| format!("input payload is missing or corrupt: {error}"))?;
+            .map_err(|error| format!("input artifact reader failed: {error}"))?;
+            let payload = match payload {
+                Ok(payload) => payload,
+                Err(error) if crate::session::input_inbox::is_attachment_error(&error) => {
+                    // Keep Submitted and its references as audit evidence. An
+                    // allowed input whose snapshot cannot be restored must not
+                    // become a text-only turn or prevent unrelated history use.
+                    self.dismiss_input_ids(
+                        [pending.input_id.clone()],
+                        chat_state::InputDismissReason::Invalidated,
+                    )
+                    .await?;
+                    self.persist_ui_notice(crate::extensions::notification::UiNotice {
+                        correlation_id: pending.input_id,
+                        category: crate::extensions::notification::UiNoticeCategory::Lifecycle,
+                        subject: Some("input attachment".into()),
+                        description: None,
+                        message: "A pending input was stopped because an image attachment is unavailable. Reattach the image and submit a new prompt.".into(),
+                        tone: crate::extensions::notification::UiNoticeTone::Error,
+                        details: Some(error.to_string()),
+                    }).await?;
+                    continue;
+                }
+                Err(error) => return Err(format!("input payload is missing or corrupt: {error}")),
+            };
             if !crate::session::input_inbox::payload_matches_intent(pending.intent, &payload) {
                 return Err("input intent does not match its payload artifact".into());
             }
@@ -333,16 +523,46 @@ impl SessionActor {
             let Ok(directory) = self.session_directory.try_clone() else {
                 break;
             };
-            if tokio::task::spawn_blocking(move || {
+            match tokio::task::spawn_blocking(move || {
                 crate::session::input_inbox::remove_payload_hashes(&directory, &hashes)
             })
             .await
-            .is_err()
             {
-                break;
+                Ok(Ok(_)) => {}
+                error => {
+                    tracing::warn!(?error, "input manifest reconciliation failed");
+                    break;
+                }
             }
         }
         drop(batch_rx);
         let _ = producer.await;
+        if shutdown.is_cancelled() {
+            return;
+        }
+        // Includes crashes after image writes but before the manifest exists.
+        // Hold the same gate across the root snapshot and the attachment sweep.
+        let _guard = self.input_artifact_gate.lock().await;
+        let Some(retained) = self
+            .chat_state_handle
+            .submitted_input_payload_hashes()
+            .await
+        else {
+            return;
+        };
+        let Ok(directory) = self.session_directory.try_clone() else {
+            return;
+        };
+        let shutdown = shutdown.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::session::input_inbox::reconcile_image_blobs(&directory, &retained, || {
+                shutdown.is_cancelled()
+            })
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            error => tracing::warn!(?error, "input image reconciliation failed"),
+        }
     }
 }

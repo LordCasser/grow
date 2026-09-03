@@ -11,6 +11,78 @@ use shell::sampling::error::{
 };
 use shell::session::ExtMethodResult;
 use shell::session::unified_list::ListScope;
+
+/// Snapshot only explicit attachments. All file lengths and the aggregate
+/// Base64 budget are checked before reading/encoding the first image. The
+/// server still validates the complete ACP/JSON and decoded-pixel budgets.
+pub(super) fn append_prompt_images(
+    mut blocks: Vec<acp::ContentBlock>,
+    images: &[crate::prompt_images::PastedImage],
+) -> Result<Vec<acp::ContentBlock>, String> {
+    use std::io::Read as _;
+    use base64::Engine as _;
+    const MAX_RAW_BYTES: u64 = 50_000_000;
+    const MAX_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
+    if images.len() > 16 {
+        return Err("Too many input images (maximum 16).".into());
+    }
+    let mut total = 0;
+    let mut sources = Vec::with_capacity(images.len());
+    for image in images {
+        let file = if image.encoded_bytes.is_some() {
+            None
+        } else {
+            let path = image.session_image_path.as_ref()
+                .ok_or_else(|| format!("Image {} has no saved data; reattach it.", image.display_number))?;
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+            }
+            Some(options.open(path)
+                .map_err(|_| format!("Image {} could not be opened; reattach it.", image.display_number))?)
+        };
+        let length = match &file {
+            Some(file) => {
+                let meta = file.metadata().map_err(|error| error.to_string())?;
+                if !meta.is_file() { return Err("Input image is not a regular file.".into()); }
+                meta.len()
+            }
+            None => image.encoded_bytes.as_ref().expect("checked above").len() as u64,
+        };
+        if length == 0 || length > MAX_RAW_BYTES {
+            return Err(format!("Image {} exceeds the attachment byte limit or is empty.", image.display_number));
+        }
+        // Include a bounded allowance for each ACP block's JSON metadata.
+        total += length.div_ceil(3) * 4 + 1024;
+        if total > MAX_ENCODED_BYTES {
+            return Err("Input images exceed the total encoded byte limit.".into());
+        }
+        sources.push((file, length));
+    }
+    for (image, (file, length)) in images.iter().zip(sources) {
+        let bytes = match file {
+            Some(file) => {
+                let mut bytes = Vec::new();
+                file.take(length + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+                if bytes.len() as u64 != length {
+                    return Err(format!("Image {} changed during loading; reattach it.", image.display_number));
+                }
+                std::borrow::Cow::Owned(bytes)
+            }
+            None => std::borrow::Cow::Borrowed(image.encoded_bytes.as_deref().expect("checked above")),
+        };
+        let uri = image.session_image_path.as_ref().or(image.source_path.as_ref())
+            .map(|path| format!("file://{}", path.display()));
+        blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(
+            base64::engine::general_purpose::STANDARD.encode(&bytes), image.mime_type.clone(),
+        ).uri(uri).meta(Some(shell::session::placeholder_images::display_number_meta(image.display_number)))));
+    }
+    Ok(blocks)
+}
+
 pub(super) fn log_prompt_result(
     session_id: &acp::SessionId,
     result: &Result<acp::PromptResponse, acp::Error>,

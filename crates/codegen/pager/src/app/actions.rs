@@ -1496,6 +1496,8 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         blocks: Vec<acp::ContentBlock>,
+        /// Explicit attachments loaded with bounds in the send effect.
+        images: Vec<crate::prompt_images::PastedImage>,
         /// See [`Effect::SendPrompt::prompt_id`].
         prompt_id: String,
     },
@@ -1786,6 +1788,7 @@ pub enum Effect {
         /// Structured text + image content blocks. `None` for text-only
         /// interjections — the wire shape stays byte-identical to legacy.
         blocks: Option<Vec<acp::ContentBlock>>,
+        images: Vec<crate::prompt_images::PastedImage>,
     },
     /// Execute an ACP-advertised slash command on the shell control plane.
     /// This never enters the model prompt queue.
@@ -2483,6 +2486,7 @@ pub enum TaskResult {
         error: String,
         text: String,
         blocks: Option<Vec<agent_client_protocol::schema::v1::ContentBlock>>,
+        images: Vec<crate::prompt_images::PastedImage>,
     },
     /// Out-of-band slash-command acknowledgement or transport/command error.
     SlashCommandExecuted {

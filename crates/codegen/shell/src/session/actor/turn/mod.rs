@@ -407,7 +407,9 @@ impl SessionActor {
                 // Goal during settlement).
                 return Ok(TurnOutcome::ControlEnded { snapshot });
             }
-            if !self.events.has_active_step() && matches!(&result, Ok(TurnOutcome::Completed { .. })) {
+            if !self.events.has_active_step()
+                && matches!(&result, Ok(TurnOutcome::Completed { .. }))
+            {
                 self.background_compaction_boundary().await?;
             }
             if matches!(
@@ -501,13 +503,24 @@ impl SessionActor {
                         "Auto-recovery exhausted after {attempt} attempts for session {}: {error_desc}",
                         self.session_info.id.0,
                     );
-                    self.send_grow_notification(GrowSessionUpdate::RetryState(
-                        crate::extensions::notification::RetryState::Exhausted {
-                            attempts: attempt,
-                            reason: error_desc,
-                            is_rate_limited: false,
-                        },
-                    ))
+                    // This is the outer recovery boundary, not an attempt
+                    // failure. An unmet completion requirement still needs a
+                    // notice even when the last model response itself was Ok.
+                    self.pending_sampling_failure.lock().take();
+                    self.send_grow_notification_with_extra_meta(
+                        GrowSessionUpdate::RetryState(
+                            crate::extensions::notification::RetryState::Exhausted {
+                                attempts: attempt,
+                                reason: error_desc,
+                                is_rate_limited: false,
+                            },
+                        ),
+                        Some(
+                            [(String::from("promptId"), serde_json::json!(req_id))]
+                                .into_iter()
+                                .collect(),
+                        ),
+                    )
                     .await;
                     return result;
                 }
@@ -1516,11 +1529,17 @@ impl SessionActor {
                 // are both durable. Never dispatch even healthy siblings of
                 // this response, and never retry an action behind the user's
                 // back. A subsequent turn can use the repaired Surface.
-                return Err(acp::Error::invalid_params().data(
-                    "The model returned invalid tool-call metadata. The response was preserved \
+                let message = "The model returned invalid tool-call metadata. The response was preserved \
                      in the Timeline and the conversation was automatically repaired. Grow did \
-                     not dispatch any tools from this response; you can continue this session.",
-                ));
+                     not dispatch any tools from this response; you can continue this session.";
+                self.send_grow_notification(GrowSessionUpdate::RetryState(
+                    crate::extensions::notification::RetryState::Failed {
+                        error_type: "invalid_tool_call_metadata".into(),
+                        message: message.into(),
+                    },
+                ))
+                .await;
+                return Err(acp::Error::invalid_params().data(message));
             }
             if let Some(text) = fallback_text {
                 tracing::warn!(

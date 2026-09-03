@@ -597,8 +597,65 @@ impl SessionActor {
     /// Send an Grow extension notification to the client
     #[tracing::instrument(skip_all)]
     pub(super) async fn send_grow_notification(&self, update: GrowSessionUpdate) {
+        if let GrowSessionUpdate::RetryState(retry) = &update {
+            let prompt_id = self.current_prompt_id.lock().ok().and_then(|id| id.clone());
+            if let Some(prompt_id) = prompt_id {
+                {
+                    let mut pending = self.pending_sampling_failure.lock();
+                    match retry {
+                        RetryState::Retrying { .. } => {
+                            // An outer recovery supersedes the failed attempt.
+                            // Never persist its error as a user-visible notice.
+                            *pending = None;
+                        }
+                        RetryState::Failed { .. } | RetryState::Exhausted { .. } => {
+                            *pending = Some((prompt_id, retry.clone()));
+                            return;
+                        }
+                    }
+                }
+                self.send_grow_notification_with_extra_meta(
+                    update,
+                    Some(
+                        [(String::from("promptId"), json!(prompt_id))]
+                            .into_iter()
+                            .collect(),
+                    ),
+                )
+                .await;
+                return;
+            }
+        }
         self.send_grow_notification_with_extra_meta(update, None)
             .await;
+    }
+
+    /// Called only after exact-owner completion wins, before the RPC response
+    /// and durable terminal projection. Successful recovery/cancellation drops
+    /// the notice; a failed turn uses the existing retry-exhausted UI channel.
+    pub(super) async fn finish_sampling_failure_notification(&self, prompt_id: &str, failed: bool) {
+        let pending = {
+            let mut pending = self.pending_sampling_failure.lock();
+            if pending
+                .as_ref()
+                .is_some_and(|(owner, _)| owner == prompt_id)
+            {
+                pending.take().map(|(_, retry)| retry)
+            } else {
+                None
+            }
+        };
+        if failed && let Some(retry) = pending {
+            self.send_grow_notification_with_extra_meta(
+                GrowSessionUpdate::RetryState(retry),
+                Some(
+                    [(String::from("promptId"), json!(prompt_id))]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+            .await;
+        }
     }
 
     /// Forward ephemeral UI state without putting it in the immutable replay
@@ -871,6 +928,83 @@ fn acking_persistence_channel() -> (
 mod grow_event_id_stamping_tests {
     use super::super::tests::support::create_test_actor;
     use super::*;
+    #[tokio::test]
+    async fn sampling_failure_notice_waits_for_exact_turn_outcome() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for (failed, resumed) in [(false, false), (true, false), (true, true)] {
+                    let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (persistence_tx, mut persistence_rx) =
+                        tokio::sync::mpsc::unbounded_channel();
+                    let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                    *actor.current_prompt_id.lock().unwrap() = Some("p1".into());
+                    actor
+                        .send_grow_notification(GrowSessionUpdate::RetryState(RetryState::Failed {
+                            error_type: "serialization".into(),
+                            message: "constructed protocol failure".into(),
+                        }))
+                        .await;
+                    assert!(actor.pending_sampling_failure.lock().is_some());
+                    // No error notice to the live UI OR replay while recovery is undecided.
+                    assert!(!std::iter::from_fn(|| gateway_rx.try_recv().ok()).any(
+                        |msg| matches!(msg, acp_transport::AcpClientMessage::ExtNotification(_))
+                    ));
+                    assert!(!std::iter::from_fn(|| persistence_rx.try_recv().ok()).any(
+                        |msg| matches!(
+                            msg,
+                            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(_))
+                        )
+                    ));
+
+                    actor
+                        .finish_sampling_failure_notification("old-prompt", true)
+                        .await;
+                    assert!(
+                        actor.pending_sampling_failure.lock().is_some(),
+                        "stale terminal cannot consume another prompt's notice"
+                    );
+                    if resumed {
+                        actor
+                            .send_grow_notification(GrowSessionUpdate::RetryState(
+                                RetryState::Retrying {
+                                    attempt: 1,
+                                    max_retries: 2,
+                                    reason: "outer recovery".into(),
+                                },
+                            ))
+                            .await;
+                        assert!(actor.pending_sampling_failure.lock().is_none());
+                    }
+                    actor
+                        .finish_sampling_failure_notification("p1", failed)
+                        .await;
+                    actor
+                        .finish_sampling_failure_notification("p1", failed)
+                        .await;
+                    assert!(actor.pending_sampling_failure.lock().is_none());
+                    let notices: Vec<_> = std::iter::from_fn(|| gateway_rx.try_recv().ok())
+                        .filter_map(|msg| {
+                            let acp_transport::AcpClientMessage::ExtNotification(args) = msg else {
+                                return None;
+                            };
+                            let notif: GrowSessionNotification =
+                                serde_json::from_str(args.request.params.get()).unwrap();
+                            matches!(
+                                notif.update,
+                                GrowSessionUpdate::RetryState(RetryState::Failed { .. })
+                            )
+                            .then_some(notif)
+                        })
+                        .collect();
+                    assert_eq!(notices.len(), usize::from(failed && !resumed));
+                    for notice in notices {
+                        assert_eq!(notice.meta.as_ref().unwrap()["promptId"], "p1");
+                        assert!(notice.meta.as_ref().unwrap()["eventId"].is_string());
+                    }
+                }
+            })
+            .await;
+    }
     async fn persisted_grow_event_id(
         prx: &mut tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
     ) -> String {

@@ -408,6 +408,15 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
     };
 
     // Block drain if the user is editing the front prompt.
+    if agent
+        .session
+        .pending_prompts
+        .front()
+        .is_some_and(|p| p.requires_review)
+    {
+        log_blocked("failed_input_requires_review", Some(&session_id.0));
+        return QueueDrain::blocked();
+    }
     if let PromptMode::EditingQueued { id, .. } = &agent.prompt_mode
         && agent
             .session
@@ -575,20 +584,19 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     agent_id,
                     session_id,
                     blocks,
+                    images: queued.images,
                     prompt_id,
                 }]
             } else if !queued.images.is_empty() {
                 // Image-bearing prompt: build text + image content blocks.
-                // Pass the session cwd so orphan `[Image #N: <path>]`
-                // placeholders (paste from a previous session, etc.)
-                // can be recovered from disk via the shared helper.
+                // Only explicit attachments belong to this submission. Text
+                // copied from history must not resurrect an old image path.
                 // Token ranges are NOT stamped here: the builder rewrites the
                 // text (placeholder stripping), which would shift byte offsets.
-                let mut blocks = crate::prompt_images::build_content_blocks_with_workspace(
+                let text = shell::session::placeholder_images::strip_paths_from_image_placeholders(
                     queued.text,
-                    queued.images,
-                    Some(std::path::Path::new(&agent.session.cwd)),
                 );
+                let mut blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
                 if let Some(acp::ContentBlock::Text(tb)) = blocks.first_mut() {
                     let map = tb.meta.get_or_insert_with(acp::Meta::new);
                     prompt_queue::stamp_combined_display_texts(map, &combined_segs);
@@ -597,6 +605,7 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     agent_id,
                     session_id,
                     blocks,
+                    images: queued.images,
                     prompt_id,
                 }]
             } else if multi {
@@ -610,6 +619,7 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     agent_id,
                     session_id,
                     blocks: vec![acp::ContentBlock::Text(tb)],
+                    images: Vec::new(),
                     prompt_id,
                 }]
             } else {

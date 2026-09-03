@@ -140,7 +140,7 @@ pub(crate) async fn run_request_task(
     let mut client = match SamplingClient::new(config.clone()) {
         Ok(c) => c,
         Err(err) => {
-            emit_failed(&event_tx, &request_id, &err);
+            emit_failed(&event_tx, &request_id, &err, None);
             send_completion(&mut completion_tx, Err(err));
             return request_id;
         }
@@ -199,7 +199,7 @@ pub(crate) async fn run_request_task(
                 let error = SamplingError::EventStreamError(format!(
                     "provider attempt admission failed: {error}"
                 ));
-                emit_failed(&event_tx, &request_id, &error);
+                emit_failed(&event_tx, &request_id, &error, None);
                 send_completion(&mut completion_tx, Err(error));
                 return request_id;
             }
@@ -338,13 +338,14 @@ pub(crate) async fn run_request_task(
                     &config,
                     &cancel_token,
                     &mut completion_tx,
+                    None,
                 )
                 .await
                 {
                     return request_id;
                 }
             }
-            AttemptOutcome::Failed { error, .. } => {
+            AttemptOutcome::Failed { error, usage } => {
                 // Doom-loop resamples run on their own budget and never
                 // consult the transport classifier, so no classifier change
                 // can silently debit the transport budget for a doom failure.
@@ -383,6 +384,7 @@ pub(crate) async fn run_request_task(
                     &config,
                     &cancel_token,
                     &mut completion_tx,
+                    usage,
                 )
                 .await
                 {
@@ -405,6 +407,7 @@ pub(crate) async fn run_request_task(
                     &config,
                     &cancel_token,
                     &mut completion_tx,
+                    None,
                 )
                 .await
                 {
@@ -471,6 +474,7 @@ async fn apply_retry_decision(
     config: &SamplerConfig,
     cancel_token: &CancellationToken,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
+    terminal_usage: Option<TokenUsage>,
 ) -> bool {
     let rate_limit_threshold = if retry_policy.rate_limit_retry_threshold == 0 {
         retry_mod::RATE_LIMIT_RETRY_THRESHOLD
@@ -527,7 +531,7 @@ async fn apply_retry_decision(
             true
         }
         RetryDecision::EmitToSession(emitted_err) => {
-            emit_failed(event_tx, request_id, &emitted_err);
+            emit_failed(event_tx, request_id, &emitted_err, terminal_usage);
             send_completion(completion_tx, Err(emitted_err));
             false
         }
@@ -562,7 +566,7 @@ async fn apply_retry_decision(
                 }
                 exhausted_span.in_scope(|| {});
             }
-            emit_failed(event_tx, request_id, &fatal_err);
+            emit_failed(event_tx, request_id, &fatal_err, terminal_usage);
             send_completion(completion_tx, Err(fatal_err));
             false
         }
@@ -885,7 +889,7 @@ async fn drive_l2(
                         .ok()
                         .and_then(|mut g| g.take());
                     let error = raw.unwrap_or_else(|| synthesize_from_info(&info));
-                    return AttemptOutcome::Failed { error, usage: None };
+                    return AttemptOutcome::Failed { error, usage: info.usage };
                 }
                 Some(other) => {
                     if matches!(
@@ -1013,8 +1017,10 @@ fn emit_failed(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     request_id: &RequestId,
     err: &SamplingError,
+    usage: Option<TokenUsage>,
 ) {
-    let info = SamplingErrorInfo::from(err);
+    let mut info = SamplingErrorInfo::from(err);
+    info.usage = usage;
     let _ = event_tx.send(SamplingEvent::Failed {
         request_id: request_id.clone(),
         error: info,
@@ -1059,6 +1065,7 @@ fn handle_cancellation(
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
         credential: SentCredential::Unknown,
+        usage: None,
     };
     let _ = event_tx.send(SamplingEvent::Failed {
         request_id: request_id.clone(),
@@ -1082,7 +1089,7 @@ fn finish_usage_settlement_failure(
     // drain barrier consumes this event; completing only the oneshot would
     // otherwise manufacture a fixed five-second timeout during persistence
     // failure or teardown.
-    emit_failed(event_tx, request_id, &error);
+    emit_failed(event_tx, request_id, &error, None);
     send_completion(completion_tx, Err(error));
 }
 
@@ -1318,6 +1325,7 @@ mod tests {
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
             credential: SentCredential::Unknown,
+            usage: None,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1339,6 +1347,7 @@ mod tests {
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
             credential: SentCredential::Unknown,
+            usage: None,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1365,6 +1374,7 @@ mod tests {
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
             credential: SentCredential::Unknown,
+            usage: None,
         };
         let err = synthesize_from_info(&info);
         match err {
@@ -1438,6 +1448,7 @@ mod tests {
             &config,
             &cancel_token,
             &mut completion_tx,
+            None,
         )
         .await;
 
@@ -1730,6 +1741,45 @@ mod tests {
                 );
             }
             _ => panic!("buffered terminal must win over simultaneous cancellation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drive_l2_protocol_rejection_preserves_terminal_usage() {
+        let request_id = RequestId::from("invalid-terminal-usage");
+        let mut error = SamplingErrorInfo::from(&SamplingError::Serialization(
+            serde::de::Error::custom("Responses protocol: incomplete tool call"),
+        ));
+        error.usage = Some(TokenUsage {
+            prompt_tokens: 11,
+            completion_tokens: 7,
+            total_tokens: 18,
+            ..Default::default()
+        });
+        let l2 = stream::iter(vec![SamplingEvent::Failed {
+            request_id: request_id.clone(),
+            error,
+        }]);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let outcome = drive_l2(
+            l2,
+            request_id,
+            &event_tx,
+            &CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        match outcome {
+            AttemptOutcome::Failed {
+                error,
+                usage: Some(usage),
+            } => {
+                assert!(!error.is_retryable());
+                assert_eq!(usage.total_tokens, 18);
+            }
+            _ => panic!("validation failure must retain usage for settlement"),
         }
     }
 }

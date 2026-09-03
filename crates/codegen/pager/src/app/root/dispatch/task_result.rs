@@ -1253,8 +1253,33 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             error,
             text,
             blocks,
+            images,
         } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
+                // The failed effect owns explicit attachments, but interject
+                // producers do not carry textarea elements. Bind only those
+                // attachments to chips so editing the retry cannot drop them.
+                // Placeholder text alone never creates an attachment.
+                let mut text = text;
+                let chip_elements = images
+                    .iter()
+                    .map(|image| {
+                        let placeholder = crate::prompt_images::display_text(image.display_number);
+                        let start = text.find(&placeholder).unwrap_or_else(|| {
+                            if !text.is_empty() && !text.ends_with(char::is_whitespace) {
+                                text.push(' ');
+                            }
+                            let start = text.len();
+                            text.push_str(&placeholder);
+                            start
+                        });
+                        crate::app::session::ChipElement {
+                            range: start..start + placeholder.len(),
+                            kind: crate::views::prompt_widget::KIND_IMAGE,
+                            display: None,
+                        }
+                    })
+                    .collect();
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
                 agent
@@ -1265,13 +1290,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         text,
                         kind: crate::app::session::QueueEntryKind::Prompt,
                         wire_blocks: blocks,
-                        images: Vec::new(),
+                        images,
+                        requires_review: true,
                         display_as_skill: false,
-                        chip_elements: Vec::new(),
+                        chip_elements,
                         skill_token_ranges: Vec::new(),
                         combined_texts: Vec::new(),
                     });
-                agent.show_toast(&format!("Interjection failed — requeued: {error}"));
+                agent.show_toast(&format!(
+                    "Interjection failed — draft held in queue for review: {error}"
+                ));
             }
             vec![]
         }

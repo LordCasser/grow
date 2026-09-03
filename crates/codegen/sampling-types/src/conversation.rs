@@ -2602,7 +2602,32 @@ impl From<ChatResponseMessage> for ConversationItem {
 /// All N parallel `tco_*` reasoning items from a single response round-trip
 /// losslessly as N sibling `Reasoning` items — there is no longer a
 /// last-write-wins `Option<ReasoningContent>` collapse on the assistant.
-pub fn response_to_conversation_items(response: rs::Response) -> Vec<ConversationItem> {
+pub fn response_to_conversation_items(
+    response: rs::Response,
+) -> crate::Result<Vec<ConversationItem>> {
+    // Preserve completion evidence until this boundary. Once converted to a
+    // ToolCall the status is gone and downstream may schedule it. Reject the
+    // entire response rather than selectively executing ambiguous siblings.
+    for (index, item) in response.output.iter().enumerate() {
+        let rs::OutputItem::FunctionCall(call) = item else {
+            continue;
+        };
+        let complete = matches!(
+            response.status,
+            rs::Status::Completed | rs::Status::Incomplete
+        ) && match call.status {
+            Some(rs::OutputStatus::Completed) => true,
+            None => response.status == rs::Status::Completed,
+            _ => false,
+        };
+        if !complete || serde_json::from_str::<serde::de::IgnoredAny>(&call.arguments).is_err() {
+            return Err(crate::SamplingError::Serialization(
+                serde::de::Error::custom(format!(
+                    "Responses protocol: incomplete function call or invalid JSON arguments at output index {index}"
+                )),
+            ));
+        }
+    }
     let model_id = response.model.clone();
     let model_fingerprint = response
         .metadata
@@ -2687,7 +2712,34 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
         reasoning_effort,
     }));
 
-    items
+    Ok(items)
+}
+
+#[cfg(test)]
+#[test]
+fn responses_conversion_requires_completed_tool_evidence_even_without_streaming() {
+    for (status, item_status, accepted) in [
+        ("completed", serde_json::Value::Null, true),
+        ("incomplete", serde_json::json!("completed"), true),
+        ("incomplete", serde_json::Value::Null, false),
+        ("completed", serde_json::json!("in_progress"), false),
+        ("completed", serde_json::json!("incomplete"), false),
+        ("in_progress", serde_json::json!("completed"), false),
+        ("failed", serde_json::json!("completed"), false),
+    ] {
+        let response: rs::Response = serde_json::from_value(serde_json::json!({
+            "id":"resp_test", "created_at":0, "object":"response", "model":"test", "status":status,
+            "output":[{"type":"function_call", "id":"fc_item", "call_id":"call_identity",
+                "name":"lookup", "arguments":"{}", "status":item_status}]
+        }))
+        .unwrap();
+        let converted = response_to_conversation_items(response);
+        assert_eq!(
+            converted.is_ok(),
+            accepted,
+            "status={status} item={item_status}"
+        );
+    }
 }
 
 // ============================================================================
@@ -4418,7 +4470,7 @@ mod tests {
             usage: None,
         };
 
-        let items = response_to_conversation_items(response);
+        let items = response_to_conversation_items(response).expect("valid response");
         let item = items
             .into_iter()
             .next_back()
@@ -4475,7 +4527,7 @@ mod tests {
             usage: None,
         };
 
-        let items = response_to_conversation_items(response_with_fc);
+        let items = response_to_conversation_items(response_with_fc).expect("valid response");
         let item = items
             .into_iter()
             .next_back()
@@ -4532,7 +4584,7 @@ mod tests {
             usage: None,
         };
 
-        let items = response_to_conversation_items(response);
+        let items = response_to_conversation_items(response).expect("valid response");
         let ConversationItem::Assistant(a) = items.last().expect("trailing Assistant") else {
             panic!("Expected Assistant item");
         };
@@ -4883,7 +4935,7 @@ mod tests {
         // The full flat-list shape (Reasoning siblings preserved) is
         // exercised in the `test_response_to_conversation_items_preserves_*`
         // tests below; here we just assert the trailing Assistant content.
-        let items = response_to_conversation_items(response);
+        let items = response_to_conversation_items(response).expect("valid response");
         let item = items
             .into_iter()
             .next_back()
@@ -4955,7 +5007,7 @@ mod tests {
         };
 
         // Exercise the flat-list path: reasoning now lives as a sibling.
-        let items = response_to_conversation_items(response);
+        let items = response_to_conversation_items(response).expect("valid response");
         let assistant_idx = items
             .iter()
             .position(|i| matches!(i, ConversationItem::Assistant(_)))
@@ -5045,7 +5097,7 @@ mod tests {
 
         // Flat-list path: reasoning sibling carries the encrypted blob,
         // empty summary maps to an empty `Vec<SummaryPart>`.
-        let items = response_to_conversation_items(response);
+        let items = response_to_conversation_items(response).expect("valid response");
         let reasoning_sibling = items
             .iter()
             .find_map(|i| match i {
@@ -8978,7 +9030,7 @@ mod tests {
             usage: None,
         };
 
-        let items = response_to_conversation_items(response);
+        let items = response_to_conversation_items(response).expect("valid response");
         let item = items
             .into_iter()
             .next_back()

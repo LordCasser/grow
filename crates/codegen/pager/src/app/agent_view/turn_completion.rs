@@ -117,7 +117,7 @@ pub(in crate::app) struct TerminalOutcome {
     pub apply: TerminalApply,
     /// Turn-end notification decision (TurnComplete / AgentError), computed
     /// from the signal BEFORE `finish_turn` clears the flags it depends on
-    /// (`rate_limited`, `model_incompatible`, `bash_turn`).
+    /// (`model_failure_reported`, `bash_turn`).
     pub notification: Option<(NotificationEventKind, String)>,
 }
 
@@ -182,7 +182,7 @@ impl AgentView {
     pub(in crate::app) fn finalize_prompt_terminal(
         &mut self,
         prompt_id: Option<&str>,
-        meta: TerminalMeta,
+        mut meta: TerminalMeta,
     ) -> TerminalOutcome {
         let current_prompt_id = self.session.current_prompt_id.clone();
         match (&current_prompt_id, prompt_id) {
@@ -202,6 +202,10 @@ impl AgentView {
             // to end the right turn; the prompt-status watchdog owns recovery.
             return TerminalOutcome::ignored();
         }
+
+        // One error surface regardless of whether the durable notification or
+        // the driver's RPC wins. Never repeat the provider failure as TurnFailed.
+        meta.skip_error_marker |= self.session.model_failure_reported;
 
         // Capture elapsed BEFORE `mark_turn_finished()` clears `turn_started_at`.
         // The anchor was back-dated from the authoritative `turnStartMs` on

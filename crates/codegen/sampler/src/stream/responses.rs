@@ -3,7 +3,7 @@
 //! Consumes a raw `rs::ResponseStreamEvent` stream and produces
 //! [`SamplingEvent`]s. Pure: no I/O, no shell coupling.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -18,9 +18,28 @@ use sampling_types::{
     TokenUsage, rs,
 };
 
+use super::protocol_failure;
 use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
+
+fn response_usage(response: &rs::Response) -> Option<TokenUsage> {
+    response.usage.as_ref().map(|u| TokenUsage {
+        prompt_tokens: u.input_tokens,
+        completion_tokens: u.output_tokens,
+        total_tokens: u.total_tokens,
+        reasoning_tokens: u.output_tokens_details.reasoning_tokens,
+        cached_prompt_tokens: u.input_tokens_details.cached_tokens,
+        cache_creation_prompt_tokens: 0,
+    })
+}
+
+fn same_tool_identity(left: &rs::FunctionToolCall, right: &rs::FunctionToolCall) -> bool {
+    left.id == right.id
+        && left.call_id == right.call_id
+        && left.name == right.name
+        && left.namespace == right.namespace
+}
 
 /// Returns whether a Responses API event reflects real model progress
 /// rather than a liveness-only heartbeat / status transition.
@@ -133,9 +152,8 @@ fn responses_raw_stop_reason(
 ///
 /// Yields exactly one terminal event ([`SamplingEvent::Completed`] or
 /// [`SamplingEvent::Failed`]) per request. Server-side `ResponseFailed`
-/// and `ResponseError` events are translated to
-/// `SamplingError::Api { status: 500, .. }` so the actor's retry loop
-/// treats them as retryable.
+/// and `ResponseError` events preserve the provider's error classification.
+/// Local protocol failures never enter the transient HTTP retry path.
 ///
 /// `doom_loop` is the collector returned alongside `raw_stream` by
 /// `SamplingClient::conversation_stream_responses`; any signals the SSE
@@ -185,6 +203,7 @@ pub(crate) fn stream_responses_tracked<'a>(
         }
 
         let mut final_response: Option<rs::Response> = None;
+        let mut response_id: Option<String> = None;
         let mut chunk_index: u64 = 0;
         let mut message_chunk_count: u64 = 0;
         let mut first_token_emitted = false;
@@ -195,8 +214,12 @@ pub(crate) fn stream_responses_tracked<'a>(
         // Populated when `ResponseOutputItemAdded` carries a `FunctionCall`;
         // later `ResponseFunctionCallArgumentsDelta` events
         // look up `output_index` here to find the matching `tool_index`.
-        let mut output_to_tool_index: BTreeMap<u32, u32> = BTreeMap::new();
+        // Tool-only UI index, observed identity/argument prefix, args-done flag.
+        let mut streamed_tools: BTreeMap<u32, (u32, rs::FunctionToolCall, bool)> = BTreeMap::new();
+        let mut added_indices = BTreeSet::new();
+        let mut done_indices = BTreeSet::new();
         let mut next_tool_index: u32 = 0;
+        let mut completed_tool_items: BTreeMap<u32, rs::FunctionToolCall> = BTreeMap::new();
 
         let mut stream = raw_stream;
         loop {
@@ -253,6 +276,18 @@ pub(crate) fn stream_responses_tracked<'a>(
             // after the content-aware idle check below.
             let mut should_break = false;
 
+            if let Some(response) = match &event {
+                ResponseStreamEvent::ResponseCreated(event) => Some(&event.response),
+                ResponseStreamEvent::ResponseInProgress(event) => Some(&event.response),
+                ResponseStreamEvent::ResponseQueued(event) => Some(&event.response),
+                _ => None,
+            } {
+                if response_id.as_ref().is_some_and(|id| id != &response.id) {
+                    yield protocol_failure(&request_id, "Responses protocol: conflicting response id", None);
+                    return;
+                }
+                response_id = Some(response.id.clone());
+            }
             match event {
                 ResponseStreamEvent::ResponseOutputTextDelta(text_delta_event) => {
                     let delta = text_delta_event.delta;
@@ -317,10 +352,14 @@ pub(crate) fn stream_responses_tracked<'a>(
                 // Start of a Responses FunctionCall — emit initial id+name
                 // and remember the output_index → tool_index mapping.
                 ResponseStreamEvent::ResponseOutputItemAdded(added_event) => {
+                    if !added_indices.insert(added_event.output_index) || done_indices.contains(&added_event.output_index) {
+                        yield protocol_failure(&request_id, "Responses protocol: duplicate or already closed output index", None);
+                        return;
+                    }
                     if let rs::OutputItem::FunctionCall(fc) = added_event.item {
                         let tool_index = next_tool_index;
                         next_tool_index += 1;
-                        output_to_tool_index.insert(added_event.output_index, tool_index);
+                        streamed_tools.insert(added_event.output_index, (tool_index, fc.clone(), false));
 
                         yield SamplingEvent::ToolCallDelta {
                             request_id: request_id.clone(),
@@ -333,16 +372,25 @@ pub(crate) fn stream_responses_tracked<'a>(
                 }
 
                 // Continuation chunk for a streaming FunctionCall's args.
-                // Drop silently if no preceding OutputItemAdded mapped.
+                // An orphan or mismatched delta cannot be silently discarded:
+                // otherwise the UI and eventual executable call can disagree.
                 ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(args_event) => {
-                    let delta = args_event.delta;
-                    if !delta.is_empty()
-                        && let Some(&tool_index) =
-                            output_to_tool_index.get(&args_event.output_index)
+                    let Some((tool_index, call, arguments_done)) = streamed_tools.get_mut(&args_event.output_index) else {
+                        yield protocol_failure(&request_id, "Responses protocol: arguments delta without a function item", None);
+                        return;
+                    };
+                    if *arguments_done || done_indices.contains(&args_event.output_index)
+                        || call.id.as_deref().is_some_and(|id| id != args_event.item_id)
                     {
+                        yield protocol_failure(&request_id, "Responses protocol: arguments delta for a closed or mismatched item", None);
+                        return;
+                    }
+                    let delta = args_event.delta;
+                    call.arguments.push_str(&delta);
+                    if !delta.is_empty() {
                         yield SamplingEvent::ToolCallDelta {
                             request_id: request_id.clone(),
-                            tool_index,
+                            tool_index: *tool_index,
                             id: None,
                             name: None,
                             arguments_delta: Some(delta),
@@ -350,17 +398,69 @@ pub(crate) fn stream_responses_tracked<'a>(
                     }
                 }
 
+                ResponseStreamEvent::ResponseFunctionCallArgumentsDone(args_event) => {
+                    let Some((_, call, arguments_done)) = streamed_tools.get_mut(&args_event.output_index) else {
+                        yield protocol_failure(&request_id, "Responses protocol: arguments done without a function item", None);
+                        return;
+                    };
+                    if *arguments_done || done_indices.contains(&args_event.output_index)
+                        || call.id.as_deref().is_some_and(|id| id != args_event.item_id)
+                        || args_event.name.as_ref().is_some_and(|name| name != &call.name)
+                        || !args_event.arguments.starts_with(&call.arguments)
+                    {
+                        yield protocol_failure(&request_id, "Responses protocol: conflicting function arguments done", None);
+                        return;
+                    }
+                    call.arguments = args_event.arguments;
+                    *arguments_done = true;
+                }
+
                 ResponseStreamEvent::ResponseCompleted(completed_event) => {
+                    if completed_event.response.status != Status::Completed {
+                        yield protocol_failure(&request_id, "Responses protocol: response.completed has a non-completed status", response_usage(&completed_event.response));
+                        return;
+                    }
                     final_response = Some(completed_event.response);
+                    should_break = true;
                 }
 
                 ResponseStreamEvent::ResponseIncomplete(incomplete_event) => {
+                    if incomplete_event.response.status != Status::Incomplete {
+                        yield protocol_failure(&request_id, "Responses protocol: response.incomplete has a non-incomplete status", response_usage(&incomplete_event.response));
+                        return;
+                    }
                     final_response = Some(incomplete_event.response);
                     should_break = true;
                 }
 
+                ResponseStreamEvent::ResponseOutputItemDone(done_event) => {
+                    let index = done_event.output_index;
+                    if !done_indices.insert(index) {
+                        yield protocol_failure(&request_id, "Responses protocol: duplicate output item done", None);
+                        return;
+                    }
+                    match done_event.item {
+                        rs::OutputItem::FunctionCall(call) => {
+                            if added_indices.contains(&index) && !streamed_tools.contains_key(&index) {
+                                yield protocol_failure(&request_id, "Responses protocol: output item changed to a function call", None);
+                                return;
+                            }
+                            completed_tool_items.insert(index, call);
+                        }
+                        _ if streamed_tools.contains_key(&index) => {
+                            yield protocol_failure(&request_id, "Responses protocol: function item changed type", None);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
                 ResponseStreamEvent::ResponseFailed(failed_event) => {
                     let response = failed_event.response;
+                    if response.status != Status::Failed {
+                        yield protocol_failure(&request_id, "Responses protocol: response.failed has a non-failed status", response_usage(&response));
+                        return;
+                    }
                     let (error_code, error_message) = response
                         .error
                         .as_ref()
@@ -369,9 +469,11 @@ pub(crate) fn stream_responses_tracked<'a>(
                             ("response_failed".to_string(), "unknown error".to_string())
                         });
                     let err = SamplingError::from_stream_error(error_code, error_message);
+                    let mut error = SamplingErrorInfo::from(&err);
+                    error.usage = response_usage(&response);
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
-                        error: SamplingErrorInfo::from(&err),
+                        error,
                     };
                     return;
                 }
@@ -413,19 +515,7 @@ pub(crate) fn stream_responses_tracked<'a>(
         let mut response = match final_response {
             Some(r) => r,
             None => {
-                let err = SamplingError::Api {
-                    status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                    message: "No ResponseCompleted or ResponseIncomplete event received from \
-                              Responses API"
-                        .to_string(),
-                    model_metadata: None,
-                    retry_after_secs: None,
-                    should_retry: None,
-                };
-                yield SamplingEvent::Failed {
-                    request_id: request_id.clone(),
-                    error: SamplingErrorInfo::from(&err),
-                };
+                yield protocol_failure(&request_id, "Responses protocol: stream ended without a terminal response", None);
                 return;
             }
         };
@@ -442,14 +532,40 @@ pub(crate) fn stream_responses_tracked<'a>(
         // `u.total_tokens` to `context_details.input + output` when
         // the backend emits it; on older deployments the wire
         // value passes through unchanged.
-        let usage = response.usage.as_ref().map(|u| TokenUsage {
-            prompt_tokens: u.input_tokens,
-            completion_tokens: u.output_tokens,
-            total_tokens: u.total_tokens,
-            reasoning_tokens: u.output_tokens_details.reasoning_tokens,
-            cached_prompt_tokens: u.input_tokens_details.cached_tokens,
-            cache_creation_prompt_tokens: 0,
-        });
+        let usage = response_usage(&response);
+        if let Some(provider_error) = &response.error {
+            let err = SamplingError::from_stream_error(provider_error.code.clone(), provider_error.message.clone());
+            let mut error = SamplingErrorInfo::from(&err);
+            error.usage = usage;
+            yield SamplingEvent::Failed { request_id: request_id.clone(), error };
+            return;
+        }
+        if response_id.as_ref().is_some_and(|id| id != &response.id) {
+            yield protocol_failure(&request_id, "Responses protocol: conflicting terminal response id", usage);
+            return;
+        }
+        // The terminal snapshot is authoritative, including when optional
+        // intermediate events were omitted, but cannot contradict evidence we
+        // already observed or silently lose an announced executable item.
+        for (index, (_, observed, arguments_done)) in &streamed_tools {
+            let matches = matches!(response.output.get(*index as usize), Some(rs::OutputItem::FunctionCall(call))
+                if same_tool_identity(observed, call)
+                    && if *arguments_done { call.arguments == observed.arguments }
+                       else { call.arguments.starts_with(&observed.arguments) });
+            if !matches {
+                yield protocol_failure(&request_id, format!("Responses protocol: terminal snapshot conflicts with function item {index}"), usage);
+                return;
+            }
+        }
+        for (index, done) in &completed_tool_items {
+            let matches = matches!(response.output.get(*index as usize), Some(rs::OutputItem::FunctionCall(call))
+                if same_tool_identity(done, call) && done.arguments == call.arguments
+                    && done.status.is_none_or(|status| status == rs::OutputStatus::Completed));
+            if !matches {
+                yield protocol_failure(&request_id, format!("Responses protocol: terminal snapshot conflicts with done function item {index}"), usage);
+                return;
+            }
+        }
 
         let cost_usd_ticks = response
             .metadata
@@ -460,12 +576,42 @@ pub(crate) fn stream_responses_tracked<'a>(
         let status = response.status.clone();
         let raw_stop_reason =
             responses_raw_stop_reason(&status, response.incomplete_details.as_ref());
+        let incomplete_stop = match response.incomplete_details.as_ref().map(|details| details.reason.as_str()) {
+            Some("max_output_tokens") => StopReason::Length,
+            Some("content_filter") => StopReason::ContentFilter,
+            // A supplier extension is not evidence of token exhaustion and
+            // must not trigger Grow's automatic truncation-continuation loop.
+            _ => StopReason::Stop,
+        };
 
         // Convert to ConversationItem(s); patch in accumulated reasoning
         // text as a fallback when the final response lacks `content` /
         // `summary` (the streaming deltas may have arrived out of band).
         // Splice policy lives in `inject_streaming_reasoning_fallback`.
-        let mut items = sampling_types::response_to_conversation_items(response);
+        for (index, item) in response.output.iter_mut().enumerate() {
+            let rs::OutputItem::FunctionCall(call) = item else { continue };
+            // An omitted optional status on the terminal snapshot can use an
+            // earlier matching item.done as evidence. Explicitly incomplete
+            // status, conflicting identities or changed arguments never can.
+            if call.status.is_none()
+                && let Some(done) = u32::try_from(index).ok().and_then(|index| completed_tool_items.get(&index))
+                && done.status.is_none_or(|status| status == rs::OutputStatus::Completed)
+                && done.id == call.id && done.call_id == call.call_id
+                && done.name == call.name && done.namespace == call.namespace
+                && done.arguments == call.arguments
+            {
+                call.status = Some(rs::OutputStatus::Completed);
+            }
+        }
+        let mut items = match sampling_types::response_to_conversation_items(response) {
+            Ok(items) => items,
+            Err(err) => {
+                let mut error = SamplingErrorInfo::from(&err);
+                error.usage = usage;
+                yield SamplingEvent::Failed { request_id: request_id.clone(), error };
+                return;
+            }
+        };
         sampling_types::inject_streaming_reasoning_fallback(&mut items, reasoning_acc);
 
         let has_tool_calls = items.iter().any(|i| match i {
@@ -478,7 +624,7 @@ pub(crate) fn stream_responses_tracked<'a>(
         } else {
             match status {
                 Status::Completed => Some(StopReason::Stop),
-                Status::Incomplete => Some(StopReason::Length),
+                Status::Incomplete => Some(incomplete_stop),
                 _ => None,
             }
         };
@@ -636,8 +782,9 @@ mod tests {
 
         match events.last().unwrap() {
             SamplingEvent::Failed { error, .. } => {
-                assert_eq!(error.kind, crate::events::SamplingErrorKind::Api);
-                assert_eq!(error.status_code, Some(500));
+                assert_eq!(error.kind, crate::events::SamplingErrorKind::Serialization);
+                assert_eq!(error.status_code, None);
+                assert!(!error.is_retryable);
             }
             other => panic!("expected Failed, got {other:?}"),
         }
@@ -698,6 +845,50 @@ mod tests {
                 );
             }
             other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_does_not_consume_tail_errors_or_wait_for_eof() {
+        for pending_tail in [false, true] {
+            let tail: BoxStream<'_, Result<rs::ResponseStreamEvent, SamplingError>> =
+                if pending_tail {
+                    stream::pending().boxed()
+                } else {
+                    stream::once(async {
+                        Err(SamplingError::EventStreamError("trailing error".into()))
+                    })
+                    .boxed()
+                };
+            let raw = stream::iter(vec![Ok(completed_event())])
+                .chain(tail)
+                .boxed();
+            let events = tokio::time::timeout(
+                Duration::from_secs(1),
+                collect(stream_responses(
+                    raw,
+                    None,
+                    rid(),
+                    Duration::from_secs(60),
+                    None,
+                )),
+            )
+            .await
+            .expect("completed must not depend on EOF");
+            assert!(matches!(
+                events.last(),
+                Some(SamplingEvent::Completed { .. })
+            ));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. }
+                    ))
+                    .count(),
+                1
+            );
         }
     }
 
@@ -900,10 +1091,229 @@ mod tests {
                 call_id: call_id.into(),
                 namespace: None,
                 name: name.into(),
-                id: None,
+                id: Some(format!("item-{output_index}")),
                 status: None,
             }),
         })
+    }
+
+    fn completed_tools(calls: &[(&str, &str, &str)]) -> rs::ResponseStreamEvent {
+        let mut response = empty_completed_response();
+        response.output = calls
+            .iter()
+            .enumerate()
+            .map(|(index, (id, name, arguments))| {
+                rs::OutputItem::FunctionCall(rs::FunctionToolCall {
+                    arguments: (*arguments).into(),
+                    call_id: (*id).into(),
+                    name: (*name).into(),
+                    id: Some(format!("item-{index}")),
+                    namespace: None,
+                    status: Some(rs::OutputStatus::Completed),
+                })
+            })
+            .collect();
+        rs::ResponseStreamEvent::ResponseCompleted(rs::ResponseCompletedEvent {
+            sequence_number: 10,
+            response,
+        })
+    }
+
+    #[tokio::test]
+    async fn conflicting_tool_stream_evidence_never_completes() {
+        let added = || function_call_added_event(0, "call_0", "test_tool");
+        let good = || completed_tools(&[("call_0", "test_tool", "{}")]);
+        let done = || {
+            serde_json::from_value::<rs::ResponseStreamEvent>(serde_json::json!({
+            "type":"response.output_item.done", "sequence_number":2, "output_index":0,
+            "item":{"type":"function_call","id":"item-0","call_id":"call_0","name":"test_tool","arguments":"{}","status":"completed"}
+        })).unwrap()
+        };
+        let wrong_item = serde_json::from_value(serde_json::json!({
+            "type":"response.function_call_arguments.delta", "sequence_number":1,
+            "output_index":0, "item_id":"other-item", "delta":"{}"
+        }))
+        .unwrap();
+        let args_done = || {
+            serde_json::from_value(serde_json::json!({
+                "type":"response.function_call_arguments.done", "sequence_number":2,
+                "output_index":0, "item_id":"item-0", "arguments":"{}", "name":"test_tool"
+            }))
+            .unwrap()
+        };
+        for wire in [
+            vec![added(), added(), good()],
+            vec![added(), wrong_item, good()],
+            vec![
+                added(),
+                function_call_args_delta_event(0, "{\"x\":1}"),
+                good(),
+            ],
+            vec![added(), completed_event()],
+            vec![
+                added(),
+                completed_tools(&[("call_other", "test_tool", "{}")]),
+            ],
+            vec![done(), done(), good()],
+            vec![
+                done(),
+                completed_tools(&[("call_0", "test_tool", "{\"changed\":true}")]),
+            ],
+            vec![
+                added(),
+                args_done(),
+                function_call_args_delta_event(0, " "),
+                good(),
+            ],
+            vec![added(), args_done(), args_done(), good()],
+            vec![
+                added(),
+                done(),
+                function_call_args_delta_event(0, "{}"),
+                good(),
+            ],
+        ] {
+            let events = collect(stream_responses(
+                stream::iter(wire.into_iter().map(Ok)).boxed(),
+                None,
+                rid(),
+                Duration::from_secs(1),
+                None,
+            ))
+            .await;
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. }
+                    ))
+                    .count(),
+                1
+            );
+            assert!(
+                matches!(events.last(), Some(SamplingEvent::Failed { error, .. })
+                if error.kind == crate::events::SamplingErrorKind::Serialization && !error.is_retryable),
+                "{events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_reason_does_not_invent_token_exhaustion() {
+        for (reason, expected) in [
+            ("max_output_tokens", StopReason::Length),
+            ("content_filter", StopReason::ContentFilter),
+            ("vendor_stop", StopReason::Stop),
+        ] {
+            let events = collect(stream_responses(
+                stream::iter([Ok(incomplete_event(reason))]).boxed(),
+                None,
+                rid(),
+                Duration::from_secs(1),
+                None,
+            ))
+            .await;
+            let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
+                panic!("{events:?}");
+            };
+            assert_eq!(response.stop_reason, Some(expected));
+            assert_eq!(
+                response.raw_stop_reason.as_deref(),
+                Some(format!("incomplete:{reason}").as_str())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_completion_requires_status_or_matching_done_evidence() {
+        use rs::Status;
+        for (overall, item_status, arguments, done, accepted) in [
+            (Status::Completed, None, "{}", false, true),
+            (
+                Status::Completed,
+                Some(rs::OutputStatus::Incomplete),
+                "{}",
+                true,
+                false,
+            ),
+            (
+                Status::Incomplete,
+                Some(rs::OutputStatus::Completed),
+                "{}",
+                false,
+                true,
+            ),
+            (Status::Incomplete, None, "{}", false, false),
+            (Status::Incomplete, None, "{}", true, true),
+            (
+                Status::Incomplete,
+                Some(rs::OutputStatus::InProgress),
+                "{}",
+                true,
+                false,
+            ),
+            (
+                Status::Completed,
+                Some(rs::OutputStatus::Completed),
+                "{",
+                true,
+                false,
+            ),
+        ] {
+            let call = rs::FunctionToolCall {
+                call_id: "call_a".into(),
+                id: Some("fc_a".into()),
+                name: "lookup".into(),
+                namespace: None,
+                arguments: arguments.into(),
+                status: item_status,
+            };
+            let mut response = build_response(overall.clone());
+            response
+                .output
+                .push(rs::OutputItem::FunctionCall(call.clone()));
+            let mut wire = vec![];
+            if done {
+                let mut done_call = call;
+                done_call.status = Some(rs::OutputStatus::Completed);
+                wire.push(Ok(rs::ResponseStreamEvent::ResponseOutputItemDone(
+                    rs::ResponseOutputItemDoneEvent {
+                        sequence_number: 1,
+                        output_index: 0,
+                        item: rs::OutputItem::FunctionCall(done_call),
+                    },
+                )));
+            }
+            wire.push(Ok(if overall == Status::Completed {
+                rs::ResponseStreamEvent::ResponseCompleted(rs::ResponseCompletedEvent {
+                    sequence_number: 2,
+                    response,
+                })
+            } else {
+                rs::ResponseStreamEvent::ResponseIncomplete(rs::ResponseIncompleteEvent {
+                    sequence_number: 2,
+                    response,
+                })
+            }));
+            let events = collect(stream_responses(
+                stream::iter(wire).boxed(),
+                None,
+                rid(),
+                Duration::from_secs(60),
+                None,
+            ))
+            .await;
+            assert_eq!(
+                matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+                accepted,
+                "overall={overall:?} item={item_status:?} args={arguments} done={done}: {events:?}"
+            );
+            if let Some(SamplingEvent::Completed { response, .. }) = events.last() {
+                assert_eq!(response.tool_calls()[0].id.as_ref(), "call_a");
+                assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+            }
+        }
     }
 
     fn function_call_args_delta_event(output_index: u32, delta: &str) -> rs::ResponseStreamEvent {
@@ -946,7 +1356,7 @@ mod tests {
             Ok(function_call_added_event(0, "call_xyz", "do_thing")),
             Ok(function_call_args_delta_event(0, "{\"x\":")),
             Ok(function_call_args_delta_event(0, "1}")),
-            Ok(completed_event()),
+            Ok(completed_tools(&[("call_xyz", "do_thing", "{\"x\":1}")])),
         ];
         let raw = stream::iter(events).boxed();
         let evs = collect(stream_responses(
@@ -969,12 +1379,11 @@ mod tests {
         assert_eq!(deltas[1].2, None);
         assert_eq!(deltas[1].3.as_deref(), Some("{\"x\":"));
         assert_eq!(deltas[2].3.as_deref(), Some("1}"));
+        assert!(matches!(evs.last(), Some(SamplingEvent::Completed { .. })));
     }
 
     #[tokio::test]
-    async fn function_call_args_delta_without_added_event_is_dropped() {
-        // ArgumentsDelta with no preceding OutputItemAdded has no
-        // output_index → tool_index mapping; drop silently.
+    async fn function_call_args_delta_without_added_event_fails() {
         let events: Vec<Result<rs::ResponseStreamEvent, SamplingError>> = vec![
             Ok(function_call_args_delta_event(7, "{\"oops\":1}")),
             Ok(completed_event()),
@@ -989,6 +1398,10 @@ mod tests {
         ))
         .await;
         assert_eq!(tool_call_deltas(&evs).len(), 0);
+        assert!(
+            matches!(evs.last(), Some(SamplingEvent::Failed { error, .. })
+            if error.kind == crate::events::SamplingErrorKind::Serialization)
+        );
     }
 
     #[tokio::test]
@@ -996,9 +1409,12 @@ mod tests {
         let events: Vec<Result<rs::ResponseStreamEvent, SamplingError>> = vec![
             Ok(function_call_added_event(0, "call_a", "tool_a")),
             Ok(function_call_added_event(1, "call_b", "tool_b")),
-            Ok(function_call_args_delta_event(0, "a-args")),
-            Ok(function_call_args_delta_event(1, "b-args")),
-            Ok(completed_event()),
+            Ok(function_call_args_delta_event(0, "{\"a\":1}")),
+            Ok(function_call_args_delta_event(1, "{\"b\":2}")),
+            Ok(completed_tools(&[
+                ("call_a", "tool_a", "{\"a\":1}"),
+                ("call_b", "tool_b", "{\"b\":2}"),
+            ])),
         ];
         let raw = stream::iter(events).boxed();
         let evs = collect(stream_responses(
@@ -1017,9 +1433,10 @@ mod tests {
         assert_eq!(deltas[1].0, 1);
         assert_eq!(deltas[1].1.as_deref(), Some("call_b"));
         assert_eq!(deltas[2].0, 0);
-        assert_eq!(deltas[2].3.as_deref(), Some("a-args"));
+        assert_eq!(deltas[2].3.as_deref(), Some("{\"a\":1}"));
         assert_eq!(deltas[3].0, 1);
-        assert_eq!(deltas[3].3.as_deref(), Some("b-args"));
+        assert_eq!(deltas[3].3.as_deref(), Some("{\"b\":2}"));
+        assert!(matches!(evs.last(), Some(SamplingEvent::Completed { .. })));
     }
 
     #[tokio::test]

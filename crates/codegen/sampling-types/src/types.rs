@@ -567,7 +567,6 @@ pub struct ChatChunkChoice {
 pub struct ToolCallDelta {
     /// The positional index of the tool call being streamed.
     /// Used to correlate delta chunks belonging to the same tool call.
-    #[serde(default)]
     pub index: u32,
     /// Only present in the first chunk for this tool call.
     #[serde(skip_serializing_if = "Option::is_none")]

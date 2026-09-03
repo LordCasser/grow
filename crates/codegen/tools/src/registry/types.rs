@@ -1737,16 +1737,29 @@ impl FinalizedToolset {
         } else {
             Vec::new()
         };
+        let agents_md = if reminders_enabled {
+            crate::reminders::agents_md::discover(&self.resources, &output).await
+        } else {
+            None
+        };
         let prompt_text = output.to_prompt_format();
-        let prompt_text = crate::reminders::format_with_reminders(
+        let mut prompt_text = crate::reminders::format_with_reminders(
             prompt_text,
             reminders,
             self.system_reminder_tag,
         );
         {
-            let res = self.resources.lock().await;
+            let mut res = self.resources.lock().await;
             self.resources_persistence.save(&res);
+            if let Some(discovery) = agents_md
+                && let Some(tracker) =
+                    res.get_mut::<crate::types::agents_md_tracker::AgentsMdTracker>()
+            {
+                tracker.append_to_prompt(discovery, &mut prompt_text, self.system_reminder_tag);
+            }
         }
+        // No await remains in this function after appending/acknowledging the
+        // reminder. Session admission and durable persistence happen downstream.
         Ok(ToolRunResult {
             output,
             prompt_text,

@@ -17,3 +17,19 @@ pub use chat_completions::stream_chat_completions;
 pub use collect::collect_response;
 pub use messages::stream_messages;
 pub use responses::stream_responses;
+
+/// A malformed response fails this request without entering the transient
+/// HTTP retry path. Only attach usage known to describe the terminal response.
+fn protocol_failure(
+    request_id: &crate::types::RequestId,
+    message: impl std::fmt::Display,
+    usage: Option<sampling_types::TokenUsage>,
+) -> crate::events::SamplingEvent {
+    let error = sampling_types::SamplingError::Serialization(serde::de::Error::custom(message));
+    let mut error = crate::events::SamplingErrorInfo::from(&error);
+    error.usage = usage;
+    crate::events::SamplingEvent::Failed {
+        request_id: request_id.clone(),
+        error,
+    }
+}

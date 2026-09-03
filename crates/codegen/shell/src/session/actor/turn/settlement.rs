@@ -234,6 +234,9 @@ impl SessionActor {
         // completed turn and must never be consumed by its successor.
         self.discard_residual_interjections_at_turn_end().await;
 
+        self.finish_sampling_failure_notification(&prompt_id, project_terminal && result.is_err())
+            .await;
+
         if let Some(input) = settled_input {
             let _ = input.respond_to.send(result.clone());
         }

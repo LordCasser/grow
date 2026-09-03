@@ -51,6 +51,60 @@ fn durable_terminal_immediately_finalizes_driver() {
 }
 
 #[test]
+fn provider_failure_is_reported_once_on_either_terminal_rail() {
+    for durable_first in [true, false] {
+        let mut agent = running_driver("p1");
+        agent.session.model_failure_reported = true;
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::RetryFailed {
+                error: "constructed provider failure".into(),
+                error_type: Some("serialization".into()),
+            }));
+        let rpc_meta = || TerminalMeta {
+            pr_ok: false,
+            failed_error: Some("constructed provider failure".into()),
+            was_cancelling: false,
+            bash_turn: false,
+            skip_error_marker: false,
+            accepts_submitting: true,
+        };
+        let first = if durable_first {
+            agent.finalize_turn_from_durable_terminal(
+                "p1",
+                Some("error"),
+                Some("constructed provider failure"),
+            )
+        } else {
+            agent.finalize_prompt_terminal(Some("p1"), rpc_meta())
+        };
+        assert!(matches!(first.apply, TerminalApply::ViewerFinalized));
+        assert!(
+            first.notification.is_none(),
+            "no second error toast/desktop notification"
+        );
+        let second = if durable_first {
+            agent.finalize_prompt_terminal(Some("p1"), rpc_meta())
+        } else {
+            agent.finalize_turn_from_durable_terminal(
+                "p1",
+                Some("error"),
+                Some("constructed provider failure"),
+            )
+        };
+        assert!(matches!(second.apply, TerminalApply::Ignored));
+        assert_eq!(agent.scrollback.len(), 1, "no duplicate TurnFailed block");
+        assert!(agent.session.state.is_idle());
+        assert!(!agent.session.model_failure_reported);
+        agent.start_turn_boundary(Some("p2"));
+        assert!(
+            !agent.session.model_failure_reported,
+            "next turn has independent error UX"
+        );
+    }
+}
+
+#[test]
 fn stale_durable_terminal_cannot_finish_new_driver_turn() {
     let mut agent = running_driver("new");
     let outcome = agent.finalize_turn_from_durable_terminal("old", Some("end_turn"), None);

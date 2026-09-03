@@ -27,6 +27,16 @@ impl SessionActor {
     ) {
         tracing::info!("queueing prompt: {prompt_id}");
         let human = !origin.is_synthetic();
+        if let Err(error) = crate::session::input_inbox::validate_image_sizes(
+            prompt_blocks.iter().filter_map(|block| match block {
+                acp::ContentBlock::Image(image) => Some(image),
+                _ => None,
+            }),
+        ) {
+            let _ = respond_to.send(Err(acp::Error::invalid_params().data(error.to_string())));
+            drop(persist_ack);
+            return;
+        }
         let follow_up_behavior = if human {
             crate::util::config::load_config()
                 .await

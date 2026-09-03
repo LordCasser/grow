@@ -248,16 +248,11 @@ impl ToolBridge {
         &self,
         initial_paths: Vec<std::path::PathBuf>,
         git_root: Option<std::path::PathBuf>,
-        initial_chain: Vec<std::path::PathBuf>,
         gitignore: Option<ignore::gitignore::Gitignore>,
     ) {
-        let registry = &*self.registry;
-        let mut res = registry.resources.lock().await;
-        if let Some(tracker) = res.get_mut::<AgentsMdTracker>() {
-            tracker
-                .seed(initial_paths, git_root, initial_chain, gitignore)
-                .await;
-        }
+        let mut tracker = AgentsMdTracker::new();
+        tracker.seed(initial_paths, git_root, gitignore).await;
+        self.registry.resources.lock().await.insert(tracker);
     }
 
     /// Restore announced skill names from persisted state.

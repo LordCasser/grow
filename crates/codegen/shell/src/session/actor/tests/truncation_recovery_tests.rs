@@ -38,9 +38,8 @@ fn text_block(text: &str) -> serde_json::Value {
 
 /// A `thinking` block. The wire streams `thinking` and `signature` via
 /// separate delta events; `complete` controls whether the terminating
-/// `content_block_stop` is emitted (an incomplete block is discarded by the
-/// stream layer — Anthropic's "thinking blocks cannot be partially
-/// recovered" constraint).
+/// `content_block_stop` is emitted. An unclosed block now fails the response
+/// instead of being silently discarded and reported as a normal completion.
 fn thinking_block(text: &str, signature: &str) -> serde_json::Value {
     json!({
         "type": "thinking",
@@ -50,7 +49,7 @@ fn thinking_block(text: &str, signature: &str) -> serde_json::Value {
 }
 
 /// A `tool_use` block; `complete` controls whether the terminating
-/// `content_block_stop` is emitted (incomplete tool_use is discarded).
+/// `content_block_stop` is emitted (incomplete tool_use fails the response).
 fn tool_use_block(id: &str, name: &str, input_json: &str) -> serde_json::Value {
     json!({
         "type": "tool_use",
@@ -62,7 +61,7 @@ fn tool_use_block(id: &str, name: &str, input_json: &str) -> serde_json::Value {
 
 /// Like [`tool_use_block`] but the builder omits the terminating
 /// `content_block_stop` (via the internal `__no_stop` marker, stripped when
-/// assembling the wire), so the stream layer discards the block — the
+/// assembling the wire), so the stream layer rejects the response — the
 /// "in-progress tool_use at max_tokens" wire shape.
 fn tool_use_block_incomplete(id: &str, name: &str, input_json: &str) -> serde_json::Value {
     let mut block = tool_use_block(id, name, input_json);
@@ -157,8 +156,8 @@ fn messages_turn(blocks: &[serde_json::Value], stop_reason: &str) -> ScriptedRes
             other => panic!("unsupported block type {other:?}"),
         }
         // Blocks marked `__no_stop` (incomplete at the cut-off) get no
-        // terminating `content_block_stop`, so the stream layer discards
-        // them; the marker itself is internal and never enters the wire.
+        // terminating `content_block_stop`; the marker itself is internal
+        // and never enters the wire.
         if block.get("__no_stop").and_then(serde_json::Value::as_bool) != Some(true) {
             events.push(json!({ "type": "content_block_stop", "index": i }).to_string());
         }
@@ -498,6 +497,63 @@ fn malformed_tool_response_does_not_poison_the_next_turn() {
     });
 }
 
+/// Invalid executable output fails locally without poisoning later requests.
+#[test]
+fn protocol_invalid_tools_do_not_execute_and_the_next_turn_recovers() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            use sampling_types::ApiBackend;
+            for (backend, unfinished_json) in [
+                (ApiBackend::ChatCompletions, false),
+                (ApiBackend::ChatCompletions, true),
+                (ApiBackend::Responses, false),
+                (ApiBackend::Responses, true),
+            ] {
+                let server = MockInferenceServer::start().await.unwrap();
+                let (path, bad, good) = if backend == ApiBackend::ChatCompletions {
+                    ("/v1/chat/completions", json!({
+                        "id":"bad", "object":"chat.completion.chunk", "model":"test-model", "created":0,
+                        "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_bad","type":"function",
+                            "function":{"name":"todo_write","arguments":if unfinished_json {"{\"x\":"} else {"{}"}}}]},
+                            "finish_reason":if unfinished_json {json!("length")} else {serde_json::Value::Null}}],
+                        "usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}
+                    }), test_support::sse::chat_completion_script_exact("continued safely", "test-model"))
+                } else {
+                    ("/v1/responses", json!({
+                        "type":"response.incomplete","sequence_number":1,"response":{
+                            "id":"bad","object":"response","created_at":0,"model":"test-model","status":"incomplete",
+                            "incomplete_details":{"reason":"max_output_tokens"},
+                            "output":[{"type":"function_call","id":"fc_bad","call_id":"call_bad","name":"todo_write",
+                                "arguments":if unfinished_json {"{\"x\":"} else {"{}"},"status":"incomplete"}],
+                            "usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,
+                                "input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}
+                        }
+                    }), test_support::sse::responses_api_script_exact("continued safely", "test-model"))
+                };
+                server.enqueue_response(path, ScriptedResponse::sse(vec![SseEvent::data(bad.to_string())]));
+                server.enqueue_response(path, ScriptedResponse::sse(good));
+                let has_terminal_usage = backend == ApiBackend::Responses || unfinished_json;
+                let (actor, _gateway_rx) = actor_with_sampler(&server, backend).await;
+                let error = run_user_turn(&actor, "bad-tool").await.expect_err("partial tool must fail");
+                assert!(format!("{error:?}").contains("protocol:"), "{error:?}");
+                assert_eq!(server.requests().iter().filter(|request| request.path == path).count(), 1, "no hidden retry");
+                assert_eq!(actor.chat_state_handle.try_get_session_usage().await.unwrap().totals.model_calls, u64::from(has_terminal_usage),
+                    "settle known terminal usage, but do not promote a pre-terminal snapshot to a final total");
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert!(!events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Tool(_))));
+                actor.state.lock().await.foreground = ForegroundState::Idle;
+                run_user_turn(&actor, "continue").await.expect("same session remains usable");
+                assert_eq!(server.requests().iter().filter(|request| request.path == path).count(), 2);
+                assert!(assistant_texts(&actor.chat_state_handle.get_conversation().await).iter().any(|text| text.contains("continued safely")));
+            }
+        }));
+    });
+}
+
 /// E2E truncation continue: mock truncates once at `max_tokens`; assert the
 /// partial response is persisted, the continue prompt is injected with
 /// `SyntheticReason::TruncationContinue`, the final output is the
@@ -673,9 +729,8 @@ fn truncation_thinking_block() {
 }
 
 /// Tool-use truncation: an in-progress tool_use block (start + partial JSON,
-/// no `content_block_stop`) is discarded — the persisted assistant has no
-/// tool calls, the next request does not carry the partial call, and the
-/// turn continues via the truncation branch.
+/// no `content_block_stop`) fails the sample. No tools or partial response
+/// enter history and no automatic truncation continuation is authorized.
 #[test]
 fn truncation_tool_use_incomplete() {
     run_with_session_stack(|| {
@@ -696,18 +751,15 @@ fn truncation_tool_use_incomplete() {
                     MAX_TOKENS,
                 ),
             );
-            server.enqueue_response(
-                "/v1/messages",
-                messages_turn(&[text_block("part two")], END_TURN),
-            );
             let (actor, _gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
 
             let result = run_user_turn(&actor, "trunc-tool").await;
-            result.expect("turn must complete successfully");
+            assert!(
+                format!("{:?}", result.expect_err("unclosed tool must fail")).contains("protocol:")
+            );
 
             let conversation = actor.chat_state_handle.get_conversation().await;
-            // The first assistant item kept the partial TEXT but no tool call.
             let assistant_items: Vec<&sampling_types::AssistantItem> = conversation
                 .iter()
                 .filter_map(|item| match item {
@@ -716,26 +768,19 @@ fn truncation_tool_use_incomplete() {
                 })
                 .collect();
             assert!(
-                assistant_items[0].content.contains("part one"),
-                "partial text must be persisted, got {:?}",
-                assistant_items[0].content
+                assistant_items
+                    .iter()
+                    .all(|a| !a.content.contains("part one"))
             );
             assert!(
                 assistant_items.iter().all(|a| a.tool_calls.is_empty()),
                 "the incomplete tool_use must not surface as a tool call"
             );
-            assert_eq!(truncation_continue_count(&conversation), 1);
-            // The follow-up request must not carry the partial tool_use id.
-            let requests = server.requests();
-            assert_eq!(requests.len(), 2, "one truncated + one final request");
-            let second_body = requests[1]
-                .body
-                .as_ref()
-                .expect("second request must have a body");
-            let serialized = serde_json::to_string(second_body).unwrap();
-            assert!(
-                !serialized.contains("call_partial"),
-                "the incomplete tool_use must not be resent, body: {serialized}"
+            assert_eq!(truncation_continue_count(&conversation), 0);
+            assert_eq!(
+                server.requests().len(),
+                1,
+                "no automatic retry/continuation"
             );
         }));
     });

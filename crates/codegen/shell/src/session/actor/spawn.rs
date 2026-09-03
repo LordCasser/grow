@@ -2311,6 +2311,7 @@ pub(crate) async fn spawn_session_actor(
         compaction_at_tokens: std::cell::Cell::new(sampling_config.compaction_at_tokens),
         doom_loop_recovery,
         doom_loop_turn_tally: Default::default(),
+        pending_sampling_failure: Default::default(),
         file_state_tracker,
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints,

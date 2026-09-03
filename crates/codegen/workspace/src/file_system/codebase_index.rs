@@ -15,13 +15,15 @@ use std::sync::{Arc, Weak};
 
 use codebase_graph::{IndexManager, IndexManagerConfig, IndexManagerHandle};
 
-use tools::util::grow_home::grow_home;
+use tools::util::grow_home::{encode_cwd_dirname, grow_home};
 
 /// Get the cache path for a cwd's index.
 ///
-/// Cache is stored in: `~/.grow/indexes/{url_encoded_cwd}/goto_index.bin`
+/// Cache is stored in: `~/.grow/indexes/{encoded_cwd}/goto_index.bin`.
+/// Share the bounded session CWD encoding so long paths do not exceed the
+/// filesystem's component limit. Index lookup does not require decoding.
 pub fn get_index_cache_path(cwd: &Path) -> PathBuf {
-    let encoded = urlencoding::encode(&cwd.to_string_lossy()).into_owned();
+    let encoded = encode_cwd_dirname(&cwd.to_string_lossy());
     grow_home()
         .join("indexes")
         .join(encoded)
@@ -118,6 +120,23 @@ mod tests {
         // Should contain URL-encoded path
         assert!(cache_path.to_string_lossy().contains("%2F"));
         assert!(cache_path.to_string_lossy().ends_with("goto_index.bin"));
+    }
+
+    #[test]
+    fn long_cwd_cache_directory_is_bounded_and_distinct() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let prefix = format!(r"C:\Users\dev\Documents\{}", "中文 空格🦀\\".repeat(30));
+        let mut names = Vec::new();
+        for cwd in [format!("{prefix}project-a"), format!("{prefix}project-b")] {
+            assert!(urlencoding::encode(&cwd).len() > 255);
+            let cache = get_index_cache_path(Path::new(&cwd));
+            let name = cache.parent().unwrap().file_name().unwrap();
+            assert!(name.len() <= 57);
+            // Check real creation without touching the user's index cache.
+            std::fs::create_dir(sandbox.path().join(name)).unwrap();
+            names.push(name.to_owned());
+        }
+        assert_ne!(names[0], names[1]);
     }
 
     // =========================================================================

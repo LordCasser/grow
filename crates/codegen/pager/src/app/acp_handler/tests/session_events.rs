@@ -771,6 +771,39 @@
             session.in_flight_prompt.is_none(),
             "RetryState bypasses session/update in_flight hook"
         );
+        assert!(scrollback.is_empty(), "automatic recovery must not append a warning");
+        assert!(!session.model_failure_reported);
+        session.state = AgentState::TurnRunning;
+        assert!(!matches!(session.turn_activity(), Some(TurnActivity::Retrying { .. })),
+            "automatic recovery must not become a retry warning in the status/title");
+    }
+
+    #[test]
+    fn late_or_foreign_model_failure_does_not_warn_in_another_turn() {
+        for active in [true, false] {
+            let mut app = make_app_with_agent("s1");
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            if active {
+                agent.session.current_prompt_id = Some("new".into());
+                agent.session.state = AgentState::TurnRunning;
+            } else {
+                agent.session.finalized_prompt = Some("old".into());
+            }
+            let payload = SessionNotification {
+                session_id: acp::SessionId::new("s1"),
+                update: GrowSessionUpdate::RetryState(RetryState::Failed {
+                    error_type: "serialization".into(), message: "old failure".into(),
+                }),
+                meta: Some(serde_json::json!({"promptId":"old"})),
+            };
+            let request = acp::ExtNotification::new("grow/session_notification",
+                serde_json::value::to_raw_value(&payload).unwrap().into());
+            assert!(!handle_ext_notification(&request, &mut app));
+            let agent = &app.agents[&AgentId(0)];
+            assert!(agent.scrollback.is_empty());
+            assert!(agent.toast.is_none());
+            assert!(!agent.session.model_failure_reported);
+        }
     }
 
     #[test]
@@ -778,7 +811,7 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
 
-        assert!(!session.rate_limited);
+        assert!(!session.model_failure_reported);
         apply_retry_state(
             &RetryState::Exhausted {
                 attempts: 3,
@@ -788,8 +821,8 @@
             &mut session,
             &mut scrollback);
         assert!(
-            session.rate_limited,
-            "rate_limited flag must be set when is_rate_limited is true"
+            session.model_failure_reported,
+            "terminal rate limit must suppress duplicate turn failure"
         );
     }
 
@@ -839,7 +872,7 @@
     }
 
     #[test]
-    fn retry_exhausted_non_rate_limited_does_not_set_flag() {
+    fn retry_exhausted_non_rate_limited_also_suppresses_duplicate_failure() {
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
 
@@ -852,8 +885,8 @@
             &mut session,
             &mut scrollback);
         assert!(
-            !session.rate_limited,
-            "rate_limited flag must not be set when is_rate_limited is false"
+            session.model_failure_reported,
+            "all terminal provider errors share one failure surface"
         );
     }
 
@@ -1422,12 +1455,12 @@
     // ── apply_retry_state ─────────────────────────────────────────────
 
     #[test]
-    fn retry_failed_encrypted_content_sets_model_incompatible() {
+    fn retry_failed_encrypted_content_suppresses_duplicate_failure() {
         use shell::extensions::notification::RetryState;
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
 
-        assert!(!session.model_incompatible);
+        assert!(!session.model_failure_reported);
         apply_retry_state(
             &RetryState::Failed {
                 error_type: "encrypted_content_mismatch".into(),
@@ -1436,13 +1469,13 @@
             &mut session,
             &mut scrollback);
         assert!(
-            session.model_incompatible,
-            "encrypted_content_mismatch should set model_incompatible flag"
+            session.model_failure_reported,
+            "encrypted_content_mismatch already displayed its error"
         );
     }
 
     #[test]
-    fn retry_failed_other_type_does_not_set_model_incompatible() {
+    fn retry_failed_other_type_also_suppresses_duplicate_failure() {
         use shell::extensions::notification::RetryState;
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
@@ -1455,7 +1488,7 @@
             &mut session,
             &mut scrollback);
         assert!(
-            !session.model_incompatible,
-            "non-encrypted_content error types must not set model_incompatible"
+            session.model_failure_reported,
+            "ordinary terminal errors already displayed their error"
         );
     }

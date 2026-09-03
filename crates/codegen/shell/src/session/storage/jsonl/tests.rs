@@ -231,6 +231,106 @@ async fn session_init_publishes_long_cwd_marker_once() {
     assert_eq!(std::fs::read_to_string(marker).unwrap(), cwd);
 }
 
+#[tokio::test]
+async fn long_session_name_survives_staging_reload_and_fork() {
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let source = Info {
+        // A legal component must not become illegal when staging adds a UUID.
+        id: acp::SessionId::new("s".repeat(255)),
+        cwd: "/workspace".into(),
+    };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    append_timeline_seed(&adapter, &source, vec![ConversationItem::user("keep me")]).await;
+    let contender = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    assert!(!contender.try_acquire_writer_lease(&source).unwrap());
+    drop(contender);
+    let target = Info {
+        id: acp::SessionId::new("t".repeat(255)),
+        cwd: source.cwd.clone(),
+    };
+    adapter.copy_session_data(&source, &target, Default::default()).await.unwrap();
+    drop(adapter);
+
+    let reopened = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    for info in [&source, &target] {
+        let loaded = reopened.load_session_for_write_without_updates(info).await.unwrap();
+        assert_eq!(loaded.summary.info.id, info.id);
+        assert_eq!(loaded_surface(&loaded.timeline_events)[0].text_content(), "keep me");
+    }
+    assert_eq!(reopened.list_sessions(Some(&source.cwd)).await.unwrap().len(), 2);
+    let parent = reopened.session_dir(&source).parent().unwrap().to_path_buf();
+    assert!(std::fs::read_dir(parent).unwrap().all(|entry| {
+        !entry.unwrap().file_name().to_string_lossy().ends_with(".staging")
+    }));
+    reopened.delete_session_by_id_sync(source.id.0.as_ref(), None).unwrap().unwrap();
+    assert!(reopened.open_session_by_id(source.id.0.as_ref()).unwrap().is_none());
+    assert_eq!(reopened.list_sessions(Some(&source.cwd)).await.unwrap().len(), 1);
+    assert!(reopened.session_dir(&target).join("summary.json").is_file());
+}
+
+#[test]
+fn long_session_writer_lease_is_bounded_stable_and_distinct() {
+    let id = acp::SessionId::new("s".repeat(255));
+    let name = JsonlStorageAdapter::writer_lease_name(&id);
+    assert!(name.is_ascii() && name.len() < 255);
+    assert_eq!(name, JsonlStorageAdapter::writer_lease_name(&id));
+    let other = acp::SessionId::new(format!("{}t", "s".repeat(254)));
+    assert_ne!(name, JsonlStorageAdapter::writer_lease_name(&other));
+    let digest_id = acp::SessionId::new(blake3::hash(id.0.as_bytes()).to_hex().to_string());
+    assert_ne!(name, JsonlStorageAdapter::writer_lease_name(&digest_id));
+    let short = acp::SessionId::new("normal-session");
+    assert_eq!(JsonlStorageAdapter::writer_lease_name(&short), ".normal-session.writer.lock");
+}
+
+#[tokio::test]
+async fn long_windows_cwds_roundtrip_under_long_storage_root() {
+    let sandbox = TempDir::new().unwrap();
+    // Exercise full paths beyond MAX_PATH as well as oversized encoded cwd
+    // components. Each real filesystem component stays individually legal.
+    let root = sandbox.path().join("grow-home".repeat(12)).join("profile".repeat(16));
+    std::fs::create_dir_all(&root).unwrap();
+    let cwds = [
+        format!(r"C:\Users\dev\Documents\{}\project", "nested\\".repeat(35)),
+        format!(r"C:\Users\dev\Documents\{}\project", "中文 空格🦀".repeat(25)),
+        format!(r"\\server\share\{}\project", "开发资料\\".repeat(30)),
+        format!(r"\\?\C:\workspace\{}\project", "nested\\".repeat(35)),
+    ];
+    for (index, cwd) in cwds.into_iter().enumerate() {
+        assert!(urlencoding::encode(&cwd).len() > 255);
+        let source = Info {
+            id: acp::SessionId::new(format!("long-path-{index}")),
+            cwd,
+        };
+        let writer = JsonlStorageAdapter::with_root(root.clone());
+        writer.init_session(&source, default_model_id()).await.unwrap();
+        append_timeline_seed(&writer, &source, vec![ConversationItem::user("persisted")]).await;
+        let source_dir = writer.session_dir(&source);
+        assert!(source_dir.as_os_str().to_string_lossy().encode_utf16().count() > 260);
+        assert!(source_dir.parent().unwrap().file_name().unwrap().len() <= 57);
+        assert_eq!(
+            crate::util::grow_home::decode_cwd_from_dirname(source_dir.parent().unwrap()),
+            Some(source.cwd.clone()),
+        );
+        let target = Info {
+            id: acp::SessionId::new(format!("long-path-fork-{index}")),
+            cwd: format!("{}-fork", source.cwd),
+        };
+        writer.copy_session_data(&source, &target, Default::default()).await.unwrap();
+        drop(writer);
+
+        let reader = JsonlStorageAdapter::with_root(root.clone());
+        for info in [&source, &target] {
+            let loaded = reader.load_session_for_write_without_updates(info).await.unwrap();
+            assert_eq!(loaded.summary.info.cwd, info.cwd);
+            assert_eq!(loaded_surface(&loaded.timeline_events)[0].text_content(), "persisted");
+            assert_eq!(reader.list_sessions(Some(&info.cwd)).await.unwrap().len(), 1);
+            let by_id = reader.open_session_by_id(info.id.0.as_ref()).unwrap().unwrap();
+            assert_eq!(by_id.summary().info.cwd, info.cwd);
+        }
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn session_init_rejects_symlinked_long_cwd_marker() {
@@ -2438,11 +2538,10 @@ async fn failed_copy_publishes_no_target_or_staging_directory() {
     let target_dir = adapter.session_dir(&target);
     assert!(!target_dir.exists(), "failed fork must not publish a target");
     let parent = target_dir.parent().unwrap();
-    let staging_prefix = format!(".{}.", target.id);
     assert!(
         std::fs::read_dir(parent)
             .unwrap()
-            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(&staging_prefix)),
+            .all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".staging")),
         "failed fork must clean its staging directory"
     );
 }

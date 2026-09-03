@@ -51,6 +51,8 @@ impl SessionActor {
         images: Vec<acp::ImageContent>,
         interjection_id: Option<String>,
     ) -> Result<(), String> {
+        crate::session::input_inbox::validate_image_sizes(&images)
+            .map_err(|error| error.to_string())?;
         let prompt_id = interjection_id
             .clone()
             .unwrap_or_else(|| format!("steer-{}", uuid::Uuid::now_v7()));

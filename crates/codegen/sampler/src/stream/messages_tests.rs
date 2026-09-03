@@ -101,13 +101,224 @@ async fn collect(s: impl Stream<Item = SamplingEvent>) -> Vec<SamplingEvent> {
     out
 }
 
+fn assert_protocol_failure(events: &[SamplingEvent]) -> &SamplingErrorInfo {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. }
+            ))
+            .count(),
+        1
+    );
+    let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+        panic!("expected protocol failure: {events:?}");
+    };
+    assert_eq!(error.kind, crate::events::SamplingErrorKind::Serialization);
+    assert!(!error.is_retryable);
+    error
+}
+
+fn tool_start(index: u32, input: serde_json::Value) -> MessageStreamEvent {
+    MessageStreamEvent::ContentBlockStart {
+        index,
+        content_block: ContentBlock::ToolUse {
+            id: format!("call_{index}"),
+            name: "test_tool".into(),
+            input,
+            cache_control: None,
+        },
+    }
+}
+
 #[tokio::test]
-async fn empty_stream_yields_started_then_completed() {
+async fn malformed_lifecycles_fail_without_completed_items() {
+    let end = || message_delta_with_stop(messages::StopReason::EndTurn);
+    let cases = vec![
+        vec![MessageStreamEvent::MessageStop],
+        vec![message_start(), MessageStreamEvent::MessageStop],
+        vec![message_start(), end()],
+        vec![message_start(), message_start()],
+        vec![message_start(), text_delta(0, "orphan")],
+        vec![message_start(), block_stop(0)],
+        vec![message_start(), text_block_start(0), text_block_start(0)],
+        vec![
+            message_start(),
+            text_block_start(0),
+            block_stop(0),
+            text_block_start(0),
+        ],
+        vec![
+            message_start(),
+            text_block_start(0),
+            block_stop(0),
+            block_stop(0),
+        ],
+        vec![
+            message_start(),
+            text_block_start(0),
+            block_stop(0),
+            text_delta(0, "late"),
+        ],
+        vec![
+            message_start(),
+            tool_start(0, serde_json::json!({})),
+            text_delta(0, "wrong type"),
+        ],
+        vec![message_start(), end(), text_block_start(0)],
+        vec![
+            message_start(),
+            end(),
+            message_delta_with_stop(messages::StopReason::MaxTokens),
+        ],
+    ];
+    for (index, events) in cases.into_iter().enumerate() {
+        let events = collect(stream_messages(
+            stream::iter(events.into_iter().map(Ok)).boxed(),
+            None,
+            rid(),
+            Duration::from_secs(1),
+        ))
+        .await;
+        let error = assert_protocol_failure(&events);
+        assert!(
+            error.usage.is_none(),
+            "nonterminal usage cannot be called final, case {index}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tool_json_validation_is_atomic_and_preserves_initial_objects() {
+    for (input, delta, valid) in [
+        (serde_json::json!({}), None, true),
+        (serde_json::json!({"x":1}), None, true),
+        (serde_json::json!({}), Some("{\"x\":1}"), true),
+        (serde_json::json!({}), Some(""), false),
+        (serde_json::json!({}), Some("{\"x\":"), false),
+        (serde_json::json!({}), Some("{}{}"), false),
+        (serde_json::json!({}), Some("[]"), false),
+        (serde_json::json!({}), Some("null"), false),
+        (serde_json::json!({"x":1}), Some("{\"y\":2}"), false),
+        (serde_json::json!(null), None, false),
+    ] {
+        // A healthy sibling must not execute if the second tool is invalid.
+        let mut wire = vec![
+            message_start(),
+            tool_start(0, serde_json::json!({})),
+            block_stop(0),
+            tool_start(1, input.clone()),
+        ];
+        if let Some(partial_json) = delta {
+            wire.push(MessageStreamEvent::ContentBlockDelta {
+                index: 1,
+                delta: StreamDelta::InputJsonDelta {
+                    partial_json: partial_json.into(),
+                },
+            });
+        }
+        wire.extend([
+            block_stop(1),
+            message_delta_with_stop(messages::StopReason::ToolUse),
+            MessageStreamEvent::MessageStop,
+        ]);
+        let events = collect(stream_messages(
+            stream::iter(wire.into_iter().map(Ok)).boxed(),
+            None,
+            rid(),
+            Duration::from_secs(1),
+        ))
+        .await;
+        if valid {
+            let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
+                panic!("{events:?}");
+            };
+            assert_eq!(response.tool_calls().len(), 2);
+            assert_eq!(
+                response.tool_calls()[1].arguments.as_ref(),
+                delta.map(str::to_owned).unwrap_or(input.to_string())
+            );
+        } else {
+            assert_eq!(
+                assert_protocol_failure(&events)
+                    .usage
+                    .as_ref()
+                    .unwrap()
+                    .completion_tokens,
+                5
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn usage_only_delta_keeps_stop_and_message_stop_does_not_poll_tail() {
+    let usage_only = MessageStreamEvent::MessageDelta {
+        delta: MessageDeltaBody {
+            stop_reason: None,
+            stop_sequence: None,
+            stop_details: None,
+        },
+        usage: MessageDeltaUsage {
+            output_tokens: 9,
+            ..Default::default()
+        },
+    };
+    let wire = vec![
+        message_start(),
+        text_block_start(0),
+        text_delta(0, "done"),
+        block_stop(0),
+        message_delta_with_stop(messages::StopReason::EndTurn),
+        usage_only,
+        MessageStreamEvent::MessageStop,
+    ];
+    let raw = stream::iter(wire.into_iter().map(Ok))
+        .chain(stream::poll_fn(|_| {
+            panic!("must drop the stream at message_stop");
+        }))
+        .boxed();
+    let events = collect(stream_messages(raw, None, rid(), Duration::from_secs(1))).await;
+    let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
+        panic!("{events:?}");
+    };
+    assert_eq!(response.stop_reason, Some(StopReason::Stop));
+    assert_eq!(response.raw_stop_reason.as_deref(), Some("end_turn"));
+    assert_eq!(response.usage.as_ref().unwrap().completion_tokens, 9);
+}
+
+#[tokio::test]
+async fn empty_content_deltas_do_not_extend_idle_deadline() {
+    let prefix = stream::iter([Ok(message_start()), Ok(text_block_start(0))]);
+    let empty = stream::unfold((), |_| async {
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        Some((Ok(text_delta(0, "")), ()))
+    });
+    let events = tokio::time::timeout(
+        Duration::from_secs(1),
+        collect(stream_messages(
+            prefix.chain(empty).boxed(),
+            None,
+            rid(),
+            Duration::from_millis(15),
+        )),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Failed { error, .. })
+        if error.kind == crate::events::SamplingErrorKind::IdleTimeout)
+    );
+}
+
+#[tokio::test]
+async fn empty_stream_yields_started_then_protocol_failure() {
     let raw = stream::iter(Vec::<Result<MessageStreamEvent, SamplingError>>::new()).boxed();
     let events = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
     assert_eq!(events.len(), 2);
     assert!(matches!(events[0], SamplingEvent::StreamStarted { .. }));
-    assert!(matches!(events[1], SamplingEvent::Completed { .. }));
+    assert_protocol_failure(&events);
 }
 
 #[tokio::test]
@@ -182,6 +393,7 @@ async fn thinking_block_emits_reasoning_channel_and_preserved_in_response() {
         Ok(thinking_delta),
         Ok(sig_delta),
         Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::EndTurn)),
         Ok(MessageStreamEvent::MessageStop),
     ];
     let raw = stream::iter(events).boxed();
@@ -531,11 +743,10 @@ async fn max_tokens_truncation_completes_with_length_stop_reason() {
 }
 
 /// An in-progress thinking block (no ContentBlockStop) at truncation time
-/// must not leak into the response: the accumulated delta is streamed to the
-/// UI but never persisted — matching Anthropic's "thinking blocks cannot be
-/// partially recovered" semantics.
+/// must fail the response rather than silently lose content and authorize an
+/// automatic truncation continuation. Preview deltas are not accepted history.
 #[tokio::test]
-async fn truncated_incomplete_thinking_block_discarded() {
+async fn truncated_incomplete_thinking_block_fails() {
     let thinking_start = MessageStreamEvent::ContentBlockStart {
         index: 0,
         content_block: ContentBlock::Thinking {
@@ -560,27 +771,15 @@ async fn truncated_incomplete_thinking_block_discarded() {
     let raw = stream::iter(events).boxed();
     let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
 
-    match evs.last().unwrap() {
-        SamplingEvent::Completed { response, .. } => {
-            assert_eq!(
-                response.stop_reason,
-                Some(StopReason::Length),
-                "truncation stop_reason must survive on the completed response"
-            );
-            assert!(
-                response.reasoning_items().next().is_none(),
-                "in-progress thinking block must be discarded: {response:?}"
-            );
-        }
-        other => panic!("expected Completed, got {other:?}"),
-    }
+    let error = assert_protocol_failure(&evs);
+    assert_eq!(error.usage.as_ref().unwrap().completion_tokens, 5);
 }
 
 /// An in-progress tool_use block (start + partial input_json, no
 /// ContentBlockStop) at truncation time must not leak into the response as
 /// an executable tool call — the arguments were never completed.
 #[tokio::test]
-async fn truncated_incomplete_tool_use_discarded() {
+async fn truncated_incomplete_tool_use_fails() {
     let tool_start = MessageStreamEvent::ContentBlockStart {
         index: 0,
         content_block: ContentBlock::ToolUse {
@@ -607,18 +806,8 @@ async fn truncated_incomplete_tool_use_discarded() {
     let raw = stream::iter(events).boxed();
     let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
 
-    match evs.last().unwrap() {
-        SamplingEvent::Completed { response, .. } => {
-            assert_eq!(response.stop_reason, Some(StopReason::Length));
-            let a = response.assistant().expect("assistant item present");
-            assert!(
-                a.tool_calls.is_empty(),
-                "in-progress tool_use must be discarded: {:?}",
-                a.tool_calls
-            );
-        }
-        other => panic!("expected Completed, got {other:?}"),
-    }
+    let error = assert_protocol_failure(&evs);
+    assert_eq!(error.usage.as_ref().unwrap().completion_tokens, 5);
 }
 
 /// A COMPLETED tool_use block followed by a max_tokens cut-off keeps its

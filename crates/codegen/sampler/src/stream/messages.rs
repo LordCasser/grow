@@ -3,7 +3,7 @@
 //! Consumes a raw `MessageStreamEvent` stream and produces
 //! [`SamplingEvent`]s. Pure: no I/O, no shell coupling.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -15,6 +15,7 @@ use sampling_types::{
     StopReason, TokenUsage, ToolCall, rs,
 };
 
+use super::protocol_failure;
 use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
@@ -40,11 +41,16 @@ fn messages_stop_reason_wire(sr: &messages::StopReason) -> String {
 pub(crate) fn messages_event_has_meaningful_content(event: &MessageStreamEvent) -> bool {
     match event {
         MessageStreamEvent::Ping => false,
+        MessageStreamEvent::ContentBlockDelta { delta, .. } => match delta {
+            messages::StreamDelta::TextDelta { text } => !text.is_empty(),
+            messages::StreamDelta::ThinkingDelta { thinking } => !thinking.is_empty(),
+            messages::StreamDelta::SignatureDelta { signature } => !signature.is_empty(),
+            messages::StreamDelta::InputJsonDelta { partial_json } => !partial_json.is_empty(),
+        },
         MessageStreamEvent::MessageStart { .. }
         | MessageStreamEvent::MessageDelta { .. }
         | MessageStreamEvent::MessageStop
         | MessageStreamEvent::ContentBlockStart { .. }
-        | MessageStreamEvent::ContentBlockDelta { .. }
         | MessageStreamEvent::ContentBlockStop { .. }
         | MessageStreamEvent::Error { .. } => true,
     }
@@ -60,6 +66,8 @@ struct BlockState {
     tool_name: String,
     tool_id: String,
     args_acc: String,
+    initial_input: Option<serde_json::Value>,
+    args_started: bool,
     thinking_acc: String,
     signature: String,
 }
@@ -69,6 +77,7 @@ enum BlockType {
     Text,
     ToolUse,
     Thinking,
+    RedactedThinking,
 }
 
 /// Transform a raw Anthropic Messages API stream into a stream of
@@ -76,8 +85,8 @@ enum BlockType {
 ///
 /// Yields exactly one terminal event ([`SamplingEvent::Completed`] or
 /// [`SamplingEvent::Failed`]) per request. Server-side `Error` events
-/// translate to `SamplingError::Api { status: 500, .. }` so the actor's
-/// retry loop treats them as retryable transport-level errors.
+/// preserve the provider's error classification. Protocol violations are
+/// non-retryable and never produce executable conversation items.
 pub fn stream_messages<'a>(
     raw_stream: BoxStream<'a, Result<MessageStreamEvent, SamplingError>>,
     model_metadata: Option<ResponseModelMetadata>,
@@ -104,6 +113,12 @@ pub fn stream_messages<'a>(
 
         // Per-block accumulators keyed by content block index.
         let mut blocks: BTreeMap<u32, BlockState> = BTreeMap::new();
+        let mut seen_blocks = BTreeSet::new();
+        let mut message_delta_seen = false;
+        let mut message_stop_seen = false;
+        // Validate closed tools immediately, but drain to a legitimate terminal
+        // usage snapshot before failing. No calls are dispatched by this layer.
+        let mut invalid_response: Option<String> = None;
 
         // Final-message-level accumulators
         let mut final_model: Option<String> = None;
@@ -170,13 +185,67 @@ pub fn stream_messages<'a>(
                 }
             };
 
-            let event_has_content = messages_event_has_meaningful_content(&event);
+            let mut event_has_content = messages_event_has_meaningful_content(&event);
+
+            let protocol_error = match &event {
+                MessageStreamEvent::Ping | MessageStreamEvent::Error { .. } => None,
+                MessageStreamEvent::MessageStart { message } => {
+                    if final_message_id.is_some() {
+                        Some("duplicate message_start")
+                    } else if message.id.trim().is_empty() || message.model.trim().is_empty()
+                        || message.r#type != "message" || message.role != "assistant"
+                        || !message.content.is_empty() || message.stop_reason.is_some()
+                    {
+                        Some("invalid message_start")
+                    } else { None }
+                }
+                _ if final_message_id.is_none() => Some("event received before message_start"),
+                MessageStreamEvent::ContentBlockStart { index, content_block } => {
+                    if message_delta_seen { Some("content received after message_delta") }
+                    else if seen_blocks.contains(index) { Some("duplicate content block index") }
+                    else if matches!(content_block, ContentBlock::Image { .. } | ContentBlock::ToolResult { .. }) {
+                        Some("unsupported assistant content block")
+                    } else { None }
+                }
+                MessageStreamEvent::ContentBlockDelta { index, delta } => {
+                    if message_delta_seen { Some("content received after message_delta") }
+                    else { match blocks.get(index) {
+                        None => Some("delta for an unopened or closed content block"),
+                        Some(state) => if matches!((state.block_type, delta),
+                            (BlockType::Text, StreamDelta::TextDelta { .. })
+                            | (BlockType::Thinking, StreamDelta::ThinkingDelta { .. } | StreamDelta::SignatureDelta { .. })
+                            | (BlockType::ToolUse, StreamDelta::InputJsonDelta { .. })
+                        ) { None } else { Some("delta type does not match content block") },
+                    }}
+                }
+                MessageStreamEvent::ContentBlockStop { index } => {
+                    if message_delta_seen { Some("content received after message_delta") }
+                    else if !blocks.contains_key(index) { Some("stop for an unopened or closed content block") }
+                    else { None }
+                }
+                MessageStreamEvent::MessageDelta { delta, .. } => {
+                    let reason = delta.stop_reason.as_ref().map(messages_stop_reason_wire);
+                    if reason.as_ref().is_some_and(|reason| reason.trim().is_empty()
+                        || final_raw_stop_reason.as_ref().is_some_and(|previous| previous != reason)) {
+                        Some("conflicting or empty stop_reason")
+                    } else if delta.stop_sequence.as_ref().is_some_and(|sequence|
+                        final_stop_sequence.as_ref().is_some_and(|previous| previous != sequence)) {
+                        Some("conflicting stop_sequence")
+                    } else { None }
+                }
+                MessageStreamEvent::MessageStop => None,
+            };
+            if let Some(message) = protocol_error {
+                yield protocol_failure(&request_id, format!("Messages stream protocol: {message}"), None);
+                return;
+            }
 
             match event {
                 MessageStreamEvent::MessageStart { message } => {
                     final_message_id = Some(message.id.clone());
                     final_model = Some(message.model.clone());
                     final_input_tokens = message.usage.input_tokens;
+                    final_output_tokens = message.usage.output_tokens;
                     final_cache_read_input_tokens = message.usage.cache_read_input_tokens;
                     final_cache_creation_input_tokens = message.usage.cache_creation_input_tokens;
                     // Surface the real id/model/input-usage in order, before any
@@ -199,7 +268,9 @@ pub fn stream_messages<'a>(
                 MessageStreamEvent::ContentBlockStart {
                     index,
                     content_block,
-                } => match content_block {
+                } => {
+                    seen_blocks.insert(index);
+                    match content_block {
                     ContentBlock::Thinking {
                         thinking,
                         signature,
@@ -212,6 +283,8 @@ pub fn stream_messages<'a>(
                                 tool_name: String::new(),
                                 tool_id: String::new(),
                                 args_acc: String::new(),
+                                initial_input: None,
+                                args_started: false,
                                 thinking_acc: thinking.clone(),
                                 signature: signature.clone(),
                             },
@@ -232,6 +305,8 @@ pub fn stream_messages<'a>(
                                 tool_name: String::new(),
                                 tool_id: String::new(),
                                 args_acc: String::new(),
+                                initial_input: None,
+                                args_started: false,
                                 thinking_acc: String::new(),
                                 signature: String::new(),
                             },
@@ -243,7 +318,7 @@ pub fn stream_messages<'a>(
                             };
                         }
                     }
-                    ContentBlock::ToolUse { id, name, .. } => {
+                    ContentBlock::ToolUse { id, name, input, .. } => {
                         let tool_index = next_tool_index;
                         next_tool_index += 1;
                         block_to_tool_index.insert(index, tool_index);
@@ -260,6 +335,8 @@ pub fn stream_messages<'a>(
                                 // "{}" then appending fragments would
                                 // produce invalid JSON.
                                 args_acc: String::new(),
+                                initial_input: Some(input),
+                                args_started: false,
                                 thinking_acc: String::new(),
                                 signature: String::new(),
                             },
@@ -285,10 +362,17 @@ pub fn stream_messages<'a>(
                     // through the deferred sampler→shell→reducer hop and handled by
                     // every `SamplingEvent` consumer (TUI included), so it is not
                     // wired. No consumer claims redacted_thinking support.
-                    ContentBlock::RedactedThinking { .. } => {}
+                    ContentBlock::RedactedThinking { .. } => {
+                        blocks.insert(index, BlockState {
+                            block_type: BlockType::RedactedThinking,
+                            text_acc: String::new(), tool_name: String::new(), tool_id: String::new(),
+                            args_acc: String::new(), initial_input: None, args_started: false,
+                            thinking_acc: String::new(), signature: String::new(),
+                        });
+                    }
                     // Image / ToolResult are not expected in assistant streams.
                     _ => {}
-                },
+                }},
 
                 MessageStreamEvent::ContentBlockDelta { index, delta } => {
                     if let Some(state) = blocks.get_mut(&index) {
@@ -335,8 +419,9 @@ pub fn stream_messages<'a>(
                                 }
                             }
                             StreamDelta::InputJsonDelta { partial_json } => {
+                                state.args_started = true;
                                 state.args_acc.push_str(&partial_json);
-                                if let Some(&tool_index) = block_to_tool_index.get(&index) {
+                                if !partial_json.is_empty() && let Some(&tool_index) = block_to_tool_index.get(&index) {
                                     yield SamplingEvent::ToolCallDelta {
                                         request_id: request_id.clone(),
                                         tool_index,
@@ -351,7 +436,7 @@ pub fn stream_messages<'a>(
                 }
 
                 MessageStreamEvent::ContentBlockStop { index } => {
-                    if let Some(state) = blocks.remove(&index) {
+                    if let Some(mut state) = blocks.remove(&index) {
                         match state.block_type {
                             BlockType::Text => {
                                 if !state.text_acc.is_empty() {
@@ -403,25 +488,51 @@ pub fn stream_messages<'a>(
                                 }
                             }
                             BlockType::ToolUse => {
-                                assistant_tool_calls.push(ToolCall {
-                                    id: std::sync::Arc::<str>::from(state.tool_id),
-                                    name: state.tool_name,
-                                    arguments: std::sync::Arc::<str>::from(state.args_acc),
-                                });
+                                let input = state.initial_input.take().expect("tool block has initial input");
+                                let initial_valid = input.is_object()
+                                    && (!state.args_started || input.as_object().is_some_and(|object| object.is_empty()));
+                                if !state.args_started {
+                                    state.args_acc = input.to_string();
+                                }
+                                if !initial_valid || !state.args_acc.trim_start().starts_with('{')
+                                    || serde_json::from_str::<serde::de::IgnoredAny>(&state.args_acc).is_err()
+                                {
+                                    invalid_response.get_or_insert_with(|| format!(
+                                        "invalid or incomplete JSON object at tool block {index}"
+                                    ));
+                                } else {
+                                    assistant_tool_calls.push(ToolCall {
+                                        id: std::sync::Arc::<str>::from(state.tool_id),
+                                        name: state.tool_name,
+                                        arguments: std::sync::Arc::<str>::from(state.args_acc),
+                                    });
+                                }
                             }
+                            BlockType::RedactedThinking => {}
                         }
                     }
                 }
 
                 MessageStreamEvent::MessageDelta { delta, usage } => {
+                    event_has_content = !message_delta_seen
+                        || (final_raw_stop_reason.is_none() && delta.stop_reason.is_some())
+                        || final_output_tokens != usage.output_tokens
+                        || usage.input_tokens.is_some_and(|n| n != final_input_tokens)
+                        || usage.cache_read_input_tokens.is_some_and(|n| n != final_cache_read_input_tokens)
+                        || usage.cache_creation_input_tokens.is_some_and(|n| n != final_cache_creation_input_tokens);
+                    message_delta_seen = true;
+                    if !blocks.is_empty() {
+                        invalid_response.get_or_insert_with(|| "message_delta with unclosed content blocks".into());
+                    }
                     // Normalize the provider's stop detail to a plain message;
                     // the shell logs it when it surfaces a refusal.
                     if let Some(details) = delta.stop_details {
                         final_stop_message = details.explanation;
                     }
                     // Keep the exact wire string so consumers can echo it.
-                    final_raw_stop_reason =
-                        delta.stop_reason.as_ref().map(messages_stop_reason_wire);
+                    if let Some(reason) = &delta.stop_reason {
+                        final_raw_stop_reason = Some(messages_stop_reason_wire(reason));
+                    }
                     // The matched stop sequence rides the same terminal delta
                     // (present only on a `stop_sequence` stop); carry it verbatim.
                     if delta.stop_sequence.is_some() {
@@ -454,7 +565,7 @@ pub fn stream_messages<'a>(
                             );
                             StopReason::Stop
                         }
-                    });
+                    }).or(final_stop_reason);
                     final_output_tokens = usage.output_tokens;
                     // Optional on the delta; preserve message_start values when omitted.
                     if let Some(input) = usage.input_tokens {
@@ -469,8 +580,8 @@ pub fn stream_messages<'a>(
                 }
 
                 MessageStreamEvent::MessageStop => {
-                    // Final message complete; the loop exits naturally
-                    // when the underlying stream ends.
+                    message_stop_seen = true;
+                    break;
                 }
 
                 MessageStreamEvent::Ping => {
@@ -508,7 +619,7 @@ pub fn stream_messages<'a>(
         let total_prompt_tokens = final_input_tokens
             .saturating_add(final_cache_read_input_tokens)
             .saturating_add(final_cache_creation_input_tokens);
-        let usage = if total_prompt_tokens > 0 || final_output_tokens > 0 {
+        let usage = if message_stop_seen && final_stop_reason.is_some() {
             Some(TokenUsage {
                 prompt_tokens: total_prompt_tokens,
                 completion_tokens: final_output_tokens,
@@ -520,6 +631,14 @@ pub fn stream_messages<'a>(
         } else {
             None
         };
+
+        if !message_stop_seen || !message_delta_seen || final_stop_reason.is_none() || !blocks.is_empty() {
+            invalid_response.get_or_insert_with(|| "stream ended without message_start, closed blocks, stop_reason and message_stop".into());
+        }
+        if let Some(message) = invalid_response {
+            yield protocol_failure(&request_id, format!("Messages stream protocol: {message}"), usage);
+            return;
+        }
 
         let stop_reason = if !assistant_tool_calls.is_empty() {
             // Completed tool_use blocks win even over Refusal: the calls are

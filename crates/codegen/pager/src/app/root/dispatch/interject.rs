@@ -64,26 +64,14 @@ pub(super) fn dispatch_interject(
     // carries non-composer text and must keep the user's draft/stash.
     agent.show_toast("Interjection sent");
 
-    // Image-bearing interjection: build text + image content blocks via the
-    // same helper as the queued-prompt drain path (orphan-placeholder
-    // recovery, allowlist, size cap). Text-only stays on the legacy wire.
-    let blocks = if images.is_empty() {
-        None
-    } else {
-        Some(crate::prompt_images::build_content_blocks_with_workspace(
-            text.clone(),
-            images,
-            Some(std::path::Path::new(&agent.session.cwd)),
-        ))
-    };
-
     vec![Effect::SendInterject {
         agent_id: id,
         session_id,
         expected_turn_id,
         text,
         interjection_id,
-        blocks,
+        blocks: None,
+        images,
     }]
 }
 

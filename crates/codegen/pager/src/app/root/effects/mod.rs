@@ -933,11 +933,22 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendPromptBlocks { agent_id, session_id, blocks, prompt_id } => {
+        Effect::SendPromptBlocks { agent_id, session_id, blocks, images, prompt_id } => {
             let tx = acp_tx.clone();
             let screen_mode = session_flags.screen_mode_label;
             tasks
                 .spawn(async move {
+                    let blocks = match tokio::task::spawn_blocking(move || append_prompt_images(blocks, &images)).await {
+                        Ok(Ok(blocks)) => blocks,
+                        result => return TaskResult::PromptResponse {
+                            agent_id, prompt_id: Some(prompt_id), http_status: None,
+                            result: Err(match result {
+                                Ok(Err(error)) => error,
+                                Err(error) => format!("Input image loader failed: {error}"),
+                                Ok(Ok(_)) => unreachable!(),
+                            }),
+                        },
+                    };
                     ulog::info(
                         "prompt.acp_send.start",
                         Some(&session_id.0),
@@ -3159,16 +3170,33 @@ pub(crate) fn execute(
             text,
             interjection_id,
             blocks,
+            images,
         } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
+                    let send_blocks = if images.is_empty() {
+                        Ok(blocks.clone())
+                    } else {
+                        let seed = blocks.clone().unwrap_or_else(|| vec![acp::ContentBlock::Text(acp::TextContent::new(
+                            shell::session::placeholder_images::strip_paths_from_image_placeholders(text.clone())
+                        ))]);
+                        let snapshot = images.clone();
+                        match tokio::task::spawn_blocking(move || append_prompt_images(seed, &snapshot)).await {
+                            Ok(result) => result.map(Some),
+                            Err(error) => Err(format!("Input image loader failed: {error}")),
+                        }
+                    };
+                    let send_blocks = match send_blocks {
+                        Ok(blocks) => blocks,
+                        Err(error) => return TaskResult::InterjectFailed { agent_id, error, text, blocks, images },
+                    };
                     let params = build_interject_params(
                         &session_id,
                         &expected_turn_id,
                         &text,
                         &interjection_id,
-                        blocks.as_deref(),
+                        send_blocks.as_deref(),
                     );
                     let request = acp::ExtRequest::new(
                         "grow/steer",
@@ -3190,6 +3218,7 @@ pub(crate) fn execute(
                                 ),
                                 text,
                                 blocks,
+                                images,
                             }
                         }
                     }

@@ -1163,8 +1163,6 @@ pub(super) fn handle_prompt_response(
         );
     // Send-now cancel: suppress the "Turn cancelled by user" marker (the new
     // prompt follows right under the partial). Wire `cancelTrigger` wins, else
-    let rate_limited = agent.session.rate_limited;
-    let model_incompatible = agent.session.model_incompatible;
     // The RetryState handler already pushed the actionable context-overflow
     // block, so the generic TurnFailed + error toast are redundant.
     let context_overflow = scrollback_has_recent_context_too_large(&agent.scrollback);
@@ -1207,6 +1205,18 @@ pub(super) fn handle_prompt_response(
     // full teardown, records the winner, and consumes
     // promptId metadata attributes the response to its exact foreground owner.
     let was_bash_turn = agent.bash_turn;
+    // Capture before the terminal finalizer clears the cancel/rewind stash.
+    // A transport error here may have an unknown admission outcome: preserve
+    // the draft for explicit review, never automatically re-send it.
+    let failed_draft = if result.is_err()
+        && agent.session.state.is_turn_submitting()
+        && response_pid.is_some()
+        && response_pid == agent.session.current_prompt_id
+    {
+        agent.session.in_flight_prompt.take()
+    } else {
+        None
+    };
     let outcome = agent.finalize_prompt_terminal(
         response_pid.as_deref(),
         crate::app::agent_view::turn_completion::TerminalMeta {
@@ -1214,7 +1224,7 @@ pub(super) fn handle_prompt_response(
             failed_error: result.as_ref().err().cloned(),
             was_cancelling,
             bash_turn: was_bash_turn,
-            skip_error_marker: rate_limited || model_incompatible || context_overflow,
+            skip_error_marker: context_overflow,
             accepts_submitting: true,
         },
     );
@@ -1228,6 +1238,11 @@ pub(super) fn handle_prompt_response(
         apply,
         crate::app::agent_view::turn_completion::TerminalApply::ViewerFinalized
     ) {
+        return vec![];
+    }
+
+    if let Some(draft) = failed_draft {
+        restore_failed_input_draft(agent, draft);
         return vec![];
     }
 
@@ -1288,6 +1303,37 @@ pub(super) fn handle_prompt_response(
 
     note_peek_page_flip(app, agent_id, page_flip_entry);
     effects
+}
+
+pub(super) fn restore_failed_input_draft(
+    agent: &mut AgentView,
+    draft: crate::app::session::InFlightPrompt,
+) {
+    if agent.prompt.text().is_empty()
+        && agent.prompt.images.is_empty()
+        && matches!(
+            agent.prompt_mode,
+            crate::app::agent_view::PromptMode::Normal
+        )
+    {
+        agent
+            .prompt
+            .restore(crate::views::prompt_widget::StashedPrompt::from_submission(
+                draft.text,
+                draft.images,
+                draft.chip_elements,
+            ));
+        agent.show_toast("Input was not confirmed. Your draft and images were restored; review before resending.");
+    } else {
+        agent.session.enqueue_in_flight_prompt_front(draft);
+        agent
+            .session
+            .pending_prompts
+            .front_mut()
+            .expect("just inserted")
+            .requires_review = true;
+        agent.show_toast("Input was not confirmed. The full draft is held in the queue; edit it before retrying.");
+    }
 }
 
 pub(super) fn handle_compact_complete(

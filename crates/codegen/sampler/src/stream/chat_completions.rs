@@ -14,9 +14,35 @@ use sampling_types::{
     ResponseModelMetadata, SamplingError, StopReason, TokenUsage, ToolCall,
 };
 
+use super::protocol_failure;
 use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
+
+// Usage is optional and often arrives after finish_reason. Bound the entire
+// tail (not each frame) so keepalives cannot hold a completed request open.
+const USAGE_TAIL_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn merge_tool_identity(
+    current: &mut String,
+    incoming: Option<String>,
+    field: &str,
+    index: u32,
+) -> Result<Option<String>, SamplingError> {
+    let Some(value) = incoming.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    if current.is_empty() {
+        *current = value.clone();
+        Ok(Some(value))
+    } else if *current == value {
+        Ok(None)
+    } else {
+        Err(SamplingError::Serialization(serde::de::Error::custom(
+            format!("Chat stream protocol: conflicting tool {field} at index {index}"),
+        )))
+    }
+}
 
 /// Transform a raw Chat Completions chunk stream into a stream of
 /// [`SamplingEvent`]s.
@@ -60,6 +86,7 @@ pub fn stream_chat_completions<'a>(
         // Per-response accumulators
         let mut first_chunk_seen = false;
         let mut first_choice_seen = false;
+        let mut response_id = String::new();
         let mut first_token_emitted = false;
         let mut model: String = String::new();
         let mut model_fingerprint: Option<String> = None;
@@ -67,6 +94,7 @@ pub fn stream_chat_completions<'a>(
         let mut cost_usd_ticks: Option<i64> = None;
         let mut finish_reason: Option<StopReason> = None;
         let mut raw_finish_reason: Option<String> = None;
+        let mut tail_deadline: Option<tokio::time::Instant> = None;
 
         let mut content_acc = String::new();
         let mut reasoning_acc = String::new();
@@ -95,10 +123,19 @@ pub fn stream_chat_completions<'a>(
 
         let mut stream = raw_stream;
         loop {
-            let next = match tokio::time::timeout(idle_timeout, stream.next()).await {
+            let timeout = tail_deadline.map_or(idle_timeout, |deadline| {
+                deadline.saturating_duration_since(tokio::time::Instant::now()).min(idle_timeout)
+            });
+            if timeout.is_zero() && finish_reason.is_some() {
+                break;
+            }
+            let next = match tokio::time::timeout(timeout, stream.next()).await {
                 Ok(Some(next)) => next,
                 Ok(None) => break, // stream ended normally
                 Err(_elapsed) => {
+                    if finish_reason.is_some() {
+                        break;
+                    }
                     let err = SamplingError::IdleTimeout {
                         elapsed_secs: idle_timeout.as_secs(),
                     };
@@ -121,12 +158,21 @@ pub fn stream_chat_completions<'a>(
             };
 
             if !first_chunk_seen {
+                response_id = chunk.id.clone();
                 model = chunk.model.clone();
                 model_fingerprint = chunk
                     .system_fingerprint
                     .clone()
                     .filter(|s| !s.is_empty());
                 first_chunk_seen = true;
+            } else if chunk.id != response_id {
+                yield protocol_failure(&request_id, "Chat stream protocol: conflicting response id", None);
+                return;
+            }
+
+            if chunk.choices.len() > 1 {
+                yield protocol_failure(&request_id, "Chat stream protocol: multiple choices in a single-candidate response", None);
+                return;
             }
 
             if let Some(u) = chunk.usage.clone() {
@@ -145,21 +191,47 @@ pub fn stream_chat_completions<'a>(
             let mut chunk_has_content = false;
 
             for choice in chunk.choices.into_iter() {
+                // Grow requests one candidate. Never combine different
+                // candidates' text or executable calls into one response.
+                if choice.index != 0 {
+                    let err = SamplingError::Serialization(serde::de::Error::custom(
+                        "Chat stream protocol: unexpected nonzero choice index",
+                    ));
+                    yield SamplingEvent::Failed {
+                        request_id: request_id.clone(),
+                        error: SamplingErrorInfo::from(&err),
+                    };
+                    return;
+                }
                 first_choice_seen = true;
+                let already_finished = finish_reason.is_some();
                 if let Some(fr) = choice.finish_reason {
-                    // Preserve the provider value before normalizing it. An
-                    // unknown extension remains the most useful diagnostic if
-                    // a non-standard multi-choice stream later reports a
-                    // known reason; typed control continues to use only
-                    // `StopReason` below.
-                    if raw_finish_reason.is_none() || fr.unknown_value().is_some() {
-                        raw_finish_reason = Some(fr.as_str().to_owned());
+                    if fr.as_str().trim().is_empty()
+                        || raw_finish_reason.as_deref().is_some_and(|previous| previous != fr.as_str()) {
+                        yield protocol_failure(&request_id, "Chat stream protocol: conflicting finish_reason", usage);
+                        return;
                     }
+                    raw_finish_reason = Some(fr.as_str().to_owned());
                     finish_reason = Some(fr.into());
-                    chunk_has_content = true;
+                    tail_deadline.get_or_insert_with(|| tokio::time::Instant::now() + USAGE_TAIL_TIMEOUT);
+                    chunk_has_content |= !already_finished;
                 }
 
                 let delta = choice.delta;
+                if already_finished
+                    && (delta.content.as_ref().is_some_and(|text| !text.is_empty())
+                        || delta.reasoning_content.as_ref().is_some_and(|text| !text.is_empty())
+                        || !delta.tool_calls.is_empty())
+                {
+                    let err = SamplingError::Serialization(serde::de::Error::custom(
+                        "Chat stream protocol: output received after finish_reason",
+                    ));
+                    yield SamplingEvent::Failed {
+                        request_id: request_id.clone(),
+                        error: SamplingErrorInfo::from(&err),
+                    };
+                    return;
+                }
 
                 if let Some(text) = delta.content
                     && !text.is_empty()
@@ -204,30 +276,44 @@ pub fn stream_chat_completions<'a>(
                 }
 
                 for tc_delta in delta.tool_calls.into_iter() {
-                    chunk_has_content = true;
-
+                    if tc_delta.kind.as_deref().is_some_and(|kind| kind != "function") {
+                        yield protocol_failure(&request_id, "Chat stream protocol: unsupported tool-call type", None);
+                        return;
+                    }
+                    let func = tc_delta.function.unwrap_or_default();
+                    if tc_delta.id.as_ref().is_none_or(|id| id.trim().is_empty())
+                        && func.name.as_ref().is_none_or(|name| name.trim().is_empty())
+                        && func.arguments.as_ref().is_none_or(String::is_empty)
+                    {
+                        continue;
+                    }
                     let entry = tool_call_acc
                         .entry(tc_delta.index)
                         .or_insert_with(|| (String::new(), String::new(), String::new()));
 
-                    let mut id_for_event: Option<String> = None;
-                    let mut name_for_event: Option<String> = None;
-                    let mut args_for_event: Option<String> = None;
-
-                    if let Some(id) = tc_delta.id {
-                        entry.0 = id.clone();
-                        id_for_event = Some(id);
-                    }
-                    if let Some(func) = tc_delta.function {
-                        if let Some(name) = func.name {
-                            entry.1 = name.clone();
-                            name_for_event = Some(name);
+                    let identity = merge_tool_identity(&mut entry.0, tc_delta.id, "id", tc_delta.index)
+                        .and_then(|id| {
+                            merge_tool_identity(&mut entry.1, func.name, "name", tc_delta.index)
+                                .map(|name| (id, name))
+                        });
+                    let (id_for_event, name_for_event) = match identity {
+                        Ok(identity) => identity,
+                        Err(err) => {
+                            yield SamplingEvent::Failed {
+                                request_id: request_id.clone(),
+                                error: SamplingErrorInfo::from(&err),
+                            };
+                            return;
                         }
-                        if let Some(args) = func.arguments {
-                            entry.2.push_str(&args);
-                            args_for_event = Some(args);
-                        }
+                    };
+                    let args_for_event = func.arguments.filter(|args| !args.is_empty());
+                    if let Some(args) = &args_for_event {
+                        entry.2.push_str(args);
                     }
+                    if id_for_event.is_none() && name_for_event.is_none() && args_for_event.is_none() {
+                        continue;
+                    }
+                    chunk_has_content = true;
 
                     yield SamplingEvent::ToolCallDelta {
                         request_id: request_id.clone(),
@@ -242,12 +328,35 @@ pub fn stream_chat_completions<'a>(
             if chunk_has_content {
                 last_content_chunk_at = Instant::now();
             } else if last_content_chunk_at.elapsed() > idle_timeout {
+                if finish_reason.is_some() {
+                    break;
+                }
                 let err = SamplingError::IdleTimeout {
                     elapsed_secs: idle_timeout.as_secs(),
                 };
                 yield SamplingEvent::Failed {
                     request_id: request_id.clone(),
                     error: SamplingErrorInfo::from(&err),
+                };
+                return;
+            }
+        }
+
+        // EOF is not completion evidence, even for text-only or empty output.
+        if !first_choice_seen || finish_reason.is_none() {
+            yield protocol_failure(&request_id, "Chat stream protocol: stream ended without a choice finish_reason", None);
+            return;
+        }
+        for (index, (_, _, arguments)) in &tool_call_acc {
+            if serde_json::from_str::<serde::de::IgnoredAny>(arguments).is_err() {
+                let err = SamplingError::Serialization(serde::de::Error::custom(format!(
+                    "Chat stream protocol: incomplete or invalid JSON arguments at tool index {index}"
+                )));
+                let mut error = SamplingErrorInfo::from(&err);
+                error.usage = usage;
+                yield SamplingEvent::Failed {
+                    request_id: request_id.clone(),
+                    error,
                 };
                 return;
             }
@@ -263,8 +372,7 @@ pub fn stream_chat_completions<'a>(
             })
             .collect();
 
-        // Honor tool calls by overriding the stop reason if the model
-        // forgot to set it (mirrors the shell's behavior).
+        // A complete call can accompany length or another terminal reason.
         if !tool_calls.is_empty() {
             finish_reason = Some(StopReason::ToolCalls);
         }
@@ -374,7 +482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_stream_yields_started_then_completed() {
+    async fn empty_stream_yields_started_then_protocol_failure() {
         let raw = stream::iter(Vec::<Result<ChatCompletionChunk, SamplingError>>::new()).boxed();
         let events = collect(stream_chat_completions(
             raw,
@@ -387,11 +495,90 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], SamplingEvent::StreamStarted { .. }));
         match &events[1] {
-            SamplingEvent::Completed { response, .. } => {
-                assert!(response.is_empty());
+            SamplingEvent::Failed { error, .. } => {
+                assert_eq!(error.kind, crate::events::SamplingErrorKind::Serialization);
+                assert!(!error.is_retryable);
             }
-            other => panic!("expected Completed, got {other:?}"),
+            other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn text_eof_and_conflicting_terminals_are_protocol_failures() {
+        let mut wrong_id = text_chunk("wrong");
+        wrong_id.id = "another-response".into();
+        let mut unknown_tool = make_chunk(vec![ChatChunkDelta {
+            tool_calls: vec![ChunkToolCallDelta {
+                index: 0,
+                id: Some("call_bad".into()),
+                kind: Some("vendor_tool".into()),
+                function: Some(ToolCallFunctionDelta {
+                    name: Some("test_tool".into()),
+                    arguments: Some("{}".into()),
+                }),
+            }],
+            ..Default::default()
+        }]);
+        unknown_tool.choices[0].finish_reason = Some(FinishReason::ToolCalls);
+        for chunks in [
+            vec![text_chunk("partial")],
+            vec![make_chunk(vec![])],
+            vec![text_chunk("hello"), wrong_id],
+            vec![
+                final_chunk(FinishReason::Stop),
+                final_chunk(FinishReason::Length),
+            ],
+            vec![final_chunk(FinishReason::Stop), text_chunk("late")],
+            vec![unknown_tool],
+        ] {
+            let events = collect(stream_chat_completions(
+                stream::iter(chunks.into_iter().map(Ok)).boxed(),
+                None,
+                rid(),
+                Duration::from_secs(1),
+            ))
+            .await;
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. }
+                    ))
+                    .count(),
+                1
+            );
+            assert!(
+                matches!(events.last(), Some(SamplingEvent::Failed { error, .. })
+                if error.kind == crate::events::SamplingErrorKind::Serialization && !error.is_retryable),
+                "{events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_chat_tail_is_bounded_without_inventing_usage() {
+        let prefix = stream::iter([Ok(text_chunk("done")), Ok(final_chunk(FinishReason::Stop))]);
+        let tail = stream::unfold((), |_| async {
+            tokio::time::sleep(Duration::from_millis(3)).await;
+            Some((Ok(final_chunk(FinishReason::Stop)), ()))
+        });
+        let events = tokio::time::timeout(
+            Duration::from_secs(1),
+            collect(stream_chat_completions(
+                prefix.chain(tail).boxed(),
+                None,
+                rid(),
+                Duration::from_millis(20),
+            )),
+        )
+        .await
+        .unwrap();
+        let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(response.assistant().unwrap().content.as_ref(), "done");
+        assert!(response.usage.is_none());
     }
 
     #[tokio::test]
@@ -732,6 +919,7 @@ mod tests {
         let raw = stream::iter::<Vec<Result<ChatCompletionChunk, SamplingError>>>(vec![
             Ok(chunk1),
             Ok(chunk2),
+            Ok(final_chunk(FinishReason::ToolCalls)),
         ])
         .boxed();
         let events = collect(stream_chat_completions(
@@ -782,6 +970,233 @@ mod tests {
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    fn tool_delta(
+        index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        args: &str,
+    ) -> ChatCompletionChunk {
+        make_chunk(vec![ChatChunkDelta {
+            tool_calls: vec![ChunkToolCallDelta {
+                index,
+                id: id.map(str::to_owned),
+                function: Some(ToolCallFunctionDelta {
+                    name: name.map(str::to_owned),
+                    arguments: Some(args.to_owned()),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }])
+    }
+
+    #[tokio::test]
+    async fn tool_identity_continuations_preserve_final_and_preview_identity() {
+        for continuation in [None, Some(""), Some(" "), Some("call_1")] {
+            let repeated_name = if continuation == Some("call_1") {
+                Some("lookup")
+            } else {
+                continuation
+            };
+            let chunks = vec![
+                Ok(tool_delta(0, Some("call_1"), Some("lookup"), "{\"x\":")),
+                Ok(tool_delta(1, Some("call_2"), Some("other"), "{}")),
+                Ok(tool_delta(0, continuation, repeated_name, "1}")),
+                Ok(final_chunk(FinishReason::ToolCalls)),
+            ];
+            let events = collect(stream_chat_completions(
+                stream::iter(chunks).boxed(),
+                None,
+                rid(),
+                Duration::from_secs(60),
+            ))
+            .await;
+            let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
+                panic!("{events:?}")
+            };
+            let calls = response.tool_calls();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0].id.as_ref(), "call_1");
+            assert_eq!(calls[0].name, "lookup");
+            assert_eq!(calls[0].arguments.as_ref(), "{\"x\":1}");
+            assert_eq!(calls[1].id.as_ref(), "call_2");
+            let ids: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    SamplingEvent::ToolCallDelta { id: Some(id), .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ids, ["call_1", "call_2"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn conflicting_identity_and_bare_tool_eof_fail_closed() {
+        for chunks in [
+            vec![Ok(tool_delta(0, Some("a"), Some("f"), "{}"))],
+            vec![
+                Ok(tool_delta(0, Some("a"), Some("f"), "{")),
+                Ok(tool_delta(0, Some("b"), None, "}")),
+            ],
+            vec![
+                Ok(tool_delta(0, Some("a"), Some("f"), "{")),
+                Ok(tool_delta(0, None, Some("g"), "}")),
+            ],
+        ] {
+            let events = collect(stream_chat_completions(
+                stream::iter(chunks).boxed(),
+                None,
+                rid(),
+                Duration::from_secs(60),
+            ))
+            .await;
+            let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+                panic!("{events:?}")
+            };
+            assert_eq!(error.kind, crate::events::SamplingErrorKind::Serialization);
+            assert!(!error.is_retryable);
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn arguments_can_precede_identity_and_usage_can_follow_finish() {
+        let mut usage = make_chunk(vec![]);
+        usage.usage = Some(Usage {
+            prompt_tokens: 1,
+            completion_tokens: 2,
+            total_tokens: 3,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+            cost_in_usd_ticks: None,
+        });
+        let chunks = vec![
+            Ok(tool_delta(0, None, None, "{}")),
+            Ok(tool_delta(0, Some("a"), Some("f"), "")),
+            Ok(final_chunk(FinishReason::ToolCalls)),
+            Ok(usage),
+        ];
+        let events = collect(stream_chat_completions(
+            stream::iter(chunks).boxed(),
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+        let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
+            panic!("{events:?}")
+        };
+        assert_eq!(response.tool_calls()[0].id.as_ref(), "a");
+        assert_eq!(response.usage.as_ref().unwrap().total_tokens, 3);
+    }
+
+    #[test]
+    fn tool_delta_requires_an_explicit_index() {
+        assert!(
+            serde_json::from_str::<ChunkToolCallDelta>(
+                r#"{"id":"a","function":{"name":"f","arguments":"{}"}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ChunkToolCallDelta>(
+                r#"{"index":0,"id":null,"function":{"name":null,"arguments":"{}"}}"#
+            )
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_json_and_multiple_choices_never_complete_tools() {
+        let mut other_choice = tool_delta(0, Some("a"), Some("f"), "{}");
+        other_choice.choices[0].index = 1;
+        for first in [tool_delta(0, Some("a"), Some("f"), "{\"x\":"), other_choice] {
+            let events = collect(stream_chat_completions(
+                stream::iter(vec![Ok(first), Ok(final_chunk(FinishReason::Length))]).boxed(),
+                None,
+                rid(),
+                Duration::from_secs(60),
+            ))
+            .await;
+            assert!(matches!(events.last(), Some(SamplingEvent::Failed { .. })));
+        }
+    }
+
+    #[tokio::test]
+    async fn arbitrary_utf8_argument_splits_and_empty_identity_are_equivalent() {
+        let args = r#"{"city":"杭州","nested":{"ok":true}}"#;
+        for split in args
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain([args.len()])
+        {
+            let events = collect(stream_chat_completions(
+                stream::iter(vec![
+                    Ok(tool_delta(0, Some("a"), Some("f"), &args[..split])),
+                    Ok(tool_delta(0, Some(""), None, &args[split..])),
+                    Ok(final_chunk(FinishReason::ToolCalls)),
+                ])
+                .boxed(),
+                None,
+                rid(),
+                Duration::from_secs(60),
+            ))
+            .await;
+            let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
+                panic!("split {split}: {events:?}")
+            };
+            assert_eq!(response.tool_calls()[0].arguments.as_ref(), args);
+        }
+    }
+
+    #[tokio::test]
+    async fn no_op_tool_deltas_do_not_create_calls_or_keep_the_stream_alive() {
+        let chunks = vec![
+            Ok(tool_delta(0, Some(""), Some(" "), "")),
+            Ok(text_chunk("answer")),
+            Ok(final_chunk(FinishReason::Stop)),
+        ];
+        let events = collect(stream_chat_completions(
+            stream::iter(chunks).boxed(),
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+        let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
+            panic!("{events:?}")
+        };
+        assert!(response.tool_calls().is_empty());
+        assert_eq!(response.assistant_text(), "answer");
+
+        let wire = async_stream::stream! {
+            yield Ok(tool_delta(0, Some("a"), Some("f"), "{"));
+            loop {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                yield Ok(tool_delta(0, Some("a"), Some("f"), ""));
+            }
+        };
+        let events = tokio::time::timeout(
+            Duration::from_secs(2),
+            collect(stream_chat_completions(
+                wire.boxed(),
+                None,
+                rid(),
+                Duration::from_millis(30),
+            )),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(events.last(), Some(SamplingEvent::Failed { error, .. }) if error.kind == crate::events::SamplingErrorKind::IdleTimeout)
+        );
     }
 
     #[tokio::test]

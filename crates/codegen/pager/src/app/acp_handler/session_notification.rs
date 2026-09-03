@@ -492,11 +492,30 @@ fn handle_session_notification_inner(
         GrowSessionUpdate::ControlStateUpdate(update) => {
             apply_control_state_update(agent, update, meta.event_id.clone(), meta.is_replay)
         }
+        GrowSessionUpdate::RetryState(ref retry) => {
+            let stale = !meta.is_replay
+                && meta.prompt_id.as_deref().is_some_and(|pid| {
+                    agent
+                        .session
+                        .current_prompt_id
+                        .as_deref()
+                        .is_some_and(|current| current != pid)
+                        || agent.session.finalized_prompt.as_deref() == Some(pid)
+                });
+            if stale {
+                false
+            } else {
+                apply_retry_state(retry, &mut agent.session, &mut agent.scrollback);
+                !matches!(
+                    retry,
+                    shell::extensions::notification::RetryState::Retrying { .. }
+                )
+            }
+        }
         ref update @ (GrowSessionUpdate::AutoCompactStarted { .. }
         | GrowSessionUpdate::AutoCompactCompleted { .. }
         | GrowSessionUpdate::AutoCompactFailed { .. }
         | GrowSessionUpdate::AutoCompactCancelled { .. }
-        | GrowSessionUpdate::RetryState(_)
         | GrowSessionUpdate::ImageDropped { .. }
         | GrowSessionUpdate::ImageProjected { .. }
         | GrowSessionUpdate::MemoryFlushCompleted { .. }
@@ -1801,7 +1820,10 @@ pub(super) fn apply_session_event(
         GrowSessionUpdate::RetryState(retry) => {
             tracing::debug!("Retry state: {retry:?}");
             apply_retry_state(retry, session, scrollback);
-            true
+            !matches!(
+                retry,
+                shell::extensions::notification::RetryState::Retrying { .. }
+            )
         }
         GrowSessionUpdate::ImageDropped { notes } => {
             let message = notes.join("\n");
@@ -1866,16 +1888,10 @@ pub(super) fn apply_retry_state(
 ) {
     use shell::extensions::notification::RetryState;
     match retry {
-        RetryState::Retrying {
-            attempt,
-            max_retries,
-            reason,
-        } => {
-            session.set_retry_activity(Some(TurnActivity::Retrying {
-                attempt: *attempt,
-                max_retries: *max_retries,
-                reason: reason.clone(),
-            }));
+        RetryState::Retrying { .. } => {
+            // Recovery is an implementation detail, not a user action. Keep
+            // normal activity/spinner UI; no warning, toast or retry title.
+            session.set_retry_activity(None);
         }
         RetryState::Exhausted {
             attempts,
@@ -1883,7 +1899,7 @@ pub(super) fn apply_retry_state(
             is_rate_limited: rate_limited,
         } => {
             session.set_retry_activity(None);
-            session.rate_limited = *rate_limited;
+            session.model_failure_reported = true;
             if *rate_limited {
                 diagnostics::session_ctx::log_event(diagnostics::events::RateLimitHit {
                     model_id: session
@@ -1912,9 +1928,7 @@ pub(super) fn apply_retry_state(
             message,
         } => {
             session.set_retry_activity(None);
-            if error_type == "encrypted_content_mismatch" {
-                session.model_incompatible = true;
-            }
+            session.model_failure_reported = true;
             if error_type == "context_length" {
                 if !scrollback_has_recent_compaction_failed(scrollback) {
                     scrollback

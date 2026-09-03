@@ -2,6 +2,28 @@
 use super::*;
 
 #[test]
+fn failed_image_loader_rejects_missing_oversized_and_aggregate_before_encoding() {
+    let mut image = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData { data: vec![1,2,3], mime_type: "image/png".into() });
+    assert!(append_prompt_images(vec![], &vec![image.clone(); 17]).is_err());
+    let root = tempfile::tempdir().unwrap();
+    image.encoded_bytes = None;
+    image.session_image_path = Some(root.path().join("missing.png"));
+    assert!(append_prompt_images(vec![], &[image.clone()]).is_err());
+    let file = std::fs::File::create(image.session_image_path.as_ref().unwrap()).unwrap();
+    file.set_len(50_000_001).unwrap();
+    assert!(append_prompt_images(vec![], &[image.clone()]).is_err());
+    file.set_len(26_000_000).unwrap();
+    assert!(append_prompt_images(vec![], &[image.clone(), image]).is_err());
+}
+
+#[test]
+fn failed_image_loader_never_guesses_from_placeholder_text() {
+    let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new("[Image #1: /tmp/previous.png]"))];
+    let output = append_prompt_images(blocks.clone(), &[]).unwrap();
+    assert_eq!(serde_json::to_value(output).unwrap(), serde_json::to_value(blocks).unwrap());
+}
+
+#[test]
 fn trajectory_ready_line_yields_the_exact_url() {
     assert_eq!(
         trajectory_ready_url(

@@ -350,12 +350,8 @@ async fn compaction_accepts_unrelated_appends_without_hiding_late_messages() {
         .push_user_message_durably(ConversationItem::user("arrived during compaction"))
         .await
         .unwrap();
-    h
-        .handle
-        .replace_compaction_range(
-            target,
-            vec![ConversationItem::user_meta("summary")],
-        )
+    h.handle
+        .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
         .await
         .expect("unrelated appends do not change the frozen target");
 
@@ -439,10 +435,7 @@ async fn partial_compaction_preserves_unselected_surface_identity() {
         .await
         .unwrap();
     h.handle
-        .replace_compaction_range(
-            target,
-            vec![ConversationItem::user_meta("summary")],
-        )
+        .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
         .await
         .unwrap();
     h.handle
@@ -767,6 +760,85 @@ async fn response_repair_retains_raw_fact_and_allows_the_next_request() {
         )
     );
     assert!(!h.handle.is_closed());
+}
+
+#[tokio::test]
+async fn repaired_history_stays_non_executable_across_all_backend_switches() {
+    use sampling_types::ApiBackend;
+    let backends = [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+    ];
+    for source in &backends {
+        for target in &backends {
+            if source == target {
+                continue;
+            }
+            let h = TestHarness::new();
+            h.handle.update_sampling_config(SamplingConfig {
+                api_backend: source.clone(),
+                ..test_config()
+            });
+            h.handle
+                .push_response_durably(malformed_response())
+                .await
+                .unwrap();
+            h.handle.update_sampling_config(SamplingConfig {
+                api_backend: target.clone(),
+                ..test_config()
+            });
+            let request = h
+                .handle
+                .build_request("switch-after-repair", vec![], None, None, None)
+                .await
+                .unwrap();
+            let wire = match target {
+                ApiBackend::ChatCompletions => {
+                    serde_json::to_value(sampling_types::ChatCompletionRequest::from(request))
+                        .unwrap()
+                }
+                ApiBackend::Responses => {
+                    serde_json::to_value(sampling_types::rs::CreateResponse::from(&request))
+                        .unwrap()
+                }
+                ApiBackend::Messages => {
+                    serde_json::to_value(sampling_types::build_messages_request(&request)).unwrap()
+                }
+            };
+            fn assert_no_executable_tools(value: &serde_json::Value) {
+                match value {
+                    serde_json::Value::Object(map) => {
+                        assert!(
+                            map.get("tool_calls")
+                                .is_none_or(|calls| calls.as_array().is_some_and(Vec::is_empty))
+                        );
+                        assert!(!map.contains_key("tool_call_id"));
+                        assert!(!matches!(
+                            map.get("type").and_then(serde_json::Value::as_str),
+                            Some(
+                                "function_call"
+                                    | "function_call_output"
+                                    | "tool_use"
+                                    | "tool_result"
+                            )
+                        ));
+                        for child in map.values() {
+                            assert_no_executable_tools(child);
+                        }
+                    }
+                    serde_json::Value::Array(values) => {
+                        for child in values {
+                            assert_no_executable_tools(child);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert_no_executable_tools(&wire);
+            assert!(wire.to_string().contains("untrusted historical evidence"));
+        }
+    }
 }
 
 #[tokio::test]
