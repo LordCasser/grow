@@ -222,7 +222,7 @@ jobs:
       # OpenHarmony build: runs scripts/build-ohos.sh inside the Harmonybrew
       # ci-runner container (arm64 OHOS userland with ohos-sdk + brew rust).
       # CI_RUNNER pins the current swr.cn-north-4.myhuaweicloud.com/harmonybrew/
-      # ci-runner:latest digest (2026-08-07 rebuild, e8ce70a6…). When the
+      # ci-runner:latest digest (2026-09-02 rebuild, 05d3ed2a…). When the
       # Harmonybrew project re-pushes the image, refresh this pin from
       # `docker manifest inspect …/harmonybrew/ci-runner:latest`; the SWR
       # registry garbage-collects superseded digests, so an outdated pin
@@ -241,7 +241,7 @@ jobs:
         shell: bash
         env:
           GROW_VERSION: ${{ inputs.grow_version }}
-          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner@sha256:e8ce70a693933902efa7c699cdba6d68750306db3284a76e9235ed281d63d525
+          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner@sha256:05d3ed2ae953021efd5d85c4ba28388821283f86508a6b8e3112d98ce1e3bd2d
         run: |
           set -euo pipefail
           docker run --rm \
