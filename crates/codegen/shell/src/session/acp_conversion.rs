@@ -455,6 +455,23 @@ pub fn acp_tool_update(
                 )]))
                 .raw_output(raw_output_json(output, rewriter)),
         )),
+        ToolOutput::ListActiveSessions(_)
+        | ToolOutput::CoordinationInquiry(_)
+        | ToolOutput::CoordinationInquiryState(_) => Some(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(tool_call_id)),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(if output.is_error() {
+                    acp::ToolCallStatus::Failed
+                } else {
+                    acp::ToolCallStatus::Completed
+                }))
+                .content(Some(vec![acp::ToolCallContent::from(
+                    acp::ContentBlock::Text(acp::TextContent::new(output.to_prompt_format())),
+                )]))
+                // Peer cwd/answers are returned facts, not paths in this
+                // Session's display worktree. Preserve them verbatim.
+                .raw_output(raw_output_json(output, None)),
+        )),
         ToolOutput::SubagentCompleted(sub) => {
             // Text includes resume handle for discoverability + meta for TUI.
             // Shared with the chat-bidi server via `to_model_text` so both
@@ -544,6 +561,92 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tools::types::output::*;
+
+    #[test]
+    fn coordination_tools_publish_full_standard_acp_results_and_terminal_status() {
+        use tools::implementations::grow_build::coordination::{
+            ActiveSession, CoordinationError, CoordinationErrorCode, CoordinationInquiryResult,
+            CoordinationInquiryState, ListActiveSessionsOutput,
+        };
+
+        let answered = CoordinationInquiryResult {
+            inquiry_id: "inquiry-1".into(),
+            status: "answered".into(),
+            answer: Some("Editing /real/work/src/lib.rs".into()),
+            error: None,
+        };
+        let rejected = CoordinationInquiryResult {
+            inquiry_id: "inquiry-2".into(),
+            status: "rejected".into(),
+            answer: None,
+            error: Some(CoordinationError::new(
+                CoordinationErrorCode::PermissionDenied,
+                "Rejected by target",
+            )),
+        };
+        let rewriter = PathRewriter::new("/real/work", Some("/display/work")).unwrap();
+        for (output, status) in [
+            (
+                ToolOutput::ListActiveSessions(ListActiveSessionsOutput {
+                    sessions: vec![ActiveSession {
+                        session_id: "peer".into(),
+                        canonical_cwd: "/real/work".into(),
+                        main_agent: "grow".into(),
+                        activity: "idle".into(),
+                        active_subagents: 0,
+                        started_at: 1,
+                        process_started_at: 1,
+                        last_heartbeat: 2,
+                    }],
+                }),
+                acp::ToolCallStatus::Completed,
+            ),
+            (
+                ToolOutput::CoordinationInquiry(answered.clone()),
+                acp::ToolCallStatus::Completed,
+            ),
+            (
+                ToolOutput::CoordinationInquiry(rejected.clone()),
+                acp::ToolCallStatus::Failed,
+            ),
+            (
+                ToolOutput::CoordinationInquiryState(CoordinationInquiryState {
+                    inquiry_id: "inquiry-1".into(),
+                    phase: "finished".into(),
+                    outcome: Some(answered),
+                }),
+                acp::ToolCallStatus::Completed,
+            ),
+            (
+                ToolOutput::CoordinationInquiryState(CoordinationInquiryState {
+                    inquiry_id: "inquiry-2".into(),
+                    phase: "finished".into(),
+                    outcome: Some(rejected),
+                }),
+                acp::ToolCallStatus::Completed,
+            ),
+        ] {
+            let update = acp_tool_update(&output, "tool-call-1", Some(&rewriter), None)
+                .expect("coordination results must not fall through to the server-only arm");
+            assert_eq!(update.tool_call_id.0.as_ref(), "tool-call-1");
+            assert_eq!(update.fields.status, Some(status));
+            assert_eq!(
+                update.fields.raw_output,
+                Some(serde_json::to_value(&output).unwrap())
+            );
+            let content = update.fields.content.unwrap();
+            let [
+                acp::ToolCallContent::Content(acp::Content {
+                    content: acp::ContentBlock::Text(text),
+                    ..
+                }),
+            ] = content.as_slice()
+            else {
+                panic!("expected a full text result for inline expansion")
+            };
+            assert_eq!(text.text, output.to_prompt_format());
+        }
+    }
 
     #[test]
     fn test_acp_tool_update_read_file_success() {

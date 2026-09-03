@@ -109,6 +109,7 @@ fn expected_builtin_tool_kinds() -> HashMap<String, ToolKind> {
         entry::<grow_build::SchedulerListTool>(ToolKind::Other, ToolAccess::Read),
         // ── Grow local session coordination ────────────────────────────────
         entry::<grow_build::ListActiveSessionsTool>(ToolKind::Other, ToolAccess::Read),
+        entry::<grow_build::GetInquiryTool>(ToolKind::Other, ToolAccess::Read),
         entry::<grow_build::AskSessionTool>(ToolKind::Other, ToolAccess::Read),
         // ── Grow integration dispatch ──────────────────────────────────────
         entry::<use_tool::UseTool>(ToolKind::UseTool, ToolAccess::All),

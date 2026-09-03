@@ -3,6 +3,7 @@
 //! This combines entries, scroll position, selection, and turn-based navigation
 //! into a single clean state object.
 
+mod coordination;
 pub mod groups;
 mod layout;
 mod nav;
@@ -454,11 +455,12 @@ impl ScrollbackState {
     /// Used by the cursor-found reconnect reload: nothing was replayed, so the
     /// pre-outage transcript is kept and only the post-cursor live tail that
     /// accumulated in the staging state is attached below it.
-    pub(crate) fn append_entries_from(&mut self, tail: ScrollbackState) {
+    pub(crate) fn append_entries_from(&mut self, mut tail: ScrollbackState) {
         debug_assert!(
             tail.next_id >= self.next_id,
             "append_entries_from requires a fresh_continuation sibling (shared id space)"
         );
+        self.merge_coordination_rows_from_tail(&mut tail);
         let tail_permission_groups = tail
             .entries
             .iter()
@@ -971,7 +973,9 @@ impl ScrollbackState {
             if let RenderBlock::ToolCall(ref tcb) = entry.block {
                 // Skip lifecycle event blocks (e.g. user_prompt_submit) — they
                 // are not real tool calls and shouldn't receive tool hooks.
-                if matches!(tcb, ToolCallBlock::Lifecycle(_)) {
+                if matches!(tcb, ToolCallBlock::Lifecycle(_))
+                    || matches!(tcb, ToolCallBlock::Other(block) if block.coordination.is_some())
+                {
                     return None;
                 }
                 Some(*id)
@@ -1580,13 +1584,18 @@ impl ScrollbackState {
         self.finish_running_with_time(id, None);
     }
 
-    /// Mark every running entry finished.
+    /// Finish foreground presentation left behind by the old turn tracker.
     ///
     /// Used when a transcript is restored/merged after a reconnect reload:
     /// entries left running by the pre-outage turn are unknown to the fresh
     /// tracker, so `finish_turn` alone would leave them animating forever.
+    /// Passive inquiries have their own lifecycle and authoritative reload
+    /// projection; foreground completion cannot end their timing or animation.
     pub(crate) fn finish_all_running(&mut self) {
-        let ids: Vec<EntryId> = self.running.iter().copied().collect();
+        let ids: Vec<EntryId> = self.running.iter().copied().filter(|id| {
+            !matches!(self.entries.get(id).map(|entry| &entry.block),
+                Some(RenderBlock::ToolCall(ToolCallBlock::Other(block))) if block.coordination.is_some())
+        }).collect();
         for id in ids {
             self.finish_running(id);
         }

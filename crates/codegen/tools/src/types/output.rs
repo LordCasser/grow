@@ -500,6 +500,9 @@ pub enum ToolOutput {
     CoordinationInquiry(
         crate::implementations::grow_build::coordination::CoordinationInquiryResult,
     ),
+    CoordinationInquiryState(
+        crate::implementations::grow_build::coordination::CoordinationInquiryState,
+    ),
     CreateGoal(crate::implementations::grow_build::update_goal::CreateGoalOutput),
     UpdateGoal(crate::implementations::grow_build::update_goal::UpdateGoalOutput),
     GetGoal(crate::implementations::grow_build::update_goal::GoalView),
@@ -518,6 +521,7 @@ impl ToolOutput {
     /// never report a *false failure*.
     pub fn is_error(&self) -> bool {
         match self {
+            ToolOutput::CoordinationInquiry(outcome) => outcome.status != "answered",
             ToolOutput::MCP(m) => m.is_error,
             ToolOutput::Bash(b) => b.exit_code != 0,
             ToolOutput::SearchReplace(SearchReplaceOutput::EditsApplied(_)) => false,
@@ -734,6 +738,9 @@ impl ToolOutput {
                 serde_json::to_string_pretty(o).unwrap_or_default()
             }
             ToolOutput::CoordinationInquiry(o) => {
+                serde_json::to_string_pretty(o).unwrap_or_default()
+            }
+            ToolOutput::CoordinationInquiryState(o) => {
                 serde_json::to_string_pretty(o).unwrap_or_default()
             }
             ToolOutput::CreateGoal(o) => o.summary.clone(),

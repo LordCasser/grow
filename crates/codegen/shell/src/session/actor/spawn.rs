@@ -2515,6 +2515,14 @@ pub(crate) async fn spawn_session_actor(
             )))
         })?;
     session
+        .recover_interrupted_coordination_inquiries()
+        .await
+        .map_err(|error| {
+            agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                "failed to close interrupted coordination inquiries: {error}"
+            )))
+        })?;
+    session
         .restore_pending_human_inputs()
         .await
         .map_err(|error| {

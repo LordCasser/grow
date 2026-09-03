@@ -1,5 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
+    use crate::scrollback::blocks::ToolCallBlock;
 
     // ── apply_session_event ────────────────────────────────────────────
 
@@ -75,7 +76,7 @@
     }
 
     #[test]
-    fn coordination_notice_keeps_its_category_and_audit_details() {
+    fn coordination_notice_projects_to_running_tool_row_with_audit_details() {
         let mut app = make_app_with_agent("s1");
         let update = GrowSessionUpdate::UiNotice(
             shell::extensions::notification::UiNotice {
@@ -83,24 +84,31 @@
                 category: shell::extensions::notification::UiNoticeCategory::Coordination,
                 subject: Some("incoming inquiry".into()),
                 description: Some("Another local Grow session requested information".into()),
-                message: "Session peer asked this session a question".into(),
+                message: "Answering session peer".into(),
                 tone: shell::extensions::notification::UiNoticeTone::Info,
-                details: Some("Source session: peer\nQuestion:\nStatus?".into()),
+                details: Some(serde_json::to_string(&shell::coordination::IncomingInquiryAudit {
+                    source_peer_id: "peer-process".into(),
+                    source_session_id: "peer".into(),
+                    source_cwd: "/tmp/work".into(),
+                    question: "Status?".into(),
+                    approval: None,
+                    outcome: None,
+                }).unwrap()),
             },
         );
         assert!(handle(make_ext_session_notification("s1", update), &mut app));
         let entry = app.agents.get_mut(&AgentId(0)).unwrap()
             .scrollback.entries_mut().last().expect("coordination notice");
         match &entry.block {
-            RenderBlock::Notice(notice) => {
-                assert_eq!(
-                    notice.category,
-                    crate::scrollback::blocks::NoticeCategory::Coordination
-                );
-                assert!(notice.details.as_deref().is_some_and(|details|
-                    details.contains("Source session: peer")));
+            RenderBlock::ToolCall(ToolCallBlock::Other(block)) => {
+                assert_eq!(block.name, "Answering session peer");
+                assert_eq!(block.coordination.as_ref().unwrap().inquiry_id, "inquiry-1");
+                assert!(entry.is_running);
+                let details = block.output.as_deref().unwrap();
+                assert!(details.contains("Source session: peer"));
+                assert!(details.contains("Inquiry ID: inquiry-1"));
             }
-            other => panic!("expected coordination Notice, got {other:?}"),
+            other => panic!("expected passive coordination tool row, got {other:?}"),
         }
     }
 

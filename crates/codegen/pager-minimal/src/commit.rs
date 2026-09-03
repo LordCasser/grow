@@ -76,9 +76,13 @@ pub(crate) const MINIMAL_BLOCK_GAP: u16 = 0;
 /// invisible until it finishes. Committing it immediately matches design §6.11
 /// ("status blocks committed") and keeps the frontier moving.
 ///
+/// A passive coordination inquiry follows its OWN terminal state: an idle
+/// primary turn or a replay's animation flag says nothing about its completion.
+/// It must remain live until the target's terminal event updates the same row.
+///
 /// Once the turn is **idle** (`turn_running == false`) everything except a
-/// pending-user-input block is stable and committable: the tracker can also
-/// leave a thinking block's `is_running` flag set after the turn ends (finalize
+/// pending-user-input block or an unfinished inquiry is stable and committable:
+/// the tracker can also leave a thinking block's `is_running` flag set after the turn ends (finalize
 /// missed at a transition), and that stale flag must not permanently wedge the
 /// commit frontier. The caller finalizes such entries before rendering so they
 /// print in their finished form. The pending-input gate deliberately applies in
@@ -97,6 +101,11 @@ pub fn is_committable(entry: &ScrollbackEntry, turn_running: bool, is_last: bool
     // case is defensive — permissions normally resolve within the turn, but a
     // pending mark must never be committed out from under its modal.
     if entry.is_pending_user_input {
+        return false;
+    }
+    if matches!(&entry.block, RenderBlock::ToolCall(ToolCallBlock::Other(block))
+        if block.coordination.as_ref().is_some_and(|row| !row.terminal))
+    {
         return false;
     }
     if !turn_running {
@@ -125,6 +134,9 @@ pub fn minimal_commit_display_mode(
 ) -> DisplayMode {
     let collapse_thinking = appearance.minimal_collapse_thinking;
     match block {
+        RenderBlock::ToolCall(ToolCallBlock::Other(block)) if block.coordination.is_some() => {
+            DisplayMode::Collapsed
+        }
         RenderBlock::ToolCall(ToolCallBlock::Edit(_)) => DisplayMode::Expanded,
         RenderBlock::ToolCall(
             tc @ (ToolCallBlock::Search(_)

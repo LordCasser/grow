@@ -1,0 +1,60 @@
+name: Local agent coordination
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/local-coordination.yml"
+      - "scripts/test_local_coordination.py"
+      - "crates/codegen/shell/src/coordination/**"
+      - "crates/codegen/shell/src/local_ipc/**"
+      - "crates/codegen/shell/src/**/coordination.rs"
+      - "crates/codegen/shell/src/session/acp_conversion.rs"
+      - "crates/codegen/tools/src/implementations/grow_build/coordination.rs"
+      - "crates/codegen/pager/src/**"
+      - "crates/codegen/pager-minimal/src/**"
+      - "Cargo.lock"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-coordination-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_SPLIT_DEBUGINFO: "off"
+      CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: "off"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.1"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: local-coordination
+      - run: cargo test --locked -p shell --lib local_ipc -- --nocapture
+      - run: cargo test --locked -p shell --lib coordination -- --nocapture
+      - run: cargo test --locked -p pager --lib coordination -- --nocapture
+      - run: cargo test --locked -p pager-minimal --lib coordination -- --nocapture
+      - run: cargo build --locked -p cli --bin grow
+      - name: Real independent process regression
+        shell: bash
+        run: |
+          binary=target/debug/grow
+          if [[ "$RUNNER_OS" == "Windows" ]]; then binary=target/debug/grow.exe; fi
+          python scripts/test_local_coordination.py --binary "$binary"

@@ -123,6 +123,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::SchedulerList(_)
         | ToolInput::ListActiveSessions(_)
         | ToolInput::AskSession(_)
+        | ToolInput::GetInquiry(_)
         | ToolInput::CreateGoal(_)
         | ToolInput::GetGoal(_)
         | ToolInput::UpdateGoal(_)

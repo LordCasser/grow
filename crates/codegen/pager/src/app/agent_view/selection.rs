@@ -911,6 +911,10 @@ impl AgentView {
         });
         let is_workflow = entry_block
             .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::Workflow(_)));
+        let is_coordination_notice = entry_block.is_some_and(|block| {
+            matches!(block,
+            crate::scrollback::block::RenderBlock::Notice(notice) if notice.has_details())
+        });
 
         // Word-select tip probe (see WORD_SELECT_REPEAT_WINDOW): assistant
         // messages only — headers / prompts / tool rows are fold-nav surfaces
@@ -977,6 +981,17 @@ impl AgentView {
         // Double-click on bg-task / subagent blocks (matched above) opens a
         // viewer instead of folding.
         match click_count {
+            2 if is_coordination_notice => {
+                if let Some(entry) = self.scrollback.entry(idx)
+                    && let crate::scrollback::block::RenderBlock::Notice(notice) = &entry.block
+                {
+                    self.block_viewer =
+                        Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
+                            "Coordination inquiry",
+                            &notice.detail_text(),
+                        ));
+                }
+            }
             1 if is_plan_tool => {
                 self.show_plan_preview();
             }
@@ -1716,6 +1731,140 @@ mod tests {
             Some(0),
         ));
         assert!(agent.block_viewer.is_some());
+    }
+
+    #[test]
+    fn coordination_notice_double_click_opens_details() {
+        use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::terminal_notice(
+                "durable-event",
+                NoticeTone::Error,
+                NoticeCategory::Coordination,
+                "Inquiry failed",
+                Some("Inquiry ID: id\nError: not_found".into()),
+            ));
+        assert!(agent.block_viewer.is_none());
+        double_click_gesture(&mut agent, Instant::now(), 0);
+        assert!(agent.block_viewer.is_some());
+    }
+
+    #[test]
+    fn coordination_failed_tool_double_click_expands_error() {
+        use crate::scrollback::blocks::{OtherToolCallBlock, ToolCallBlock};
+        use crate::scrollback::types::DisplayMode;
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::ToolCall(
+                ToolCallBlock::Other(
+                    OtherToolCallBlock::new("ask_session", "target")
+                        .with_error("transport_error\nretryAfterMs: 250"),
+                ),
+            ));
+        assert_eq!(
+            agent.scrollback.entry(0).unwrap().display_mode,
+            DisplayMode::Collapsed
+        );
+        double_click_gesture(&mut agent, Instant::now(), 0);
+        assert_eq!(
+            agent.scrollback.entry(0).unwrap().display_mode,
+            DisplayMode::Expanded
+        );
+        assert!(
+            agent.block_viewer.is_none(),
+            "expand the tool itself, not a system message"
+        );
+    }
+
+    #[test]
+    fn coordination_list_and_ask_double_click_expand_tool_return_values() {
+        use crate::scrollback::blocks::{OtherToolCallBlock, ToolCallBlock};
+        use crate::scrollback::types::DisplayMode;
+        for (name, output) in [
+            (
+                "list_active_sessions",
+                r#"{"sessions":[{"sessionId":"peer"}]}"#,
+            ),
+            (
+                "ask_session",
+                r#"{"inquiryId":"one","status":"answered","answer":"working"}"#,
+            ),
+        ] {
+            let mut agent = make_agent();
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::ToolCall(
+                    ToolCallBlock::Other(OtherToolCallBlock::new(name, "").with_output(output)),
+                ));
+            assert_eq!(
+                agent.scrollback.entry(0).unwrap().display_mode,
+                DisplayMode::Collapsed
+            );
+            double_click_gesture(&mut agent, Instant::now(), 0);
+            let entry = agent.scrollback.entry(0).unwrap();
+            assert_eq!(entry.display_mode, DisplayMode::Expanded);
+            assert!(entry.block.searchable_text().unwrap().contains(output));
+            assert!(
+                agent.block_viewer.is_none(),
+                "source tools use normal inline expansion"
+            );
+        }
+    }
+
+    #[test]
+    fn coordination_answer_double_click_expands_the_passive_tool_row() {
+        use crate::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
+        use crate::scrollback::types::DisplayMode;
+        let mut agent = make_agent();
+        let mut block = OtherToolCallBlock::new("Answered session peer", "")
+            .with_output("Inquiry ID: one\nQuestion: status?\nAnswer: working");
+        block.coordination = Some(CoordinationRow {
+            source_peer_id: "peer".into(),
+            inquiry_id: "one".into(),
+            terminal: true,
+        });
+        agent.scrollback.upsert_coordination_row(block, false);
+        double_click_gesture(&mut agent, Instant::now(), 0);
+        assert_eq!(
+            agent.scrollback.entry(0).unwrap().display_mode,
+            DisplayMode::Expanded
+        );
+        assert!(agent.block_viewer.is_none());
+    }
+
+    #[test]
+    fn coordination_answering_double_click_can_expand_then_collapse() {
+        use crate::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
+        use crate::scrollback::types::DisplayMode;
+        let mut agent = make_agent();
+        let mut block =
+            OtherToolCallBlock::new("Answering session peer", "").with_output("Question: status?");
+        block.coordination = Some(CoordinationRow {
+            source_peer_id: "peer".into(),
+            inquiry_id: "one".into(),
+            terminal: false,
+        });
+        agent.scrollback.upsert_coordination_row(block, false);
+        for (i, expected) in [
+            DisplayMode::Expanded,
+            DisplayMode::Collapsed,
+            DisplayMode::Expanded,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            double_click_gesture(
+                &mut agent,
+                Instant::now() + std::time::Duration::from_secs(i as u64),
+                0,
+            );
+            assert_eq!(agent.scrollback.entry(0).unwrap().display_mode, expected);
+            assert!(agent.scrollback.entry(0).unwrap().is_running);
+            assert!(agent.block_viewer.is_none());
+        }
     }
 
     #[test]

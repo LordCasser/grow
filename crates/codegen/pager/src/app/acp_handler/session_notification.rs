@@ -20,6 +20,9 @@ fn ui_notice_block(
         shell::extensions::notification::UiNoticeCategory::Lifecycle => NoticeCategory::Lifecycle,
     };
     let mut metadata = Vec::new();
+    if matches!(category, NoticeCategory::Coordination) {
+        metadata.push(format!("Inquiry ID: {}", notice.correlation_id));
+    }
     if let Some(subject) = notice.subject {
         metadata.push(match category {
             NoticeCategory::Command => format!("Command: {subject}"),
@@ -39,6 +42,53 @@ fn ui_notice_block(
         }
         None => RenderBlock::typed_notice(tone, category, notice.message, details),
     }
+}
+
+/// Timeline audit identity and transcript presentation are different things:
+/// source tools own their UI; target events update one passive tool-style row.
+fn apply_ui_notice(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    mut notice: shell::extensions::notification::UiNotice,
+    event_id: Option<String>,
+    is_replay: bool,
+) -> bool {
+    use crate::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
+    if notice.category == shell::extensions::notification::UiNoticeCategory::Coordination {
+        match notice.subject.as_deref() {
+            Some("outgoing inquiry" | "outgoing inquiry completed") => return false,
+            Some("incoming inquiry" | "inquiry approval" | "inquiry completed") => {
+                let Some(audit) = shell::coordination::IncomingInquiryAudit::from_notice(&notice)
+                else {
+                    // Without structured identity we cannot safely merge or
+                    // hold the native history frontier. Preserve the raw fact.
+                    scrollback.push_block(ui_notice_block(notice, event_id));
+                    return true;
+                };
+                let terminal = audit.outcome.is_some();
+                let coordination = CoordinationRow {
+                    source_peer_id: audit.source_peer_id.clone(),
+                    inquiry_id: notice.correlation_id.clone(),
+                    terminal,
+                };
+                notice.details = Some(audit.display_details());
+                let failed = terminal
+                    && notice.tone != shell::extensions::notification::UiNoticeTone::Success;
+                let RenderBlock::Notice(notice) = ui_notice_block(notice, event_id) else {
+                    unreachable!()
+                };
+                let mut block = OtherToolCallBlock::new(notice.text, "")
+                    .with_output(notice.details.unwrap_or_default());
+                if failed {
+                    block.error = Some(block.name.clone());
+                }
+                block.coordination = Some(coordination);
+                return scrollback.upsert_coordination_row(block, is_replay);
+            }
+            _ => {} // Runtime health errors remain visible notices.
+        }
+    }
+    scrollback.push_block(ui_notice_block(notice, event_id));
+    true
 }
 
 /// Merge the durable descriptor carried by a replayed spawn into an existing
@@ -408,12 +458,12 @@ fn handle_session_notification_inner(
     let root_session_id: &str = session_notif.session_id.0.as_ref();
     let controls_pending_before = agent.session.controls_pending();
     let changed = match session_notif.update {
-        GrowSessionUpdate::UiNotice(output) => {
-            agent
-                .scrollback
-                .push_block(ui_notice_block(output, meta.event_id.clone()));
-            true
-        }
+        GrowSessionUpdate::UiNotice(output) => apply_ui_notice(
+            &mut agent.scrollback,
+            output,
+            meta.event_id.clone(),
+            meta.is_replay,
+        ),
         GrowSessionUpdate::ControlStateUpdate(update) => {
             apply_control_state_update(agent, update, meta.event_id.clone(), meta.is_replay)
         }
@@ -1321,10 +1371,7 @@ pub(super) fn handle_child_session_notification(
                 .subagent_views
                 .get_mut(child_sid)
                 .is_some_and(|child| {
-                    child
-                        .scrollback
-                        .push_block(ui_notice_block(output, event_id));
-                    true
+                    apply_ui_notice(&mut child.scrollback, output, event_id, is_replay)
                 })
         }
         GrowSessionUpdate::ControlStateUpdate(update) => agent
@@ -1643,7 +1690,9 @@ pub(super) fn apply_session_event(
             ..
         } => {
             if *async_compact {
-                scrollback.push_block(RenderBlock::notice(format!("async compact applied · {tokens_before} → {tokens_after} tokens")));
+                scrollback.push_block(RenderBlock::notice(format!(
+                    "async compact applied · {tokens_before} → {tokens_after} tokens"
+                )));
                 return true;
             }
             tracing::info!("Auto-compact completed: {tokens_after} tokens after");

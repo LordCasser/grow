@@ -83,14 +83,12 @@ pub struct GoalState {
     pub tokens_used: i64,
     /// At least one provider attempt admitted while this Goal was active did
     /// not return usage. `tokens_used` is then only a durable lower bound. The
-    /// first such gap pauses automatic continuation; an explicit user restart
-    /// may acknowledge the lower bound only when no exact token budget is in
-    /// force.
+    /// gap pauses automatic continuation only when an exact token budget is
+    /// in force. Unbudgeted Goals keep running with the lower-bound ledger.
     pub usage_incomplete: bool,
     /// The user explicitly accepted the current lower-bound ledger. A later
-    /// unmetered provider attempt clears this acknowledgement and requires a
-    /// fresh restart, so one acknowledgement cannot authorize unknown usage
-    /// forever.
+    /// unmetered provider attempt clears this historical acknowledgement. It
+    /// is not an admission gate for an unbudgeted Goal.
     #[serde(default)]
     pub usage_incomplete_acknowledged: bool,
     #[serde(default)]
@@ -107,6 +105,13 @@ pub struct GoalState {
 pub struct GoalTracker {
     goal: Option<GoalState>,
     active_since: Option<Instant>,
+}
+
+impl GoalState {
+    /// Missing usage prevents exact budget enforcement, not unbudgeted work.
+    pub fn usage_blocks_budget(&self) -> bool {
+        self.usage_incomplete && self.token_budget.is_some()
+    }
 }
 
 impl Default for GoalTracker {
@@ -238,7 +243,7 @@ impl GoalTracker {
             return false;
         }
         let next_status = match goal.status {
-            _ if goal.usage_incomplete => GoalStatus::Paused,
+            _ if goal.usage_incomplete && token_budget.is_some() => GoalStatus::Paused,
             GoalStatus::Paused | GoalStatus::Blocked => goal.status,
             GoalStatus::Active | GoalStatus::BudgetLimited | GoalStatus::Complete => {
                 GoalStatus::Active
@@ -363,7 +368,7 @@ impl GoalTracker {
         let Some(goal) = self.goal.as_mut() else {
             return false;
         };
-        if !goal.status.can_restart() || (goal.usage_incomplete && goal.token_budget.is_some()) {
+        if !goal.status.can_restart() || goal.usage_blocks_budget() {
             return false;
         }
         goal.status = GoalStatus::Active;
@@ -486,9 +491,9 @@ impl GoalTracker {
         true
     }
 
-    /// Record that a captured provider attempt was unmetered. The active Step
-    /// owns the later Paused lifecycle transition; separating the evidence
-    /// from that terminal keeps its Control fact after StepEnded.
+    /// Record that a captured provider attempt was unmetered. If a budget is
+    /// configured, the active Step owns the later Paused lifecycle transition;
+    /// separating the evidence keeps that Control fact after StepEnded.
     pub fn mark_usage_incomplete(&mut self, goal_id: &str) -> bool {
         let Some(goal) = self.goal.as_ref() else {
             return false;
@@ -512,14 +517,17 @@ impl GoalTracker {
         let Some(goal) = self.goal.as_ref() else {
             return false;
         };
-        if goal.goal_id != goal_id || !goal.usage_incomplete || goal.status == GoalStatus::Paused {
+        if goal.goal_id != goal_id
+            || !goal.usage_blocks_budget()
+            || goal.status == GoalStatus::Paused
+        {
             return false;
         }
         self.account_elapsed();
         let goal = self.goal.as_mut().expect("Goal existed above");
         goal.status = GoalStatus::Paused;
         goal.status_message = Some(
-            "Goal paused because a provider attempt did not report token usage; usage is a lower bound. Restart explicitly without a token budget to accept that lower bound, or clear and recreate the Goal for exact accounting."
+            "Goal paused because its token budget cannot be enforced exactly: a provider attempt did not report token usage. Usage is a lower bound. Remove the budget and restart, or clear and recreate the Goal for exact accounting."
                 .into(),
         );
         goal.blocked_audit = None;
@@ -708,11 +716,44 @@ mod tests {
         );
         assert!(
             tracker.mark_usage_incomplete("g1"),
-            "a later unmetered attempt must require a fresh acknowledgement"
+            "a later unmetered attempt clears the historical acknowledgement"
         );
         assert!(!tracker.snapshot().unwrap().usage_incomplete_acknowledged);
+        assert!(!tracker.pause_for_incomplete_usage("g1"));
+        assert_eq!(tracker.status(), Some(GoalStatus::Active));
+    }
+
+    #[test]
+    fn unbudgeted_incomplete_usage_does_not_pause_or_block_definition_edits() {
+        let mut tracker = tracker();
+        assert!(tracker.set_token_budget(None));
+        assert!(tracker.mark_usage_incomplete("g1"));
+        assert!(!tracker.pause_for_incomplete_usage("g1"));
+        assert!(tracker.revise_goal("finish safely".into(), None));
+        assert_eq!(tracker.status(), Some(GoalStatus::Active));
+        assert!(tracker.snapshot().unwrap().usage_incomplete);
+        assert!(tracker.account_tokens("g1", 42));
+        assert_eq!(tracker.tokens_used(), 42);
+        assert!(!tracker.set_token_budget(Some(100)));
+        assert!(!tracker.revise_goal("install a budget".into(), Some(100)));
+    }
+
+    #[test]
+    fn budgeted_incomplete_usage_still_pauses_and_prevents_restart() {
+        let mut tracker = tracker();
+        assert!(tracker.mark_usage_incomplete("g1"));
         assert!(tracker.pause_for_incomplete_usage("g1"));
         assert_eq!(tracker.status(), Some(GoalStatus::Paused));
+        assert!(!tracker.restart());
+        assert!(
+            tracker
+                .snapshot()
+                .unwrap()
+                .status_message
+                .as_ref()
+                .unwrap()
+                .contains("token budget cannot be enforced exactly")
+        );
     }
 
     #[test]

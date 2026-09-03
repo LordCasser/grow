@@ -33,6 +33,13 @@ struct CancelRequest {
     target_session_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GetRequest {
+    inquiry_id: String,
+    source_session_id: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CancelResponse {
@@ -42,6 +49,14 @@ struct CancelResponse {
 
 pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
+        "grow/coordination/get" => {
+            let request: GetRequest = parse_params(args)?;
+            let state = agent
+                .get_coordination_inquiry(&request.inquiry_id, &request.source_session_id)
+                .await
+                .map_err(coordination_error)?;
+            to_raw_response(&state)
+        }
         "grow/coordination/list" => {
             let request: ListRequest = parse_params(args)?;
             let sessions = agent
@@ -94,6 +109,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
-fn coordination_error(error: String) -> acp::Error {
-    acp::Error::invalid_params().data(error)
+fn coordination_error(error: crate::coordination::CoordinationError) -> acp::Error {
+    acp::Error::invalid_params()
+        .data(serde_json::to_value(error).expect("coordination error serializes"))
 }

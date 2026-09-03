@@ -60,7 +60,7 @@ Plan 与 Goal 各自保留必要的专用状态。Workflow Definition/Run 统一
 | Workflow | 主 Agent正常对话与整合 | 普通权限与 Workflow tool | Behavior 是公共 Definition/Run 管理的唯一入口，但不拥有已启动 Run 的生命周期 |
 | Goal | Active 时正常对话并在 idle 后继续；stopped Goal 只是持久目标记录 | 主 Agent 获得 Goal scoped tools | 只有 Active Goal 选择 Goal Behavior；pause/block/budget limit 释放为 Normal，restart 再激活 |
 
-Goal 的 provider usage 一旦缺失，持久计数只能作为下界，自动 continuation 必须暂停。用户可显式 restart 无 token budget 的 Goal，并保留 `usage_incomplete` 事实及其独立的 durable acknowledgement；带 token budget 的 Goal 不允许在无法精确执法时 restart 或重新安装预算，必须先移除预算或重建 Goal。restart 是对当前不确定性的显式确认，不得伪造或清除历史 usage；后续再次出现未知 usage 会撤销该确认并重新暂停。
+Goal 的 provider usage 缺失时，持久计数只能作为下界，必须保留 `usage_incomplete`。但是统计是否完整和是否允许继续执行是两件事：没有设置 token budget 时，没有需要精确执行的预算上限，因此网络错误仍走普通重试，Goal 可以继续，不能仅因 usage 缺失暂停或取消后台压缩。带 token budget 时仍然关闭新的 provider admission，并在安全的 Step 边界暂停；用户需要先移除预算再 restart，或者重建 Goal。已有下界账本不能重新安装精确预算，restart 也不能伪造或清除历史 usage。普通终态错误、用户暂停和已耗尽的预算仍按各自规则停止 Goal。
 
 Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档是 Plan Behavior 的审批产物，不是 Goal 黑板。Workflow Workspace 持久化 session 草稿与 Definition 焦点，Run 属于统一公共 runtime。`deep-research` 由 builtin extractor version-managed 到 `~/.grow/workflows/deep-research.rhai`，每次启动幂等核验后作为普通 User workflow 由 Registry 扫描，不拥有额外 scope、Behavior 或运行机制。
 

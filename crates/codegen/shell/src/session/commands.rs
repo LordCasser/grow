@@ -335,6 +335,11 @@ pub enum SessionCommand {
     PublishControlState {
         respond_to: oneshot::Sender<()>,
     },
+    /// Restore live receiving-side rows after replay, independently of the
+    /// primary turn. Failure must not acknowledge a fully restored session.
+    PublishCoordinationState {
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
     /// Admit one source-owned signal into the durable Timeline inbox.
     /// Producers never queue model turns directly; the actor derives delivery
     /// from received-minus-consumed facts after the immutable payload lands.
@@ -767,11 +772,13 @@ pub enum SessionCommand {
     RunCoordinationInquiry {
         inquiry: crate::coordination::InboundInquiry,
     },
-    /// Persist and publish one coordination audit fact through the Session's
+    /// Persist one coordination audit fact through the Session's
     /// canonical UiNotice timeline. The acknowledgement is a durability
     /// barrier: callers must not continue remote execution if it fails.
     RecordCoordinationNotice {
         notice: crate::extensions::notification::UiNotice,
+        /// Source tool calls already have their own live ACP presentation.
+        publish: bool,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
     /// Bind the primary Session's process-level coordination backend into

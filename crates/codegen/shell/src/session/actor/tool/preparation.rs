@@ -311,6 +311,24 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
+            ToolInput::ListActiveSessions(_) => (
+                "list_active_sessions".to_owned(),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
+            ToolInput::AskSession(ref inquiry) => (
+                format!("ask_session: {}", inquiry.target_session_id),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
+            ToolInput::GetInquiry(ref inquiry) => (
+                format!("get_inquiry: {}", inquiry.inquiry_id),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
             #[allow(unreachable_patterns)]
             _ => (
                 "Tool call".to_string(),

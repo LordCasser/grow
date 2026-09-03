@@ -1446,13 +1446,10 @@ async fn rewind_points_waits_for_in_flight_session_load() {
             let (handle, mut commands) = make_test_handle_with_receiver("test-model", None);
             agent.sessions.borrow_mut().insert(sid, handle);
             drop(guard);
-            let command = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                commands.recv(),
-            )
-            .await
-            .expect("Rewind command must arrive after load publication")
-            .expect("Rewind command channel must remain open");
+            let command = tokio::time::timeout(std::time::Duration::from_secs(5), commands.recv())
+                .await
+                .expect("Rewind command must arrive after load publication")
+                .expect("Rewind command channel must remain open");
             let crate::session::SessionCommand::GetRewindPoints { respond_to } = command else {
                 panic!("unexpected command after Rewind lookup");
             };
@@ -2158,10 +2155,10 @@ fn initialize_advertises_stable_v1_coordination_capability() {
             .as_ref()
             .and_then(|meta| meta.get("grow/coordination"))
             .expect("coordination capability");
-        assert_eq!(coordination["version"], 1);
+        assert_eq!(coordination["version"], 2);
         assert_eq!(
             coordination["operations"],
-            serde_json::json!(["list", "ask", "cancel"])
+            serde_json::json!(["list", "ask", "get", "cancel"])
         );
         assert_eq!(coordination["localOnly"], true);
         assert_eq!(coordination["audit"], true);

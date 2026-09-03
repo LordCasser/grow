@@ -185,8 +185,8 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 });
                             if coordination_enabled {
                                 capabilities["grow/coordination"] = serde_json::json!({
-                                    "version": 1,
-                                    "operations": ["list", "ask", "cancel"],
+                                    "version": 2,
+                                    "operations": ["list", "ask", "get", "cancel"],
                                     "localOnly": true,
                                     "audit": true,
                                 });
@@ -1173,6 +1173,11 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             acp::Error::internal_error()
                 .data("Session actor ended while publishing control state")
         })?;
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        control_tx.send(SessionCommand::PublishCoordinationState { respond_to })
+            .map_err(|_| acp::Error::internal_error().data("Session ended before coordination state publication"))?;
+        response.await.map_err(|_| acp::Error::internal_error().data("Coordination state publication was interrupted"))?
+            .map_err(|error| acp::Error::internal_error().data(error))?;
         if session_exists
             && let Some(hooks) = crate::extensions::hooks::reconnect_client_hooks(
                 request_meta.as_ref(),
@@ -2001,7 +2006,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             }
             "grow/session/repair" => crate::extensions::repair::handle(self, &args).await,
             "grow/session/usage" => crate::extensions::usage::handle(self, &args).await,
-            "grow/coordination/list" | "grow/coordination/ask" | "grow/coordination/cancel" => {
+            "grow/coordination/list" | "grow/coordination/ask" | "grow/coordination/get" | "grow/coordination/cancel" => {
                 crate::extensions::coordination::handle(self, &args).await
             }
             "grow/memory/flush" | "grow/memory/rewrite" => {

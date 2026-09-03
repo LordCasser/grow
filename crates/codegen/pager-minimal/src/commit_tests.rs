@@ -141,6 +141,102 @@ fn running_tool_still_holds_the_frontier_even_with_a_later_block() {
     assert_eq!(minimal_api::commit_scan_cursor(&s), 1);
 }
 
+fn coordination_row(terminal: bool) -> ScrollbackEntry {
+    use pager::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
+    let title = if terminal {
+        "Answered session peer"
+    } else {
+        "Answering session peer"
+    };
+    let mut block = OtherToolCallBlock::new(title, "")
+        .with_output("Inquiry ID: one\nQuestion: status?\nAnswer: working");
+    block.coordination = Some(CoordinationRow {
+        source_peer_id: "peer".into(),
+        inquiry_id: "one".into(),
+        terminal,
+    });
+    ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::Other(block)))
+}
+
+#[test]
+fn coordination_holds_native_frontier_until_its_own_terminal_not_primary_turn_end() {
+    for turn_running in [false, true] {
+        for is_last in [false, true] {
+            for animated in [false, true] {
+                let mut entry = coordination_row(false);
+                entry.is_running = animated;
+                assert!(!is_committable(&entry, turn_running, is_last));
+            }
+            assert!(is_committable(
+                &coordination_row(true),
+                turn_running,
+                is_last
+            ));
+        }
+    }
+}
+
+#[test]
+fn coordination_idle_start_is_live_and_only_answered_is_committed_once() {
+    let mut state = ScrollbackState::new();
+    let id = state.push(coordination_row(false));
+    state.set_entry_running(id, true);
+    let mut printed = Vec::new();
+    commit_leading_run(&mut state, false, |_, index| {
+        printed.push(index);
+        true
+    });
+    assert!(
+        printed.is_empty(),
+        "Answering must not be frozen in native history"
+    );
+    assert_eq!(scan_frontier(&state, false).tail_start, 0);
+
+    state.get_by_id_mut(id).unwrap().block = coordination_row(true).block;
+    state.finish_running(id);
+    commit_leading_run(&mut state, false, |_, index| {
+        printed.push(index);
+        true
+    });
+    commit_leading_run(&mut state, false, |_, index| {
+        printed.push(index);
+        true
+    });
+    assert_eq!(printed, vec![0]);
+    assert_eq!(state.len(), 1);
+    assert_eq!(state.get(0).unwrap().id, id);
+    assert!(!scan_frontier(&state, false).will_commit);
+}
+
+#[test]
+fn coordination_interrupted_terminal_releases_later_native_history() {
+    let mut state = ScrollbackState::new();
+    let id = state.push(coordination_row(false));
+    state.push(finalized("later normal turn"));
+    // Replay alone does not prove the inquiry is running or finished.
+    assert!(!state.get_by_id(id).unwrap().is_running);
+    assert!(commit_collect(&mut state).is_empty());
+    let mut interrupted = coordination_row(true);
+    let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = &mut interrupted.block else {
+        panic!()
+    };
+    block.name = "Unable to answer session peer".into();
+    block.error = Some("target_restarted".into());
+    state.get_by_id_mut(id).unwrap().block = interrupted.block;
+    assert_eq!(commit_collect(&mut state), vec![0, 1]);
+    assert!(commit_collect(&mut state).is_empty());
+}
+
+#[test]
+fn coordination_minimal_default_is_one_line_for_start_and_finish() {
+    for terminal in [false, true] {
+        let mut state = ScrollbackState::new();
+        state.push(coordination_row(terminal));
+        stamp_live_tail_display_modes(&mut state, &default_appearance());
+        assert_eq!(state.get(0).unwrap().display_mode(), DisplayMode::Collapsed);
+    }
+}
+
 #[test]
 fn plan_body_anchored_above_a_parked_tool_commits_while_it_is_still_running() {
     let mut s = ScrollbackState::new();

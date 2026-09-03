@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::inquiry::{InquiryOutcome, InquiryPhase};
 use super::manifest::PeerDescription;
 
-pub(crate) const PROTOCOL_VERSION: u32 = 1;
+// Grow's private IPC version, unrelated to ACP's stable v1 wire schema.
+pub(crate) const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

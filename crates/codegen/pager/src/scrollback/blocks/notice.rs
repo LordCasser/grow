@@ -7,7 +7,9 @@ use std::fmt;
 use crate::appearance::AppearanceConfig;
 use crate::render::wrapping::word_wrap_lines;
 use crate::scrollback::block::BlockContent;
-use crate::scrollback::types::{AccentStyle, BlockContext, BlockLine, BlockOutput, Selectable};
+use crate::scrollback::types::{
+    AccentStyle, BlockContext, BlockLine, BlockOutput, DisplayMode, Selectable,
+};
 use crate::theme::Theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +105,21 @@ pub struct NoticeBlock {
 }
 
 impl NoticeBlock {
+    pub fn has_details(&self) -> bool {
+        self.category == NoticeCategory::Coordination
+            && self
+                .details
+                .as_ref()
+                .is_some_and(|details| !details.is_empty())
+    }
+
+    pub fn detail_text(&self) -> String {
+        format!(
+            "{}\n\n{}",
+            self.text,
+            self.details.as_deref().unwrap_or_default()
+        )
+    }
     /// Create a compact terminal UI notice for existing command/lifecycle
     /// call sites. Domain events should prefer [`Self::terminal`].
     pub fn new(text: impl Into<String>) -> Self {
@@ -167,7 +184,9 @@ impl BlockContent for NoticeBlock {
         styled_lines.extend(
             source_lines.map(|line| Line::from(Span::styled(line.to_string(), body_style))),
         );
-        if let Some(details) = self.details.as_deref() {
+        if let Some(details) = self.details.as_deref()
+            && !(self.has_details() && ctx.mode == DisplayMode::Collapsed)
+        {
             styled_lines.extend(
                 details
                     .lines()
@@ -224,14 +243,56 @@ impl BlockContent for NoticeBlock {
     }
 
     fn is_foldable(&self) -> bool {
-        false
+        self.has_details()
     }
 
     fn is_selectable(&self) -> bool {
-        false
+        self.has_details()
+    }
+
+    fn default_display_mode(&self) -> DisplayMode {
+        if self.has_details() {
+            DisplayMode::Collapsed
+        } else {
+            DisplayMode::Expanded
+        }
     }
 
     fn is_groupable(&self) -> bool {
         self.event_id.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coordination_details_are_selectable_and_compact_by_default() {
+        let notice = NoticeBlock::terminal(
+            "event",
+            NoticeTone::Error,
+            NoticeCategory::Coordination,
+            "Inquiry failed",
+            Some("Inquiry ID: id\npermission_denied".into()),
+        );
+        assert!(notice.is_foldable());
+        assert!(notice.is_selectable());
+        assert_eq!(notice.default_display_mode(), DisplayMode::Collapsed);
+        assert!(notice.detail_text().contains("permission_denied"));
+        let mut context = BlockContext {
+            width: 100,
+            mode: DisplayMode::Collapsed,
+            is_running: false,
+            raw: false,
+            max_lines: None,
+            appearance: AppearanceConfig::default(),
+            is_selected: false,
+            cwd: None,
+        };
+        let collapsed = notice.output(&context);
+        context.mode = DisplayMode::Expanded;
+        assert!(notice.output(&context).lines.len() > collapsed.lines.len());
+        assert!(!NoticeBlock::new("ordinary lifecycle message").is_foldable());
     }
 }

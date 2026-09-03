@@ -775,6 +775,7 @@ impl ToolRegistryBuilder {
         b.register::<grow_build::SchedulerListTool>();
         b.register::<grow_build::ListActiveSessionsTool>();
         b.register::<grow_build::AskSessionTool>();
+        b.register::<grow_build::GetInquiryTool>();
         b.register::<crate::implementations::memory::search_tool::MemorySearchImpl>();
         b.register::<crate::implementations::memory::get_tool::MemoryGetImpl>();
         b.register::<crate::implementations::context_recall::ContextRecallImpl>();

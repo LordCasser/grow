@@ -6,23 +6,38 @@ pub(super) struct QueuedCoordinationInquiry {
 }
 
 impl SessionActor {
-    pub(super) fn enqueue_coordination_inquiry(
+    pub(super) async fn enqueue_coordination_inquiry(
         self: &Arc<Self>,
         inquiry: crate::coordination::InboundInquiry,
     ) {
+        // Receipt is durable before queued/approval/running is observable.
+        if let Err(error) = self.record_incoming_coordination_notice(&inquiry).await {
+            reject_inquiry(
+                inquiry,
+                crate::coordination::InquiryStatus::Failed,
+                crate::coordination::CoordinationError::new(
+                    crate::coordination::CoordinationErrorCode::AuditFailure,
+                    error,
+                ),
+            );
+            return;
+        }
         if inquiry.cancellation.is_cancelled() {
             self.complete_rejected_coordination_inquiry_with_audit(
                 inquiry,
                 crate::coordination::InquiryStatus::Cancelled,
-                "coordination inquiry was cancelled before admission",
+                "coordination inquiry was cancelled before admission".into(),
             );
             return;
         }
         let Some(activity) = self.session_activities.try_start("coordination_inquiry") else {
-            reject_inquiry(
+            self.complete_rejected_coordination_inquiry_with_audit(
                 inquiry,
                 crate::coordination::InquiryStatus::Unavailable,
-                "target session is shutting down",
+                crate::coordination::CoordinationError::new(
+                    crate::coordination::CoordinationErrorCode::NotFound,
+                    "target session is shutting down",
+                ),
             );
             return;
         };
@@ -35,10 +50,17 @@ impl SessionActor {
             self.complete_rejected_coordination_inquiry_with_audit(
                 inquiry,
                 crate::coordination::InquiryStatus::Unavailable,
-                "target session inquiry queue is full",
+                crate::coordination::CoordinationError::retry(
+                    crate::coordination::CoordinationErrorCode::Busy,
+                    "target session inquiry queue is full",
+                    1000,
+                ),
             );
             return;
         }
+        inquiry
+            .progress
+            .send_replace(crate::coordination::InquiryPhase::Queued);
         queue.push_back(QueuedCoordinationInquiry {
             inquiry,
             _activity: activity,
@@ -74,7 +96,10 @@ impl SessionActor {
                 Ok(()) => outcome,
                 Err(error) => failed(
                     &inquiry,
-                    format!("failed to persist target coordination audit: {error}"),
+                    crate::coordination::CoordinationError::new(
+                        crate::coordination::CoordinationErrorCode::AuditFailure,
+                        format!("failed to persist target coordination audit: {error}"),
+                    ),
                 ),
             };
             let _ = inquiry.respond_to.send(outcome);
@@ -85,12 +110,6 @@ impl SessionActor {
         &self,
         inquiry: &crate::coordination::InboundInquiry,
     ) -> crate::coordination::InquiryOutcome {
-        if let Err(error) = self.record_incoming_coordination_notice(inquiry).await {
-            return failed(
-                inquiry,
-                format!("failed to persist incoming coordination audit: {error}"),
-            );
-        }
         let Some(materialized) = self
             .chat_state_handle
             .materialize_timeline(self.session_info.id.to_string())
@@ -112,8 +131,15 @@ impl SessionActor {
             }
         }
 
-        let target_cwd = crate::coordination::canonical_cwd(Path::new(&self.session_info.cwd));
-        if inquiry.source_cwd != target_cwd {
+        let same_cwd = match (
+            dunce::canonicalize(&inquiry.source_cwd),
+            dunce::canonicalize(&self.session_info.cwd),
+        ) {
+            (Ok(source), Ok(target)) => source == target,
+            _ => false,
+        };
+        if !same_cwd {
+            let target_cwd = crate::coordination::canonical_cwd(Path::new(&self.session_info.cwd));
             inquiry
                 .progress
                 .send_replace(crate::coordination::InquiryPhase::AwaitingApproval);
@@ -330,18 +356,13 @@ impl SessionActor {
         self: &Arc<Self>,
         inquiry: crate::coordination::InboundInquiry,
         status: crate::coordination::InquiryStatus,
-        error: &'static str,
+        error: crate::coordination::CoordinationError,
     ) {
         let session = Arc::clone(self);
         tokio::task::spawn_local(async move {
             let mut outcome =
                 crate::coordination::InquiryOutcome::terminal(&inquiry.inquiry_id, status, error);
-            if let Err(audit_error) = session.record_incoming_coordination_notice(&inquiry).await {
-                outcome = failed(
-                    &inquiry,
-                    format!("failed to persist incoming coordination audit: {audit_error}"),
-                );
-            } else if let Err(audit_error) = session
+            if let Err(audit_error) = session
                 .record_coordination_terminal_notice(&inquiry, &outcome)
                 .await
             {
@@ -358,21 +379,10 @@ impl SessionActor {
         &self,
         inquiry: &crate::coordination::InboundInquiry,
     ) -> Result<(), String> {
-        self.persist_ui_notice(crate::extensions::notification::UiNotice {
-            correlation_id: inquiry.inquiry_id.clone(),
-            category: crate::extensions::notification::UiNoticeCategory::Coordination,
-            subject: Some("incoming inquiry".to_owned()),
-            description: Some("Another local Grow session requested information".to_owned()),
-            message: format!(
-                "Session {} asked this session a question",
-                inquiry.source_session_id
-            ),
-            tone: crate::extensions::notification::UiNoticeTone::Info,
-            details: Some(format!(
-                "Source session: {}\nSource workspace: {}\n\nQuestion:\n{}",
-                inquiry.source_session_id, inquiry.source_cwd, inquiry.question
-            )),
-        })
+        self.persist_ui_notice(
+            crate::coordination::IncomingInquiryAudit::received(inquiry)
+                .notice(&inquiry.inquiry_id),
+        )
         .await
     }
 
@@ -382,23 +392,15 @@ impl SessionActor {
         result: &str,
         approved: bool,
     ) -> Result<(), String> {
-        self.persist_ui_notice(crate::extensions::notification::UiNotice {
-            correlation_id: inquiry.inquiry_id.clone(),
-            category: crate::extensions::notification::UiNoticeCategory::Coordination,
-            subject: Some("inquiry approval".to_owned()),
-            description: Some("Cross-workspace coordination permission".to_owned()),
-            message: format!("Cross-workspace inquiry was {result}"),
-            tone: if approved {
-                crate::extensions::notification::UiNoticeTone::Success
-            } else {
-                crate::extensions::notification::UiNoticeTone::Warning
-            },
-            details: Some(format!(
-                "Source session: {}\nSource workspace: {}\nDecision: {result}",
-                inquiry.source_session_id, inquiry.source_cwd
-            )),
-        })
-        .await
+        let mut audit = crate::coordination::IncomingInquiryAudit::received(inquiry);
+        audit.approval = Some(result.into());
+        let mut notice = audit.notice(&inquiry.inquiry_id);
+        notice.tone = if approved {
+            crate::extensions::notification::UiNoticeTone::Success
+        } else {
+            crate::extensions::notification::UiNoticeTone::Warning
+        };
+        self.persist_ui_notice(notice).await
     }
 
     async fn record_coordination_terminal_notice(
@@ -406,40 +408,79 @@ impl SessionActor {
         inquiry: &crate::coordination::InboundInquiry,
         outcome: &crate::coordination::InquiryOutcome,
     ) -> Result<(), String> {
-        let status = serde_json::to_value(outcome.status)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_else(|| "failed".to_owned());
-        let details = match (&outcome.answer, &outcome.error) {
-            (Some(answer), _) => Some(format!(
-                "Source session: {}\nStatus: {status}\n\nAnswer:\n{answer}",
-                inquiry.source_session_id
-            )),
-            (_, Some(error)) => Some(format!(
-                "Source session: {}\nStatus: {status}\nError: {error}",
-                inquiry.source_session_id
-            )),
-            _ => Some(format!(
-                "Source session: {}\nStatus: {status}",
-                inquiry.source_session_id
-            )),
-        };
-        self.persist_ui_notice(crate::extensions::notification::UiNotice {
-            correlation_id: inquiry.inquiry_id.clone(),
-            category: crate::extensions::notification::UiNoticeCategory::Coordination,
-            subject: Some("inquiry completed".to_owned()),
-            description: Some("Local coordination inquiry terminal state".to_owned()),
-            message: format!("Coordination inquiry finished: {status}"),
-            tone: if outcome.status == crate::coordination::InquiryStatus::Answered {
-                crate::extensions::notification::UiNoticeTone::Success
-            } else if outcome.status == crate::coordination::InquiryStatus::Failed {
-                crate::extensions::notification::UiNoticeTone::Error
-            } else {
-                crate::extensions::notification::UiNoticeTone::Warning
-            },
-            details,
+        let mut audit = crate::coordination::IncomingInquiryAudit::received(inquiry);
+        audit.outcome = Some(outcome.clone());
+        self.persist_ui_notice(audit.notice(&inquiry.inquiry_id))
+            .await
+    }
+
+    /// Read the existing durable audit, not a second inquiry ledger. Holding a
+    /// pinned directory keeps restore independent of ambient GROW_HOME paths.
+    async fn pending_coordination_notices(
+        &self,
+    ) -> Result<Vec<(String, crate::coordination::IncomingInquiryAudit)>, String> {
+        let directory = self.session_directory.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut latest = indexmap::IndexMap::<
+                (String, String),
+                crate::coordination::IncomingInquiryAudit,
+            >::new();
+            let _ = crate::session::storage::stream_replay_grow_notifications_in(
+                &directory,
+                |notification| {
+                    let GrowSessionUpdate::UiNotice(notice) = notification.update else {
+                        return;
+                    };
+                    let Some(audit) =
+                        crate::coordination::IncomingInquiryAudit::from_notice(&notice)
+                    else {
+                        return;
+                    };
+                    let key = (audit.source_peer_id.clone(), notice.correlation_id);
+                    if latest
+                        .get(&key)
+                        .is_none_or(|previous| previous.outcome.is_none())
+                    {
+                        latest.insert(key, audit);
+                    }
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(latest
+                .into_iter()
+                .filter_map(|((_, id), audit)| audit.outcome.is_none().then_some((id, audit)))
+                .collect())
         })
         .await
+        .map_err(|error| error.to_string())?
+    }
+
+    /// Only called while constructing a new SessionActor, under its exclusive
+    /// writer epoch. No process-local inquiry can have survived that boundary.
+    pub(super) async fn recover_interrupted_coordination_inquiries(&self) -> Result<(), String> {
+        for (id, mut audit) in self.pending_coordination_notices().await? {
+            audit.outcome = Some(crate::coordination::InquiryOutcome::terminal(
+                &id,
+                crate::coordination::InquiryStatus::Unavailable,
+                crate::coordination::CoordinationError::new(
+                    crate::coordination::CoordinationErrorCode::TargetRestarted,
+                    "target session restarted before a terminal answer was recorded; the inquiry was not replayed",
+                ),
+            ));
+            self.persist_ui_notice(audit.notice(&id)).await?;
+        }
+        Ok(())
+    }
+
+    /// Reconnect to a resident actor republishes its open receipt as live,
+    /// without another durable event, model request, or notification hook.
+    pub(super) async fn publish_coordination_state(&self) -> Result<(), String> {
+        for (id, audit) in self.pending_coordination_notices().await? {
+            self.send_transient_passive_notification(GrowSessionUpdate::UiNotice(
+                audit.notice(&id),
+            ));
+        }
+        Ok(())
     }
 
     async fn request_coordination_approval(
@@ -531,7 +572,7 @@ enum CoordinationApproval {
 fn reject_inquiry(
     inquiry: crate::coordination::InboundInquiry,
     status: crate::coordination::InquiryStatus,
-    error: impl Into<String>,
+    error: impl Into<crate::coordination::CoordinationError>,
 ) {
     let _ = inquiry
         .respond_to
@@ -544,7 +585,7 @@ fn reject_inquiry(
 
 fn failed(
     inquiry: &crate::coordination::InboundInquiry,
-    error: impl Into<String>,
+    error: impl Into<crate::coordination::CoordinationError>,
 ) -> crate::coordination::InquiryOutcome {
     crate::coordination::InquiryOutcome::terminal(
         &inquiry.inquiry_id,
@@ -590,7 +631,7 @@ mod tests {
                 let mut responses = Vec::new();
                 for id in 0..crate::coordination::MAX_QUEUED_INQUIRIES {
                     let (inquiry, response) = inquiry(id);
-                    actor.enqueue_coordination_inquiry(inquiry);
+                    actor.enqueue_coordination_inquiry(inquiry).await;
                     responses.push(response);
                 }
                 let queued_sources: Vec<_> = actor
@@ -607,7 +648,7 @@ mod tests {
                 );
 
                 let (overflow, overflow_response) = inquiry(33);
-                actor.enqueue_coordination_inquiry(overflow);
+                actor.enqueue_coordination_inquiry(overflow).await;
                 let outcome = overflow_response.await.unwrap();
                 assert_eq!(
                     outcome.status,
@@ -632,7 +673,7 @@ mod tests {
                     .cancellation
                     .cancel(crate::coordination::InquiryCancellationReason::Explicit);
 
-                actor.enqueue_coordination_inquiry(inquiry);
+                actor.enqueue_coordination_inquiry(inquiry).await;
 
                 assert!(actor.coordination_inquiries.borrow().is_empty());
                 assert!(!actor.coordination_inquiry_active.get());
@@ -724,7 +765,7 @@ mod tests {
                 let outcome = actor.handle_coordination_inquiry(&inquiry).await;
 
                 assert_eq!(outcome.status, crate::coordination::InquiryStatus::Rejected);
-                assert!(outcome.error.unwrap().contains("no online UI"));
+                assert!(outcome.error.unwrap().message.contains("no online UI"));
             })
             .await;
     }

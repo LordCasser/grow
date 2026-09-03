@@ -23,6 +23,7 @@ pub use hook::{HookPhase, HookRunEntry, HookRunStatus, ToolCallHookData};
 pub use lifecycle::LifecycleEventBlock;
 pub use list_dir::ListDirToolCallBlock;
 pub use memory_search::MemorySearchToolCallBlock;
+pub use other::CoordinationRow;
 pub use other::OtherToolCallBlock;
 pub use read::{ReadMediaKind, ReadToolCallBlock};
 pub use search::{
@@ -264,7 +265,7 @@ impl BlockContent for ToolCallBlock {
     }
 
     fn is_groupable(&self) -> bool {
-        true
+        !matches!(self, Self::Other(block) if block.coordination.is_some())
     }
 
     fn image_references(&self) -> &[crate::prompt_images::ScrollbackImageRef] {
@@ -565,7 +566,7 @@ impl ToolCallBlock {
             ToolCallBlock::Execute(_) => Some(VerbGroupKind::Command),
             ToolCallBlock::Edit(_) => Some(VerbGroupKind::EditFile),
             ToolCallBlock::UseTool(_) => Some(VerbGroupKind::McpCall),
-            ToolCallBlock::Other(_) => Some(VerbGroupKind::OtherTool),
+            ToolCallBlock::Other(b) => b.coordination.is_none().then_some(VerbGroupKind::OtherTool),
             ToolCallBlock::Lifecycle(_) => None,
             ToolCallBlock::Read(_)
             | ToolCallBlock::ListDir(_)

@@ -142,6 +142,34 @@ fn open_block_viewer_opens_list_dir_block() {
 }
 
 #[test]
+fn coordination_enter_opens_notice_and_failed_tool_details() {
+    use crate::scrollback::blocks::{
+        NoticeCategory, NoticeTone, OtherToolCallBlock, ToolCallBlock,
+    };
+    let blocks = [
+        RenderBlock::terminal_notice(
+            "event",
+            NoticeTone::Error,
+            NoticeCategory::Coordination,
+            "Inquiry failed",
+            Some("Inquiry ID: id\nnot_found".into()),
+        ),
+        RenderBlock::ToolCall(ToolCallBlock::Other(
+            OtherToolCallBlock::new("ask_session", "target").with_error("not_found"),
+        )),
+    ];
+    for block in blocks {
+        let mut app = test_app_with_agent();
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(block.has_normal_fullscreen_viewer());
+        agent.scrollback.push_block(block);
+        agent.scrollback.set_selected(Some(0));
+        dispatch(Action::OpenBlockViewer, &mut app);
+        assert!(app.agents.get(&AgentId(0)).unwrap().block_viewer.is_some());
+    }
+}
+
+#[test]
 fn open_block_viewer_prefers_markdown_viewer_over_image_refs() {
     use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
 

@@ -1137,6 +1137,11 @@ impl RenderBlock {
             RenderBlock::ToolCall(ToolCallBlock::ListDir(b)) => {
                 b.error.is_none() && !b.output.is_empty()
             }
+            RenderBlock::ToolCall(ToolCallBlock::Other(b)) => {
+                // Image-backed generic tools retain their OS-native viewer.
+                b.media_ref_path().is_none() && (b.error.is_some() || b.output.is_some())
+            }
+            RenderBlock::Notice(notice) => notice.has_details(),
             _ => false,
         }
     }

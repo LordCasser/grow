@@ -4365,7 +4365,7 @@ async fn durable_sideband_append_is_sequence_aware_and_idempotent() {
 }
 
 #[tokio::test]
-async fn session_load_closes_an_interrupted_sideband_once() {
+async fn coordination_observer_preserves_live_sideband_and_new_writer_recovers_once() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     let info = create_test_info();
@@ -4414,10 +4414,18 @@ async fn session_load_closes_an_interrupted_sideband_once() {
         .await
         .unwrap();
 
-    adapter.load_session_without_updates(&info).await.unwrap();
-    adapter.load_session_without_updates(&info).await.unwrap();
-
     let path = adapter.sideband_timeline_file(&info, &id).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let observer = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    observer.load_session_without_updates(&info).await.unwrap();
+    observer.load_session(&info).await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before, "observing a live session must not close its sideband");
+    assert!(observer.load_session_for_write_without_updates(&info).await.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before, "rejected writer must not mutate the sideband");
+    drop(adapter);
+    observer.load_session_for_write_without_updates(&info).await.unwrap();
+    observer.load_session_for_write_without_updates(&info).await.unwrap();
+
     let stored = std::fs::read_to_string(path)
         .unwrap()
         .lines()

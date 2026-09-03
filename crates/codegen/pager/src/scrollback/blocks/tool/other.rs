@@ -10,6 +10,15 @@ use crate::scrollback::types::{
 };
 use crate::theme::Theme;
 
+/// Identity of a passive inquiry row rendered with the normal tool chrome.
+/// Its durable start/approval/end events are not three separate UI rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinationRow {
+    pub source_peer_id: String,
+    pub inquiry_id: String,
+    pub terminal: bool,
+}
+
 /// Other/unknown tool call.
 #[derive(Debug, Clone)]
 pub struct OtherToolCallBlock {
@@ -25,6 +34,8 @@ pub struct OtherToolCallBlock {
     pub started_at: Option<std::time::Instant>,
     /// Elapsed time in ms after completion (Phase 2: time tracking).
     pub elapsed_ms: Option<i64>,
+    /// Present only on the receiving side's passive inquiry presentation.
+    pub coordination: Option<CoordinationRow>,
     /// Image references detected in the tool output.
     image_refs: Vec<crate::prompt_images::ScrollbackImageRef>,
 }
@@ -43,6 +54,7 @@ impl OtherToolCallBlock {
             output: None,
             started_at: None,
             elapsed_ms: None,
+            coordination: None,
             image_refs: Vec::new(),
         }
     }
@@ -73,7 +85,20 @@ impl OtherToolCallBlock {
     /// Path of the first image reference for the filepath
     /// line of an inline-media block, independent of inline-graphics support.
     pub(crate) fn media_ref_path(&self) -> Option<std::path::PathBuf> {
+        if self.prefers_text_output() {
+            return None;
+        }
         self.image_refs.first().map(|image| image.path.clone())
+    }
+
+    /// Coordination carries structured text, sometimes quoting an image path.
+    /// Such a reference is an attachment, not a replacement for the result.
+    fn prefers_text_output(&self) -> bool {
+        self.coordination.is_some()
+            || matches!(
+                self.name.as_str(),
+                "list_active_sessions" | "ask_session" | "get_inquiry"
+            )
     }
 
     /// Set error (mutable) — compute elapsed time if not already set (Phase 2).
@@ -227,6 +252,17 @@ impl BlockContent for OtherToolCallBlock {
                 let mut lines: Vec<BlockLine> =
                     vec![self.collapsed_line(&theme, false, None).into()];
 
+                if let Some(error) = &self.error {
+                    lines.extend(
+                        word_wrap_lines(
+                            error.lines().map(|line| Line::from(line.to_owned())),
+                            width,
+                        )
+                        .into_iter()
+                        .map(BlockLine::styled),
+                    );
+                }
+
                 if let Some(output) = &self.output {
                     // Try to render as structured Q&A (AskUserQuestion output).
                     let qa_lines = parse_ask_user_qa_pairs(output);
@@ -280,8 +316,9 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn accent(&self, ctx: &BlockContext) -> Option<AccentStyle> {
-        // No accent when collapsed — keeps accents reserved for Execute blocks in dense groups
-        if ctx.mode == DisplayMode::Collapsed {
+        // Passive inquiry rows use Run-like state chrome even when collapsed.
+        // Ordinary Other tools keep their existing dense-group appearance.
+        if ctx.mode == DisplayMode::Collapsed && self.coordination.is_none() {
             return None;
         }
         let theme = Theme::current();
@@ -289,6 +326,8 @@ impl BlockContent for OtherToolCallBlock {
             Some(AccentStyle::static_color(theme.accent_error))
         } else if ctx.is_running {
             Some(AccentStyle::animated(theme.accent_running))
+        } else if self.coordination.as_ref().is_some_and(|row| row.terminal) {
+            Some(AccentStyle::static_color(theme.accent_success))
         } else {
             Some(AccentStyle::static_color(theme.accent_tool))
         }
@@ -299,6 +338,8 @@ impl BlockContent for OtherToolCallBlock {
         if self.error.is_some() {
             let theme = Theme::current();
             Some(AccentStyle::static_color(theme.accent_error))
+        } else if self.coordination.is_some() {
+            self.accent(ctx)
         } else if ctx.mode == DisplayMode::Collapsed {
             None // default gray
         } else {
@@ -319,11 +360,7 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn is_foldable(&self) -> bool {
-        // Not foldable if failed
-        if self.error.is_some() {
-            return false;
-        }
-        self.output.is_some()
+        self.output.is_some() || self.error.is_some()
     }
 
     fn default_display_mode(&self) -> DisplayMode {
@@ -331,7 +368,7 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn next_fold_mode(&self, current: DisplayMode, is_running: bool) -> DisplayMode {
-        if is_running {
+        if is_running && self.coordination.is_none() {
             match current {
                 DisplayMode::Truncated => DisplayMode::Expanded,
                 _ => DisplayMode::Truncated,
@@ -345,7 +382,7 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn collapse_mode(&self, is_running: bool) -> DisplayMode {
-        if is_running {
+        if is_running && self.coordination.is_none() {
             DisplayMode::Truncated
         } else {
             DisplayMode::Collapsed
@@ -357,6 +394,9 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn inline_media(&self) -> Option<crate::prompt_images::InlineMediaInfo> {
+        if self.prefers_text_output() {
+            return None;
+        }
         if let Some(img) = self.image_refs.first() {
             let (w, h) = img.dimensions?;
             return Some(crate::prompt_images::InlineMediaInfo {
@@ -370,6 +410,9 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn inline_open_button(&self) -> Option<std::path::PathBuf> {
+        if self.prefers_text_output() {
+            return None;
+        }
         // Only used when there is no inline-graphics overlay to host the button
         // row. When the overlay is active it draws its own button row instead.
         if crate::terminal::image::scrollback_inline_overlay_active() {
@@ -379,6 +422,75 @@ impl BlockContent for OtherToolCallBlock {
             return Some(img.path.clone());
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod coordination_tests {
+    use super::*;
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::ToolCallBlock;
+    use crate::scrollback::state::ScrollbackState;
+
+    #[test]
+    fn coordination_image_reference_does_not_replace_text_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proof.png");
+        image::RgbaImage::new(2, 2).save(&path).unwrap();
+        for name in [
+            "Answering session peer",
+            "list_active_sessions",
+            "ask_session",
+            "get_inquiry",
+        ] {
+            for markdown in [false, true] {
+                let reference = if markdown {
+                    format!("![proof]({})", path.display())
+                } else {
+                    path.display().to_string()
+                };
+                let mut block = OtherToolCallBlock::new(name, "").with_output(format!(
+                    "Question: progress?\nAnswer: tests passed\nProof: {reference}\nStatus: answered"
+                ));
+                if name.starts_with("Answering") {
+                    block.coordination = Some(CoordinationRow {
+                        source_peer_id: "peer".into(),
+                        inquiry_id: "one".into(),
+                        terminal: false,
+                    });
+                }
+                assert!(
+                    !block.image_references().is_empty(),
+                    "test must exercise an actual detected image"
+                );
+                assert!(block.media_ref_path().is_none());
+                assert!(block.inline_media().is_none());
+                assert!(block.inline_open_button().is_none());
+                let mut state = ScrollbackState::new();
+                state.push_block(RenderBlock::ToolCall(ToolCallBlock::Other(block)));
+                state.set_selected(Some(0));
+                state.expand_selected();
+                let entry = state.entry(0).unwrap();
+                let ctx = entry.context(120, &AppearanceConfig::default(), None);
+                let rendered = format!("{:?}", entry.block.output(&ctx));
+                for text in [
+                    "Question: progress?",
+                    "Answer: tests passed",
+                    "Status: answered",
+                ] {
+                    assert!(rendered.contains(text), "missing {text}: {rendered}");
+                }
+            }
+        }
+        // Unrelated image tools retain their existing inline-media behavior.
+        let ordinary =
+            OtherToolCallBlock::new("image_tool", "").with_output(path.display().to_string());
+        assert_eq!(ordinary.media_ref_path(), Some(path));
+        assert!(ordinary.inline_media().is_some());
+        assert_eq!(
+            ordinary.next_fold_mode(DisplayMode::Collapsed, true),
+            DisplayMode::Truncated
+        );
     }
 }
 

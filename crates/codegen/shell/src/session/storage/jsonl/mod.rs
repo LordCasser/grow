@@ -265,7 +265,59 @@ impl JsonlStorageAdapter {
         info: &Info,
     ) -> io::Result<super::PersistedDataLight> {
         self.ensure_writer_lease(info)?;
-        <Self as StorageAdapter>::load_session_without_updates(self, info).await
+        self.load_light_data(info, true).await
+    }
+
+    async fn load_light_data(
+        &self,
+        info: &Info,
+        recover_sidebands: bool,
+    ) -> io::Result<super::PersistedDataLight> {
+        tracing::info!("Loading session data (without updates) from JSONL");
+        let opened = self.open_session(info)?;
+        let summary = opened.summary().clone();
+        let validated = opened.validated_timeline(&info.id.to_string())?;
+        let timeline_events = validated.events;
+        let timeline = validated.timeline;
+        // Only the explicit new-writer load owns crash reconciliation. Merely
+        // reading a live Session cannot end its still-running sidebands.
+        if recover_sidebands {
+            self.recover_interrupted_sidebands(info, &validated.sidebands)
+                .await?;
+        }
+        let summary = self
+            .reconcile_session_title_projection(info, summary, &timeline)
+            .await?;
+        let summary = self
+            .reconcile_model_projection(info, summary, &timeline)
+            .await?;
+        let control_snapshot =
+            crate::session::control::SessionControlSnapshot::latest_from_timeline(
+                timeline.events(),
+            )?;
+        let signals =
+            crate::session::signals::SessionSignals::latest_from_timeline(timeline.events())?;
+        let announcement_state =
+            crate::session::announcement_state::AnnouncementState::latest_from_timeline(
+                timeline.events(),
+            )?;
+        let workflow_runs = self.load_workflow_runs_sync(info, &timeline)?;
+        let result = super::PersistedDataLight {
+            summary,
+            timeline_events,
+            control_snapshot,
+            signals,
+            announcement_state,
+            workflow_runs,
+        };
+        tracing::info!(
+            session_id = %info.id,
+            timeline_events = result.timeline_events.len(),
+            has_signals = result.signals.is_some(),
+            session_format_version = result.summary.session_format_version,
+            "Session data loaded (without updates, rewind points deferred) from JSONL"
+        );
+        Ok(result)
     }
 
     pub fn new() -> Self {
@@ -3200,8 +3252,6 @@ impl StorageAdapter for JsonlStorageAdapter {
         let validated = opened.validated_timeline(&info.id.to_string())?;
         let timeline_events = validated.events;
         let timeline = validated.timeline;
-        let sidebands = validated.sidebands;
-        self.recover_interrupted_sidebands(info, &sidebands).await?;
         let summary = self
             .reconcile_session_title_projection(info, summary, &timeline)
             .await?;
@@ -3253,47 +3303,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         &self,
         info: &Info,
     ) -> io::Result<super::PersistedDataLight> {
-        tracing::info!("Loading session data (without updates) from JSONL");
-        let opened = self.open_session(info)?;
-        let summary = opened.summary().clone();
-        let validated = opened.validated_timeline(&info.id.to_string())?;
-        let timeline_events = validated.events;
-        let timeline = validated.timeline;
-        let sidebands = validated.sidebands;
-        self.recover_interrupted_sidebands(info, &sidebands).await?;
-        let summary = self
-            .reconcile_session_title_projection(info, summary, &timeline)
-            .await?;
-        let summary = self
-            .reconcile_model_projection(info, summary, &timeline)
-            .await?;
-        let control_snapshot =
-            crate::session::control::SessionControlSnapshot::latest_from_timeline(
-                timeline.events(),
-            )?;
-        let signals =
-            crate::session::signals::SessionSignals::latest_from_timeline(timeline.events())?;
-        let announcement_state =
-            crate::session::announcement_state::AnnouncementState::latest_from_timeline(
-                timeline.events(),
-            )?;
-        let workflow_runs = self.load_workflow_runs_sync(info, &timeline)?;
-        let result = super::PersistedDataLight {
-            summary,
-            timeline_events,
-            control_snapshot,
-            signals,
-            announcement_state,
-            workflow_runs,
-        };
-        tracing::info!(
-            session_id = %info.id,
-            timeline_events = result.timeline_events.len(),
-            has_signals = result.signals.is_some(),
-            session_format_version = result.summary.session_format_version,
-            "Session data loaded (without updates, rewind points deferred) from JSONL"
-        );
-        Ok(result)
+        self.load_light_data(info, false).await
     }
     async fn load_summary(&self, info: &Info) -> io::Result<Summary> {
         let info_clone = info.clone();

@@ -2055,6 +2055,21 @@ impl MvpAgent {
             acp::Error::internal_error()
                 .data("session closed while installing coordination backend")
         })?;
+        if let Err(error) = self.coordination.handle().require_ready() {
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            let _ = handle.cmd_tx.send(SessionCommand::RecordCoordinationNotice {
+                notice: crate::extensions::notification::UiNotice {
+                    correlation_id: format!("coordination-runtime-{}", session_info.id.0),
+                    category: crate::extensions::notification::UiNoticeCategory::Coordination,
+                    subject: Some("runtime unavailable".to_owned()),
+                    description: Some("Local agent communication could not start".to_owned()),
+                    message: "Local coordination is unavailable".to_owned(),
+                    tone: crate::extensions::notification::UiNoticeTone::Error,
+                    details: Some(error.to_string()),
+                }, publish: true, respond_to,
+            });
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), response).await;
+        }
         let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
         if handle_display_cwd.is_some() {
             handle.display_cwd = handle_display_cwd;

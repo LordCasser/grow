@@ -625,6 +625,12 @@ impl SessionActor {
     /// recursively treating that projection as a fresh Notification Hook.
     pub(super) async fn send_transient_hook_notification(&self, update: GrowSessionUpdate) {
         self.close_rewind_window().await;
+        self.send_transient_passive_notification(update);
+    }
+
+    /// Re-publish already durable UI state without another audit event, hook,
+    /// or interaction boundary. A transient snapshot cannot be a replay cursor.
+    pub(super) fn send_transient_passive_notification(&self, update: GrowSessionUpdate) {
         let mut notification = self.build_grow_notification(update, None);
         if let Some(meta) = notification
             .meta
@@ -650,6 +656,15 @@ impl SessionActor {
             )
             .await;
         }
+    }
+
+    /// Persist an audit fact without injecting a second live UI notification.
+    pub(super) async fn persist_grow_audit_notification(
+        &self,
+        update: GrowSessionUpdate,
+    ) -> Result<(), crate::session::persistence::DurableAppendError> {
+        self.append_grow_notification_exact(self.build_grow_notification(update, None))
+            .await
     }
 
     /// Persist and forward a passive UI/audit update without changing rewind

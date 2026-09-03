@@ -33,7 +33,8 @@ pub mod write;
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use coordination::{
-    ASK_SESSION_TOOL_NAME, AskSessionTool, LIST_ACTIVE_SESSIONS_TOOL_NAME, ListActiveSessionsTool,
+    ASK_SESSION_TOOL_NAME, AskSessionTool, GET_INQUIRY_TOOL_NAME, GetInquiryTool,
+    LIST_ACTIVE_SESSIONS_TOOL_NAME, ListActiveSessionsTool,
 };
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
 pub use grep::GrepTool;

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
@@ -10,11 +10,12 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::local_ipc::frame::{read_json, write_json};
-use crate::local_ipc::transport::{LocalListener, LocalStream};
+use crate::local_ipc::transport::{LocalListener, LocalStream, PrivateEndpoint};
 
 use super::inquiry::{
-    INQUIRY_DEADLINE, InboundInquiry, InquiryCancellation, InquiryCancellationReason,
-    InquiryOutcome, InquiryPhase, InquiryStatus, MAX_QUESTION_BYTES, TERMINAL_CACHE_TTL,
+    CoordinationError, CoordinationErrorCode, INQUIRY_DEADLINE, InboundInquiry,
+    InquiryCancellation, InquiryCancellationReason, InquiryOutcome, InquiryPhase, InquiryState,
+    InquiryStatus, MAX_QUESTION_BYTES, TERMINAL_CACHE_TTL,
 };
 use super::manifest::{
     DiscoveredSession, HEARTBEAT_INTERVAL, LEASE_DURATION, LocalSessionSnapshot, PeerDescription,
@@ -46,14 +47,41 @@ struct InquiryRecord {
     progress: watch::Sender<InquiryPhase>,
     result: watch::Sender<Option<InquiryOutcome>>,
     terminal_at: std::sync::Mutex<Option<Instant>>,
+    target: std::sync::Mutex<Option<PeerManifest>>,
+}
+
+impl InquiryRecord {
+    fn new(payload: InquiryPayload, phase: InquiryPhase) -> Self {
+        Self {
+            payload,
+            cancellation: InquiryCancellation::new(),
+            progress: watch::channel(phase).0,
+            result: watch::channel(None).0,
+            terminal_at: std::sync::Mutex::new(None),
+            target: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.terminal_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some_and(|at| at.elapsed() >= TERMINAL_CACHE_TTL)
+    }
+
+    fn complete(&self, outcome: InquiryOutcome) {
+        self.result.send_replace(Some(outcome));
+        self.progress.send_replace(InquiryPhase::Finished);
+        *self.terminal_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 enum InquiryRequestError {
     #[error("{0}")]
-    Transport(String),
-    #[error("{code}: {message}")]
-    Remote { code: String, message: String },
+    Transport(CoordinationError),
+    #[error("{0}")]
+    Remote(CoordinationError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -67,17 +95,59 @@ struct Shared {
     grow_home: PathBuf,
     peer_id: String,
     incarnation: String,
-    endpoint: PathBuf,
+    endpoint: OnceLock<PrivateEndpoint>,
     manifest_path: PathBuf,
     token: String,
     started_at: i64,
     sessions: RwLock<HashMap<String, PeerSession>>,
     inquiry_tx: mpsc::Sender<InboundInquiry>,
     inquiries: tokio::sync::Mutex<HashMap<(String, String), Arc<InquiryRecord>>>,
+    outgoing: tokio::sync::Mutex<HashMap<(String, String), Arc<InquiryRecord>>>,
+    started: AtomicBool,
+    publication: std::sync::Mutex<()>,
+    lease_lock: OnceLock<std::fs::File>,
+    startup_error: std::sync::Mutex<Option<String>>,
     cancel: CancellationToken,
 }
 
 impl Shared {
+    fn require_ready(&self) -> Result<(), CoordinationError> {
+        if !self.started.load(Ordering::Acquire) || self.cancel.is_cancelled() {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::RuntimeUnavailable,
+                self.startup_error
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                    .unwrap_or_else(|| "local coordination runtime is not running".to_owned()),
+            ));
+        }
+        let manifest = read_manifest(&self.manifest_path).map_err(|error| {
+            CoordinationError::retry(
+                CoordinationErrorCode::RuntimeUnavailable,
+                format!("local coordination lease cannot be read: {error}"),
+                1000,
+            )
+        })?;
+        if manifest.incarnation != self.incarnation || manifest.expires_at < now_unix_ms() {
+            return Err(CoordinationError::retry(
+                CoordinationErrorCode::RuntimeUnavailable,
+                "local coordination lease is not valid",
+                1000,
+            ));
+        }
+        Ok(())
+    }
+
+    fn publish(&self) -> io::Result<()> {
+        let _guard = self.publication.lock().unwrap_or_else(|e| e.into_inner());
+        if self.cancel.is_cancelled() {
+            return Ok(());
+        }
+        // Serialize snapshot creation AND replacement, not just temporary names.
+        write_manifest(&self.manifest_path, &self.current_manifest())
+    }
+
     fn current_manifest(&self) -> PeerManifest {
         let now = now_unix_ms();
         PeerManifest {
@@ -85,7 +155,12 @@ impl Shared {
             peer_id: self.peer_id.clone(),
             pid: std::process::id(),
             incarnation: self.incarnation.clone(),
-            endpoint: self.endpoint.clone(),
+            endpoint: self
+                .endpoint
+                .get()
+                .map(|endpoint| endpoint.path().to_path_buf())
+                .unwrap_or_default(),
+            transport: super::manifest::TRANSPORT_KIND.to_owned(),
             token: self.token.clone(),
             started_at: self.started_at,
             heartbeat_at: now,
@@ -118,7 +193,6 @@ pub struct CoordinationRuntime {
     shared: Arc<Shared>,
     inquiry_rx: std::sync::Mutex<Option<mpsc::Receiver<InboundInquiry>>>,
     start_lock: tokio::sync::Mutex<()>,
-    started: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -135,7 +209,6 @@ impl CoordinationRuntime {
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
-        let endpoint = std::env::temp_dir().join(format!("grow-coordination-{peer_id}.sock"));
         let manifest_path = peers_dir(&grow_home).join(format!("{peer_id}.json"));
         let (inquiry_tx, inquiry_rx) = mpsc::channel(256);
         Self {
@@ -143,44 +216,68 @@ impl CoordinationRuntime {
                 grow_home,
                 peer_id,
                 incarnation,
-                endpoint,
+                endpoint: OnceLock::new(),
                 manifest_path,
                 token,
                 started_at: now_unix_ms(),
                 sessions: RwLock::new(HashMap::new()),
                 inquiry_tx,
                 inquiries: tokio::sync::Mutex::new(HashMap::new()),
+                outgoing: tokio::sync::Mutex::new(HashMap::new()),
+                started: AtomicBool::new(false),
+                publication: std::sync::Mutex::new(()),
+                lease_lock: OnceLock::new(),
+                startup_error: std::sync::Mutex::new(None),
                 cancel: CancellationToken::new(),
             }),
             inquiry_rx: std::sync::Mutex::new(Some(inquiry_rx)),
             start_lock: tokio::sync::Mutex::new(()),
-            started: AtomicBool::new(false),
         }
     }
 
     pub async fn ensure_started(&self) -> Result<(), CoordinationStartError> {
-        if self.started.load(Ordering::Acquire) {
+        if self.shared.started.load(Ordering::Acquire) {
             return Ok(());
         }
         let _guard = self.start_lock.lock().await;
-        if self.started.load(Ordering::Acquire) {
+        if self.shared.started.load(Ordering::Acquire) {
             return Ok(());
         }
 
-        ensure_private_runtime_dirs(&self.shared.grow_home)?;
-        #[cfg(unix)]
-        if self.shared.endpoint.exists() {
-            std::fs::remove_file(&self.shared.endpoint)?;
-        }
-        let listener = LocalListener::bind(&self.shared.endpoint)?;
-        write_manifest(&self.shared.manifest_path, &self.shared.current_manifest())?;
-        self.started.store(true, Ordering::Release);
+        let prepared = (|| -> io::Result<_> {
+            ensure_private_runtime_dirs(&self.shared.grow_home)?;
+            if self.shared.lease_lock.get().is_none() {
+                let lock = super::manifest::lock_peer(&self.shared.manifest_path)?;
+                let _ = self.shared.lease_lock.set(lock);
+            }
+            if self.shared.endpoint.get().is_none() {
+                let _ = self.shared.endpoint.set(PrivateEndpoint::new()?);
+            }
+            let endpoint = self.shared.endpoint.get().expect("allocated endpoint");
+            #[cfg(unix)]
+            if endpoint.path().exists() {
+                std::fs::remove_file(endpoint.path())?;
+            }
+            let listener = LocalListener::bind(endpoint.path())?;
+            self.shared.publish()?;
+            Ok(listener)
+        })();
+        let listener = prepared.map_err(|error| {
+            *self
+                .shared
+                .startup_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
+            error
+        })?;
+        self.shared.started.store(true, Ordering::Release);
+        tokio::spawn(run_heartbeat(Arc::clone(&self.shared)));
         tokio::spawn(run_server(listener, Arc::clone(&self.shared)));
         Ok(())
     }
 
     pub fn is_started(&self) -> bool {
-        self.started.load(Ordering::Acquire)
+        self.shared.started.load(Ordering::Acquire)
     }
 
     pub(crate) fn take_inquiry_receiver(&self) -> Option<mpsc::Receiver<InboundInquiry>> {
@@ -198,9 +295,8 @@ impl CoordinationRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *sessions = merge_local_sessions(&sessions, snapshots, now_unix_ms());
         drop(sessions);
-        if self.started.load(Ordering::Acquire)
-            && let Err(error) =
-                write_manifest(&self.shared.manifest_path, &self.shared.current_manifest())
+        if self.shared.started.load(Ordering::Acquire)
+            && let Err(error) = self.shared.publish()
         {
             tracing::warn!(error = %error, "failed to publish coordination session snapshot");
         }
@@ -219,7 +315,7 @@ impl CoordinationRuntime {
     pub async fn list_active_sessions(
         &self,
         source_session_id: &str,
-    ) -> Result<Vec<DiscoveredSession>, String> {
+    ) -> Result<Vec<DiscoveredSession>, CoordinationError> {
         self.handle().list_active_sessions(source_session_id).await
     }
 
@@ -231,7 +327,7 @@ impl CoordinationRuntime {
         question: &str,
         progress: Option<mpsc::UnboundedSender<InquiryPhase>>,
         cancellation: CancellationToken,
-    ) -> Result<InquiryOutcome, String> {
+    ) -> Result<InquiryOutcome, CoordinationError> {
         self.handle()
             .ask_session(
                 inquiry_id,
@@ -249,7 +345,7 @@ impl CoordinationRuntime {
         inquiry_id: &str,
         source_session_id: &str,
         target_session_id: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, CoordinationError> {
         self.handle()
             .cancel_session(inquiry_id, source_session_id, target_session_id)
             .await
@@ -257,14 +353,27 @@ impl CoordinationRuntime {
 }
 
 impl CoordinationHandle {
+    pub fn require_ready(&self) -> Result<(), CoordinationError> {
+        self.shared.require_ready()
+    }
+
+    fn require_source(&self, source: &str) -> Result<(), CoordinationError> {
+        if !self.shared.owns_session(source) {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::PermissionDenied,
+                "source session is not owned by this Grow process",
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn list_active_sessions(
         &self,
         source_session_id: &str,
-    ) -> Result<Vec<DiscoveredSession>, String> {
-        if !self.shared.owns_session(source_session_id) {
-            return Err("source session is not owned by this Grow process".to_owned());
-        }
-        let manifests = self.live_manifests(source_session_id).await;
+    ) -> Result<Vec<DiscoveredSession>, CoordinationError> {
+        self.require_ready()?;
+        self.require_source(source_session_id)?;
+        let manifests = self.live_manifests(source_session_id).await?;
         let conflicts = conflicted_session_ids(&manifests);
         let mut discovered = Vec::new();
         for manifest in manifests {
@@ -303,98 +412,300 @@ impl CoordinationHandle {
         question: &str,
         progress: Option<mpsc::UnboundedSender<InquiryPhase>>,
         cancellation: CancellationToken,
-    ) -> Result<InquiryOutcome, String> {
-        validate_inquiry_id(inquiry_id)?;
-        if question.as_bytes().len() > MAX_QUESTION_BYTES {
-            return Err(format!(
-                "coordination question exceeds the {MAX_QUESTION_BYTES}-byte limit"
+    ) -> Result<InquiryOutcome, CoordinationError> {
+        validate_inquiry_id(inquiry_id)
+            .map_err(|e| CoordinationError::new(CoordinationErrorCode::InvalidRequest, e))?;
+        self.require_source(source_session_id)?;
+        if question.len() > MAX_QUESTION_BYTES || question.trim().is_empty() {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::InvalidRequest,
+                format!("question must be nonempty and at most {MAX_QUESTION_BYTES} bytes"),
             ));
         }
-        if question.trim().is_empty() {
-            return Err("coordination question must not be empty".to_owned());
-        }
-        if !self.shared.owns_session(source_session_id) {
-            return Err("source session is not owned by this Grow process".to_owned());
-        }
-        send_progress(&progress, InquiryPhase::Discovering);
-        let mut target = self
-            .resolve_target(source_session_id, target_session_id)
-            .await?;
-        let request = Request::Ask {
-            inquiry_id: inquiry_id.to_owned(),
+        let payload = InquiryPayload {
+            source_incarnation: self.shared.incarnation.clone(),
+            source_session_id: source_session_id.to_owned(),
+            source_cwd: self
+                .shared
+                .sessions
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(source_session_id)
+                .expect("owned source")
+                .canonical_cwd
+                .clone(),
             target_session_id: target_session_id.to_owned(),
             question: question.to_owned(),
         };
-        let mut reconnect_delay = RECONNECT_MIN_DELAY;
-        let deadline = tokio::time::sleep(INQUIRY_DEADLINE);
-        tokio::pin!(deadline);
+        let key = (source_session_id.to_owned(), inquiry_id.to_owned());
+        let mut outgoing = self.shared.outgoing.lock().await;
+        outgoing.retain(|_, record| !record.expired());
+        let record = if let Some(record) = outgoing.get(&key) {
+            if record.payload != payload {
+                return Err(CoordinationError::new(
+                    CoordinationErrorCode::Conflict,
+                    "inquiry id already belongs to a different payload",
+                ));
+            }
+            Arc::clone(record)
+        } else {
+            if let Some(audit) = self.durable_inquiry(inquiry_id, source_session_id).await? {
+                if audit.target_session_id != target_session_id || audit.question != question {
+                    return Err(CoordinationError::new(
+                        CoordinationErrorCode::Conflict,
+                        "inquiry id already belongs to a different durable request",
+                    ));
+                }
+                return Ok(audit.outcome);
+            }
+            let record = Arc::new(InquiryRecord::new(payload, InquiryPhase::Discovering));
+            outgoing.insert(key, Arc::clone(&record));
+            let sender = self.clone();
+            let task_record = Arc::clone(&record);
+            let task_id = inquiry_id.to_owned();
+            tokio::spawn(async move {
+                sender.run_outgoing(task_id, task_record).await;
+            });
+            record
+        };
+        drop(outgoing);
+        let mut result = record.result.subscribe();
+        let mut phases = record.progress.subscribe();
+        send_progress(&progress, *phases.borrow());
         loop {
+            if let Some(outcome) = result.borrow().clone() {
+                return Ok(outcome);
+            }
             tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => {
-                    let _ = self
-                        .cancel_session(inquiry_id, source_session_id, target_session_id)
-                        .await;
-                    return Ok(InquiryOutcome::terminal(
-                        inquiry_id,
-                        InquiryStatus::Cancelled,
-                        "coordination inquiry was cancelled",
-                    ));
+                _ = cancellation.cancelled(), if !record.cancellation.is_cancelled() => {
+                    record.cancellation.cancel(InquiryCancellationReason::Explicit);
                 }
-                _ = &mut deadline => {
-                    let _ = self
-                        .cancel_session(inquiry_id, source_session_id, target_session_id)
-                        .await;
-                    return Ok(InquiryOutcome::terminal(
-                        inquiry_id,
-                        InquiryStatus::TimedOut,
-                        "coordination inquiry timed out",
-                    ));
+                changed = result.changed() => {
+                    changed.map_err(|_| CoordinationError::new(CoordinationErrorCode::Failed, "inquiry result channel closed"))?;
                 }
-                response = request_inquiry(
+                changed = phases.changed() => {
+                    changed.map_err(|_| CoordinationError::new(CoordinationErrorCode::Failed, "inquiry progress channel closed"))?;
+                    send_progress(&progress, *phases.borrow_and_update());
+                }
+            }
+        }
+    }
+
+    async fn run_outgoing(&self, id: String, record: Arc<InquiryRecord>) {
+        let (progress, mut phases) = mpsc::unbounded_channel();
+        let observed = Arc::clone(&record);
+        let relay = tokio::spawn(async move {
+            while let Some(phase) = phases.recv().await {
+                observed.progress.send_replace(phase);
+            }
+        });
+        let result = tokio::select! {
+            biased;
+            _ = self.shared.cancel.cancelled() => Err(CoordinationError::new(
+                CoordinationErrorCode::SourceUnavailable, "source runtime stopped")),
+            _ = record.cancellation.cancelled() => Ok(record.cancellation.outcome(&id)),
+            result = timeout(INQUIRY_DEADLINE, self.deliver_inquiry(&id, &record, progress)) => {
+                result.unwrap_or_else(|_| Err(CoordinationError::new(
+                    CoordinationErrorCode::TimedOut, "coordination inquiry deadline exceeded")))
+            }
+        };
+        // deliver_inquiry owns the only sender, including when its future is dropped.
+        let _ = relay.await;
+        let outcome = result.unwrap_or_else(|error| {
+            let status = match error.code {
+                CoordinationErrorCode::TimedOut => InquiryStatus::TimedOut,
+                CoordinationErrorCode::PermissionDenied => InquiryStatus::Rejected,
+                CoordinationErrorCode::NotFound
+                | CoordinationErrorCode::TargetRestarted
+                | CoordinationErrorCode::RuntimeUnavailable
+                | CoordinationErrorCode::SourceUnavailable => InquiryStatus::Unavailable,
+                _ => InquiryStatus::Failed,
+            };
+            InquiryOutcome::terminal(&id, status, error)
+        });
+        if matches!(
+            outcome.status,
+            InquiryStatus::Cancelled | InquiryStatus::TimedOut
+        ) {
+            let target = record
+                .target
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(target) = target {
+                // Cancel the pinned instance, never re-resolve onto a restarted peer.
+                let _ = request_peer(
                     &self.shared,
                     &target,
-                    source_session_id,
-                    &request,
-                    progress.as_ref(),
-                ) => match response {
-                    Ok(outcome) => return Ok(outcome),
-                    Err(InquiryRequestError::Remote { code, message }) => {
-                        return Err(format!("{code}: {message}"));
-                    }
-                    Err(InquiryRequestError::Transport(error)) => {
-                        send_progress(&progress, InquiryPhase::Reconnecting);
-                        tracing::debug!(
-                            inquiry_id,
-                            target_session_id,
-                            %error,
-                            "coordination inquiry transport interrupted; reconnecting"
-                        );
-                    }
+                    &record.payload.source_session_id,
+                    Request::Cancel {
+                        inquiry_id: id.clone(),
+                        target_session_id: record.payload.target_session_id.clone(),
+                    },
+                )
+                .await;
+            }
+        }
+        record.complete(outcome);
+    }
+
+    async fn deliver_inquiry(
+        &self,
+        id: &str,
+        record: &InquiryRecord,
+        progress: mpsc::UnboundedSender<InquiryPhase>,
+    ) -> Result<InquiryOutcome, CoordinationError> {
+        self.require_ready()?;
+        let payload = &record.payload;
+        let mut target = self
+            .resolve_target(&payload.source_session_id, &payload.target_session_id)
+            .await?;
+        *record.target.lock().unwrap_or_else(|e| e.into_inner()) = Some(target.clone());
+        let request = Request::Ask {
+            inquiry_id: id.to_owned(),
+            target_session_id: payload.target_session_id.clone(),
+            question: payload.question.clone(),
+        };
+        let mut delay = RECONNECT_MIN_DELAY;
+        loop {
+            match request_inquiry(
+                &self.shared,
+                &target,
+                &payload.source_session_id,
+                &request,
+                Some(&progress),
+            )
+            .await
+            {
+                Ok(outcome) => return Ok(outcome),
+                Err(InquiryRequestError::Remote(error)) => return Err(error),
+                Err(InquiryRequestError::Transport(error)) if !error.retryable => {
+                    return Err(error);
+                }
+                Err(InquiryRequestError::Transport(_)) => {
+                    let _ = progress.send(InquiryPhase::Reconnecting);
+                    // Never log question, answer, endpoint or token.
+                    tracing::debug!(inquiry_id = id, "coordination transport interrupted");
                 }
             }
-            tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => continue,
-                _ = &mut deadline => continue,
-                _ = tokio::time::sleep(reconnect_delay) => {}
-            }
-            reconnect_delay = std::cmp::min(reconnect_delay.saturating_mul(2), RECONNECT_MAX_DELAY);
+            tokio::time::sleep(delay).await;
+            delay = std::cmp::min(delay.saturating_mul(2), RECONNECT_MAX_DELAY);
             match self
-                .resolve_target(source_session_id, target_session_id)
+                .resolve_target(&payload.source_session_id, &payload.target_session_id)
                 .await
             {
-                Ok(current) => target = current,
-                Err(error) if target.expires_at < now_unix_ms() => {
-                    return Ok(InquiryOutcome::terminal(
-                        inquiry_id,
-                        InquiryStatus::Unavailable,
-                        error,
-                    ));
+                Ok(current) => {
+                    if current.peer_id != target.peer_id
+                        || current.incarnation != target.incarnation
+                    {
+                        return Err(CoordinationError::new(
+                            CoordinationErrorCode::TargetRestarted,
+                            "target process restarted; the accepted inquiry will not be replayed",
+                        ));
+                    }
+                    target = current;
                 }
+                Err(error) if target.expires_at < now_unix_ms() => return Err(error),
                 Err(_) => {}
             }
         }
+    }
+
+    pub async fn get_inquiry(
+        &self,
+        inquiry_id: &str,
+        source_session_id: &str,
+    ) -> Result<InquiryState, CoordinationError> {
+        self.require_source(source_session_id)?;
+        validate_inquiry_id(inquiry_id)
+            .map_err(|e| CoordinationError::new(CoordinationErrorCode::InvalidRequest, e))?;
+        let mut outgoing = self.shared.outgoing.lock().await;
+        outgoing.retain(|_, record| !record.expired());
+        if let Some(record) = outgoing.get(&(source_session_id.to_owned(), inquiry_id.to_owned())) {
+            // Hold the result snapshot while reading progress: complete() writes
+            // result first, so a query cannot pair an old phase with a new result.
+            let outcome = record.result.borrow();
+            return Ok(InquiryState {
+                inquiry_id: inquiry_id.to_owned(),
+                phase: if outcome.is_some() {
+                    InquiryPhase::Finished
+                } else {
+                    *record.progress.borrow()
+                },
+                outcome: outcome.clone(),
+            });
+        }
+        drop(outgoing);
+        let audit = self
+            .durable_inquiry(inquiry_id, source_session_id)
+            .await?
+            .ok_or_else(|| {
+                CoordinationError::new(
+                    CoordinationErrorCode::NotFound,
+                    "inquiry not found in this source session",
+                )
+            })?;
+        Ok(InquiryState {
+            inquiry_id: inquiry_id.to_owned(),
+            phase: InquiryPhase::Finished,
+            outcome: Some(audit.outcome),
+        })
+    }
+
+    /// Do not let queries report success after source audit persistence fails.
+    pub(crate) async fn audit_failed(&self, id: &str, source: &str, error: CoordinationError) {
+        if let Some(record) = self
+            .shared
+            .outgoing
+            .lock()
+            .await
+            .get(&(source.to_owned(), id.to_owned()))
+        {
+            record.complete(InquiryOutcome::terminal(id, InquiryStatus::Failed, error));
+        }
+    }
+
+    async fn durable_inquiry(
+        &self,
+        id: &str,
+        source: &str,
+    ) -> Result<Option<super::inquiry::InquiryAudit>, CoordinationError> {
+        let id = id.to_owned();
+        let source = source.to_owned();
+        let home = self.shared.grow_home.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut found = None;
+            let _ = crate::session::storage::stream_replay_grow_notifications_at(
+                &source,
+                &home,
+                |notification| {
+                    if let crate::extensions::notification::SessionUpdate::UiNotice(notice) =
+                        notification.update
+                        && notice.category
+                            == crate::extensions::notification::UiNoticeCategory::Coordination
+                        && notice.correlation_id == id
+                        && notice.subject.as_deref() == Some("outgoing inquiry completed")
+                        && let Some(details) = notice.details
+                        && let Ok(audit) =
+                            serde_json::from_str::<super::inquiry::InquiryAudit>(&details)
+                        && audit.outcome.inquiry_id == id
+                    {
+                        found = Some(audit);
+                    }
+                },
+            )
+            .map_err(|error| {
+                CoordinationError::new(CoordinationErrorCode::AuditFailure, error.to_string())
+            })?;
+            Ok(found)
+        })
+        .await
+        .map_err(|_| {
+            CoordinationError::new(
+                CoordinationErrorCode::AuditFailure,
+                "inquiry history reader failed",
+            )
+        })?
     }
 
     pub async fn cancel_session(
@@ -402,8 +713,31 @@ impl CoordinationHandle {
         inquiry_id: &str,
         source_session_id: &str,
         target_session_id: &str,
-    ) -> Result<bool, String> {
-        validate_inquiry_id(inquiry_id)?;
+    ) -> Result<bool, CoordinationError> {
+        self.require_source(source_session_id)?;
+        validate_inquiry_id(inquiry_id)
+            .map_err(|e| CoordinationError::new(CoordinationErrorCode::InvalidRequest, e))?;
+        {
+            let outgoing = self.shared.outgoing.lock().await;
+            if let Some(record) =
+                outgoing.get(&(source_session_id.to_owned(), inquiry_id.to_owned()))
+            {
+                if record.payload.target_session_id != target_session_id {
+                    return Err(CoordinationError::new(
+                        CoordinationErrorCode::Conflict,
+                        "inquiry target does not match",
+                    ));
+                }
+                if record.result.borrow().is_some() {
+                    return Ok(false);
+                }
+                record
+                    .cancellation
+                    .cancel(InquiryCancellationReason::Explicit);
+                return Ok(true);
+            }
+        }
+        self.require_ready()?;
         let target = self
             .resolve_target(source_session_id, target_session_id)
             .await?;
@@ -419,8 +753,11 @@ impl CoordinationHandle {
         .await?
         {
             Response::Cancellation { accepted, .. } => Ok(accepted),
-            Response::Error { code, message } => Err(format!("{code}: {message}")),
-            _ => Err("coordination peer returned an invalid cancel response".to_owned()),
+            Response::Error { code, message } => Err(remote_error(&code, message)),
+            _ => Err(CoordinationError::new(
+                CoordinationErrorCode::TransportError,
+                "invalid cancel response",
+            )),
         }
     }
 
@@ -428,95 +765,124 @@ impl CoordinationHandle {
         &self,
         source_session_id: &str,
         target_session_id: &str,
-    ) -> Result<PeerManifest, String> {
-        if !self.shared.owns_session(source_session_id) {
-            return Err("source session is not owned by this Grow process".to_owned());
-        }
+    ) -> Result<PeerManifest, CoordinationError> {
+        self.require_ready()?;
+        self.require_source(source_session_id)?;
         if source_session_id == target_session_id {
-            return Err("source and target sessions must differ".to_owned());
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::InvalidRequest,
+                "source and target sessions must differ",
+            ));
         }
-        let manifests = self.live_manifests(source_session_id).await;
+        let manifests = self.live_manifests(source_session_id).await?;
         if conflicted_session_ids(&manifests).contains(target_session_id) {
-            return Err("target session identity is conflicted".to_owned());
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "target session identity is conflicted",
+            ));
         }
-        let mut matches = manifests.into_iter().filter(|manifest| {
-            manifest
-                .sessions
-                .iter()
-                .any(|session| session.session_id == target_session_id)
-        });
-        let target = matches
-            .next()
-            .ok_or_else(|| "target session is unavailable".to_owned())?;
+        let mut matches = manifests
+            .into_iter()
+            .filter(|m| m.sessions.iter().any(|s| s.session_id == target_session_id));
+        let target = matches.next().ok_or_else(|| CoordinationError::new(CoordinationErrorCode::NotFound,
+            "target primary session is not online; rediscover targets (subagents are not independently addressable)"))?;
         if matches.next().is_some() {
-            return Err("target session identity is ambiguous".to_owned());
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::Conflict,
+                "target session identity is ambiguous",
+            ));
         }
         Ok(target)
     }
 
-    async fn live_manifests(&self, source_session_id: &str) -> Vec<PeerManifest> {
-        let now = now_unix_ms();
-        let mut manifests = read_all_manifests(&self.shared.grow_home);
-        if !manifests
-            .iter()
-            .any(|manifest| manifest.peer_id == self.shared.peer_id)
-        {
-            manifests.push(self.shared.current_manifest());
-        }
-        let mut live = Vec::new();
-        for manifest in manifests {
-            if manifest.peer_id == self.shared.peer_id {
-                live.push(self.shared.current_manifest());
-                continue;
-            }
-            if manifest.expires_at >= now {
-                live.push(manifest);
-                continue;
-            }
-            match request_peer(
-                &self.shared,
-                &manifest,
-                source_session_id,
-                Request::Describe,
-            )
-            .await
-            {
-                Ok(Response::Description { peer }) => {
-                    live.push(manifest_from_description(&manifest, peer));
+    async fn live_manifests(
+        &self,
+        source_session_id: &str,
+    ) -> Result<Vec<PeerManifest>, CoordinationError> {
+        timeout(SETUP_TIMEOUT, async {
+            let now = now_unix_ms();
+            let manifests = read_all_manifests(&self.shared.grow_home).map_err(|e| {
+                CoordinationError::new(CoordinationErrorCode::DiscoveryError, e.to_string())
+            })?;
+            let mut live = Vec::new();
+            for manifest in manifests {
+                if manifest.peer_id == self.shared.peer_id {
+                    live.push(self.shared.current_manifest());
+                } else if manifest.expires_at >= now {
+                    live.push(manifest);
+                } else {
+                    match request_peer(
+                        &self.shared,
+                        &manifest,
+                        source_session_id,
+                        Request::Describe,
+                    )
+                    .await
+                    {
+                        Ok(Response::Description { peer }) => {
+                            live.push(manifest_from_description(&manifest, peer))
+                        }
+                        _ => {
+                            cleanup_stale_manifest(&self.shared.grow_home, &manifest);
+                        }
+                    }
                 }
-                _ => cleanup_stale_manifest(&self.shared.grow_home, &manifest),
             }
-        }
-        live
+            Ok(live)
+        })
+        .await
+        .map_err(|_| {
+            CoordinationError::retry(
+                CoordinationErrorCode::DiscoveryError,
+                "peer discovery timed out; no empty-online-set was inferred",
+                1000,
+            )
+        })?
     }
 }
 
 impl Drop for CoordinationRuntime {
     fn drop(&mut self) {
         self.shared.cancel.cancel();
+        let _guard = self
+            .shared
+            .publication
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _ = std::fs::remove_file(&self.shared.manifest_path);
         #[cfg(unix)]
-        let _ = std::fs::remove_file(&self.shared.endpoint);
+        if let Some(endpoint) = self.shared.endpoint.get() {
+            let _ = std::fs::remove_file(endpoint.path());
+        }
     }
 }
 
-async fn run_server(listener: LocalListener, shared: Arc<Shared>) {
+async fn run_heartbeat(shared: Arc<Shared>) {
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = shared.cancel.cancelled() => break,
             _ = heartbeat.tick() => {
-                if let Err(error) = write_manifest(&shared.manifest_path, &shared.current_manifest()) {
+                let publisher = Arc::clone(&shared);
+                if let Ok(Err(error)) = tokio::task::spawn_blocking(move || publisher.publish()).await {
                     tracing::warn!(error = %error, "failed to refresh coordination lease");
                 }
             }
+        }
+    }
+}
+
+async fn run_server(listener: LocalListener, shared: Arc<Shared>) {
+    loop {
+        tokio::select! {
+            _ = shared.cancel.cancelled() => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
                     let shared = Arc::clone(&shared);
                     tokio::spawn(async move {
-                        if let Err(error) = serve_connection(stream, shared).await {
-                            tracing::debug!(error = %error, "coordination connection ended");
+                        if serve_connection(stream, shared).await.is_err() {
+                            tracing::debug!(error_code = "connection_error", "coordination connection ended");
                         }
                     });
                 }
@@ -662,6 +1028,9 @@ async fn write_response(stream: &mut LocalStream, response: Response) -> Result<
 }
 
 fn validate_hello(shared: &Shared, hello: &ClientHello) -> Result<PeerManifest, String> {
+    if uuid::Uuid::parse_str(&hello.peer_id).is_err() {
+        return Err("invalid source peer identity".to_owned());
+    }
     if hello.protocol_version != PROTOCOL_VERSION {
         return Err("unsupported coordination protocol version".to_owned());
     }
@@ -735,7 +1104,7 @@ async fn accept_inquiry(
     }
 
     let cancellation = InquiryCancellation::new();
-    let (progress, progress_rx) = watch::channel(InquiryPhase::Queued);
+    let (progress, progress_rx) = watch::channel(InquiryPhase::Receiving);
     let (result, result_rx) = watch::channel(None);
     let record = Arc::new(InquiryRecord {
         payload: payload.clone(),
@@ -743,6 +1112,7 @@ async fn accept_inquiry(
         progress,
         result,
         terminal_at: std::sync::Mutex::new(None),
+        target: std::sync::Mutex::new(None),
     });
     inquiries.insert(key, Arc::clone(&record));
     drop(inquiries);
@@ -773,6 +1143,7 @@ async fn run_inquiry(
     let source_peer_id = source.peer_id;
     let lease_source_peer_id = source_peer_id.clone();
     let source_incarnation = source.incarnation;
+    let mut verified_expiry = source.expires_at;
     let source_session_id = record.payload.source_session_id.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
@@ -782,13 +1153,17 @@ async fn run_inquiry(
                 _ = wait_for_terminal(lease_result.clone()) => break,
                 _ = interval.tick() => {
                     let path = peers_dir(&grow_home).join(format!("{lease_source_peer_id}.json"));
-                    let source_is_live = read_manifest(&path).is_ok_and(|manifest| {
-                        manifest.incarnation == source_incarnation
-                            && manifest.expires_at >= now_unix_ms()
-                            && manifest.sessions.iter().any(|session| {
-                                session.session_id == source_session_id
-                            })
-                    });
+                    let source_is_live = match read_manifest(&path) {
+                        Ok(manifest) => {
+                            let valid_identity = manifest.incarnation == source_incarnation
+                                && manifest.sessions.iter().any(|session| session.session_id == source_session_id);
+                            if valid_identity { verified_expiry = manifest.expires_at; }
+                            valid_identity && verified_expiry >= now_unix_ms()
+                        }
+                        // A transient sharing/read failure is not a SessionClosed event.
+                        // Never extend the last authenticated lease.
+                        Err(_) => verified_expiry >= now_unix_ms(),
+                    };
                     if !source_is_live {
                         lease_cancellation.cancel(InquiryCancellationReason::SourceUnavailable);
                         break;
@@ -891,19 +1266,49 @@ fn send_progress(progress: &Option<mpsc::UnboundedSender<InquiryPhase>>, phase: 
     }
 }
 
+fn transport_error(error: impl std::fmt::Display) -> CoordinationError {
+    CoordinationError::retry(
+        CoordinationErrorCode::TransportError,
+        error.to_string(),
+        250,
+    )
+}
+
+fn io_error(error: io::Error) -> CoordinationError {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        CoordinationError::new(CoordinationErrorCode::PermissionDenied, error.to_string())
+    } else {
+        transport_error(error)
+    }
+}
+
+fn remote_error(code: &str, message: String) -> CoordinationError {
+    let code = match code {
+        "inquiry_payload_conflict" => CoordinationErrorCode::Conflict,
+        "target_unavailable" => CoordinationErrorCode::NotFound,
+        "invalid_inquiry_id" | "question_too_large" | "invalid_question" => {
+            CoordinationErrorCode::InvalidRequest
+        }
+        _ => CoordinationErrorCode::Failed,
+    };
+    CoordinationError::new(code, message)
+}
+
 async fn request_peer(
     source: &Shared,
     target: &PeerManifest,
     source_session_id: &str,
     request: Request,
-) -> Result<Response, String> {
-    let mut stream = connect_peer(source, target, source_session_id).await?;
-    write_json(&mut stream, &request)
-        .await
-        .map_err(|error| error.to_string())?;
-    read_json(&mut stream)
-        .await
-        .map_err(|error| error.to_string())
+) -> Result<Response, CoordinationError> {
+    timeout(SETUP_TIMEOUT, async {
+        let mut stream = connect_peer(source, target, source_session_id).await?;
+        write_json(&mut stream, &request)
+            .await
+            .map_err(transport_error)?;
+        read_json(&mut stream).await.map_err(transport_error)
+    })
+    .await
+    .map_err(|_| transport_error("coordination RPC timed out"))?
 }
 
 async fn request_inquiry(
@@ -916,13 +1321,14 @@ async fn request_inquiry(
     let mut stream = connect_peer(source, target, source_session_id)
         .await
         .map_err(InquiryRequestError::Transport)?;
-    write_json(&mut stream, request)
+    timeout(SETUP_TIMEOUT, write_json(&mut stream, request))
         .await
-        .map_err(|error| InquiryRequestError::Transport(error.to_string()))?;
+        .map_err(|_| InquiryRequestError::Transport(transport_error("inquiry send timed out")))?
+        .map_err(|error| InquiryRequestError::Transport(transport_error(error)))?;
     loop {
         let response: Response = read_json(&mut stream)
             .await
-            .map_err(|error| InquiryRequestError::Transport(error.to_string()))?;
+            .map_err(|error| InquiryRequestError::Transport(transport_error(error)))?;
         match response {
             Response::Progress { phase, .. } => {
                 if let Some(progress) = progress {
@@ -931,12 +1337,12 @@ async fn request_inquiry(
             }
             Response::Inquiry { outcome } => return Ok(outcome),
             Response::Error { code, message } => {
-                return Err(InquiryRequestError::Remote { code, message });
+                return Err(InquiryRequestError::Remote(remote_error(&code, message)));
             }
             _ => {
-                return Err(InquiryRequestError::Transport(
-                    "coordination peer returned an invalid inquiry response".to_owned(),
-                ));
+                return Err(InquiryRequestError::Transport(transport_error(
+                    "invalid inquiry response",
+                )));
             }
         }
     }
@@ -946,11 +1352,11 @@ async fn connect_peer(
     source: &Shared,
     target: &PeerManifest,
     source_session_id: &str,
-) -> Result<LocalStream, String> {
+) -> Result<LocalStream, CoordinationError> {
     let mut stream = timeout(CONNECT_TIMEOUT, LocalStream::connect(&target.endpoint))
         .await
-        .map_err(|_| "coordination connect timed out".to_owned())?
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| transport_error("coordination connect timed out"))?
+        .map_err(io_error)?;
     let hello = ClientHello {
         protocol_version: PROTOCOL_VERSION,
         peer_id: source.peer_id.clone(),
@@ -958,21 +1364,30 @@ async fn connect_peer(
         bearer_token: target.token.clone(),
         source_session_id: source_session_id.to_owned(),
     };
-    write_json(&mut stream, &hello)
-        .await
-        .map_err(|error| error.to_string())?;
-    let server: ServerHello = timeout(SETUP_TIMEOUT, read_json(&mut stream))
-        .await
-        .map_err(|_| "coordination handshake response timed out".to_owned())?
-        .map_err(|error| error.to_string())?;
-    if !server.accepted
-        || server.protocol_version != PROTOCOL_VERSION
+    let server: ServerHello = timeout(SETUP_TIMEOUT, async {
+        write_json(&mut stream, &hello)
+            .await
+            .map_err(transport_error)?;
+        read_json(&mut stream).await.map_err(transport_error)
+    })
+    .await
+    .map_err(|_| transport_error("coordination handshake timed out"))??;
+    if server.protocol_version != PROTOCOL_VERSION
         || server.peer_id != target.peer_id
         || server.incarnation != target.incarnation
     {
-        return Err(server
-            .error
-            .unwrap_or_else(|| "coordination handshake rejected".to_owned()));
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::Conflict,
+            "coordination peer identity mismatch",
+        ));
+    }
+    if !server.accepted {
+        return Err(CoordinationError::new(
+            CoordinationErrorCode::PermissionDenied,
+            server
+                .error
+                .unwrap_or_else(|| "coordination handshake rejected".to_owned()),
+        ));
     }
     Ok(stream)
 }
@@ -985,6 +1400,7 @@ fn manifest_from_description(base: &PeerManifest, description: PeerDescription) 
         pid: base.pid,
         incarnation: description.incarnation,
         endpoint: base.endpoint.clone(),
+        transport: base.transport.clone(),
         token: base.token.clone(),
         started_at: description.started_at,
         heartbeat_at: now,
@@ -995,18 +1411,20 @@ fn manifest_from_description(base: &PeerManifest, description: PeerDescription) 
 }
 
 fn cleanup_stale_manifest(grow_home: &Path, manifest: &PeerManifest) {
-    let expected = peers_dir(grow_home).join(format!("{}.json", manifest.peer_id));
-    let _ = std::fs::remove_file(expected);
-    #[cfg(unix)]
-    if manifest.endpoint.parent() == Some(std::env::temp_dir().as_path())
-        && manifest
-            .endpoint
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == format!("grow-coordination-{}.sock", manifest.peer_id))
-    {
-        let _ = std::fs::remove_file(&manifest.endpoint);
+    let path = peers_dir(grow_home).join(format!("{}.json", manifest.peer_id));
+    let Ok(_lock) = super::manifest::lock_peer(&path) else {
+        return;
+    };
+    let Ok(current) = read_manifest(&path) else {
+        return;
+    };
+    if current.incarnation != manifest.incarnation || current.expires_at >= now_unix_ms() {
+        return;
     }
+    let _ = std::fs::remove_file(&path);
+    // Socket cleanup belongs to its owning endpoint, never to discovery.
+    // A failed RPC is not authority to unlink another process's listener.
+    let _ = std::fs::remove_file(path.with_extension("lock"));
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -1033,6 +1451,323 @@ mod tests {
             activity: crate::agent::roster::RosterActivity::Idle,
             subagents: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn unstarted_runtime_is_not_an_empty_online_set() {
+        let home = tempfile::tempdir().unwrap();
+        let runtime = CoordinationRuntime::new(home.path().to_owned());
+        runtime.publish_sessions(vec![snapshot("source", "/repo")]);
+        assert_eq!(
+            runtime
+                .list_active_sessions("source")
+                .await
+                .unwrap_err()
+                .code,
+            CoordinationErrorCode::RuntimeUnavailable
+        );
+        let id = uuid::Uuid::now_v7().to_string();
+        let result = runtime
+            .ask_session(
+                &id,
+                "source",
+                "missing",
+                "hello",
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.error.as_ref().unwrap().code,
+            CoordinationErrorCode::RuntimeUnavailable
+        );
+        assert_eq!(
+            runtime
+                .handle()
+                .get_inquiry(&id, "source")
+                .await
+                .unwrap()
+                .outcome,
+            Some(result)
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_target_has_structured_queryable_terminal_state() {
+        let home = tempfile::tempdir().unwrap();
+        let runtime = CoordinationRuntime::new(home.path().to_owned());
+        runtime.ensure_started().await.unwrap();
+        runtime.publish_sessions(vec![
+            snapshot("source", "/repo"),
+            snapshot("other", "/repo"),
+        ]);
+        let id = uuid::Uuid::now_v7().to_string();
+        let result = runtime
+            .ask_session(
+                &id,
+                "source",
+                "missing",
+                "hello",
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, InquiryStatus::Unavailable);
+        assert_eq!(
+            result.error.as_ref().unwrap().code,
+            CoordinationErrorCode::NotFound
+        );
+        assert!(
+            runtime.handle().get_inquiry(&id, "other").await.is_err(),
+            "another local session cannot read this inquiry"
+        );
+        assert_eq!(
+            runtime
+                .handle()
+                .get_inquiry(&id, "source")
+                .await
+                .unwrap()
+                .outcome,
+            Some(result)
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_retries_share_one_run_and_expose_running_state() {
+        let home = tempfile::tempdir().unwrap();
+        let source = CoordinationRuntime::new(home.path().to_owned());
+        let target = CoordinationRuntime::new(home.path().to_owned());
+        source.ensure_started().await.unwrap();
+        target.ensure_started().await.unwrap();
+        source.publish_sessions(vec![snapshot("source", "/repo")]);
+        target.publish_sessions(vec![snapshot("target", "/repo")]);
+        let mut incoming = target.take_inquiry_receiver().unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        let first = source.ask_session(
+            &id,
+            "source",
+            "target",
+            "work?",
+            None,
+            CancellationToken::new(),
+        );
+        let retry = source.ask_session(
+            &id,
+            "source",
+            "target",
+            "work?",
+            None,
+            CancellationToken::new(),
+        );
+        let answer = async {
+            let inquiry = incoming.recv().await.unwrap();
+            inquiry.progress.send_replace(InquiryPhase::Running);
+            timeout(Duration::from_secs(2), async {
+                loop {
+                    let state = source.handle().get_inquiry(&id, "source").await.unwrap();
+                    assert!(state.outcome.is_none());
+                    if state.phase == InquiryPhase::Running {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(incoming.try_recv().is_err());
+            inquiry
+                .respond_to
+                .send(InquiryOutcome::answered(&id, "one answer".into()))
+                .unwrap();
+        };
+        let (first, retry, ()) = tokio::join!(first, retry, answer);
+        assert_eq!(first.unwrap(), retry.unwrap());
+        assert_eq!(
+            source
+                .handle()
+                .get_inquiry(&id, "source")
+                .await
+                .unwrap()
+                .phase,
+            InquiryPhase::Finished
+        );
+        let conflict = source
+            .ask_session(
+                &id,
+                "source",
+                "target",
+                "different",
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.code, CoordinationErrorCode::Conflict);
+    }
+
+    #[tokio::test]
+    async fn stale_probe_cannot_reap_a_live_peers_manifest_or_socket() {
+        let home = tempfile::tempdir().unwrap();
+        let runtime = CoordinationRuntime::new(home.path().to_owned());
+        runtime.ensure_started().await.unwrap();
+        let mut manifest = runtime.shared.current_manifest();
+        manifest.expires_at = 0;
+        write_manifest(&runtime.shared.manifest_path, &manifest).unwrap();
+        cleanup_stale_manifest(home.path(), &manifest);
+        assert!(runtime.shared.manifest_path.exists());
+        #[cfg(unix)]
+        assert!(manifest.endpoint.exists());
+    }
+
+    #[tokio::test]
+    async fn reconnect_never_replays_to_a_new_target_incarnation() {
+        let home = tempfile::tempdir().unwrap();
+        let source = CoordinationRuntime::new(home.path().to_owned());
+        source.ensure_started().await.unwrap();
+        source.publish_sessions(vec![snapshot("source", "/repo")]);
+        let endpoint = PrivateEndpoint::new().unwrap();
+        let listener = LocalListener::bind(endpoint.path()).unwrap();
+        let mut target = source.shared.current_manifest();
+        target.peer_id = uuid::Uuid::new_v4().to_string();
+        target.endpoint = endpoint.path().to_owned();
+        target.sessions[0].session_id = "target".into();
+        let path = peers_dir(home.path()).join(format!("{}.json", target.peer_id));
+        write_manifest(&path, &target).unwrap();
+        let replacement = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _: ClientHello = read_json(&mut stream).await.unwrap();
+            write_json(
+                &mut stream,
+                &ServerHello {
+                    protocol_version: PROTOCOL_VERSION,
+                    peer_id: target.peer_id.clone(),
+                    incarnation: target.incarnation.clone(),
+                    accepted: true,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+            let request: Request = read_json(&mut stream).await.unwrap();
+            assert!(matches!(request, Request::Ask { .. }));
+            target.incarnation = uuid::Uuid::new_v4().to_string();
+            write_manifest(&path, &target).unwrap();
+            // Lost response + a new incarnation must never trigger a new Ask.
+            drop(stream);
+            assert!(
+                timeout(Duration::from_secs(1), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let id = uuid::Uuid::now_v7().to_string();
+        let result = timeout(
+            Duration::from_secs(3),
+            source.ask_session(
+                &id,
+                "source",
+                "target",
+                "work?",
+                None,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            result.error.unwrap().code,
+            CoordinationErrorCode::TargetRestarted
+        );
+        replacement.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transient_source_manifest_failure_preserves_only_the_last_verified_lease() {
+        let home = tempfile::tempdir().unwrap();
+        let source = CoordinationRuntime::new(home.path().to_owned());
+        let target = CoordinationRuntime::new(home.path().to_owned());
+        source.ensure_started().await.unwrap();
+        target.ensure_started().await.unwrap();
+        source.publish_sessions(vec![snapshot("source", "/repo")]);
+        target.publish_sessions(vec![snapshot("target", "/repo")]);
+        let mut incoming = target.take_inquiry_receiver().unwrap();
+        let mut identity = source.shared.current_manifest();
+        identity.expires_at = now_unix_ms() + 500;
+        source.shared.cancel.cancel(); // Stop publication without changing identity.
+        std::fs::remove_file(&source.shared.manifest_path).unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        let _ = accept_inquiry(
+            Arc::clone(&target.shared),
+            identity.clone(),
+            InquiryPayload {
+                source_incarnation: identity.incarnation,
+                source_session_id: "source".into(),
+                source_cwd: "/repo".into(),
+                target_session_id: "target".into(),
+                question: "work?".into(),
+            },
+            id,
+        )
+        .await
+        .unwrap();
+        let inquiry = incoming.recv().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!inquiry.cancellation.is_cancelled());
+        timeout(Duration::from_secs(3), inquiry.cancellation.cancelled())
+            .await
+            .unwrap();
+        assert_eq!(
+            inquiry.cancellation.reason(),
+            InquiryCancellationReason::SourceUnavailable
+        );
+        let _ = inquiry
+            .respond_to
+            .send(inquiry.cancellation.outcome(&inquiry.inquiry_id));
+    }
+
+    #[tokio::test]
+    async fn describe_deadline_covers_a_peer_stalling_after_handshake() {
+        let home = tempfile::tempdir().unwrap();
+        let source = CoordinationRuntime::new(home.path().to_owned());
+        source.ensure_started().await.unwrap();
+        source.publish_sessions(vec![snapshot("source", "/repo")]);
+        let endpoint = PrivateEndpoint::new().unwrap();
+        let listener = LocalListener::bind(endpoint.path()).unwrap();
+        let mut target = source.shared.current_manifest();
+        target.endpoint = endpoint.path().to_owned();
+        let expected = target.clone();
+        let stalled = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _: ClientHello = read_json(&mut stream).await.unwrap();
+            write_json(
+                &mut stream,
+                &ServerHello {
+                    protocol_version: PROTOCOL_VERSION,
+                    peer_id: expected.peer_id,
+                    incarnation: expected.incarnation,
+                    accepted: true,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+            let _: Request = read_json(&mut stream).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let result = timeout(
+            Duration::from_secs(5),
+            request_peer(&source.shared, &target, "source", Request::Describe),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.unwrap_err().code,
+            CoordinationErrorCode::TransportError
+        );
+        stalled.abort();
     }
 
     #[test]
@@ -1216,6 +1951,7 @@ mod tests {
             pid: std::process::id(),
             incarnation: uuid::Uuid::new_v4().to_string(),
             endpoint: std::env::temp_dir().join(format!("grow-coordination-{ghost_id}.sock")),
+            transport: super::super::manifest::TRANSPORT_KIND.to_owned(),
             token: "ghost".to_owned(),
             started_at: 0,
             heartbeat_at: 0,
@@ -1276,7 +2012,7 @@ mod tests {
         assert!(matches!(
             read_json::<_, Response>(&mut stream).await.unwrap(),
             Response::Progress {
-                phase: InquiryPhase::Queued,
+                phase: InquiryPhase::Receiving,
                 ..
             }
         ));
@@ -1356,8 +2092,10 @@ mod tests {
                 CancellationToken::new(),
             )
             .await
-            .unwrap_err();
-        assert!(error.contains("inquiry_payload_conflict"));
+            .unwrap()
+            .error
+            .unwrap();
+        assert_eq!(error.code, CoordinationErrorCode::Conflict);
         let _ = inquiry.respond_to.send(InquiryOutcome::answered(
             &inquiry_id,
             "first answer".to_owned(),

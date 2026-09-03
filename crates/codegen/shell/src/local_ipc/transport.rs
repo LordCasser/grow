@@ -5,6 +5,66 @@
 //!   expose AF_UNIX on Windows). The logical filesystem path is hashed
 //!   into `\\.\pipe\grow-local-<hash>` so callers keep their path-based API.
 //!
+
+/// An owned, private endpoint for a process-scoped service. Discovery belongs
+/// to the caller; socket path allocation and lifetime belong to the transport.
+#[derive(Debug)]
+pub(crate) struct PrivateEndpoint {
+    path: std::path::PathBuf,
+    #[cfg(unix)]
+    _directory: tempfile::TempDir,
+}
+
+impl PrivateEndpoint {
+    pub(crate) fn new() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // macOS's per-user TMPDIR plus a UUID can already exceed sun_path.
+            // A random 0700 directory under the short system root also prevents
+            // another user from replacing the socket between bind and chmod.
+            let directory = tempfile::Builder::new()
+                .prefix("grow-ipc-")
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir_in("/tmp")?;
+            let path = directory.path().join("s");
+            validate_socket_path(&path)?;
+            Ok(Self {
+                path,
+                _directory: directory,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                path: std::path::PathBuf::from(format!(
+                    "grow-coordination-{}",
+                    uuid::Uuid::new_v4().simple()
+                )),
+            })
+        }
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+#[cfg(unix)]
+fn validate_socket_path(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    // Zero is valid for sockaddr_un; only the platform's array length is used.
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "local IPC socket path exceeds the platform limit or contains NUL",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 mod unix_impl {
     use std::io;
@@ -20,6 +80,7 @@ mod unix_impl {
     impl LocalListener {
         pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
             let path = path.as_ref();
+            super::validate_socket_path(path)?;
             let inner = tokio::net::UnixListener::bind(path)?;
             if let Err(error) =
                 std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -44,6 +105,34 @@ mod unix_tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::LocalListener;
+
+    #[tokio::test]
+    async fn private_endpoint_is_short_and_its_directory_is_owner_only() {
+        let endpoint = super::PrivateEndpoint::new().unwrap();
+        assert!(endpoint.path().as_os_str().len() < 100);
+        assert_eq!(
+            std::fs::metadata(endpoint.path().parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let listener = LocalListener::bind(endpoint.path()).unwrap();
+        let path = endpoint.path().to_owned();
+        drop(listener);
+        drop(endpoint);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn overlong_socket_path_is_rejected_before_bind() {
+        let path = std::path::PathBuf::from(format!("/tmp/{}", "x".repeat(120)));
+        assert_eq!(
+            LocalListener::bind(path).err().unwrap().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
 
     #[tokio::test]
     async fn socket_is_owner_only() {
@@ -91,58 +180,7 @@ mod windows_impl {
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tracing::debug;
 
-    struct OwnerOnlySecurityAttributes {
-        descriptor: windows::Win32::Security::PSECURITY_DESCRIPTOR,
-        attributes: windows::Win32::Security::SECURITY_ATTRIBUTES,
-    }
-
-    impl OwnerOnlySecurityAttributes {
-        fn new() -> io::Result<Self> {
-            use windows::Win32::Security::Authorization::{
-                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-            };
-            use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-            use windows::core::PCWSTR;
-
-            // A protected DACL that grants generic-all only to the object owner.
-            // Named-pipe objects inherit the creating token's owner, i.e. the
-            // current OS user, so other local users cannot open the endpoint.
-            let sddl: Vec<u16> = "D:P(A;;GA;;;OW)\0".encode_utf16().collect();
-            let mut descriptor = PSECURITY_DESCRIPTOR::default();
-            unsafe {
-                ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    PCWSTR(sddl.as_ptr()),
-                    SDDL_REVISION_1,
-                    &mut descriptor,
-                    None,
-                )
-                .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
-            }
-
-            Ok(Self {
-                descriptor,
-                attributes: SECURITY_ATTRIBUTES {
-                    nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-                    lpSecurityDescriptor: descriptor.0,
-                    bInheritHandle: false.into(),
-                },
-            })
-        }
-
-        fn as_mut_ptr(&mut self) -> *mut std::ffi::c_void {
-            (&mut self.attributes as *mut windows::Win32::Security::SECURITY_ATTRIBUTES).cast()
-        }
-    }
-
-    impl Drop for OwnerOnlySecurityAttributes {
-        fn drop(&mut self) {
-            use windows::Win32::Foundation::{HLOCAL, LocalFree};
-
-            unsafe {
-                let _ = LocalFree(Some(HLOCAL(self.descriptor.0)));
-            }
-        }
-    }
+    use super::super::security::UserSecurityAttributes;
 
     fn create_server(
         pipe_name: &OsStr,
@@ -154,7 +192,7 @@ mod windows_impl {
         options
             .first_pipe_instance(first_instance)
             .reject_remote_clients(true);
-        let mut security = OwnerOnlySecurityAttributes::new()?;
+        let mut security = UserSecurityAttributes::new()?;
         unsafe { options.create_with_security_attributes_raw(pipe_name, security.as_mut_ptr()) }
     }
 
@@ -175,11 +213,21 @@ mod windows_impl {
         pub async fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
             use tokio::net::windows::named_pipe::ClientOptions;
 
-            // ClientOptions::open returns ERROR_PIPE_BUSY if all pipe
-            // instances are in use; the caller's CONNECT_TIMEOUT loop
-            // already retries, so we surface the error and let it handle.
+            use windows::Win32::Foundation::ERROR_PIPE_BUSY;
             let pipe_name = path_to_pipe_name(path.as_ref());
-            let inner = ClientOptions::new().open(pipe_name)?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+            let inner = loop {
+                match ClientOptions::new().open(&pipe_name) {
+                    Ok(pipe) => break pipe,
+                    Err(error)
+                        if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32)
+                            && tokio::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
             Ok(Self {
                 inner: StreamInner::Client(inner),
             })
@@ -237,7 +285,7 @@ mod windows_impl {
     pub struct LocalListener {
         pipe_name: std::ffi::OsString,
         /// Next pre-created server instance, ready for `connect().await`.
-        /// We rotate: take this one, await its connect, immediately create
+        /// Await connect while retaining this instance, then replace it with
         /// the next one for the following accept(). The first instance is
         /// created in `bind()` with `first_pipe_instance(true)` to lock
         /// out other processes from squatting the pipe name.
@@ -263,24 +311,25 @@ mod windows_impl {
         /// placeholder where Unix would return the peer address (named
         /// pipes don't carry one).
         pub async fn accept(&self) -> io::Result<(LocalStream, ())> {
-            // Take the pending instance (or create one), await a client, then
-            // pre-create the next. On connect() error, drop the instance and
-            // retry with a fresh one — returning early would leave the slot
-            // empty and brick the listener. Bounded with a backoff so a
-            // persistently failing connect() can't busy-spin.
+            // Retain the pending instance through cancellation, then create
+            // its replacement before returning the connected stream. Retry
+            // connect errors with a bounded backoff, never an empty slot.
             const MAX_ACCEPT_ATTEMPTS: usize = 10;
             const RETRY_BACKOFF: Duration = Duration::from_millis(20);
 
             let mut slot = self.next_server.lock().await;
             let mut last_err: Option<io::Error> = None;
             for attempt in 0..MAX_ACCEPT_ATTEMPTS {
-                let server = match slot.take() {
-                    Some(server) => server,
-                    None => create_server(&self.pipe_name, false)?,
-                };
-                match server.connect().await {
+                if slot.is_none() {
+                    *slot = Some(create_server(&self.pipe_name, false)?);
+                }
+                // Keep ownership in the listener across await: callers select
+                // accept against heartbeats/events and routinely cancel it.
+                match slot.as_ref().expect("pending pipe").connect().await {
                     Ok(()) => {
-                        *slot = Some(create_server(&self.pipe_name, false)?);
+                        // Do not lose the connected instance if re-arming fails.
+                        let next = create_server(&self.pipe_name, false)?;
+                        let server = slot.replace(next).expect("connected pipe");
                         return Ok((
                             LocalStream {
                                 inner: StreamInner::Server(server),
@@ -289,7 +338,10 @@ mod windows_impl {
                         ));
                     }
                     Err(e) => {
-                        // Failed `server` drops here, freeing the instance.
+                        // Re-arm before dropping the failed instance so the
+                        // name remains reserved, including during backoff.
+                        let next = create_server(&self.pipe_name, false)?;
+                        *slot = Some(next);
                         debug!(attempt, error = %e, "named-pipe accept connect failed; retrying");
                         last_err = Some(e);
                         tokio::time::sleep(RETRY_BACKOFF).await;
@@ -363,6 +415,49 @@ mod windows_impl {
     mod tests {
         use super::*;
         use std::path::Path;
+
+        #[tokio::test]
+        async fn cancelled_accept_preserves_reserved_pipe_instance() {
+            let endpoint = super::super::PrivateEndpoint::new().unwrap();
+            let listener = LocalListener::bind(endpoint.path()).unwrap();
+            for _ in 0..8 {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(5), listener.accept())
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    listener.next_server.lock().await.is_some(),
+                    "cancel must not consume the pending pipe"
+                );
+                assert!(listener_is_ready(endpoint.path()));
+            }
+            let client = LocalStream::connect(endpoint.path()).await.unwrap();
+            let (server, _) = listener.accept().await.unwrap();
+            drop((client, server));
+        }
+
+        #[tokio::test]
+        async fn busy_pipe_connect_waits_for_the_next_instance() {
+            let endpoint = super::super::PrivateEndpoint::new().unwrap();
+            let listener = LocalListener::bind(endpoint.path()).unwrap();
+            let first = LocalStream::connect(endpoint.path()).await.unwrap();
+            let path = endpoint.path().to_owned();
+            let second = tokio::spawn(async move { LocalStream::connect(path).await });
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            assert!(
+                !second.is_finished(),
+                "busy is transient, not an immediate connection failure"
+            );
+            let accepted_first = listener.accept().await.unwrap();
+            let second = tokio::time::timeout(Duration::from_secs(2), second)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let accepted_second = listener.accept().await.unwrap();
+            drop((first, second, accepted_first, accepted_second));
+        }
 
         #[test]
         fn pipe_name_is_deterministic() {

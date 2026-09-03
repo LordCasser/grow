@@ -378,6 +378,7 @@ impl AccessKind {
             | ToolInput::MemoryGet(_)
             | ToolInput::ContextRecall(_)
             | ToolInput::GetGoal(_)
+            | ToolInput::GetInquiry(_)
             | ToolInput::SchedulerList(_)
             | ToolInput::ListActiveSessions(_) => AccessKind::Read(None),
             ToolInput::SearchReplace(search_replace) => {

@@ -70,8 +70,9 @@ struct GoalUsageAttemptOwner {
     background: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     returned: bool,
     /// `None` means the provider attempt has not reported an outcome yet.
-    /// `Some(None)` is fail-closed unknown usage; `Some(Some(tokens))` is the
-    /// exact normalized Goal charge. The first report wins permanently.
+    /// `Some(None)` is unknown usage (an exact budget must fail closed);
+    /// `Some(Some(tokens))` is the exact normalized Goal charge. The first
+    /// report wins permanently.
     settlement: Option<Option<i64>>,
 }
 
@@ -484,9 +485,7 @@ impl SessionActor {
                 active
                     .and_then(|goal| goal.token_budget)
                     .is_some_and(|budget| tracker.tokens_used() >= budget),
-                active.is_some_and(|goal| {
-                    goal.usage_incomplete && !goal.usage_incomplete_acknowledged
-                }),
+                active.is_some_and(crate::session::goal_tracker::GoalState::usage_blocks_budget),
             )
         };
         self.goal_usage_window
@@ -600,10 +599,15 @@ impl SessionActor {
         if !already_recorded && !self.goal_tracker.lock().mark_usage_incomplete(goal_id) {
             return Ok(GoalUsageIncompleteApply::Ignored);
         }
-        self.cancel_background_compaction("goal_usage_incomplete")
-            .await
-            .map_err(|error| error.to_string())?;
-        if !self.events.has_active_step() {
+        // An unknown charge is durable evidence in every Goal. Only an exact
+        // budget needs to stop provider admission and Goal-owned work; without
+        // a budget, preserve normal retry/continuation and compaction behavior.
+        if previous.token_budget.is_some() {
+            self.cancel_background_compaction("goal_usage_incomplete")
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        if previous.token_budget.is_some() && !self.events.has_active_step() {
             if self.goal_tracker.lock().pause_for_incomplete_usage(goal_id) {
                 self.commit_goal_stop_or_restore(previous).await?;
                 let tokens_used = self.goal_tokens_used();
@@ -1620,7 +1624,7 @@ mod tests {
             .create_goal(
                 "goal-1".into(),
                 "finish".into(),
-                None,
+                Some(100),
                 "2026-08-27T00:00:00Z".into(),
             )
             .unwrap();
@@ -1788,6 +1792,85 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn unbudgeted_incomplete_usage_preserves_admission_and_lower_bound() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for active_step in [false, true] {
+                    let (actor, _gateway_rx) = build_actor().await;
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .create_goal(
+                            "goal-1".into(),
+                            "finish".into(),
+                            None,
+                            "2026-08-27T00:00:00Z".into(),
+                        )
+                        .unwrap();
+                    actor
+                        .behavior
+                        .lock()
+                        .select_behavior(tool_types::BehaviorId::Goal);
+                    actor.sync_goal_usage_window();
+                    if active_step {
+                        crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
+                    }
+                    let owner = actor.session_id_string();
+                    // Unknown usage can recur before or between provider
+                    // attempts. Every lease must settle, without closing an
+                    // unbudgeted Goal's retry/continuation admission.
+                    for charge in [None, None, Some(42)] {
+                        let attempt = actor
+                            .goal_usage_window
+                            .begin_model_attempt(&owner, 0, Some("goal-1"))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert!(
+                            actor
+                                .goal_usage_window
+                                .claim_attempt_settlement(&attempt, charge)
+                        );
+                        actor
+                            .settle_claimed_goal_usage_attempt(&attempt)
+                            .await
+                            .unwrap();
+                        assert!(!actor.goal_usage_window.provider_admission_closed());
+                        assert!(!actor.enforce_goal_spending_limit().await);
+                        assert_eq!(
+                            actor.goal_tracker.lock().status(),
+                            Some(crate::session::goal_tracker::GoalStatus::Active)
+                        );
+                        assert_eq!(
+                            actor.behavior.lock().behavior(),
+                            tool_types::BehaviorId::Goal
+                        );
+                        assert!(!actor.state.lock().await.terminal_preemption_pending);
+                    }
+                    let goal = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+                    assert!(goal.usage_incomplete);
+                    assert_eq!(goal.tokens_used, 42);
+                    let restored = crate::session::goal_tracker::GoalTracker::from_snapshot(goal)
+                        .expect("a lower-bound unbudgeted Goal remains restorable");
+                    *actor.goal_tracker.lock() = restored;
+                    actor.sync_goal_usage_window();
+                    assert!(!actor.goal_usage_window.provider_admission_closed());
+                    let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
+                    assert!(
+                        timeline.iter().any(|event| matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Control(control)
+                                if control.snapshot.pointer("/goal/usage_incomplete")
+                                    == Some(&serde_json::Value::Bool(true))
+                        )),
+                        "lower-bound evidence must be durable"
+                    );
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn incomplete_usage_closes_admission_then_pauses_after_step_end() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -1798,7 +1881,7 @@ mod tests {
                     .create_goal(
                         "goal-1".into(),
                         "finish".into(),
-                        None,
+                        Some(100),
                         "2026-08-27T00:00:00Z".into(),
                     )
                     .unwrap();

@@ -1,4 +1,5 @@
 use super::*;
+use crate::coordination::{CoordinationError, CoordinationErrorCode};
 
 impl MvpAgent {
     pub(super) async fn ensure_coordination_started(&self) -> bool {
@@ -115,7 +116,7 @@ impl MvpAgent {
     pub(crate) async fn list_coordination_sessions(
         &self,
         source_session_id: &str,
-    ) -> Result<Vec<crate::coordination::DiscoveredSession>, String> {
+    ) -> Result<Vec<crate::coordination::DiscoveredSession>, CoordinationError> {
         self.coordination_backend(source_session_id)?
             .list_active_sessions()
             .await
@@ -124,7 +125,7 @@ impl MvpAgent {
     pub(crate) fn validate_coordination_source(
         &self,
         source_session_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), CoordinationError> {
         self.require_coordination_source(source_session_id)
             .map(|_| ())
     }
@@ -137,7 +138,7 @@ impl MvpAgent {
         question: String,
         progress: Option<tokio::sync::mpsc::UnboundedSender<crate::coordination::InquiryPhase>>,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> Result<crate::coordination::InquiryOutcome, String> {
+    ) -> Result<crate::coordination::InquiryOutcome, CoordinationError> {
         self.coordination_backend(&source_session_id)?
             .ask_with_id(
                 inquiry_id,
@@ -149,12 +150,24 @@ impl MvpAgent {
             .await
     }
 
+    pub(crate) async fn get_coordination_inquiry(
+        &self,
+        inquiry_id: &str,
+        source_session_id: &str,
+    ) -> Result<crate::coordination::InquiryState, CoordinationError> {
+        self.require_coordination_source(source_session_id)?;
+        self.coordination
+            .handle()
+            .get_inquiry(inquiry_id, source_session_id)
+            .await
+    }
+
     pub(crate) async fn cancel_coordination_session(
         &self,
         inquiry_id: &str,
         source_session_id: &str,
         target_session_id: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, CoordinationError> {
         self.coordination_backend(source_session_id)?
             .cancel_session(inquiry_id, target_session_id)
             .await
@@ -176,7 +189,7 @@ impl MvpAgent {
     fn coordination_backend(
         &self,
         source_session_id: &str,
-    ) -> Result<SessionCoordinationBackend, String> {
+    ) -> Result<SessionCoordinationBackend, CoordinationError> {
         let source = self.require_coordination_source(source_session_id)?;
         Ok(SessionCoordinationBackend {
             coordination: self.coordination.handle(),
@@ -188,13 +201,18 @@ impl MvpAgent {
     fn require_coordination_source(
         &self,
         source_session_id: &str,
-    ) -> Result<SessionHandle, String> {
+    ) -> Result<SessionHandle, CoordinationError> {
         self.sessions
             .borrow()
             .get(&acp::SessionId::new(source_session_id))
             .cloned()
             .filter(|handle| !handle.cmd_tx.is_closed())
-            .ok_or_else(|| "source session is not owned by this ACP connection".to_owned())
+            .ok_or_else(|| {
+                CoordinationError::new(
+                    CoordinationErrorCode::PermissionDenied,
+                    "source session is not owned by this ACP connection",
+                )
+            })
     }
 }
 
@@ -208,7 +226,7 @@ struct SessionCoordinationBackend {
 impl SessionCoordinationBackend {
     async fn list_active_sessions(
         &self,
-    ) -> Result<Vec<crate::coordination::DiscoveredSession>, String> {
+    ) -> Result<Vec<crate::coordination::DiscoveredSession>, CoordinationError> {
         self.coordination
             .list_active_sessions(&self.source_session_id)
             .await
@@ -221,18 +239,24 @@ impl SessionCoordinationBackend {
         question: String,
         progress: Option<tokio::sync::mpsc::UnboundedSender<crate::coordination::InquiryPhase>>,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> Result<crate::coordination::InquiryOutcome, String> {
+    ) -> Result<crate::coordination::InquiryOutcome, CoordinationError> {
+        if question.trim().is_empty() || question.len() > crate::coordination::MAX_QUESTION_BYTES {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::InvalidRequest,
+                "question must be nonempty and at most 16384 bytes",
+            ));
+        }
         record_coordination_notice(
             &self.source,
             crate::extensions::notification::UiNotice {
                 correlation_id: inquiry_id.clone(),
                 category: crate::extensions::notification::UiNoticeCategory::Coordination,
                 subject: Some("outgoing inquiry".to_owned()),
-                description: Some("Question sent to another local Grow session".to_owned()),
+                description: Some("Attempting to send a question to another local Grow session".to_owned()),
                 message: format!("Asking session {target_session_id}"),
                 tone: crate::extensions::notification::UiNoticeTone::Info,
                 details: Some(format!(
-                    "Target session: {target_session_id}\n\nQuestion:\n{question}"
+                    "Inquiry ID: {inquiry_id}\nTarget session: {target_session_id}\n\nQuestion:\n{question}"
                 )),
             },
         )
@@ -258,18 +282,26 @@ impl SessionCoordinationBackend {
                 .await;
             let outcome = match result {
                 Ok(outcome) => outcome,
+                // A conflicting retry must not overwrite the original audit.
+                Err(error) if error.code == CoordinationErrorCode::Conflict => return Err(error),
                 Err(error) => crate::coordination::InquiryOutcome::terminal(
                     &task_inquiry_id,
                     crate::coordination::InquiryStatus::Failed,
                     error,
                 ),
             };
-            record_coordination_notice(
+            if let Err(error) = record_coordination_notice(
                 &task_source,
-                source_terminal_notice(&task_target_session_id, &outcome),
+                source_terminal_notice(&task_target_session_id, &task_question, &outcome),
             )
-            .await?;
-            Ok::<_, String>(outcome)
+            .await
+            {
+                coordination
+                    .audit_failed(&task_inquiry_id, &task_source_session_id, error.clone())
+                    .await;
+                return Err(error);
+            }
+            Ok::<_, CoordinationError>(outcome)
         });
         let mut cancel_on_drop = CancelCoordinationOnDrop::new(cancellation);
         let result = task
@@ -283,7 +315,7 @@ impl SessionCoordinationBackend {
         &self,
         inquiry_id: &str,
         target_session_id: &str,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, CoordinationError> {
         self.coordination
             .cancel_session(inquiry_id, &self.source_session_id, target_session_id)
             .await
@@ -296,7 +328,10 @@ impl tools::implementations::grow_build::coordination::CoordinationBackend
 {
     async fn list_active_sessions(
         &self,
-    ) -> Result<Vec<tools::implementations::grow_build::coordination::ActiveSession>, String> {
+    ) -> Result<
+        Vec<tools::implementations::grow_build::coordination::ActiveSession>,
+        CoordinationError,
+    > {
         Ok(self
             .list_active_sessions()
             .await?
@@ -318,13 +353,16 @@ impl tools::implementations::grow_build::coordination::CoordinationBackend
 
     async fn ask_session(
         &self,
+        inquiry_id: Option<String>,
         target_session_id: String,
         question: String,
         progress: tokio::sync::mpsc::UnboundedSender<String>,
         cancellation: tokio_util::sync::CancellationToken,
-    ) -> Result<tools::implementations::grow_build::coordination::CoordinationInquiryResult, String>
-    {
-        let inquiry_id = uuid::Uuid::now_v7().to_string();
+    ) -> Result<
+        tools::implementations::grow_build::coordination::CoordinationInquiryResult,
+        CoordinationError,
+    > {
+        let inquiry_id = inquiry_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
         let (typed_progress, mut typed_phases) = tokio::sync::mpsc::unbounded_channel();
         let progress_task = tokio::spawn(async move {
             while let Some(phase) = typed_phases.recv().await {
@@ -354,6 +392,32 @@ impl tools::implementations::grow_build::coordination::CoordinationBackend
                 status: enum_label(outcome.status),
                 answer: outcome.answer,
                 error: outcome.error,
+            },
+        )
+    }
+    async fn get_inquiry(
+        &self,
+        inquiry_id: String,
+    ) -> Result<
+        tools::implementations::grow_build::coordination::CoordinationInquiryState,
+        CoordinationError,
+    > {
+        let state = self
+            .coordination
+            .get_inquiry(&inquiry_id, &self.source_session_id)
+            .await?;
+        Ok(
+            tools::implementations::grow_build::coordination::CoordinationInquiryState {
+                inquiry_id: state.inquiry_id,
+                phase: enum_label(state.phase),
+                outcome: state.outcome.map(|outcome| {
+                    tools::implementations::grow_build::coordination::CoordinationInquiryResult {
+                        inquiry_id: outcome.inquiry_id,
+                        status: enum_label(outcome.status),
+                        answer: outcome.answer,
+                        error: outcome.error,
+                    }
+                }),
             },
         )
     }
@@ -393,37 +457,55 @@ impl Drop for CancelCoordinationOnDrop {
 async fn record_coordination_notice(
     session: &SessionHandle,
     notice: crate::extensions::notification::UiNotice,
-) -> Result<(), String> {
+) -> Result<(), CoordinationError> {
     let (respond_to, response) = tokio::sync::oneshot::channel();
     session
         .cmd_tx
-        .send(SessionCommand::RecordCoordinationNotice { notice, respond_to })
-        .map_err(|_| "source session is unavailable".to_owned())?;
+        .send(SessionCommand::RecordCoordinationNotice {
+            notice,
+            publish: false,
+            respond_to,
+        })
+        .map_err(|_| {
+            CoordinationError::new(
+                CoordinationErrorCode::AuditFailure,
+                "source session is unavailable for audit persistence",
+            )
+        })?;
     tokio::time::timeout(std::time::Duration::from_secs(30), response)
         .await
-        .map_err(|_| "coordination audit persistence timed out".to_owned())?
-        .map_err(|_| "source session closed before persisting coordination audit".to_owned())?
+        .map_err(|_| {
+            CoordinationError::new(
+                CoordinationErrorCode::AuditFailure,
+                "coordination audit persistence timed out",
+            )
+        })?
+        .map_err(|_| {
+            CoordinationError::new(
+                CoordinationErrorCode::AuditFailure,
+                "source session closed before persisting coordination audit",
+            )
+        })?
+        .map_err(|error| CoordinationError::new(CoordinationErrorCode::AuditFailure, error))
 }
 
 fn source_terminal_notice(
     target_session_id: &str,
+    question: &str,
     outcome: &crate::coordination::InquiryOutcome,
 ) -> crate::extensions::notification::UiNotice {
     let status = serde_json::to_value(outcome.status)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_else(|| "failed".to_owned());
-    let details = match (&outcome.answer, &outcome.error) {
-        (Some(answer), _) => Some(format!(
-            "Target session: {target_session_id}\nStatus: {status}\n\nAnswer:\n{answer}"
-        )),
-        (_, Some(error)) => Some(format!(
-            "Target session: {target_session_id}\nStatus: {status}\nError: {error}"
-        )),
-        _ => Some(format!(
-            "Target session: {target_session_id}\nStatus: {status}"
-        )),
-    };
+    let details = Some(
+        serde_json::to_string_pretty(&crate::coordination::InquiryAudit {
+            target_session_id: target_session_id.to_owned(),
+            question: question.to_owned(),
+            outcome: outcome.clone(),
+        })
+        .expect("inquiry audit serializes"),
+    );
     crate::extensions::notification::UiNotice {
         correlation_id: outcome.inquiry_id.clone(),
         category: crate::extensions::notification::UiNoticeCategory::Coordination,

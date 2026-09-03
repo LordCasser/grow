@@ -363,6 +363,20 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
             RenderBlock::SubagentPermission(block) => block.member(0).map(|member| {
                 BlockViewerPane::for_plain_text(&member.detail_title(), &member.detail_text())
             }),
+            RenderBlock::Notice(notice) if notice.has_details() => Some(
+                BlockViewerPane::for_plain_text("Coordination inquiry", &notice.detail_text()),
+            ),
+            RenderBlock::ToolCall(ToolCallBlock::Other(block)) => {
+                Some(BlockViewerPane::for_plain_text(
+                    &block.name,
+                    &format!(
+                        "{}\n{}\n{}",
+                        block.summary,
+                        block.error.as_deref().unwrap_or_default(),
+                        block.output.as_deref().unwrap_or_default()
+                    ),
+                ))
+            }
             _ => None,
         };
 

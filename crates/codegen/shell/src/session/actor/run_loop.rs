@@ -263,7 +263,10 @@ async fn begin_graceful_shutdown(
     cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<(), String> {
     session.session_activities.close_admission();
-    session.cancel_background_compaction("session_shutdown").await.map_err(|error| error.to_string())?;
+    session
+        .cancel_background_compaction("session_shutdown")
+        .await
+        .map_err(|error| error.to_string())?;
     session.sideband_cancel.cancel();
     session
         .user_input_generation
@@ -1653,6 +1656,9 @@ pub(super) async fn run_session(
                         session.publish_completed_hook_projections().await;
                         let _ = respond_to.send(());
                     }
+                    SessionCommand::PublishCoordinationState { respond_to } => {
+                        let _ = respond_to.send(session.publish_coordination_state().await);
+                    }
                     SessionCommand::GetCurrentModel { responds_to } => {
                         let model = session.current_catalog_model_id();
                         let _ = responds_to.send(model);
@@ -2539,10 +2545,16 @@ pub(super) async fn run_session(
                         });
                     }
                     SessionCommand::RunCoordinationInquiry { inquiry } => {
-                        session.enqueue_coordination_inquiry(inquiry);
+                        session.enqueue_coordination_inquiry(inquiry).await;
                     }
-                    SessionCommand::RecordCoordinationNotice { notice, respond_to } => {
-                        let result = session.persist_ui_notice(notice).await;
+                    SessionCommand::RecordCoordinationNotice { notice, publish, respond_to } => {
+                        let result = if publish {
+                            session.persist_ui_notice(notice).await
+                        } else {
+                            session.persist_grow_audit_notification(
+                                crate::extensions::notification::SessionUpdate::UiNotice(notice),
+                            ).await.map_err(|error| error.to_string())
+                        };
                         let _ = respond_to.send(result);
                     }
                     SessionCommand::InstallCoordinationBackend { backend, respond_to } => {
