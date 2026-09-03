@@ -106,11 +106,13 @@ pub struct NoticeBlock {
 
 impl NoticeBlock {
     pub fn has_details(&self) -> bool {
-        self.category == NoticeCategory::Coordination
-            && self
-                .details
-                .as_ref()
-                .is_some_and(|details| !details.is_empty())
+        matches!(
+            self.category,
+            NoticeCategory::Coordination | NoticeCategory::Command
+        ) && self
+            .details
+            .as_ref()
+            .is_some_and(|details| !details.is_empty())
     }
 
     pub fn detail_text(&self) -> String {
@@ -251,7 +253,12 @@ impl BlockContent for NoticeBlock {
     }
 
     fn default_display_mode(&self) -> DisplayMode {
-        if self.has_details() {
+        // Routine command metadata belongs in details. Keep actionable failure
+        // and warning details visible without requiring another gesture.
+        if self.has_details()
+            && !(self.category == NoticeCategory::Command
+                && matches!(self.tone, NoticeTone::Warning | NoticeTone::Error))
+        {
             DisplayMode::Collapsed
         } else {
             DisplayMode::Expanded
@@ -266,6 +273,28 @@ impl BlockContent for NoticeBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_metadata_is_foldable_without_hiding_actionable_errors() {
+        for (tone, mode) in [
+            (NoticeTone::Info, DisplayMode::Collapsed),
+            (NoticeTone::Success, DisplayMode::Collapsed),
+            (NoticeTone::Warning, DisplayMode::Expanded),
+            (NoticeTone::Error, DisplayMode::Expanded),
+        ] {
+            let notice = NoticeBlock::terminal(
+                "event",
+                tone,
+                NoticeCategory::Command,
+                "Command result",
+                Some("Command: /goal clear\nReason and recovery details".into()),
+            );
+            assert!(notice.is_foldable());
+            assert!(notice.is_selectable());
+            assert_eq!(notice.default_display_mode(), mode);
+            assert!(notice.detail_text().contains("Reason and recovery details"));
+        }
+    }
 
     #[test]
     fn coordination_details_are_selectable_and_compact_by_default() {

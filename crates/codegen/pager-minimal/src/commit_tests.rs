@@ -575,6 +575,28 @@ fn commit_leading_run_advances_frontier_and_marks_committed_once() {
 }
 
 #[test]
+fn command_notice_keeps_compact_metadata_when_stamped_and_committed() {
+    for (tone, expected) in [
+        (NoticeTone::Success, DisplayMode::Collapsed),
+        (NoticeTone::Error, DisplayMode::Expanded),
+    ] {
+        let mut state = ScrollbackState::new();
+        state.push_block(RenderBlock::terminal_notice(
+            "command-result",
+            tone,
+            NoticeCategory::Command,
+            "Goal command result",
+            Some("Command: /goal clear\nReason and recovery".into()),
+        ));
+        stamp_live_tail_display_modes(&mut state, &default_appearance());
+        assert_eq!(state.get(0).unwrap().display_mode(), expected);
+        assert_eq!(commit_collect(&mut state), vec![0]);
+        assert!(commit_collect(&mut state).is_empty());
+        assert_eq!(state.get(0).unwrap().display_mode(), expected);
+    }
+}
+
+#[test]
 fn terminal_notice_commits_once_during_a_running_turn() {
     let mut state = ScrollbackState::new();
     state.push(ScrollbackEntry::new(RenderBlock::terminal_notice(

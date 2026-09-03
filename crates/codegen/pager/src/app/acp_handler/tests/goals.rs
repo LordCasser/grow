@@ -72,6 +72,11 @@ fn retired_blackboard_wire_state_is_rejected() {
 #[test]
 fn lifecycle_transitions_append_deduplicated_goal_events() {
     let mut app = make_app_with_agent("sess-A");
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .behavior_mode = tools::types::BehaviorId::Goal;
 
     assert!(send_goal_update(&mut app, "active", "ship it"));
     assert!(matches!(
@@ -107,10 +112,92 @@ fn lifecycle_transitions_append_deduplicated_goal_events() {
         Some(SessionEvent::GoalCompleted { .. })
     ));
 
+    let before_clear = app.agents[&AgentId(0)].scrollback.len();
     assert!(send_goal_update(&mut app, "cleared", ""));
-    assert!(matches!(
-        last_session_event(&app.agents[&AgentId(0)].scrollback),
-        Some(SessionEvent::GoalCleared)
-    ));
+    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), before_clear);
     assert!(app.agents[&AgentId(0)].session.goal_state.is_none());
+}
+
+#[test]
+fn goal_controls_outside_goal_behavior_keep_state_without_duplicate_history() {
+    use crate::scrollback::block::BlockContent;
+    use crate::scrollback::types::{BlockContext, DisplayMode};
+    use shell::extensions::notification::{UiNotice, UiNoticeCategory, UiNoticeTone};
+
+    for behavior in [
+        tools::types::BehaviorId::Normal,
+        tools::types::BehaviorId::Clarify,
+        tools::types::BehaviorId::Plan,
+        tools::types::BehaviorId::Workflow,
+    ] {
+        let mut app = make_app_with_agent("sess-A");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .behavior_mode = behavior;
+        for status in ["active", "paused", "blocked", "budget_limited", "complete"] {
+            assert!(send_goal_update(&mut app, status, "ship it"));
+            assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 0);
+            assert_eq!(
+                app.agents[&AgentId(0)]
+                    .session
+                    .goal_state
+                    .as_ref()
+                    .unwrap()
+                    .status,
+                GoalDisplayStatus::parse(status).unwrap(),
+            );
+        }
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .set_goal_detail_visible(true);
+        assert!(send_goal_update(&mut app, "cleared", ""));
+        let agent = &app.agents[&AgentId(0)];
+        assert!(agent.session.goal_state.is_none());
+        assert!(!agent.show_goal_detail);
+        assert_eq!(agent.session.last_cleared_goal_id.as_deref(), Some("g1"));
+        assert_eq!(agent.scrollback.len(), 0);
+
+        let notice = GrowSessionUpdate::UiNotice(UiNotice {
+            correlation_id: "clear-invocation".into(),
+            category: UiNoticeCategory::Command,
+            subject: Some("/goal clear".into()),
+            description: Some("[behavior] Set, manage, or check an autonomous goal".into()),
+            message: "Goal cleared.".into(),
+            tone: UiNoticeTone::Success,
+            details: None,
+        });
+        assert!(handle(
+            make_ext_session_notification("sess-A", notice),
+            &mut app
+        ));
+        assert!(send_goal_update(&mut app, "cleared", ""));
+        assert!(!send_goal_update(&mut app, "active", "stale state"));
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(agent.session.behavior_mode, behavior);
+        assert_eq!(
+            agent.scrollback.len(),
+            1,
+            "only the command result is visible"
+        );
+        let entry = agent.scrollback.entry(0).unwrap();
+        let RenderBlock::Notice(notice) = &entry.block else {
+            panic!("command notice")
+        };
+        assert!(notice.detail_text().contains("/goal clear"));
+        assert_eq!(entry.display_mode, DisplayMode::Collapsed);
+        let output = notice.output(&BlockContext {
+            width: 100,
+            mode: entry.display_mode,
+            is_running: false,
+            raw: false,
+            max_lines: None,
+            appearance: crate::appearance::AppearanceConfig::default(),
+            is_selected: false,
+            cwd: None,
+        });
+        assert_eq!(output.lines.len(), 1);
+    }
 }

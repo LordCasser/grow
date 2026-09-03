@@ -16,7 +16,7 @@ use pager::app::root::{ActiveView, AppView};
 use pager::appearance::AppearanceConfig;
 use pager::minimal_api;
 use pager::render::Renderable;
-use pager::scrollback::block::RenderBlock;
+use pager::scrollback::block::{BlockContent, RenderBlock};
 use pager::scrollback::blocks::ToolCallBlock;
 use pager::scrollback::entry::{EntryId, ScrollbackEntry};
 use pager::scrollback::state::ScrollbackState;
@@ -134,6 +134,11 @@ pub fn minimal_commit_display_mode(
 ) -> DisplayMode {
     let collapse_thinking = appearance.minimal_collapse_thinking;
     match block {
+        RenderBlock::Notice(notice)
+            if notice.category == pager::scrollback::blocks::NoticeCategory::Command =>
+        {
+            notice.default_display_mode()
+        }
         RenderBlock::ToolCall(ToolCallBlock::Other(block)) if block.coordination.is_some() => {
             DisplayMode::Collapsed
         }

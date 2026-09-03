@@ -22,13 +22,15 @@ impl AgentView {
             .unwrap_or(0)
             .max(next.elapsed_ms);
 
-        if let Some(event) = goal_transition_event(
-            self.session.goal_state.as_ref(),
-            &next.goal_id,
-            &next.objective,
-            next.status,
-            elapsed_floor_ms,
-        ) {
+        if self.session.behavior_mode == tools::types::BehaviorId::Goal
+            && let Some(event) = goal_transition_event(
+                self.session.goal_state.as_ref(),
+                &next.goal_id,
+                &next.objective,
+                next.status,
+                elapsed_floor_ms,
+            )
+        {
             self.scrollback
                 .push_block(RenderBlock::session_event(event));
         }
@@ -39,12 +41,11 @@ impl AgentView {
         true
     }
 
-    /// Clear the active Goal, record its durable transition, and close detail.
+    /// Clear the Goal projection and close detail. The durable command notice
+    /// owns the visible confirmation; a state snapshot must not echo it again.
     pub(crate) fn clear_goal(&mut self) -> bool {
         if let Some(goal) = self.session.goal_state.take() {
             self.session.last_cleared_goal_id = Some(goal.goal_id);
-            self.scrollback
-                .push_block(RenderBlock::session_event(SessionEvent::GoalCleared));
         }
         self.set_goal_detail_visible(false);
         true

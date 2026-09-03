@@ -913,7 +913,9 @@ impl AgentView {
             .is_some_and(|b| matches!(b, crate::scrollback::block::RenderBlock::Workflow(_)));
         let is_coordination_notice = entry_block.is_some_and(|block| {
             matches!(block,
-            crate::scrollback::block::RenderBlock::Notice(notice) if notice.has_details())
+            crate::scrollback::block::RenderBlock::Notice(notice)
+                if notice.category == crate::scrollback::blocks::NoticeCategory::Coordination
+                    && notice.has_details())
         });
 
         // Word-select tip probe (see WORD_SELECT_REPEAT_WINDOW): assistant
@@ -1731,6 +1733,42 @@ mod tests {
             Some(0),
         ));
         assert!(agent.block_viewer.is_some());
+    }
+
+    #[test]
+    fn command_notice_double_click_expands_and_collapses_metadata() {
+        use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
+        use crate::scrollback::types::DisplayMode;
+        let mut agent = make_agent();
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::terminal_notice(
+                "command-event",
+                NoticeTone::Success,
+                NoticeCategory::Command,
+                "Goal cleared.",
+                Some("Command: /goal clear\nSet, manage, or check an autonomous goal".into()),
+            ));
+        assert_eq!(
+            agent.scrollback.entry(0).unwrap().display_mode,
+            DisplayMode::Collapsed
+        );
+        let now = Instant::now();
+        for (index, expected) in [DisplayMode::Expanded, DisplayMode::Collapsed]
+            .into_iter()
+            .enumerate()
+        {
+            double_click_gesture(
+                &mut agent,
+                now + std::time::Duration::from_secs(index as u64),
+                0,
+            );
+            assert_eq!(agent.scrollback.entry(0).unwrap().display_mode, expected);
+            assert!(
+                agent.block_viewer.is_none(),
+                "command details expand inline"
+            );
+        }
     }
 
     #[test]

@@ -119,7 +119,6 @@ pub enum SessionEvent {
     GoalBlocked,
     GoalBudgetLimited,
     GoalRestarted,
-    GoalCleared,
     /// A `/goal` finished (status → Complete). Carries the goal's total
     /// elapsed time across all its turns, distinct from the per-turn
     /// "Worked for" marker.
@@ -238,7 +237,6 @@ impl SessionEvent {
             SessionEvent::GoalBlocked => "Goal blocked.".to_string(),
             SessionEvent::GoalBudgetLimited => "Goal token budget exhausted.".to_string(),
             SessionEvent::GoalRestarted => "Goal restarted.".to_string(),
-            SessionEvent::GoalCleared => "Goal cleared.".to_string(),
             SessionEvent::GoalCompleted { elapsed } => {
                 format!(
                     "Goal complete \u{2014} {} end-to-end.",

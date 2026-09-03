@@ -142,11 +142,18 @@ fn open_block_viewer_opens_list_dir_block() {
 }
 
 #[test]
-fn coordination_enter_opens_notice_and_failed_tool_details() {
+fn enter_opens_command_coordination_notice_and_failed_tool_details() {
     use crate::scrollback::blocks::{
         NoticeCategory, NoticeTone, OtherToolCallBlock, ToolCallBlock,
     };
     let blocks = [
+        RenderBlock::terminal_notice(
+            "command-event",
+            NoticeTone::Success,
+            NoticeCategory::Command,
+            "Goal cleared.",
+            Some("Command: /goal clear".into()),
+        ),
         RenderBlock::terminal_notice(
             "event",
             NoticeTone::Error,
