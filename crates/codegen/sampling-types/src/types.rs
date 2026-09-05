@@ -147,9 +147,6 @@ pub struct ChatRequestMessage {
     pub tool_calls: Vec<ToolCallRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    /// The model used for this message (typically set on assistant responses)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
     /// The reasoning/thinking content from the model (for models that support extended thinking)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
@@ -163,7 +160,6 @@ impl ChatRequestMessage {
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
-            model_id: None,
             reasoning_content: None,
         }
     }
@@ -175,23 +171,17 @@ impl ChatRequestMessage {
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
-            model_id: None,
             reasoning_content: None,
         }
     }
 
-    pub fn assistant(
-        content: impl Into<String>,
-        model_id: impl Into<String>,
-        reasoning_content: Option<String>,
-    ) -> Self {
+    pub fn assistant(content: impl Into<String>, reasoning_content: Option<String>) -> Self {
         Self {
             role: Role::Assistant,
             content: MessageContent::Text(content.into()),
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
-            model_id: Some(model_id.into()),
             reasoning_content,
         }
     }
@@ -203,7 +193,6 @@ impl ChatRequestMessage {
             name: None,
             tool_calls: vec![tool_call],
             tool_call_id: None,
-            model_id: None,
             reasoning_content: None,
         }
     }
@@ -215,7 +204,6 @@ impl ChatRequestMessage {
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
-            model_id: None,
             reasoning_content: None,
         }
     }

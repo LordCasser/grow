@@ -93,18 +93,119 @@ pub struct InquiryState {
     pub outcome: Option<InquiryOutcome>,
 }
 
-/// Structured details on the existing durable source UiNotice, not a second
-/// job ledger. This supports querying completed inquiries after a reconnect
-/// or process restart without replaying a model request.
+/// Source completion fact carried by the canonical Timeline observation.
+/// UiNotice details are a disposable display projection of this fact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct InquiryAudit {
+pub struct InquiryAudit {
     pub target_session_id: String,
     pub question: String,
     pub outcome: InquiryOutcome,
 }
 
-/// Receiving-side facts stored in the existing UiNotice details. Identity is
+/// Shell-owned inquiry facts in Timeline's existing Observation family.
+/// Recovery reads these typed payloads, never UiNotice prose or replay files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InquiryEvent {
+    OutgoingStarted {
+        inquiry_id: String,
+        target_session_id: String,
+        question: String,
+    },
+    OutgoingCompleted {
+        audit: InquiryAudit,
+    },
+    Incoming {
+        inquiry_id: String,
+        audit: IncomingInquiryAudit,
+    },
+}
+
+impl InquiryEvent {
+    pub(crate) fn timeline_kind(&self) -> chat_state::TimelineEventKind {
+        chat_state::TimelineEventKind::Observation(chat_state::ObservationEvent {
+            scope: "coordination".into(),
+            name: "inquiry".into(),
+            turn: None,
+            step: None,
+            data: Some(serde_json::to_value(self).expect("inquiry fact serializes")),
+        })
+    }
+
+    pub(crate) fn from_timeline(event: &chat_state::TimelineEvent) -> Result<Option<Self>, String> {
+        let chat_state::TimelineEventKind::Observation(observation) = &event.kind else {
+            return Ok(None);
+        };
+        if observation.scope != "coordination" || observation.name != "inquiry" {
+            return Ok(None);
+        }
+        let value = observation
+            .data
+            .clone()
+            .ok_or("inquiry fact has no payload")?;
+        let fact: Self = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        if let Self::Incoming { inquiry_id, audit } = &fact {
+            if audit.source_peer_id.is_empty()
+                || audit.source_session_id.is_empty()
+                || audit
+                    .outcome
+                    .as_ref()
+                    .is_some_and(|outcome| &outcome.inquiry_id != inquiry_id)
+            {
+                return Err("inquiry fact has inconsistent source or outcome identity".into());
+            }
+        }
+        Ok(Some(fact))
+    }
+
+    pub(crate) fn notice(&self) -> crate::extensions::notification::UiNotice {
+        use crate::extensions::notification::{UiNotice, UiNoticeCategory, UiNoticeTone};
+        match self {
+            Self::Incoming { inquiry_id, audit } => audit.notice(inquiry_id),
+            Self::OutgoingStarted {
+                inquiry_id,
+                target_session_id,
+                question,
+            } => UiNotice {
+                correlation_id: inquiry_id.clone(),
+                category: UiNoticeCategory::Coordination,
+                subject: Some("outgoing inquiry".into()),
+                description: Some(
+                    "Attempting to send a question to another local Grow session".into(),
+                ),
+                message: format!("Asking session {target_session_id}"),
+                tone: UiNoticeTone::Info,
+                details: Some(format!(
+                    "Inquiry ID: {inquiry_id}\nTarget session: {target_session_id}\n\nQuestion:\n{question}"
+                )),
+            },
+            Self::OutgoingCompleted { audit } => {
+                let status =
+                    serde_json::to_value(audit.outcome.status).expect("inquiry status serializes");
+                UiNotice {
+                    correlation_id: audit.outcome.inquiry_id.clone(),
+                    category: UiNoticeCategory::Coordination,
+                    subject: Some("outgoing inquiry completed".into()),
+                    description: Some("Local coordination inquiry terminal state".into()),
+                    message: format!(
+                        "Inquiry to session {} finished: {}",
+                        audit.target_session_id,
+                        status.as_str().unwrap()
+                    ),
+                    tone: match audit.outcome.status {
+                        InquiryStatus::Answered => UiNoticeTone::Success,
+                        InquiryStatus::Failed => UiNoticeTone::Error,
+                        _ => UiNoticeTone::Warning,
+                    },
+                    details: Some(serde_json::to_string(audit).expect("inquiry audit serializes")),
+                }
+            }
+        }
+    }
+}
+
+/// Receiving-side Timeline facts, also projected into UiNotice details. Identity is
 /// scoped exactly like the runtime's dedup key, never inferred from UI prose.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -200,7 +301,11 @@ impl IncomingInquiryAudit {
                     "incoming inquiry"
                 },
                 "Answering session",
-                UiNoticeTone::Info,
+                match self.approval.as_deref() {
+                    Some(approval) if approval.starts_with("approved") => UiNoticeTone::Success,
+                    Some(_) => UiNoticeTone::Warning,
+                    None => UiNoticeTone::Info,
+                },
             ),
         };
         UiNotice {

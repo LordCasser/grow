@@ -2554,6 +2554,10 @@ pub(super) async fn run_session(
                     SessionCommand::RunCoordinationInquiry { inquiry } => {
                         session.enqueue_coordination_inquiry(inquiry).await;
                     }
+                    SessionCommand::RecordCoordinationInquiry { event, respond_to } => {
+                        let result = session.persist_coordination_inquiry(event).await;
+                        let _ = respond_to.send(result);
+                    }
                     SessionCommand::RecordCoordinationNotice { notice, publish, respond_to } => {
                         let result = if publish {
                             session.persist_ui_notice(notice).await

@@ -4,8 +4,9 @@
 //! - Chat Completions API (`ChatCompletionRequest`)
 //! - Responses API (`CreateResponse`)
 //!
-//! The internal representation captures a superset of features from both APIs,
-//! allowing seamless switching between backends via configuration.
+//! Durable items contain only provider-neutral facts. Provider-native state
+//! needed for a same-route follow-up lives separately in the non-serializable
+//! continuation projection, so switching backends cannot leak wire metadata.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -35,27 +36,52 @@ pub enum ConversationItem {
     Assistant(AssistantItem),
     /// Tool/function result
     ToolResult(ToolResultItem),
-    /// A tool call executed server-side by the backend agentic sampler
-    /// (currently code interpreter). These are NOT
-    /// executed by the client — the server already ran them and fed
-    /// results into the model's context. Stored so they can be:
-    /// 1. Persisted as canonical Timeline message facts for resume/fork
-    /// 2. Sent back to the Responses API as input items for context continuity
-    /// 3. Rendered by the pager (search queries, sources, etc.)
+    /// Provider-neutral display fact for a tool call executed server-side by
+    /// the backend. The native continuation lane, not Timeline, carries the
+    /// protocol object required for a same-route follow-up request.
     BackendToolCall(BackendToolCallItem),
-    /// A reasoning item from the Responses API, stored as a sibling of the
-    /// assistant message so that:
-    ///
-    /// 1. N parallel `tco_*` reasoning items (one per backend tool call)
-    ///    round-trip losslessly without last-write-wins clobbering.
-    /// 2. The interleaved order of `[reasoning, tool_call, reasoning, ...,
-    ///    message]` produced by the model is preserved byte-stable across
-    ///    turns, which is what lets the server-side prefix KV-cache hit.
-    ///
-    /// Wraps `rs::ReasoningItem` directly (symmetric with `BackendToolCall`
-    /// wrapping native backend call items) so no field is dropped on the
-    /// way through.
-    Reasoning(rs::ReasoningItem),
+    /// Visible, provider-neutral reasoning text. Provider continuation data
+    /// (signatures, encrypted blobs, native ids and statuses) never crosses
+    /// this durable boundary.
+    Reasoning(VisibleReasoningItem),
+}
+
+/// Durable reasoning is deliberately smaller than any provider wire type.
+///
+/// The custom decoder is a one-way bridge for 2.1.3 Timeline entries: it
+/// extracts visible `summary`/`content` text from the old Responses-shaped
+/// object and ignores every opaque field. New writes contain only `text`.
+#[derive(Debug, Clone, Serialize)]
+pub struct VisibleReasoningItem {
+    pub text: Arc<str>,
+}
+
+impl<'de> Deserialize<'de> for VisibleReasoningItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(text) = value.get("text").and_then(serde_json::Value::as_str) {
+            return Ok(Self {
+                text: Arc::from(text),
+            });
+        }
+
+        let mut visible = Vec::new();
+        for field in ["summary", "content"] {
+            if let Some(parts) = value.get(field).and_then(serde_json::Value::as_array) {
+                visible.extend(parts.iter().filter_map(|part| {
+                    part.get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                }));
+            }
+        }
+        Ok(Self {
+            text: Arc::from(visible.join("\n")),
+        })
+    }
 }
 
 /// System message content
@@ -345,57 +371,83 @@ pub struct ToolResultItem {
     pub images: Vec<ContentPart>,
 }
 
-/// A server-side tool call from the backend agentic sampler.
-///
-/// Wraps the typed Responses API output items so they can be round-tripped
-/// back to the server and rendered by the pager.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Provider-neutral display fact for a server-executed tool call.
+/// Native ids, status and output objects live only in the in-memory
+/// continuation lane.
+#[derive(Debug, Clone, Serialize)]
 pub struct BackendToolCallItem {
-    /// The specific backend tool that was called.
     pub kind: BackendToolKind,
+    pub summary: Arc<str>,
 }
 
 impl BackendToolCallItem {
-    /// The backend-tool-call id (the `id` field on the underlying
-    /// `rs::CodeInterpreterToolCall`). Used by the legacy-session
-    /// upgrader to dedupe against the same call when it also appears
-    /// inside a sibling assistant's `raw_output` array.
-    pub fn id(&self) -> &str {
-        match &self.kind {
-            BackendToolKind::CodeInterpreter(ci) => ci.id.as_str(),
+    pub fn code_interpreter(code: Option<&str>) -> Self {
+        let code = code.unwrap_or_default();
+        let preview: String = code.chars().take(100).collect();
+        let suffix = (preview.len() < code.len()).then_some("...").unwrap_or("");
+        Self {
+            kind: BackendToolKind::CodeInterpreter,
+            summary: Arc::from(format!("[backend code_interpreter] {preview}{suffix}")),
         }
     }
 
     /// Human-readable summary for token estimation and text extraction.
     pub fn text_summary(&self) -> String {
-        match &self.kind {
-            BackendToolKind::CodeInterpreter(ci) => {
-                let code_preview = ci
-                    .code
-                    .as_deref()
-                    .map(|c| {
-                        if c.len() > 100 {
-                            format!("{}...", &c[..100])
-                        } else {
-                            c.to_string()
-                        }
-                    })
-                    .unwrap_or_default();
-                format!("[backend code_interpreter] {code_preview}")
-            }
-        }
+        self.summary.as_ref().to_owned()
     }
 }
 
-/// Discriminated union of backend-executed tool call types.
-///
-/// Each variant wraps the native Responses API struct, enabling
-/// zero-copy round-tripping when building subsequent API requests.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "tool_type", rename_all = "snake_case")]
+impl<'de> Deserialize<'de> for BackendToolCallItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(kind) = value.get("kind").and_then(serde_json::Value::as_str) {
+            let kind = match kind {
+                "code_interpreter" => BackendToolKind::CodeInterpreter,
+                "mcp" => BackendToolKind::Mcp,
+                _ => BackendToolKind::Other,
+            };
+            let summary = value
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("[backend tool]");
+            return Ok(Self {
+                kind,
+                summary: Arc::from(summary),
+            });
+        }
+
+        // 2.1.3 encoded `kind` as a tagged native Responses object.
+        let native = value.get("kind").unwrap_or(&value);
+        let tool_type = native
+            .get("tool_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("other");
+        let kind = match tool_type {
+            "code_interpreter" => BackendToolKind::CodeInterpreter,
+            "mcp" | "mcp_call" => BackendToolKind::Mcp,
+            _ => BackendToolKind::Other,
+        };
+        let summary = match kind {
+            BackendToolKind::CodeInterpreter => {
+                Self::code_interpreter(native.get("code").and_then(serde_json::Value::as_str))
+                    .summary
+            }
+            BackendToolKind::Mcp => Arc::from("[backend mcp call]"),
+            BackendToolKind::Other => Arc::from("[backend tool]"),
+        };
+        Ok(Self { kind, summary })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BackendToolKind {
-    /// Server-side code interpreter execution.
-    CodeInterpreter(rs::CodeInterpreterToolCall),
+    CodeInterpreter,
+    Mcp,
+    Other,
 }
 
 // ============================================================================
@@ -1044,9 +1096,9 @@ fn image_files_envelope_paths(text: &str) -> Vec<String> {
     paths
 }
 
-/// Return every ordered provider-native carrier belonging to one Assistant
-/// response in the flat conversation representation. Reasoning and backend
-/// calls may be interleaved; any role-bearing item is a hard boundary.
+/// Return every ordered durable display carrier belonging to one Assistant
+/// response. Visible reasoning and backend-call summaries may be interleaved;
+/// any role-bearing item is a hard boundary.
 pub fn assistant_response_carrier_indices(
     items: &[ConversationItem],
     assistant_index: usize,
@@ -1087,93 +1139,6 @@ fn strip_image_files_envelope(text: &str) -> String {
     stripped.push_str(&text[..start]);
     stripped.push_str(text[end..].trim_start_matches(['\r', '\n']));
     stripped
-}
-
-// ============================================================================
-// Reasoning Content
-// ============================================================================
-
-/// Reasoning/thinking content from the model.
-/// Structured to support both plain text (chat completions) and
-/// encrypted reasoning (responses API).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReasoningContent {
-    /// Plain text reasoning (always available for display)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<Arc<str>>,
-    /// Encrypted reasoning content (Responses API only)
-    /// This can be passed back to the API for context continuity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted: Option<Arc<str>>,
-    /// Original reasoning item ID from the Responses API.
-    /// Required when replaying reasoning items in subsequent turns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<Arc<str>>,
-}
-
-impl ReasoningContent {
-    /// Create from plain text reasoning (chat completions style)
-    pub fn from_text(text: impl Into<String>) -> Self {
-        Self {
-            text: Some(Arc::<str>::from(text.into())),
-            encrypted: None,
-            id: None,
-        }
-    }
-
-    /// Create from encrypted content (responses API style)
-    pub fn from_encrypted(encrypted: impl Into<String>) -> Self {
-        Self {
-            text: None,
-            encrypted: Some(Arc::<str>::from(encrypted.into())),
-            id: None,
-        }
-    }
-
-    /// Build from a Responses API `ReasoningItem`.
-    /// Prefers `content` (full raw reasoning) over `summary` for the text field;
-    /// in practice the API populates one or the other, never both.
-    pub fn from_reasoning_item(r: &rs::ReasoningItem) -> Option<Self> {
-        let text = Self::join_content(&r.content).or_else(|| Self::join_summary(&r.summary));
-        if text.is_none() && r.encrypted_content.is_none() {
-            return None;
-        }
-        Some(Self {
-            text,
-            encrypted: r.encrypted_content.as_deref().map(Arc::<str>::from),
-            // async-openai >= 0.41 made `ReasoningItem.id` an `Option<String>`.
-            id: r.id.as_deref().map(Arc::<str>::from),
-        })
-    }
-
-    /// Check if there's any reasoning content
-    pub fn is_empty(&self) -> bool {
-        self.text.is_none() && self.encrypted.is_none()
-    }
-
-    fn join_content(content: &Option<Vec<rs::ReasoningItemContent>>) -> Option<Arc<str>> {
-        let parts = content.as_ref()?;
-        let joined: String = parts
-            .iter()
-            .map(|item| match item {
-                rs::ReasoningItemContent::ReasoningText(rt) => rt.text.as_str(),
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        (!joined.is_empty()).then_some(Arc::<str>::from(joined))
-    }
-
-    fn join_summary(summary: &[rs::SummaryPart]) -> Option<Arc<str>> {
-        let joined: String = summary
-            .iter()
-            .map(|p| {
-                let rs::SummaryPart::SummaryText(st) = p;
-                st.text.as_str()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        (!joined.is_empty()).then_some(Arc::<str>::from(joined))
-    }
 }
 
 // ============================================================================
@@ -1293,9 +1258,84 @@ pub fn validate_output_value(
         .map_err(|error| format!("output does not match the required schema: {error}"))
 }
 
+/// Provider-native response state retained only for continuation on the
+/// currently selected route. This type is intentionally not serializable.
+#[derive(Debug, Clone)]
+pub enum NativeContinuationFragment {
+    ChatCompletions(ChatRequestMessage),
+    Responses(Vec<rs::InputItem>),
+    Messages(Vec<crate::messages::ContentBlock>),
+}
+
+impl NativeContinuationFragment {
+    pub fn backend(&self) -> ApiBackend {
+        match self {
+            Self::ChatCompletions(_) => ApiBackend::ChatCompletions,
+            Self::Responses(_) => ApiBackend::Responses,
+            Self::Messages(_) => ApiBackend::Messages,
+        }
+    }
+
+    pub fn estimated_tokens(&self) -> u64 {
+        let bytes = match self {
+            Self::ChatCompletions(message) => serde_json::to_vec(message),
+            Self::Responses(items) => serde_json::to_vec(items),
+            Self::Messages(blocks) => serde_json::to_vec(blocks),
+        }
+        .map_or(0, |bytes| bytes.len());
+        (bytes as u64) / 4
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::ChatCompletions(message) => {
+                message.content.is_empty()
+                    && message
+                        .reasoning_content
+                        .as_deref()
+                        .is_none_or(str::is_empty)
+                    && message.tool_calls.is_empty()
+            }
+            Self::Responses(items) => items.is_empty(),
+            Self::Messages(blocks) => blocks.is_empty(),
+        }
+    }
+
+    /// Signature used only by the live Messages-compatible response framing.
+    pub fn signature(&self) -> Option<String> {
+        match self {
+            Self::Messages(blocks) => blocks.iter().find_map(|block| match block {
+                crate::messages::ContentBlock::Thinking { signature, .. }
+                    if !signature.is_empty() =>
+                {
+                    Some(signature.clone())
+                }
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeContinuationSpan {
+    pub start: usize,
+    pub end: usize,
+    pub fragment: NativeContinuationFragment,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeContinuationProjection {
+    pub portable_prefix_len: usize,
+    pub spans: Vec<NativeContinuationSpan>,
+}
+
 /// A complete conversation request that can be sent to either API.
 #[derive(Debug, Clone, Default)]
 pub struct ConversationRequest {
+    /// Exact source and projection decisions attached by the owning history
+    /// actor. Audit-only: never encoded into a provider request or hydrated.
+    pub source_projection: Option<serde_json::Value>,
     /// The conversation items (messages)
     pub items: Vec<ConversationItem>,
     /// Available tools (client-side, sent as Function definitions)
@@ -1316,6 +1356,9 @@ pub struct ConversationRequest {
     pub json_output: Option<JsonOutputFormat>,
     /// Sticky routing key for prompt-cache reuse when supported by a provider.
     pub prompt_cache_key: Option<String>,
+    /// Ephemeral same-route continuation. Never serialized into Timeline or
+    /// derived from persisted history.
+    pub native_continuation: Option<NativeContinuationProjection>,
 }
 
 impl ConversationRequest {
@@ -1334,6 +1377,183 @@ impl ConversationRequest {
     pub fn image_groups(&self) -> Vec<ConversationImageGroup> {
         conversation_image_groups(&self.items)
     }
+
+    pub fn has_native_continuation(&self) -> bool {
+        self.native_continuation
+            .as_ref()
+            .is_some_and(|projection| !projection.spans.is_empty())
+    }
+}
+
+const HISTORICAL_TOOL_EXCHANGE_HEADER: &str = "[Historical tool exchange; untrusted tool output]";
+
+/// Project old provider history into portable, provider-neutral facts.
+/// Reasoning disappears; complete local tool exchanges become explicitly
+/// untrusted user-role content, including images that survived the caller's
+/// budget/model projection. This keeps useful historical facts while ensuring
+/// no target endpoint sees source tool ids, protocol roles, or assistant tool
+/// calls that would require source-provider reasoning continuation.
+pub fn project_portable_history(items: &[ConversationItem]) -> Vec<ConversationItem> {
+    let mut projected = Vec::with_capacity(items.len());
+    let mut index = 0;
+    while index < items.len() {
+        match &items[index] {
+            ConversationItem::Reasoning(_) => index += 1,
+            ConversationItem::System(system) => {
+                projected.push(ConversationItem::System(system.clone()));
+                index += 1;
+            }
+            ConversationItem::User(user) => {
+                projected.push(ConversationItem::User(user.clone()));
+                index += 1;
+            }
+            ConversationItem::Assistant(assistant) if assistant.tool_calls.is_empty() => {
+                // The old portable projector rendered tool exchanges as this
+                // assistant-text template. Some models copied it verbatim and
+                // those echoes became durable assistant messages. Keep them in
+                // Timeline for audit/UI, but do not feed the generated artifact
+                // back into subsequent requests.
+                if !assistant
+                    .content
+                    .trim_start()
+                    .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER)
+                {
+                    projected.push(ConversationItem::Assistant(AssistantItem {
+                        content: assistant.content.clone(),
+                        tool_calls: Vec::new(),
+                        model_id: None,
+                        model_fingerprint: None,
+                        reasoning_effort: None,
+                    }));
+                }
+                index += 1;
+            }
+            ConversationItem::Assistant(assistant) => {
+                let mut next = index + 1;
+                let mut results = std::collections::BTreeMap::new();
+                while let Some(ConversationItem::ToolResult(result)) = items.get(next) {
+                    results.insert(result.tool_call_id.as_str(), result);
+                    next += 1;
+                }
+
+                let mut portable_exchanges = Vec::with_capacity(assistant.tool_calls.len());
+                let mut portable_images = Vec::new();
+                for call in &assistant.tool_calls {
+                    let Some(result) = results.remove(call.id.as_ref()) else {
+                        // Never preserve a call without its result. It is neither
+                        // a complete fact nor safe input for a strict endpoint.
+                        continue;
+                    };
+
+                    let mut content = format!(
+                        "Tool: {}\nArguments: {}\nResult:",
+                        call.name, call.arguments
+                    );
+                    if !result.content.is_empty() {
+                        content.push('\n');
+                        content.push_str(&result.content);
+                    }
+                    for part in &result.images {
+                        match part {
+                            ContentPart::Text { text } => {
+                                content.push('\n');
+                                content.push_str(text);
+                            }
+                            ContentPart::Image { .. } => portable_images.push(part.clone()),
+                        }
+                    }
+                    portable_exchanges.push(content);
+                }
+
+                let content = if assistant
+                    .content
+                    .trim_start()
+                    .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER)
+                {
+                    Arc::from("")
+                } else {
+                    assistant.content.clone()
+                };
+                if !content.is_empty() {
+                    projected.push(ConversationItem::Assistant(AssistantItem {
+                        content,
+                        tool_calls: Vec::new(),
+                        model_id: None,
+                        model_fingerprint: None,
+                        reasoning_effort: None,
+                    }));
+                }
+                if !portable_exchanges.is_empty() {
+                    let mut exchange = ConversationItem::user(format!(
+                        "{HISTORICAL_TOOL_EXCHANGE_HEADER}\n{}",
+                        portable_exchanges.join("\n\n")
+                    ));
+                    if let ConversationItem::User(user) = &mut exchange {
+                        user.content.extend(portable_images);
+                    }
+                    projected.push(exchange);
+                }
+                index = next;
+            }
+            ConversationItem::ToolResult(_) => {
+                // An unpaired historical result cannot be represented safely
+                // in any of the three endpoint protocols.
+                index += 1;
+            }
+            ConversationItem::BackendToolCall(call) => {
+                projected.push(ConversationItem::assistant(call.text_summary()));
+                index += 1;
+            }
+        }
+    }
+    projected
+}
+
+#[derive(Debug, Clone)]
+enum RequestSegment {
+    Items(Vec<ConversationItem>),
+    Native(NativeContinuationFragment),
+}
+
+fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<RequestSegment> {
+    let Some(native) = &req.native_continuation else {
+        return vec![RequestSegment::Items(req.items.clone())];
+    };
+    if native.portable_prefix_len > req.items.len() {
+        return vec![RequestSegment::Items(project_portable_history(&req.items))];
+    }
+
+    let mut previous_end = native.portable_prefix_len;
+    for span in &native.spans {
+        if span.start < previous_end
+            || span.end <= span.start
+            || span.end > req.items.len()
+            || span.fragment.backend() != backend
+        {
+            return vec![RequestSegment::Items(project_portable_history(&req.items))];
+        }
+        previous_end = span.end;
+    }
+
+    let mut segments = Vec::new();
+    let portable = project_portable_history(&req.items[..native.portable_prefix_len]);
+    if !portable.is_empty() {
+        segments.push(RequestSegment::Items(portable));
+    }
+    let mut cursor = native.portable_prefix_len;
+    for span in &native.spans {
+        if cursor < span.start {
+            segments.push(RequestSegment::Items(
+                req.items[cursor..span.start].to_vec(),
+            ));
+        }
+        segments.push(RequestSegment::Native(span.fragment.clone()));
+        cursor = span.end;
+    }
+    if cursor < req.items.len() {
+        segments.push(RequestSegment::Items(req.items[cursor..].to_vec()));
+    }
+    segments
 }
 
 /// Tool choice options
@@ -1460,12 +1680,10 @@ impl From<Usage> for TokenUsage {
 
 /// Response from a conversation turn.
 ///
-/// `items` is a flat ordered list mirroring the Responses API's
-/// `output: Vec<OutputItem>`: interleaved `Reasoning`, `BackendToolCall`,
-/// and a single trailing `Assistant` item (which carries the assistant text
-/// and any client-executable `FunctionCall`s as `tool_calls`). Helpers
-/// (`assistant()`, `empty_reason()`, etc.) treat the trailing Assistant as
-/// "the response message" for backwards-compatible call sites.
+/// `items` is the provider-neutral durable projection of one response:
+/// visible `Reasoning`, display-only `BackendToolCall` facts, and a trailing
+/// `Assistant` carrying visible text and client-executable tool calls. Native
+/// protocol objects live only in `native_continuation`.
 #[derive(Debug, Clone)]
 pub struct ConversationResponse {
     /// The flat ordered list of items produced by this turn. The trailing
@@ -1511,6 +1729,9 @@ pub struct ConversationResponse {
     /// configured stop sequence; `None` otherwise and on backends that do not
     /// report one (OAI Chat Completions / Responses).
     pub stop_sequence: Option<String>,
+    /// Provider-native continuation for this response. It is admitted into
+    /// ChatState only after the durable Timeline write succeeds.
+    pub native_continuation: Option<NativeContinuationFragment>,
 }
 
 /// Normalize a wire cost-ticks value at capture.
@@ -1557,7 +1778,7 @@ impl ConversationResponse {
     /// Reasoning siblings that precede the trailing `Assistant`, in order.
     /// Used by streaming consumers and the empty-response retry logic that
     /// previously inspected `AssistantItem.reasoning`.
-    pub fn reasoning_items(&self) -> impl Iterator<Item = &rs::ReasoningItem> {
+    pub fn reasoning_items(&self) -> impl Iterator<Item = &VisibleReasoningItem> {
         self.items.iter().filter_map(|item| match item {
             ConversationItem::Reasoning(r) => Some(r),
             _ => None,
@@ -1587,9 +1808,7 @@ impl ConversationResponse {
         if !a.content.is_empty() || !a.tool_calls.is_empty() {
             return None;
         }
-        let has_reasoning = self
-            .reasoning_items()
-            .any(|r| !r.summary.is_empty() || r.content.is_some() || r.encrypted_content.is_some());
+        let has_reasoning = self.reasoning_items().any(|r| !r.text.is_empty());
         if has_reasoning {
             Some(EmptyReason::ReasoningOnly)
         } else {
@@ -2063,50 +2282,28 @@ impl compaction::ToolResultItem for ConversationItem {
     }
 }
 
-/// Extract human-readable text from a Responses-API reasoning item by
-/// joining its `summary` parts (in order) followed by its `content`
-/// blocks. Both fields are optional; encrypted-only reasoning items
-/// (e.g. `tco_*` backend-tool blobs) return an empty string since
-/// their text is not user-visible.
-///
-/// Ordering contract: summary parts come first, then content blocks.
-/// Streaming consumers and the Anthropic `Thinking` emitter rely on
-/// this ordering to round-trip display text consistently.
-pub fn reasoning_item_text(r: &rs::ReasoningItem) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for sp in &r.summary {
-        match sp {
-            rs::SummaryPart::SummaryText(t) => parts.push(t.text.clone()),
-        }
+pub fn reasoning_item_text(r: &VisibleReasoningItem) -> String {
+    r.text.as_ref().to_owned()
+}
+
+pub fn reasoning_text_from_response_item(r: &rs::ReasoningItem) -> String {
+    let mut parts = Vec::new();
+    for summary in &r.summary {
+        let rs::SummaryPart::SummaryText(summary) = summary;
+        parts.push(summary.text.clone());
     }
-    if let Some(ref content) = r.content {
-        for c in content {
-            let rs::ReasoningItemContent::ReasoningText(rt) = c;
-            parts.push(rt.text.clone());
+    if let Some(content) = &r.content {
+        for content in content {
+            let rs::ReasoningItemContent::ReasoningText(content) = content;
+            parts.push(content.text.clone());
         }
     }
     parts.join("\n")
 }
 
-/// Construct an `rs::ReasoningItem` carrying a single `SummaryText`
-/// part — the shape every non-Responses-API streaming consumer
-/// (`stream/chat_completions`, `stream/messages`, `stream/responses`
-/// fallback) synthesizes when adapting a non-typed reasoning string to
-/// the sibling-`Reasoning` data model.
-///
-/// `id` is left empty because none of the synthesizing paths carry a
-/// stable upstream id; `encrypted_content` is `None` because the only
-/// source of `encrypted_content` is the Responses API itself (which
-/// hits the typed-`OutputItem::Reasoning` path, not this helper).
-pub fn synthesized_reasoning_item(text: impl Into<String>) -> rs::ReasoningItem {
-    rs::ReasoningItem {
-        id: None,
-        summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-            text: text.into(),
-        })],
-        content: None,
-        encrypted_content: None,
-        status: None,
+pub fn synthesized_reasoning_item(text: impl Into<String>) -> VisibleReasoningItem {
+    VisibleReasoningItem {
+        text: Arc::from(text.into()),
     }
 }
 
@@ -2128,9 +2325,7 @@ pub fn inject_streaming_reasoning_fallback(items: &mut Vec<ConversationItem>, te
         return;
     }
     let any_with_text = items.iter().any(|i| match i {
-        ConversationItem::Reasoning(r) => r.summary.iter().any(|sp| match sp {
-            rs::SummaryPart::SummaryText(t) => !t.text.is_empty(),
-        }),
+        ConversationItem::Reasoning(r) => !r.text.is_empty(),
         _ => false,
     });
     if any_with_text {
@@ -2141,10 +2336,7 @@ pub fn inject_streaming_reasoning_fallback(items: &mut Vec<ConversationItem>, te
         .position(|i| matches!(i, ConversationItem::Reasoning(_)))
     {
         if let ConversationItem::Reasoning(r) = &mut items[idx] {
-            r.summary
-                .push(rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text,
-                }));
+            r.text = Arc::from(text);
         }
         return;
     }
@@ -2256,8 +2448,6 @@ impl From<ChatRequestMessage> for ConversationItem {
                 // construct the conversation directly via the Responses API
                 // path (`response_to_conversation_items`).
                 let content = msg.text_content();
-                let model_id = msg.model_id;
-
                 let tool_calls: Vec<ToolCall> = msg
                     .tool_calls
                     .into_iter()
@@ -2271,7 +2461,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                 ConversationItem::Assistant(AssistantItem {
                     content: Arc::<str>::from(content),
                     tool_calls,
-                    model_id,
+                    model_id: None,
                     model_fingerprint: None,
                     reasoning_effort: None,
                 })
@@ -2354,14 +2544,11 @@ fn sanitize_tool_arguments(id: &str, name: &str, arguments: Arc<str>) -> Arc<str
 /// Convert a single non-`Reasoning` [`ConversationItem`] into the
 /// chat-completions wire format.
 ///
-/// `Reasoning` is intentionally unsupported: it has no single-item Chat
-/// Completions equivalent (the wire format only carries `reasoning_content`
-/// *on the following assistant message*, which a single item can't see).
-/// Callers that need reasoning folded in must either use
-/// [`conversation_to_chat_messages`] (the batch path) or thread the
-/// reasoning onto the following assistant themselves; both filter out
-/// `Reasoning` items before reaching this function, so the `Reasoning` arm
-/// below is structurally unreachable.
+/// `Reasoning` is intentionally unsupported: durable reasoning is display-only
+/// and must not be reconstructed into provider history. Same-route Chat
+/// `reasoning_content` is supplied by the ephemeral native continuation lane.
+/// Batch conversion filters `Reasoning` before reaching this function, so the
+/// corresponding match arm below is structurally unreachable.
 ///
 /// Replaces the old `From<ConversationItem> for ChatRequestMessage` impl,
 /// which `panic!`ed on a lone `Reasoning` item and could be tripped
@@ -2410,7 +2597,6 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                 name: None,
                 tool_calls: Vec::new(),
                 tool_call_id: None,
-                model_id: None,
                 reasoning_content: None,
             }
         }
@@ -2425,18 +2611,14 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                 })
                 .collect();
 
-            // Reasoning is no longer stored on AssistantItem; the
-            // chat-completions wire path that wants `reasoning_content`
-            // filled in should use `conversation_to_chat_messages` instead
-            // of this per-item conversion, since reasoning lives as
-            // preceding sibling items.
+            // Reasoning is no longer stored on AssistantItem. Same-route
+            // `reasoning_content` is supplied only by a native fragment.
             ChatRequestMessage {
                 role: Role::Assistant,
                 content: MessageContent::Text(a.content.as_ref().to_owned()),
                 name: None,
                 tool_calls,
                 tool_call_id: None,
-                model_id: a.model_id,
                 reasoning_content: None,
             }
         }
@@ -2462,7 +2644,6 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                     name: None,
                     tool_calls: Vec::new(),
                     tool_call_id: Some(t.tool_call_id),
-                    model_id: None,
                     reasoning_content: None,
                 }
             }
@@ -2476,76 +2657,26 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
             name: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
-            model_id: None,
             reasoning_content: None,
         },
-        // Unreachable: `conversation_to_chat_messages` (the only caller)
-        // folds `Reasoning` siblings into the following assistant and
-        // never passes one to this function.
+        // Unreachable: `conversation_to_chat_messages` filters durable
+        // display-only reasoning before this per-item conversion.
         ConversationItem::Reasoning(_) => unreachable!(
-            "conversation_to_chat_messages folds Reasoning siblings; \
+            "conversation_to_chat_messages filters Reasoning siblings; \
                  conversation_item_to_chat_message is never called with one"
         ),
     }
 }
 
-/// Convert a sequence of [`ConversationItem`]s into the chat-completions
-/// wire format, joining each run of `Reasoning` siblings into the
-/// `reasoning_content` of the following `Assistant` message. An intervening
-/// `BackendToolCall` (emitted as its own synthetic assistant message) does
-/// not break this fold, so the canonical
-/// `[Reasoning, BackendToolCall, Assistant]` turn keeps its reasoning; any
-/// other intervening item (user / tool result) clears it.
-///
-/// `Reasoning` items not followed by an `Assistant` (e.g. trailing
-/// reasoning from a canceled response, or reasoning orphaned by an
-/// intervening user turn) are dropped. This is the canonical
-/// `ConversationItem` → `ChatRequestMessage` conversion for the
-/// chat-completions backend; it attaches reasoning to the right assistant
-/// turn (there is intentionally no public single-item conversion, since a
-/// lone `Reasoning` item has no chat-completions equivalent).
+/// Convert durable conversation facts to Chat Completions messages.
+/// Timeline reasoning is display-only; same-route reasoning is supplied by
+/// the ephemeral native continuation lane.
 pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRequestMessage> {
-    let mut out: Vec<ChatRequestMessage> = Vec::with_capacity(items.len());
-    let mut pending_reasoning: Vec<String> = Vec::new();
-
-    for item in items {
-        match item {
-            ConversationItem::Reasoning(r) => {
-                let text = reasoning_item_text(&r);
-                if !text.is_empty() {
-                    pending_reasoning.push(text);
-                }
-            }
-            ConversationItem::Assistant(_) => {
-                let mut msg = conversation_item_to_chat_message(item);
-                if !pending_reasoning.is_empty() {
-                    msg.reasoning_content = Some(pending_reasoning.join("\n"));
-                    pending_reasoning.clear();
-                }
-                out.push(msg);
-            }
-            ConversationItem::BackendToolCall(_) => {
-                // A backend tool call sits between the reasoning and the
-                // assistant in the canonical `[Reasoning, BackendToolCall,
-                // Assistant]` turn ordering. Emit its synthetic assistant
-                // message but keep `pending_reasoning` intact so it still
-                // folds onto the following assistant — matching the Responses
-                // API path, which preserves reasoning across backend tool
-                // calls.
-                out.push(conversation_item_to_chat_message(item));
-            }
-            other => {
-                // Trailing reasoning is held until the next assistant;
-                // intervening user/tool messages clear it, matching the
-                // pre-refactor behavior where reasoning lived on the
-                // immediately-following assistant turn only.
-                pending_reasoning.clear();
-                out.push(conversation_item_to_chat_message(other));
-            }
-        }
-    }
-
-    out
+    items
+        .into_iter()
+        .filter(|item| !matches!(item, ConversationItem::Reasoning(_)))
+        .map(conversation_item_to_chat_message)
+        .collect()
 }
 
 // ============================================================================
@@ -2593,15 +2724,9 @@ impl From<ChatResponseMessage> for ConversationItem {
 /// Convert a Responses API `Response` into a flat ordered list of
 /// `ConversationItem`s, mirroring the shape of `response.output`.
 ///
-/// Returns the items in the **exact order they were emitted** by the model:
-/// interleaved `Reasoning`, `BackendToolCall`, and finally a single
-/// `Assistant` item carrying accumulated text + client-executable
-/// `FunctionCall`s. Byte-stable replay of this ordering on the next turn
-/// is what keeps the server-side prefix KV-cache hot.
-///
-/// All N parallel `tco_*` reasoning items from a single response round-trip
-/// losslessly as N sibling `Reasoning` items — there is no longer a
-/// last-write-wins `Option<ReasoningContent>` collapse on the assistant.
+/// Returns visible/provider-neutral facts in model emission order. The caller
+/// separately derives a native continuation fragment before this conversion;
+/// Timeline output from this function is never replayed as provider state.
 pub fn response_to_conversation_items(
     response: rs::Response,
 ) -> crate::Result<Vec<ConversationItem>> {
@@ -2674,23 +2799,27 @@ pub fn response_to_conversation_items(
                 });
             }
             rs::OutputItem::Reasoning(r) => {
-                // Each reasoning item — real `rs_*` from the model and
-                // `tco_*` encrypted blobs from parallel backend tool
-                // calls — is emitted as its own sibling, preserving order.
-                items.push(ConversationItem::Reasoning(r));
+                let text = reasoning_text_from_response_item(&r);
+                if !text.is_empty() {
+                    items.push(ConversationItem::Reasoning(synthesized_reasoning_item(
+                        text,
+                    )));
+                }
             }
-            // Backend-executed tools: the server already ran these and
-            // fed results into the model's context. We capture them as
-            // BackendToolCall siblings so they're persisted and sent back
-            // on subsequent turns for context continuity.
+            // Backend-executed tools are durable only as display/audit facts.
+            // Same-route protocol continuity comes from the native fragment.
             rs::OutputItem::CodeInterpreterCall(ci) => {
                 backend_tool_count += 1;
-                items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
-                    kind: BackendToolKind::CodeInterpreter(ci),
-                }));
+                items.push(ConversationItem::BackendToolCall(
+                    BackendToolCallItem::code_interpreter(ci.code.as_deref()),
+                ));
             }
-            rs::OutputItem::McpCall(_) => {
+            rs::OutputItem::McpCall(call) => {
                 backend_tool_count += 1;
+                items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
+                    kind: BackendToolKind::Mcp,
+                    summary: Arc::from(format!("[backend mcp call] {}", call.name)),
+                }));
             }
             _ => {}
         }
@@ -2713,6 +2842,71 @@ pub fn response_to_conversation_items(
     }));
 
     Ok(items)
+}
+
+/// Convert the typed Responses output into valid stateless input items for
+/// same-route continuation. Output-only statuses are removed where the input
+/// schema permits; unsupported output-resource shapes are deliberately
+/// omitted instead of being tunneled through untyped JSON.
+pub fn responses_native_fragment(response: &rs::Response) -> NativeContinuationFragment {
+    let mut input = Vec::with_capacity(response.output.len());
+    for output in &response.output {
+        let item = match output {
+            rs::OutputItem::Message(message) => {
+                rs::InputItem::Item(rs::Item::Message(rs::MessageItem::Output(message.clone())))
+            }
+            rs::OutputItem::FunctionCall(call) => {
+                let mut call = call.clone();
+                call.status = None;
+                rs::InputItem::Item(rs::Item::FunctionCall(call))
+            }
+            rs::OutputItem::Reasoning(reasoning) => {
+                let mut reasoning = reasoning.clone();
+                reasoning.status = None;
+                rs::InputItem::Item(rs::Item::Reasoning(reasoning))
+            }
+            rs::OutputItem::FileSearchCall(call) => {
+                rs::InputItem::Item(rs::Item::FileSearchCall(call.clone()))
+            }
+            rs::OutputItem::WebSearchCall(call) => {
+                rs::InputItem::Item(rs::Item::WebSearchCall(call.clone()))
+            }
+            rs::OutputItem::ComputerCall(call) => {
+                rs::InputItem::Item(rs::Item::ComputerCall(call.clone()))
+            }
+            rs::OutputItem::ImageGenerationCall(call) => {
+                rs::InputItem::Item(rs::Item::ImageGenerationCall(call.clone()))
+            }
+            rs::OutputItem::CodeInterpreterCall(call) => {
+                rs::InputItem::Item(rs::Item::CodeInterpreterCall(call.clone()))
+            }
+            rs::OutputItem::LocalShellCall(call) => {
+                rs::InputItem::Item(rs::Item::LocalShellCall(call.clone()))
+            }
+            rs::OutputItem::McpListTools(call) => {
+                rs::InputItem::Item(rs::Item::McpListTools(call.clone()))
+            }
+            rs::OutputItem::McpApprovalRequest(call) => {
+                rs::InputItem::Item(rs::Item::McpApprovalRequest(call.clone()))
+            }
+            rs::OutputItem::McpCall(call) => rs::InputItem::Item(rs::Item::McpCall(call.clone())),
+            rs::OutputItem::CustomToolCall(call) => {
+                rs::InputItem::Item(rs::Item::CustomToolCall(call.clone()))
+            }
+            rs::OutputItem::FunctionCallOutput(_)
+            | rs::OutputItem::ComputerCallOutput(_)
+            | rs::OutputItem::Compaction(_)
+            | rs::OutputItem::ShellCall(_)
+            | rs::OutputItem::ShellCallOutput(_)
+            | rs::OutputItem::ApplyPatchCall(_)
+            | rs::OutputItem::ApplyPatchCallOutput(_)
+            | rs::OutputItem::CustomToolCallOutput(_)
+            | rs::OutputItem::ToolSearchCall(_)
+            | rs::OutputItem::ToolSearchOutput(_) => continue,
+        };
+        input.push(item);
+    }
+    NativeContinuationFragment::Responses(input)
 }
 
 #[cfg(test)]
@@ -2750,10 +2944,16 @@ const STRUCTURED_OUTPUT_SCHEMA_NAME: &str = "structured_output";
 
 impl From<ConversationRequest> for ChatCompletionRequest {
     fn from(req: ConversationRequest) -> Self {
-        // Uses the reasoning-aware helper so `Reasoning` siblings collapse
-        // into `reasoning_content` on the following assistant rather than
-        // being emitted as empty assistant messages.
-        let messages: Vec<ChatRequestMessage> = conversation_to_chat_messages(req.items);
+        let messages: Vec<ChatRequestMessage> = request_segments(&req, ApiBackend::ChatCompletions)
+            .into_iter()
+            .flat_map(|segment| match segment {
+                RequestSegment::Items(items) => conversation_to_chat_messages(items),
+                RequestSegment::Native(NativeContinuationFragment::ChatCompletions(message)) => {
+                    vec![message]
+                }
+                RequestSegment::Native(_) => Vec::new(),
+            })
+            .collect();
 
         let tools_is_empty = req.tools.is_empty();
         let tools: Option<Vec<ToolDefinition>> = if tools_is_empty {
@@ -2886,16 +3086,20 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 
 /// Build the [`rs::InputParam`] for a Responses API request.
 ///
-/// Conversion is a straight 1:1 map: each [`ConversationItem`] becomes its
-/// natural Responses-API input shape via [`conversation_item_to_input_items`].
-/// Reasoning items are top-level siblings (not bundled into the assistant),
-/// so they appear inline in the same order the model originally emitted —
-/// which is what lets the server-side prefix KV-cache hit on repeat turns.
+/// Portable surface facts are allowlisted into Responses input items. Spans
+/// admitted for the current route are replaced with their typed native
+/// fragments; durable visible reasoning itself is never sent.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
-    let items: Vec<rs::InputItem> = req
-        .items
-        .iter()
-        .flat_map(conversation_item_to_input_items)
+    let items: Vec<rs::InputItem> = request_segments(req, ApiBackend::Responses)
+        .into_iter()
+        .flat_map(|segment| match segment {
+            RequestSegment::Items(items) => items
+                .iter()
+                .flat_map(conversation_item_to_input_items)
+                .collect(),
+            RequestSegment::Native(NativeContinuationFragment::Responses(items)) => items,
+            RequestSegment::Native(_) => Vec::new(),
+        })
         .collect();
     rs::InputParam::Items(items)
 }
@@ -2955,15 +3159,7 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                 phase: None,
             })]
         }
-        ConversationItem::Reasoning(r) => {
-            // Reasoning items round-trip back to the Responses API in their
-            // native typed form. `status` is output-only (the API rejects it
-            // on input), so strip it before emission; everything else
-            // (summary, content, encrypted_content, id) passes through.
-            let mut r = r.clone();
-            r.status = None;
-            vec![rs::InputItem::Item(rs::Item::Reasoning(r))]
-        }
+        ConversationItem::Reasoning(_) => Vec::new(),
         ConversationItem::Assistant(a) => {
             let mut items = Vec::new();
 
@@ -3029,13 +3225,12 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
             ))]
         }
         ConversationItem::BackendToolCall(b) => {
-            // Round-trip backend tool calls back to the Responses API as
-            // their native item types, preserving full context continuity.
-            vec![match &b.kind {
-                BackendToolKind::CodeInterpreter(ci) => {
-                    rs::InputItem::Item(rs::Item::CodeInterpreterCall(ci.clone()))
-                }
-            }]
+            vec![rs::InputItem::EasyMessage(rs::EasyInputMessage {
+                r#type: rs::MessageType::Message,
+                role: rs::Role::Assistant,
+                content: rs::EasyInputContent::Text(b.text_summary()),
+                phase: None,
+            })]
         }
     }
 }
@@ -3349,25 +3544,9 @@ pub fn transform_conversation_cwd(
             }
             // Backend tool calls don't contain workspace paths — no-op.
             ConversationItem::BackendToolCall(_) => {}
-            // Reasoning items rarely reference CWD paths, but they can —
-            // patch both summary parts and content blocks defensively.
             ConversationItem::Reasoning(r) => {
-                for sp in r.summary.iter_mut() {
-                    match sp {
-                        rs::SummaryPart::SummaryText(t) => {
-                            if t.text.contains(source_cwd) {
-                                t.text = t.text.replace(source_cwd, target_cwd);
-                            }
-                        }
-                    }
-                }
-                if let Some(ref mut content) = r.content {
-                    for c in content.iter_mut() {
-                        let rs::ReasoningItemContent::ReasoningText(rt) = c;
-                        if rt.text.contains(source_cwd) {
-                            rt.text = rt.text.replace(source_cwd, target_cwd);
-                        }
-                    }
+                if r.text.contains(source_cwd) {
+                    r.text = Arc::from(r.text.replace(source_cwd, target_cwd));
                 }
             }
         }
@@ -3787,123 +3966,128 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         }
     };
 
-    // Process all conversation items
-    for item in &req.items {
-        match item {
-            ConversationItem::System(s) => {
-                flush_assistant(&mut pending_assistant, &mut messages);
-                flush_tool_results(&mut pending_tool_results, &mut messages);
-                system_blocks.push(TextBlock {
-                    r#type: "text".to_string(),
-                    text: s.content.as_ref().to_owned(),
-                    cache_control: None,
-                });
-            }
-            ConversationItem::User(u) => {
-                flush_assistant(&mut pending_assistant, &mut messages);
-                flush_tool_results(&mut pending_tool_results, &mut messages);
-                let blocks = content_parts_to_anthropic_blocks(&u.content);
-                messages.push(Message {
-                    role: MessageRole::User,
-                    content: MessageContent::Blocks(blocks),
-                });
-            }
-            ConversationItem::Assistant(a) => {
-                flush_tool_results(&mut pending_tool_results, &mut messages);
-
-                // Reasoning is no longer carried inline on AssistantItem;
-                // it lives as preceding sibling `Reasoning` items which
-                // emit their own Thinking blocks via the arm below.
-
-                // Text block from content (if non-empty)
-                if !a.content.is_empty() {
-                    pending_assistant.push(ContentBlock::Text {
-                        text: a.content.as_ref().to_owned(),
-                        cache_control: None,
-                    });
-                }
-
-                // Tool use blocks from tool_calls
-                for tc in &a.tool_calls {
-                    let input =
-                        serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
-                    pending_assistant.push(ContentBlock::ToolUse {
-                        id: sanitize_tool_call_id(&tc.id),
-                        name: tc.name.clone(),
-                        input,
-                        cache_control: None,
-                    });
-                }
-            }
-            ConversationItem::ToolResult(t) => {
-                flush_assistant(&mut pending_assistant, &mut messages);
-                let content = if t.images.is_empty() {
-                    ToolResultContent::Text(t.content.as_ref().to_owned())
-                } else {
-                    let mut blocks = vec![ContentBlock::Text {
-                        text: t.content.as_ref().to_owned(),
-                        cache_control: None,
-                    }];
-                    for img in &t.images {
-                        if let ContentPart::Image { url } = img {
-                            let source = if let Some(rest) = url.strip_prefix("data:") {
-                                if let Some((media_type, data)) = rest.split_once(";base64,") {
-                                    ImageSource::Base64 {
-                                        media_type: media_type.to_string(),
-                                        data: data.to_string(),
-                                    }
-                                } else {
-                                    ImageSource::Url {
-                                        url: url.as_ref().to_owned(),
-                                    }
-                                }
-                            } else {
-                                ImageSource::Url {
-                                    url: url.as_ref().to_owned(),
-                                }
-                            };
-                            blocks.push(ContentBlock::Image {
-                                source,
+    // Process portable/current neutral facts and exact same-route native
+    // assistant blocks in one chronological stream.
+    for segment in request_segments(req, ApiBackend::Messages) {
+        match segment {
+            RequestSegment::Items(items) => {
+                for item in &items {
+                    match item {
+                        ConversationItem::System(s) => {
+                            flush_assistant(&mut pending_assistant, &mut messages);
+                            flush_tool_results(&mut pending_tool_results, &mut messages);
+                            system_blocks.push(TextBlock {
+                                r#type: "text".to_string(),
+                                text: s.content.as_ref().to_owned(),
                                 cache_control: None,
                             });
                         }
+                        ConversationItem::User(u) => {
+                            flush_assistant(&mut pending_assistant, &mut messages);
+                            flush_tool_results(&mut pending_tool_results, &mut messages);
+                            let blocks = content_parts_to_anthropic_blocks(&u.content);
+                            messages.push(Message {
+                                role: MessageRole::User,
+                                content: MessageContent::Blocks(blocks),
+                            });
+                        }
+                        ConversationItem::Assistant(a) => {
+                            flush_tool_results(&mut pending_tool_results, &mut messages);
+
+                            // Durable reasoning is not carried inline on AssistantItem
+                            // and is never reconstructed into a Thinking block here.
+                            // Same-route thinking comes from the native segment.
+
+                            // Text block from content (if non-empty)
+                            if !a.content.is_empty() {
+                                pending_assistant.push(ContentBlock::Text {
+                                    text: a.content.as_ref().to_owned(),
+                                    cache_control: None,
+                                });
+                            }
+
+                            // Tool use blocks from tool_calls
+                            for tc in &a.tool_calls {
+                                let input = serde_json::from_str(&tc.arguments)
+                                    .unwrap_or(serde_json::json!({}));
+                                pending_assistant.push(ContentBlock::ToolUse {
+                                    id: sanitize_tool_call_id(&tc.id),
+                                    name: tc.name.clone(),
+                                    input,
+                                    cache_control: None,
+                                });
+                            }
+                        }
+                        ConversationItem::ToolResult(t) => {
+                            flush_assistant(&mut pending_assistant, &mut messages);
+                            let content = if t.images.is_empty() {
+                                ToolResultContent::Text(t.content.as_ref().to_owned())
+                            } else {
+                                let mut blocks = vec![ContentBlock::Text {
+                                    text: t.content.as_ref().to_owned(),
+                                    cache_control: None,
+                                }];
+                                for img in &t.images {
+                                    if let ContentPart::Image { url } = img {
+                                        let source = if let Some(rest) = url.strip_prefix("data:") {
+                                            if let Some((media_type, data)) =
+                                                rest.split_once(";base64,")
+                                            {
+                                                ImageSource::Base64 {
+                                                    media_type: media_type.to_string(),
+                                                    data: data.to_string(),
+                                                }
+                                            } else {
+                                                ImageSource::Url {
+                                                    url: url.as_ref().to_owned(),
+                                                }
+                                            }
+                                        } else {
+                                            ImageSource::Url {
+                                                url: url.as_ref().to_owned(),
+                                            }
+                                        };
+                                        blocks.push(ContentBlock::Image {
+                                            source,
+                                            cache_control: None,
+                                        });
+                                    }
+                                }
+                                ToolResultContent::Blocks(blocks)
+                            };
+                            pending_tool_results.push(ContentBlock::ToolResult {
+                                tool_use_id: sanitize_tool_call_id(&t.tool_call_id),
+                                content,
+                                cache_control: None,
+                            });
+                        }
+                        // Anthropic Messages API has no native backend-tool-call concept.
+                        // Emit a synthetic assistant text block so the model retains
+                        // context about what was searched.
+                        ConversationItem::BackendToolCall(b) => {
+                            flush_tool_results(&mut pending_tool_results, &mut messages);
+                            pending_assistant.push(ContentBlock::Text {
+                                text: b.text_summary(),
+                                cache_control: None,
+                            });
+                        }
+                        // Durable reasoning is display-only. Same-route thinking and its
+                        // signature are projected from the ephemeral native lane.
+                        ConversationItem::Reasoning(_) => {}
                     }
-                    ToolResultContent::Blocks(blocks)
-                };
-                pending_tool_results.push(ContentBlock::ToolResult {
-                    tool_use_id: sanitize_tool_call_id(&t.tool_call_id),
-                    content,
-                    cache_control: None,
-                });
+                }
             }
-            // Anthropic Messages API has no native backend-tool-call concept.
-            // Emit a synthetic assistant text block so the model retains
-            // context about what was searched.
-            ConversationItem::BackendToolCall(b) => {
+            RequestSegment::Native(NativeContinuationFragment::Messages(blocks)) => {
                 flush_tool_results(&mut pending_tool_results, &mut messages);
-                pending_assistant.push(ContentBlock::Text {
-                    text: b.text_summary(),
-                    cache_control: None,
-                });
-            }
-            // Reasoning sibling — emit as Anthropic `thinking` block on the
-            // pending assistant turn. `tco_*` encrypted blobs only set
-            // `signature`; real model reasoning sets `thinking`.
-            ConversationItem::Reasoning(r) => {
-                flush_tool_results(&mut pending_tool_results, &mut messages);
-                let thinking = reasoning_item_text(r);
-                let signature = r
-                    .encrypted_content
-                    .as_deref()
-                    .map(str::to_owned)
-                    .unwrap_or_default();
-                if !thinking.is_empty() || !signature.is_empty() {
-                    pending_assistant.push(ContentBlock::Thinking {
-                        thinking,
-                        signature,
+                flush_assistant(&mut pending_assistant, &mut messages);
+                if !blocks.is_empty() {
+                    messages.push(Message {
+                        role: MessageRole::Assistant,
+                        content: MessageContent::Blocks(blocks),
                     });
                 }
             }
+            RequestSegment::Native(_) => {}
         }
     }
 
@@ -4197,10 +4381,9 @@ mod tests {
         let back: ConversationItem = chat_msg.into();
         assert_eq!(back.text_content(), "Hello!");
 
-        // Assistant message (reasoning is now a sibling, not a field;
-        // single-item conversion produces None for reasoning_content. The
-        // `conversation_to_chat_messages` helper is what carries reasoning
-        // through; tested separately).
+        // Assistant message (durable reasoning is a display-only sibling;
+        // neither single-item nor batch portable conversion reconstructs
+        // reasoning_content).
         let assistant = ConversationItem::assistant_with_model("Hi there!", "grow-3");
         let chat_msg = conversation_item_to_chat_message(assistant);
         assert_eq!(chat_msg.reasoning_content, None);
@@ -4698,7 +4881,8 @@ mod tests {
 
         assert_eq!(chat_msg.text_content(), "Let me help you with that.");
         assert_eq!(chat_msg.tool_calls.len(), 1);
-        assert_eq!(chat_msg.model_id, Some("grow-3".to_string()));
+        let wire = serde_json::to_value(chat_msg).unwrap();
+        assert!(wire.get("model_id").is_none());
     }
 
     // ============================================================================
@@ -4818,58 +5002,6 @@ mod tests {
         assert_eq!(fco_items.len(), 2);
         assert_eq!(fco_items[0].call_id, "call_1");
         assert_eq!(fco_items[1].call_id, "call_2");
-    }
-
-    // ============================================================================
-    // Encrypted Reasoning Tests
-    // ============================================================================
-
-    #[test]
-    fn test_reasoning_content_from_text() {
-        let reasoning = ReasoningContent::from_text("Let me think step by step...");
-        assert_eq!(
-            reasoning.text.as_deref(),
-            Some("Let me think step by step...")
-        );
-        assert!(reasoning.encrypted.is_none());
-        assert!(!reasoning.is_empty());
-    }
-
-    #[test]
-    fn test_reasoning_content_from_encrypted() {
-        let reasoning = ReasoningContent::from_encrypted("enc_abc123_encrypted_data");
-        assert!(reasoning.text.is_none());
-        assert_eq!(
-            reasoning.encrypted.as_deref(),
-            Some("enc_abc123_encrypted_data")
-        );
-        assert!(!reasoning.is_empty());
-    }
-
-    #[test]
-    fn test_reasoning_content_helper_round_trip() {
-        // `ReasoningContent` still exists for the chat-completions wire +
-        // legacy paths. Confirm both fields survive serde.
-        let reasoning = ReasoningContent {
-            text: Some("Visible reasoning".into()),
-            encrypted: Some("enc_hidden_data".into()),
-            id: None,
-        };
-        assert!(!reasoning.is_empty());
-        let json = serde_json::to_string(&reasoning).expect("serialize");
-        let back: ReasoningContent = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.text.as_deref(), Some("Visible reasoning"));
-        assert_eq!(back.encrypted.as_deref(), Some("enc_hidden_data"));
-    }
-
-    #[test]
-    fn test_reasoning_content_empty() {
-        let reasoning = ReasoningContent {
-            text: None,
-            encrypted: None,
-            id: None,
-        };
-        assert!(reasoning.is_empty());
     }
 
     #[test]
@@ -5006,7 +5138,7 @@ mod tests {
             usage: None,
         };
 
-        // Exercise the flat-list path: reasoning now lives as a sibling.
+        let native = responses_native_fragment(&response);
         let items = response_to_conversation_items(response).expect("valid response");
         let assistant_idx = items
             .iter()
@@ -5024,17 +5156,20 @@ mod tests {
                 _ => None,
             })
             .expect("reasoning sibling present");
-        // Both text summary and encrypted content should be preserved
-        assert_eq!(
-            reasoning_sibling.summary.first().map(|sp| match sp {
-                rs::SummaryPart::SummaryText(t) => t.text.as_str(),
-            }),
-            Some("Visible thinking summary")
-        );
-        assert_eq!(
-            reasoning_sibling.encrypted_content.as_deref(),
-            Some("enc_base64_encrypted_reasoning_data_here")
-        );
+        assert_eq!(reasoning_sibling.text.as_ref(), "Visible thinking summary");
+        let durable = serde_json::to_string(&items).unwrap();
+        assert!(!durable.contains("enc_base64_encrypted_reasoning_data_here"));
+        assert!(!durable.contains("reasoning_enc"));
+        let NativeContinuationFragment::Responses(native) = native else {
+            panic!("responses continuation expected")
+        };
+        let native_json = serde_json::to_value(&native).unwrap();
+        let native_text = native_json.to_string();
+        assert!(native_text.contains("enc_base64_encrypted_reasoning_data_here"));
+        assert!(native_text.contains("reasoning_enc"));
+        assert!(native_text.contains("msg_456"));
+        assert_eq!(native_json[0].get("status"), None);
+        assert_eq!(native_json[1]["status"], "completed");
     }
 
     #[test]
@@ -5095,54 +5230,32 @@ mod tests {
             usage: None,
         };
 
-        // Flat-list path: reasoning sibling carries the encrypted blob,
-        // empty summary maps to an empty `Vec<SummaryPart>`.
+        let native = responses_native_fragment(&response);
         let items = response_to_conversation_items(response).expect("valid response");
-        let reasoning_sibling = items
-            .iter()
-            .find_map(|i| match i {
-                ConversationItem::Reasoning(r) => Some(r),
-                _ => None,
-            })
-            .expect("reasoning sibling present");
-        assert!(reasoning_sibling.summary.is_empty());
-        assert_eq!(
-            reasoning_sibling.encrypted_content.as_deref(),
-            Some("enc_only_encrypted_no_visible_summary")
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, ConversationItem::Reasoning(_)))
+        );
+        assert!(
+            !serde_json::to_string(&items)
+                .unwrap()
+                .contains("enc_only_encrypted_no_visible_summary")
+        );
+        let NativeContinuationFragment::Responses(native) = native else {
+            panic!("responses continuation expected")
+        };
+        assert!(
+            serde_json::to_string(&native)
+                .unwrap()
+                .contains("enc_only_encrypted_no_visible_summary")
         );
     }
 
     #[test]
-    fn test_reasoning_content_serialization_with_encrypted() {
-        // Test that ReasoningContent correctly serializes/deserializes with both fields
-        let reasoning = ReasoningContent {
-            text: Some("Let me think...".into()),
-            encrypted: Some("enc_abc123".into()),
-            id: None,
-        };
-
-        let json = serde_json::to_string(&reasoning).expect("Should serialize");
-        assert!(json.contains("Let me think..."));
-        assert!(json.contains("enc_abc123"));
-
-        let back: ReasoningContent = serde_json::from_str(&json).expect("Should deserialize");
-        assert_eq!(back.text.as_deref(), Some("Let me think..."));
-        assert_eq!(back.encrypted.as_deref(), Some("enc_abc123"));
-    }
-
-    #[test]
     fn test_conversation_item_with_sibling_reasoning_serialization() {
-        // Reasoning is now a sibling variant — round-trip both items
-        // through serde and confirm they survive.
-        let reasoning_item = ConversationItem::Reasoning(rs::ReasoningItem {
-            id: Some("reasoning_1".to_string()),
-            summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                text: "Computing the answer...".to_string(),
-            })],
-            content: None,
-            encrypted_content: Some("enc_ultimate_answer_computation".to_string()),
-            status: None,
-        });
+        let reasoning_item =
+            ConversationItem::Reasoning(synthesized_reasoning_item("Computing the answer..."));
         let assistant_item = ConversationItem::Assistant(AssistantItem {
             content: "The answer is 42.".into(),
             tool_calls: vec![],
@@ -5153,28 +5266,223 @@ mod tests {
 
         for item in [reasoning_item, assistant_item] {
             let json = serde_json::to_string(&item).expect("Should serialize");
+            assert!(!json.contains("encrypted_content"));
+            assert!(!json.contains("reasoning_1"));
             let back: ConversationItem = serde_json::from_str(&json).expect("Should deserialize");
             assert_eq!(std::mem::discriminant(&item), std::mem::discriminant(&back));
         }
     }
 
     #[test]
+    fn legacy_native_timeline_items_decode_one_way_to_durable_facts() {
+        let reasoning: ConversationItem = serde_json::from_value(serde_json::json!({
+            "type": "reasoning",
+            "id": "reasoning_native_id",
+            "summary": [{"type": "summary_text", "text": "visible summary"}],
+            "content": [{"type": "reasoning_text", "text": "visible detail"}],
+            "encrypted_content": "encrypted_secret",
+            "status": "completed",
+            "provider_extension": {"secret": true}
+        }))
+        .unwrap();
+        assert_eq!(reasoning.text_content(), "visible summary\nvisible detail");
+        let reasoning_json = serde_json::to_value(reasoning).unwrap();
+        assert_eq!(reasoning_json["type"], "reasoning");
+        assert_eq!(reasoning_json["text"], "visible summary\nvisible detail");
+        for field in [
+            "id",
+            "summary",
+            "content",
+            "encrypted_content",
+            "status",
+            "provider_extension",
+        ] {
+            assert!(reasoning_json.get(field).is_none(), "retained {field}");
+        }
+
+        let backend_tool: ConversationItem = serde_json::from_value(serde_json::json!({
+            "type": "backend_tool_call",
+            "kind": {
+                "tool_type": "code_interpreter",
+                "id": "native_tool_id",
+                "container_id": "native_container_id",
+                "code": "print('visible')",
+                "status": "completed",
+                "outputs": [{"type": "logs", "logs": "opaque output"}]
+            }
+        }))
+        .unwrap();
+        let backend_json = serde_json::to_value(backend_tool).unwrap();
+        assert_eq!(backend_json["type"], "backend_tool_call");
+        assert_eq!(backend_json["kind"], "code_interpreter");
+        assert!(backend_json["summary"].as_str().unwrap().contains("print"));
+        let encoded = backend_json.to_string();
+        for forbidden in [
+            "native_tool_id",
+            "native_container_id",
+            "completed",
+            "opaque output",
+        ] {
+            assert!(!encoded.contains(forbidden), "retained {forbidden}");
+        }
+    }
+
+    #[test]
+    fn portable_history_is_allowlisted_for_all_wire_backends() {
+        let mut user = ConversationItem::user("inspect both images");
+        user.add_image("data:image/png;base64,user_image_secret");
+        let items = vec![
+            ConversationItem::system("sys"),
+            user,
+            ConversationItem::Reasoning(synthesized_reasoning_item("visible_reasoning_secret")),
+            ConversationItem::Assistant(AssistantItem {
+                content: "checking".into(),
+                tool_calls: vec![ToolCall {
+                    id: "native_call_id".into(),
+                    name: "read_file".to_owned(),
+                    arguments: r#"{"path":"a.png"}"#.into(),
+                }],
+                model_id: Some("source_model_id".to_owned()),
+                model_fingerprint: Some("source_fingerprint".to_owned()),
+                reasoning_effort: Some(crate::ReasoningEffort::High),
+            }),
+            ConversationItem::tool_result_with_images(
+                "native_call_id",
+                "tool result text",
+                vec![
+                    ContentPart::Image {
+                        url: "data:image/png;base64,historical_tool_image_secret".into(),
+                    },
+                    ContentPart::Text {
+                        text: "an earlier image was evicted".into(),
+                    },
+                ],
+            ),
+        ];
+        let mut request = ConversationRequest::from_items(items);
+        request.native_continuation = Some(NativeContinuationProjection {
+            portable_prefix_len: request.items.len(),
+            spans: Vec::new(),
+        });
+        let projected = project_portable_history(&request.items);
+        let historical_exchange = projected
+            .iter()
+            .find(|item| {
+                item.text_content()
+                    .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER)
+            })
+            .expect("complete historical tool exchange should remain as text");
+        assert!(matches!(historical_exchange, ConversationItem::User(_)));
+
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            let wire = match backend {
+                ApiBackend::ChatCompletions => {
+                    serde_json::to_value(ChatCompletionRequest::from(request.clone())).unwrap()
+                }
+                ApiBackend::Responses => {
+                    serde_json::to_value(rs::CreateResponse::from(&request)).unwrap()
+                }
+                ApiBackend::Messages => {
+                    serde_json::to_value(build_messages_request(&request)).unwrap()
+                }
+            };
+            let text = wire.to_string();
+            for required in [
+                "user_image_secret",
+                HISTORICAL_TOOL_EXCHANGE_HEADER,
+                "read_file",
+                "a.png",
+                "tool result text",
+                "historical_tool_image_secret",
+                "an earlier image was evicted",
+            ] {
+                assert!(
+                    text.contains(required),
+                    "{backend:?} omitted {required}: {text}"
+                );
+            }
+            for forbidden in [
+                "visible_reasoning_secret",
+                "source_model_id",
+                "source_fingerprint",
+                "native_call_id",
+                "call_00000001",
+                "model_id",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{backend:?} leaked {forbidden}: {text}"
+                );
+            }
+
+            let endpoint_protocol = match backend {
+                ApiBackend::ChatCompletions => ["tool_calls", "tool_call_id"],
+                ApiBackend::Responses => ["function_call", "function_call_output"],
+                ApiBackend::Messages => ["tool_use", "tool_result"],
+            };
+            for forbidden in endpoint_protocol {
+                assert!(
+                    !text.contains(forbidden),
+                    "{backend:?} leaked historical tool protocol {forbidden}: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn portable_history_drops_legacy_flattened_tool_echoes() {
+        let projected = project_portable_history(&[
+            ConversationItem::assistant(format!(
+                "{HISTORICAL_TOOL_EXCHANGE_HEADER}\nTool: run_terminal_command\nResult: copied"
+            )),
+            ConversationItem::assistant("real visible answer"),
+        ]);
+
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].text_content(), "real visible answer");
+    }
+
+    #[test]
+    fn portable_history_never_emits_incomplete_tool_protocol() {
+        let projected = project_portable_history(&[
+            ConversationItem::Assistant(AssistantItem {
+                content: "visible before interrupted call".into(),
+                tool_calls: vec![ToolCall {
+                    id: "dangling_source_id".into(),
+                    name: "run_terminal_command".to_owned(),
+                    arguments: r#"{"command":"pwd"}"#.into(),
+                }],
+                model_id: Some("source-model".to_owned()),
+                model_fingerprint: None,
+                reasoning_effort: None,
+            }),
+            ConversationItem::tool_result("orphan_source_id", "orphan result"),
+        ]);
+
+        assert_eq!(projected.len(), 1);
+        let ConversationItem::Assistant(assistant) = &projected[0] else {
+            panic!("expected portable assistant text");
+        };
+        assert_eq!(
+            assistant.content.as_ref(),
+            "visible before interrupted call"
+        );
+        assert!(assistant.tool_calls.is_empty());
+        assert!(assistant.model_id.is_none());
+    }
+
+    #[test]
     fn test_encrypted_reasoning_included_in_responses_api_request() {
         // Test that when building a Responses API request, encrypted reasoning is included
         // This is crucial for context continuity across turns
-        let req = ConversationRequest::from_items(vec![
+        let mut req = ConversationRequest::from_items(vec![
             ConversationItem::system("You are helpful"),
             ConversationItem::user("What is 2+2?"),
-            // Previous reasoning + assistant: reasoning is now a sibling.
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r1".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: "Let me calculate 2+2...".to_string(),
-                })],
-                content: None,
-                encrypted_content: Some("enc_secret_reasoning_chain".to_string()),
-                status: None,
-            }),
+            ConversationItem::Reasoning(synthesized_reasoning_item("Let me calculate 2+2...")),
             ConversationItem::Assistant(AssistantItem {
                 content: "The answer is 4.".into(),
                 tool_calls: vec![],
@@ -5185,6 +5493,22 @@ mod tests {
             // New user message
             ConversationItem::user("Now what is 3+3?"),
         ]);
+        req.native_continuation = Some(NativeContinuationProjection {
+            portable_prefix_len: 2,
+            spans: vec![NativeContinuationSpan {
+                start: 2,
+                end: 3,
+                fragment: NativeContinuationFragment::Responses(vec![rs::InputItem::Item(
+                    rs::Item::Reasoning(rs::ReasoningItem {
+                        id: Some("r1".to_string()),
+                        summary: vec![],
+                        content: None,
+                        encrypted_content: Some("enc_secret_reasoning_chain".to_string()),
+                        status: None,
+                    }),
+                )]),
+            }],
+        });
 
         let responses_req: rs::CreateResponse = (&req).into();
 
@@ -5216,25 +5540,15 @@ mod tests {
             Some("enc_secret_reasoning_chain".to_string())
         );
 
-        // Verify summary text is included
-        assert_eq!(reasoning.summary.len(), 1);
-        let rs::SummaryPart::SummaryText(summary) = &reasoning.summary[0];
-        assert_eq!(summary.text, "Let me calculate 2+2...");
+        assert_eq!(reasoning.id.as_deref(), Some("r1"));
     }
 
     #[test]
     fn test_only_encrypted_reasoning_included_in_request() {
-        // Test that when there's only encrypted content (no visible summary),
-        // it's still included in the request
+        // Durable display-only reasoning never becomes provider input.
         let req = ConversationRequest::from_items(vec![
             ConversationItem::user("Hello"),
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some(String::new()),
-                summary: vec![],
-                content: None,
-                encrypted_content: Some("enc_hidden_thoughts".to_string()),
-                status: None,
-            }),
+            ConversationItem::Reasoning(synthesized_reasoning_item("visible thought")),
             ConversationItem::Assistant(AssistantItem {
                 content: "Hi!".into(),
                 tool_calls: vec![],
@@ -5260,17 +5574,7 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(reasoning_items.len(), 1);
-        let reasoning = reasoning_items[0];
-
-        // Encrypted content should be present
-        assert_eq!(
-            reasoning.encrypted_content,
-            Some("enc_hidden_thoughts".to_string())
-        );
-
-        // Summary should be empty
-        assert!(reasoning.summary.is_empty());
+        assert!(reasoning_items.is_empty());
     }
 
     #[test]
@@ -6014,12 +6318,29 @@ mod tests {
 
     #[test]
     fn test_messages_request_cache_breakpoint_skips_thinking() {
-        let req = ConversationRequest::from_items(vec![
+        let mut req = ConversationRequest::from_items(vec![
             ConversationItem::user("Fix the bug"),
             ConversationItem::Reasoning(synthesized_reasoning_item("weighing options")),
             ConversationItem::assistant("Fixed it."),
         ])
         .with_model("messages-compatible-model");
+        req.native_continuation = Some(NativeContinuationProjection {
+            portable_prefix_len: 1,
+            spans: vec![NativeContinuationSpan {
+                start: 1,
+                end: 3,
+                fragment: NativeContinuationFragment::Messages(vec![
+                    crate::messages::ContentBlock::Thinking {
+                        thinking: "weighing options".into(),
+                        signature: "sig_test".into(),
+                    },
+                    crate::messages::ContentBlock::Text {
+                        text: "Fixed it.".into(),
+                        cache_control: None,
+                    },
+                ]),
+            }],
+        });
 
         let json = serde_json::to_value(build_messages_request(&req)).unwrap();
         let blocks = json["messages"][1]["content"].as_array().unwrap();
@@ -7066,15 +7387,9 @@ mod tests {
         let root = "/home/user/project";
 
         let mut items = vec![
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("rs_1".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: format!("thinking about {worktree}"),
-                })],
-                content: None,
-                encrypted_content: None,
-                status: None,
-            }),
+            ConversationItem::Reasoning(synthesized_reasoning_item(format!(
+                "thinking about {worktree}"
+            ))),
             ConversationItem::Assistant(AssistantItem {
                 content: format!("I edited {worktree}/src/main.rs").into(),
                 tool_calls: vec![],
@@ -7093,12 +7408,11 @@ mod tests {
         let ConversationItem::Reasoning(r) = &items[0] else {
             panic!("expected Reasoning sibling");
         };
-        let rs::SummaryPart::SummaryText(t) = &r.summary[0];
         assert!(
-            !t.text.contains(worktree),
+            !r.text.contains(worktree),
             "reasoning sibling text should be rewritten"
         );
-        assert!(t.text.contains(root));
+        assert!(r.text.contains(root));
     }
 
     #[test]
@@ -7372,6 +7686,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert!(response.is_empty());
 
@@ -7387,6 +7702,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert!(!response.is_empty());
 
@@ -7406,6 +7722,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert!(!response.is_empty());
     }
@@ -7431,6 +7748,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert!(
             response.is_empty(),
@@ -7455,6 +7773,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert!(
             !response.is_empty(),
@@ -7483,6 +7802,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert!(
             !response.is_empty(),
@@ -7514,6 +7834,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
 
         let calls = response.tool_calls();
@@ -7537,6 +7858,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert_eq!(
             response.fallback_text().as_deref(),
@@ -7559,6 +7881,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -7577,6 +7900,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -7599,6 +7923,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert_eq!(
             response.fallback_text().as_deref(),
@@ -7624,6 +7949,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert!(response.fallback_text().is_none());
     }
@@ -7745,21 +8071,6 @@ mod tests {
         assert_eq!(back.id.as_ref(), "call_123");
         assert_eq!(back.name, "bash");
         assert_eq!(back.arguments.as_ref(), r#"{"command": "ls"}"#);
-    }
-
-    #[test]
-    fn test_reasoning_content_serialization() {
-        let reasoning = ReasoningContent {
-            text: Some("Thinking...".into()),
-            encrypted: Some("enc_data".into()),
-            id: None,
-        };
-
-        let json = serde_json::to_string(&reasoning).expect("Should serialize");
-        let back: ReasoningContent = serde_json::from_str(&json).expect("Should deserialize");
-
-        assert_eq!(back.text.as_deref(), Some("Thinking..."));
-        assert_eq!(back.encrypted.as_deref(), Some("enc_data"));
     }
 
     // ====================================================================
@@ -8341,15 +8652,9 @@ mod tests {
             ConversationItem::Reasoning(synthesized_reasoning_item(
                 "reasoning /secret/reasoning.png",
             )),
-            ConversationItem::BackendToolCall(BackendToolCallItem {
-                kind: BackendToolKind::CodeInterpreter(rs::CodeInterpreterToolCall {
-                    code: Some("open('/secret/backend.png')".into()),
-                    container_id: "container_1".into(),
-                    id: "ci_1".into(),
-                    outputs: None,
-                    status: rs::CodeInterpreterToolCallStatus::Completed,
-                }),
-            }),
+            ConversationItem::BackendToolCall(BackendToolCallItem::code_interpreter(Some(
+                "open('/secret/backend.png')",
+            ))),
             ConversationItem::Reasoning(synthesized_reasoning_item("more /secret/reasoning-2.png")),
             ConversationItem::assistant_tool_calls(vec![ToolCall {
                 id: "call_1".into(),
@@ -9054,6 +9359,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         }
     }
 
@@ -9081,15 +9387,9 @@ mod tests {
         // is classified as ReasoningOnly so the retry logic resamples.
         let response = ConversationResponse {
             items: vec![
-                ConversationItem::Reasoning(rs::ReasoningItem {
-                    id: Some("r1".to_string()),
-                    summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                        text: "thinking but no text output".to_string(),
-                    })],
-                    content: None,
-                    encrypted_content: None,
-                    status: None,
-                }),
+                ConversationItem::Reasoning(synthesized_reasoning_item(
+                    "thinking but no text output",
+                )),
                 ConversationItem::Assistant(AssistantItem {
                     content: String::new().into(),
                     tool_calls: Vec::new(),
@@ -9107,6 +9407,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         assert_eq!(
             response.empty_reason(),
@@ -9171,18 +9472,16 @@ mod tests {
     //
     // These pin the invariants that motivated this refactor:
     //
-    // 1. `tco_*` reasoning items from parallel backend tool calls round-trip
-    //    losslessly as N sibling `Reasoning` items (a prior data-loss
-    //    bug — was last-write-wins on `AssistantItem.reasoning`).
+    // 1. Visible reasoning from parallel backend tool calls remains ordered as
+    //    N provider-neutral sibling `Reasoning` items.
     //
     // 2. Multi-turn conversations preserve emission order
     //    `[Sys, U1, R, BTC*, A1, U2, R, BTC*, A2, ...]` rather than
     //    `[Sys, U1, ..., UN, R*, A*]` (a prior ordering bug that
     //    torched the server-side prefix cache).
     //
-    // 3. `conversation_to_chat_messages` folds preceding Reasoning siblings
-    //    into the next assistant's `reasoning_content` for the
-    //    chat-completions wire path.
+    // 3. Portable Chat conversion drops durable Reasoning siblings; only the
+    //    native continuation lane may carry `reasoning_content`.
     //
     // 4. `patch_reasoning_text_types` injects the `type: "reasoning_text"`
     //    discriminator on nested `content[]` items that async-openai's
@@ -9198,15 +9497,7 @@ mod tests {
         //     [Sys, U1, U2, U3, U4, U5, R, A1, R, A2, ...]
         // which would shift the cache prefix every turn.
         fn r(text: &str) -> ConversationItem {
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some(text.to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: text.to_string(),
-                })],
-                content: None,
-                encrypted_content: Some(format!("enc_{text}")),
-                status: None,
-            })
+            ConversationItem::Reasoning(synthesized_reasoning_item(text))
         }
         let items: Vec<ConversationItem> = vec![
             ConversationItem::system("you are helpful"),
@@ -9231,9 +9522,7 @@ mod tests {
             panic!("expected Items input");
         };
 
-        // Walk the wire items and verify the expected pattern.
-        // Roles per wire item: System, User, Reasoning(role=Assistant),
-        // Assistant, User, Reasoning, Assistant, ...
+        // Durable reasoning is display-only and absent from wire history.
         let kinds: Vec<&'static str> = wire_items
             .iter()
             .map(|w| match w {
@@ -9249,63 +9538,33 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec![
-                "Sys", "U", "R", "A", "U", "R", "A", "U", "R", "A", "U", "R", "A", "U",
-            ],
-            "multi-turn ordering must preserve interleaved Reasoning ↔ Assistant per turn"
+            vec!["Sys", "U", "A", "U", "A", "U", "A", "U", "A", "U"],
+            "portable history must omit durable reasoning"
         );
     }
 
     #[test]
-    fn conversation_to_chat_messages_folds_reasoning_into_following_assistant() {
+    fn conversation_to_chat_messages_drops_reasoning_before_assistant() {
         let items = vec![
             ConversationItem::user("hi"),
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r1".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: "thinking step 1".to_string(),
-                })],
-                content: None,
-                encrypted_content: None,
-                status: None,
-            }),
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r2".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: "thinking step 2".to_string(),
-                })],
-                content: None,
-                encrypted_content: None,
-                status: None,
-            }),
+            ConversationItem::Reasoning(synthesized_reasoning_item("thinking step 1")),
+            ConversationItem::Reasoning(synthesized_reasoning_item("thinking step 2")),
             ConversationItem::assistant("answer"),
         ];
 
         let msgs = conversation_to_chat_messages(items);
-        assert_eq!(msgs.len(), 2, "user + assistant; reasoning items folded");
+        assert_eq!(msgs.len(), 2, "user + assistant; reasoning items dropped");
         assert_eq!(msgs[0].role, Role::User);
         assert_eq!(msgs[1].role, Role::Assistant);
         assert_eq!(msgs[1].text_content(), "answer");
-        assert_eq!(
-            msgs[1].reasoning_content.as_deref(),
-            Some("thinking step 1\nthinking step 2"),
-            "reasoning text joined and attached to the assistant"
-        );
+        assert_eq!(msgs[1].reasoning_content, None);
     }
 
     #[test]
     fn conversation_to_chat_messages_drops_trailing_reasoning() {
         let items = vec![
             ConversationItem::user("hi"),
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r1".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: "abandoned thinking".to_string(),
-                })],
-                content: None,
-                encrypted_content: None,
-                status: None,
-            }),
+            ConversationItem::Reasoning(synthesized_reasoning_item("abandoned thinking")),
         ];
         let msgs = conversation_to_chat_messages(items);
         assert_eq!(
@@ -9318,11 +9577,7 @@ mod tests {
 
     #[test]
     fn conversation_to_chat_messages_drops_reasoning_when_user_intervenes() {
-        // Reasoning only folds onto the *immediately* following assistant. A
-        // non-assistant item in between (here a User) clears pending reasoning,
-        // matching the "reasoning lived on the immediately-following assistant
-        // turn only" semantic. This is the non-trailing sibling of
-        // `conversation_to_chat_messages_drops_trailing_reasoning`.
+        // Durable reasoning is display-only regardless of which role follows.
         let items = vec![
             reasoning_sibling("r1", "stale thinking", None),
             ConversationItem::user("actually, new question"),
@@ -9445,22 +9700,16 @@ mod tests {
     }
 
     // ========================================================================
-    // KV Cache Invariant Tests (adapted to sibling-Reasoning)
+    // Portable Responses Projection Tests
     //
-    // These tests enforce prefix stability and correct turn ordering for the
-    // Responses API input construction. Prompt caching (server-side prefix
-    // match) requires that request N's serialised input is a strict prefix
-    // of request N+1's. Any re-ordering of items -- especially reasoning
-    // items -- destroys the prefix and tanks the cache hit rate.
+    // These tests enforce stable ordering for the durable portable projection.
+    // Provider-native prefix continuity is covered by native-fragment tests.
     //
     // The invariant asserted is `&input2[..input1.len()] == input1` for
     // every pair of consecutive turns.
     //
-    // In the sibling-Reasoning refactor, reasoning rides as
-    // `ConversationItem::Reasoning(rs::ReasoningItem)` siblings in the flat
-    // ordered `items` list. The serialized wire shape is produced by the
-    // `From<&ConversationRequest> for rs::CreateResponse` impl with no
-    // placeholder/splice dance. The old `__RAW_OUTPUT_PLACEHOLDER_`
+    // Visible reasoning remains a sibling durable fact but is omitted from
+    // this portable projection. The old `__RAW_OUTPUT_PLACEHOLDER_`
     // / `extract_raw_input_items` / `splice_raw_input_items` tests are
     // structurally obsolete and are not ported; the invariants they pinned
     // are preserved here in a backend-shape-agnostic form.
@@ -9470,19 +9719,11 @@ mod tests {
     /// text, and optional encrypted_content. This replaces the old
     /// `assistant_with_raw_output()` helper.
     fn reasoning_sibling(
-        id: &str,
+        _id: &str,
         summary_text: &str,
-        encrypted: Option<&str>,
+        _encrypted: Option<&str>,
     ) -> ConversationItem {
-        ConversationItem::Reasoning(rs::ReasoningItem {
-            id: Some(id.to_string()),
-            summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                text: summary_text.to_string(),
-            })],
-            content: None,
-            encrypted_content: encrypted.map(str::to_owned),
-            status: None,
-        })
+        ConversationItem::Reasoning(synthesized_reasoning_item(summary_text))
     }
 
     /// Helper: serialise the wire `input` array to a Vec of JSON values.
@@ -9563,12 +9804,10 @@ mod tests {
         let input = input_items_json(&req);
         let summary = summarise_input(&input);
 
-        // Expected: [system, user, reasoning, assistant]
-        assert_eq!(summary.len(), 4, "got: {summary:?}");
+        assert_eq!(summary.len(), 3, "got: {summary:?}");
         assert_eq!(summary[0], "system:sys");
         assert_eq!(summary[1], "user:u1");
-        assert_eq!(summary[2], "reasoning:r_abc");
-        assert_eq!(summary[3], "assistant:hi");
+        assert_eq!(summary[2], "assistant:hi");
 
         // No placeholder strings must appear (post-refactor invariant).
         let body_str = serde_json::to_string(&input).unwrap();
@@ -9577,11 +9816,7 @@ mod tests {
             "no placeholder strings post-refactor"
         );
 
-        // The reasoning item must carry encrypted_content verbatim.
-        assert_eq!(
-            input[2].get("encrypted_content").and_then(|v| v.as_str()),
-            Some("enc1"),
-        );
+        assert!(!body_str.contains("enc1"));
     }
 
     /// Cache-prefix regression: with MULTIPLE turns each carrying a Reasoning
@@ -9610,64 +9845,18 @@ mod tests {
         let input = input_items_json(&req);
         let summary = summarise_input(&input);
 
-        // INVARIANT 1: There must be exactly N reasoning items for N
-        // siblings. The pre-refactor bug produced only 1.
         let reasoning_count = summary
             .iter()
             .filter(|s| s.starts_with("reasoning:"))
             .count();
         assert_eq!(
-            reasoning_count, 3,
-            "must have 3 reasoning items, got {reasoning_count}. Items: {summary:?}"
+            reasoning_count, 0,
+            "durable reasoning must not be sent. Items: {summary:?}"
         );
-
-        // INVARIANT 2: Each reasoning must be BETWEEN its corresponding
-        // user message and the NEXT user message. Without this check,
-        // all reasoning items bunched at the end would still pass count.
-        let user_positions: Vec<usize> = summary
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.starts_with("user:"))
-            .map(|(i, _)| i)
-            .collect();
-        let reasoning_positions: Vec<usize> = summary
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.starts_with("reasoning:"))
-            .map(|(i, _)| i)
-            .collect();
-
-        assert_eq!(user_positions.len(), 3);
-        assert_eq!(reasoning_positions.len(), 3);
-
-        for (i, rp) in reasoning_positions.iter().enumerate() {
-            assert!(
-                *rp > user_positions[i],
-                "reasoning {i} at position {rp} must be after user {i} at position {}. \
-                 Items: {summary:?}",
-                user_positions[i]
-            );
-            if i + 1 < user_positions.len() {
-                assert!(
-                    *rp < user_positions[i + 1],
-                    "reasoning {i} at position {rp} must be before user {} at position {}. \
-                     Items: {summary:?}",
-                    i + 1,
-                    user_positions[i + 1]
-                );
-            }
-        }
-
-        // INVARIANT 3: encrypted_content per item is preserved 1:1.
-        let mut enc_seen: Vec<&str> = Vec::new();
-        for v in &input {
-            if v.get("type").and_then(|t| t.as_str()) == Some("reasoning")
-                && let Some(enc) = v.get("encrypted_content").and_then(|s| s.as_str())
-            {
-                enc_seen.push(enc);
-            }
-        }
-        assert_eq!(enc_seen, vec!["enc1", "enc2", "enc3"]);
+        let body = serde_json::to_string(&input).unwrap();
+        assert!(!body.contains("enc1"));
+        assert!(!body.contains("enc2"));
+        assert!(!body.contains("enc3"));
     }
 
     /// INVARIANT: prefix stability across turns without reasoning.
@@ -9790,16 +9979,14 @@ mod tests {
         let input = input_items_json(&req);
         let summary = summarise_input(&input);
 
-        assert_eq!(summary.len(), 4);
-        assert_eq!(summary[2], "reasoning:r1");
+        assert_eq!(summary.len(), 3);
+        assert_eq!(summary[2], "assistant:response text");
 
         // Encrypted content absent on the wire.
         assert!(
-            input[2].get("encrypted_content").is_none()
-                || input[2]
-                    .get("encrypted_content")
-                    .and_then(|v| v.as_str())
-                    .is_none(),
+            input
+                .iter()
+                .all(|item| item.get("encrypted_content").is_none()),
         );
 
         // The placeholder sentinel from the pre-refactor world must not appear.
@@ -9848,8 +10035,8 @@ mod tests {
             .filter(|s| s.starts_with("reasoning:"))
             .count();
         assert_eq!(
-            reasoning_count, 1,
-            "exactly one reasoning item; got: {summary:?}"
+            reasoning_count, 0,
+            "durable reasoning is display-only; got: {summary:?}"
         );
         assert!(
             summary.iter().any(|s| s == "function_call:call_1"),
@@ -9897,7 +10084,7 @@ mod tests {
             "no placeholder strings post-sibling-Reasoning refactor"
         );
 
-        // Both reasoning items must appear inline in the input array.
+        // Durable reasoning must not appear in the input array.
         let input = body["input"].as_array().unwrap();
         let reasoning_items: Vec<&serde_json::Value> = input
             .iter()
@@ -9905,8 +10092,8 @@ mod tests {
             .collect();
         assert_eq!(
             reasoning_items.len(),
-            2,
-            "both reasoning siblings must be present"
+            0,
+            "durable reasoning must be omitted"
         );
     }
 }

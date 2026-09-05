@@ -275,7 +275,7 @@ async fn actor_with_sampler(
     if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
         cfg.base_url = server.url();
         cfg.api_backend = api_backend.clone();
-        actor.chat_state_handle.update_sampling_config(cfg);
+        actor.chat_state_handle.replace_sampling_route(cfg);
     }
     let sampler_config = sampler::SamplerConfig {
         api_key: Some("test-key".to_string()),
@@ -430,6 +430,188 @@ fn chat_completions_request_count(server: &MockInferenceServer) -> usize {
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
+
+#[test]
+fn rejected_native_continuation_falls_back_silently_and_keeps_session_usable() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(
+                    &[
+                        thinking_block("visible first thought", "native_signature_secret"),
+                        text_block("first answer"),
+                    ],
+                    END_TURN,
+                ),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                ScriptedResponse::json(
+                    400,
+                    json!({
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "constructed provider continuation rejection"
+                        }
+                    }),
+                ),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[text_block("portable retry answer")], END_TURN),
+            );
+
+            let (actor, mut gateway_rx) =
+                actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            run_user_turn(&actor, "continuation-first")
+                .await
+                .expect("first turn establishes native continuation");
+            actor.state.lock().await.foreground = ForegroundState::Idle;
+            run_user_turn(&actor, "continuation-fallback")
+                .await
+                .expect("portable retry must complete in the same Session");
+
+            let requests: Vec<_> = server
+                .requests()
+                .into_iter()
+                .filter(|request| request.path == "/v1/messages")
+                .collect();
+            assert_eq!(requests.len(), 3);
+            let rejected = requests[1].body.as_ref().unwrap().to_string();
+            assert!(rejected.contains("native_signature_secret"));
+            assert!(rejected.contains("visible first thought"));
+            let portable_retry = requests[2].body.as_ref().unwrap().to_string();
+            assert!(!portable_retry.contains("native_signature_secret"));
+            assert!(!portable_retry.contains("visible first thought"));
+            assert!(portable_retry.contains("first answer"));
+
+            let durable =
+                serde_json::to_string(&actor.chat_state_handle.get_conversation().await).unwrap();
+            assert!(durable.contains("visible first thought"));
+            assert!(!durable.contains("native_signature_secret"));
+            assert!(durable.contains("portable retry answer"));
+            assert!(!actor.chat_state_handle.is_closed());
+
+            let mut retry_notices = 0;
+            while let Ok(message) = gateway_rx.try_recv() {
+                let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                    continue;
+                };
+                if args.request.method.as_ref() != "grow/session_notification" {
+                    continue;
+                }
+                let notification: crate::extensions::notification::SessionNotification =
+                    serde_json::from_str(args.request.params.get()).unwrap();
+                if matches!(notification.update, GrowSessionUpdate::RetryState(_)) {
+                    retry_notices += 1;
+                }
+            }
+            assert_eq!(
+                retry_notices, 0,
+                "recoverable continuation fallback must stay invisible to the TUI"
+            );
+        }));
+    });
+}
+
+#[test]
+fn failed_portable_retry_notifies_once_without_poisoning_session() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(
+                    &[
+                        thinking_block("visible thought", "native_signature_secret"),
+                        text_block("first answer"),
+                    ],
+                    END_TURN,
+                ),
+            );
+            for message in ["native rejected", "portable request rejected"] {
+                server.enqueue_response(
+                    "/v1/messages",
+                    ScriptedResponse::json(
+                        400,
+                        json!({
+                            "type": "error",
+                            "error": {"type": "invalid_request_error", "message": message}
+                        }),
+                    ),
+                );
+            }
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[text_block("later turn succeeds")], END_TURN),
+            );
+
+            let (actor, mut gateway_rx) =
+                actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            run_user_turn(&actor, "fallback-fails-first").await.unwrap();
+            actor.state.lock().await.foreground = ForegroundState::Idle;
+            run_user_turn(&actor, "fallback-fails-second")
+                .await
+                .expect_err("the failed portable retry ends only this turn");
+            assert!(!actor.chat_state_handle.is_closed());
+            actor.state.lock().await.foreground = ForegroundState::Idle;
+            run_user_turn(&actor, "fallback-fails-third")
+                .await
+                .expect("a later turn must remain usable");
+
+            let requests: Vec<_> = server
+                .requests()
+                .into_iter()
+                .filter(|request| request.path == "/v1/messages")
+                .collect();
+            assert_eq!(requests.len(), 4);
+            assert!(
+                requests[1]
+                    .body
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("native_signature_secret")
+            );
+            assert!(
+                !requests[2]
+                    .body
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains("native_signature_secret")
+            );
+
+            let mut retry_notices = 0;
+            while let Ok(message) = gateway_rx.try_recv() {
+                let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                    continue;
+                };
+                if args.request.method.as_ref() != "grow/session_notification" {
+                    continue;
+                }
+                let notification: crate::extensions::notification::SessionNotification =
+                    serde_json::from_str(args.request.params.get()).unwrap();
+                if matches!(notification.update, GrowSessionUpdate::RetryState(_)) {
+                    retry_notices += 1;
+                }
+            }
+            assert_eq!(retry_notices, 1);
+        }));
+    });
+}
 
 /// A successful transport can still yield unusable tool metadata. Preserve
 /// that response and its repair, execute no siblings, and keep the next turn
@@ -653,9 +835,10 @@ fn truncation_multiple_continues() {
     });
 }
 
-/// Thinking blocks: a complete thinking block survives into history (with
-/// its signature); an in-progress thinking block (started, deltas streamed,
-/// no `content_block_stop`) is discarded. The truncation then continues.
+/// Every thinking block closed before a max-token boundary remains visible in
+/// durable history, while provider signatures stay memory-only. The
+/// truncation then continues. Unclosed blocks are rejected by the sampler's
+/// protocol tests and never reach this session path.
 #[test]
 fn truncation_thinking_block() {
     run_with_session_stack(|| {
@@ -688,38 +871,31 @@ fn truncation_thinking_block() {
             result.expect("turn must complete successfully");
 
             let conversation = actor.chat_state_handle.get_conversation().await;
-            // The complete thinking block is retained as a Reasoning sibling
-            // with its signature; the incomplete one is nowhere to be found.
+            // All complete visible thinking is durable. Provider signatures
+            // remain in the in-memory continuation lane.
             let reasoning_texts: Vec<String> = conversation
                 .iter()
                 .filter_map(|item| match item {
-                    ConversationItem::Reasoning(r) => Some(format!(
-                        "sig={:?} text={}",
-                        r.encrypted_content,
-                        r.summary
-                            .iter()
-                            .map(|p| match p {
-                                sampling_types::rs::SummaryPart::SummaryText(s) => {
-                                    s.text.clone()
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("")
-                    )),
+                    ConversationItem::Reasoning(r) => Some(r.text.to_string()),
                     _ => None,
                 })
                 .collect();
             assert!(
                 reasoning_texts
                     .iter()
-                    .any(|r| r.contains("complete thinking") && r.contains("sig_complete")),
-                "complete thinking block with signature must be retained, got {reasoning_texts:?}"
+                    .any(|r| r.contains("complete thinking")),
+                "complete visible thinking must be retained, got {reasoning_texts:?}"
             );
             assert!(
-                !reasoning_texts
+                reasoning_texts
                     .iter()
                     .any(|r| r.contains("partial thinking")),
-                "incomplete thinking block must be discarded, got {reasoning_texts:?}"
+                "the first closed thinking block must also be retained, got {reasoning_texts:?}"
+            );
+            assert!(
+                !serde_json::to_string(&conversation)
+                    .unwrap()
+                    .contains("sig_complete")
             );
             assert_eq!(truncation_continue_count(&conversation), 1);
             let joined: String = assistant_texts(&conversation).concat();

@@ -92,12 +92,15 @@ pub struct MemoryIndex {
     /// Whether sqlite-vec loaded successfully (FTS always available).
     vec_available: bool,
     embedding_dimensions: usize,
+    embedding_identity: Option<String>,
 }
 
 impl MemoryIndex {
     /// Open or create the index database at `db_path`.
     ///
     /// `dimensions` sets the embedding vector size for the `chunks_vec` table.
+    /// `identity` binds vectors to the credential-free endpoint/model configuration;
+    /// `None` opens an FTS-only handle without invalidating another session's vectors.
     /// If sqlite-vec failed to load (call `init_sqlite_vec()` first), the
     /// index gracefully degrades to FTS-only mode.
     pub fn open_or_create(
@@ -105,6 +108,7 @@ impl MemoryIndex {
         storage: MemoryStorage,
         config: MemoryIndexConfig,
         dimensions: usize,
+        identity: Option<&str>,
     ) -> Result<Self, rusqlite::Error> {
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
@@ -117,6 +121,7 @@ impl MemoryIndex {
             storage,
             config,
             dimensions,
+            identity,
             JournalMode::for_db_path(db_path),
         )
     }
@@ -128,10 +133,11 @@ impl MemoryIndex {
         storage: MemoryStorage,
         config: MemoryIndexConfig,
         dimensions: usize,
+        identity: Option<&str>,
         journal_mode: JournalMode,
     ) -> Result<Self, rusqlite::Error> {
         // busy_timeout + journal pragma live in the helper (see JournalMode::open).
-        let db = journal_mode.open(db_path)?;
+        let mut db = journal_mode.open(db_path)?;
 
         // Check if sqlite-vec loaded (graceful fallback if not)
         let vec_available =
@@ -149,48 +155,34 @@ impl MemoryIndex {
                 }
             };
 
-        // Create schema
-        db.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
-
-        // Store/verify embedding dimensions in meta table
-        let stored_dims: Option<String> = db
-            .query_row(schema::GET_META_SQL, params!["embedding_dimensions"], |r| {
-                r.get(0)
-            })
-            .ok();
-
-        match stored_dims {
-            Some(ref s) if s.parse::<usize>().ok() == Some(dimensions) => {
-                // Dimensions match — nothing to do
-            }
-            Some(ref s) => {
-                // Dimension mismatch — recreate vec table
-                tracing::warn!(
-                    stored = %s,
-                    requested = dimensions,
-                    "embedding dimension mismatch, recreating chunks_vec"
-                );
-                if vec_available {
-                    let _ = db.execute("DROP TABLE IF EXISTS chunks_vec", []);
-                    db.execute_batch(&format!(
-                        "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(\n    \
-                         chunk_id TEXT PRIMARY KEY,\n    \
-                         embedding FLOAT[{dimensions}]\n);"
-                    ))?;
-                }
-                db.execute(
+        // Schema and vector-space changes share a writer transaction. An FTS-only
+        // reader leaves the currently selected vector space untouched.
+        let embedding_identity = identity.map(|identity| format!("{dimensions}:{identity}"));
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute_batch(&schema::schema_sql(dimensions, vec_available))?;
+        // An unavailable extension cannot invalidate the existing vec table,
+        // so it must not relabel that table's metadata either.
+        if vec_available && let Some(identity) = &embedding_identity {
+            use rusqlite::OptionalExtension;
+            let stored: Option<String> = tx
+                .query_row(schema::GET_META_SQL, params!["embedding_identity"], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            if stored.as_ref() != Some(identity) {
+                tx.execute("DROP TABLE IF EXISTS chunks_vec", [])?;
+                tx.execute_batch(&schema::schema_sql(dimensions, true))?;
+                tx.execute(
                     schema::UPSERT_META_SQL,
-                    params!["embedding_dimensions", dimensions.to_string()],
+                    params!["embedding_identity", identity],
                 )?;
-            }
-            None => {
-                // First time — store dimensions
-                db.execute(
+                tx.execute(
                     schema::UPSERT_META_SQL,
                     params!["embedding_dimensions", dimensions.to_string()],
                 )?;
             }
         }
+        tx.commit()?;
 
         Ok(Self {
             db,
@@ -198,12 +190,31 @@ impl MemoryIndex {
             chunk_config: config,
             vec_available,
             embedding_dimensions: dimensions,
+            embedding_identity,
         })
     }
 
     /// Whether sqlite-vec is available for vector operations.
     pub fn vec_available(&self) -> bool {
-        self.vec_available
+        self.vec_available && self.embedding_identity.is_some()
+    }
+
+    /// Call within the same transaction as vector reads/writes. A different
+    /// session may switch the cache while this handle is awaiting an API call.
+    fn embedding_identity_matches(
+        &self,
+        db: &rusqlite::Connection,
+    ) -> Result<bool, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        let Some(expected) = self.embedding_identity.as_ref() else {
+            return Ok(false);
+        };
+        let current: Option<String> = db
+            .query_row(schema::GET_META_SQL, params!["embedding_identity"], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(current.as_ref() == Some(expected))
     }
 
     /// Embedding dimensions configured for this index.
@@ -513,7 +524,11 @@ impl MemoryIndex {
         if !self.vec_available {
             return Ok(vec![]);
         }
-        let mut stmt = self.db.prepare(
+        let tx = self.db.unchecked_transaction()?;
+        if !self.embedding_identity_matches(&tx)? {
+            return Ok(vec![]);
+        }
+        let mut stmt = tx.prepare(
             "SELECT c.id, c.text FROM chunks c \
              LEFT JOIN chunks_vec_rowids v ON v.id = c.id \
              WHERE v.id IS NULL",
@@ -535,11 +550,17 @@ impl MemoryIndex {
         if !self.vec_available {
             return Ok(());
         }
+        let tx = self.db.unchecked_transaction()?;
+        if !self.embedding_identity_matches(&tx)? {
+            tracing::warn!("embedding cache identity changed; rejecting stale vector write");
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let embedding_bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
-        self.db.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO chunks_vec(chunk_id, embedding) VALUES (?1, ?2)",
             params![chunk_id, embedding_bytes],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -556,7 +577,11 @@ impl MemoryIndex {
             .iter()
             .flat_map(|f| f.to_le_bytes())
             .collect();
-        let mut stmt = self.db.prepare(
+        let tx = self.db.unchecked_transaction()?;
+        if !self.embedding_identity_matches(&tx)? {
+            return Ok(vec![]);
+        }
+        let mut stmt = tx.prepare(
             "SELECT chunk_id, distance FROM chunks_vec \
              WHERE embedding MATCH ?1 AND k = ?2 ORDER BY distance",
         )?;
@@ -744,7 +769,60 @@ mod tests {
     fn test_index(tmp: &TempDir) -> MemoryIndex {
         let db_path = tmp.path().join("test.sqlite");
         let storage = test_storage(tmp);
-        MemoryIndex::open_or_create(&db_path, storage, MemoryIndexConfig::default(), 1536).unwrap()
+        MemoryIndex::open_or_create(
+            &db_path,
+            storage,
+            MemoryIndexConfig::default(),
+            1536,
+            Some("test"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn vector_space_changes_invalidate_cache_and_reject_old_handles() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("vectors.sqlite");
+        let open = |identity| {
+            MemoryIndex::open_or_create(
+                &path,
+                test_storage(&tmp),
+                MemoryIndexConfig::default(),
+                4,
+                identity,
+            )
+            .unwrap()
+        };
+        let mut a = open(Some("endpoint-a/model-a"));
+        assert!(a.vec_available());
+        let file = tmp.path().join("memory.md");
+        std::fs::write(&file, "Rust ownership and borrowing guide").unwrap();
+        a.reindex_file(&file, "workspace").unwrap();
+        let id = a.chunks_without_embeddings().unwrap()[0].0.clone();
+        a.upsert_embedding(&id, &[1., 0., 0., 0.]).unwrap();
+        assert!(
+            open(Some("endpoint-a/model-a"))
+                .chunks_without_embeddings()
+                .unwrap()
+                .is_empty()
+        );
+        let fts = open(None);
+        assert!(!fts.vec_available());
+        assert!(
+            a.chunks_without_embeddings().unwrap().is_empty(),
+            "FTS-only opens preserve vectors"
+        );
+        let b = open(Some("endpoint-a/model-b"));
+        assert_eq!(b.chunks_without_embeddings().unwrap().len(), 1);
+        assert!(!b.search_fts("ownership", 5).unwrap().is_empty());
+        b.upsert_embedding(&id, &[0., 1., 0., 0.]).unwrap();
+        assert!(a.upsert_embedding(&id, &[1., 0., 0., 0.]).is_err());
+        assert!(a.vector_search(&[1., 0., 0., 0.], 1).unwrap().is_empty());
+        assert_eq!(b.vector_search(&[0., 1., 0., 0.], 1).unwrap()[0].1, 0.);
+        let c = open(Some("endpoint-b/model-b"));
+        assert_eq!(c.chunks_without_embeddings().unwrap().len(), 1);
+        assert!(b.upsert_embedding(&id, &[0., 1., 0., 0.]).is_err());
     }
 
     #[test]
@@ -767,14 +845,20 @@ mod tests {
                 storage.clone(),
                 MemoryIndexConfig::default(),
                 1536,
+                Some("test"),
             )
             .unwrap();
         }
 
         // Reopen
-        let idx =
-            MemoryIndex::open_or_create(&db_path, storage, MemoryIndexConfig::default(), 1536)
-                .unwrap();
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage,
+            MemoryIndexConfig::default(),
+            1536,
+            Some("test"),
+        )
+        .unwrap();
         assert_eq!(idx.embedding_dimensions(), 1536);
     }
 
@@ -808,6 +892,7 @@ mod tests {
             storage,
             MemoryIndexConfig::default(),
             512,
+            Some("test"),
             JournalMode::Truncate,
         )
         .unwrap();

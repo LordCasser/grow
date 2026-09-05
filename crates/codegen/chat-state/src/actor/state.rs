@@ -4,12 +4,14 @@ use std::collections::BTreeSet;
 
 use sampling_types::{
     ConversationItem, ConversationRequest, DanglingToolCallReason, JsonOutputFormat,
-    SamplingConfig, TokenUsage, dedup_duplicate_tool_results, repair_dangling_tool_calls,
+    NativeContinuationFragment, NativeContinuationProjection, NativeContinuationSpan,
+    SamplingConfig, TokenUsage, dedup_duplicate_tool_results, project_portable_history,
+    repair_dangling_tool_calls,
 };
 
 use crate::types::Credentials;
 use crate::usage::UsageLedger;
-use crate::{EventSeq, Timeline};
+use crate::{EventSeq, SurfaceId, Timeline};
 
 /// Bytes/4 estimate of the system prompt portion of a [`ConversationItem`].
 /// Returns 0 for non-system items so callers can pipe through whatever they
@@ -59,10 +61,41 @@ pub fn estimate_request_input_tokens(request: &ConversationRequest) -> u64 {
         Some(JsonOutputFormat::JsonSchema(schema)) => serde_json::to_string(schema)
             .map_or(0, |schema| token_estimation::estimate_tokens(&schema)),
     };
-    estimate_conversation_tokens(&request.items)
+    estimate_effective_conversation_tokens(request)
         .saturating_add(estimate_tool_specs_tokens(&request.tools))
         .saturating_add(tool_choice_tokens)
         .saturating_add(output_schema_tokens)
+}
+
+fn estimate_wire_items(items: &[ConversationItem]) -> u64 {
+    items
+        .iter()
+        .filter(|item| !matches!(item, ConversationItem::Reasoning(_)))
+        .map(estimate_item_tokens)
+        .sum()
+}
+
+fn estimate_effective_conversation_tokens(request: &ConversationRequest) -> u64 {
+    let Some(native) = &request.native_continuation else {
+        return estimate_wire_items(&request.items);
+    };
+    if native.portable_prefix_len > request.items.len() {
+        return estimate_wire_items(&project_portable_history(&request.items));
+    }
+    let mut total = estimate_wire_items(&project_portable_history(
+        &request.items[..native.portable_prefix_len],
+    ));
+    let mut cursor = native.portable_prefix_len;
+    for span in &native.spans {
+        if span.start < cursor || span.end <= span.start || span.end > request.items.len() {
+            return estimate_wire_items(&project_portable_history(&request.items));
+        }
+        total = total
+            .saturating_add(estimate_wire_items(&request.items[cursor..span.start]))
+            .saturating_add(span.fragment.estimated_tokens());
+        cursor = span.end;
+    }
+    total.saturating_add(estimate_wire_items(&request.items[cursor..]))
 }
 
 fn estimate_tool_tokens(
@@ -105,18 +138,22 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
                     .sum::<usize>();
             (bytes as u64) / token_estimation::BYTES_PER_TOKEN
         }
-        ConversationItem::ToolResult(tr) => token_estimation::estimate_tokens(&tr.content),
+        ConversationItem::ToolResult(tr) => {
+            let mut bytes = tr.content.len();
+            let mut images = 0;
+            for part in &tr.images {
+                match part {
+                    ContentPart::Text { text } => bytes += text.len(),
+                    ContentPart::Image { .. } => images += 1,
+                }
+            }
+            bytes as u64 / token_estimation::BYTES_PER_TOKEN
+                + token_estimation::estimate_image_tokens(images)
+        }
         ConversationItem::BackendToolCall(b) => {
             token_estimation::estimate_tokens(&b.text_summary())
         }
-        ConversationItem::Reasoning(r) => {
-            // Summary + content text follow the standard bytes-per-token
-            // estimate; encrypted blobs are base64 and don't survive
-            // tokenization 1:1, so estimate at len/4 as well.
-            let text_bytes = sampling_types::reasoning_item_text(r).len();
-            let enc_bytes = r.encrypted_content.as_deref().map(str::len).unwrap_or(0);
-            ((text_bytes + enc_bytes) as u64) / token_estimation::BYTES_PER_TOKEN
-        }
+        ConversationItem::Reasoning(r) => token_estimation::estimate_tokens(&r.text),
     }
 }
 
@@ -160,6 +197,8 @@ pub fn estimate_messages_tokens(items: &[ConversationItem]) -> u64 {
 pub(crate) struct ChatState {
     /// Durable conversation facts plus the current model-visible projection.
     pub timeline: Timeline,
+    /// Non-durable provider continuation for the current sampling epoch.
+    pub continuation: ContinuationLane,
     /// Current sampling configuration (model, context window, etc.).
     pub sampling_config: SamplingConfig,
     /// Provider-anchored projection of the current model-visible context.
@@ -196,6 +235,129 @@ pub(crate) struct ChatState {
     /// Cleared on `TakeTurnMessages` (consumed), `BeginTurnCapture` (new turn),
     /// and the durable rewind transaction (which abandons the turn capture).
     pub(super) turn_capture: Option<TurnCaptureState>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeSpanRecord {
+    surface_ids: Vec<SurfaceId>,
+    fragment: NativeContinuationFragment,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContinuationLane {
+    backend: sampling_types::ApiBackend,
+    epoch_nonce: String,
+    portable_prefix_len: usize,
+    observed_projection: Vec<(SurfaceId, blake3::Hash)>,
+    spans: Vec<NativeSpanRecord>,
+}
+
+impl ContinuationLane {
+    fn new(backend: sampling_types::ApiBackend, portable_prefix_len: usize) -> Self {
+        Self {
+            backend,
+            epoch_nonce: uuid::Uuid::now_v7().to_string(),
+            portable_prefix_len,
+            observed_projection: Vec::new(),
+            spans: Vec::new(),
+        }
+    }
+
+    pub(super) fn reset(
+        &mut self,
+        backend: sampling_types::ApiBackend,
+        portable_prefix_len: usize,
+        reason: &'static str,
+    ) {
+        tracing::info!(
+            reason,
+            ?backend,
+            native_spans = self.spans.len(),
+            "reset native continuation epoch"
+        );
+        *self = Self::new(backend, portable_prefix_len);
+    }
+
+    pub(super) fn epoch_nonce(&self) -> &str {
+        &self.epoch_nonce
+    }
+
+    pub(super) fn reconcile_projection(
+        &mut self,
+        surface_ids: &[SurfaceId],
+        items: &[ConversationItem],
+    ) -> bool {
+        if surface_ids.len() != items.len() {
+            self.reset(
+                self.backend.clone(),
+                items.len(),
+                "request_projection_identity_mismatch",
+            );
+            return false;
+        }
+        let current: Vec<_> = surface_ids
+            .iter()
+            .copied()
+            .zip(items.iter().map(|item| {
+                let bytes = serde_json::to_vec(item).expect("conversation item must serialize");
+                blake3::hash(&bytes)
+            }))
+            .collect();
+        let pure_append = current.len() >= self.observed_projection.len()
+            && current[..self.observed_projection.len()] == self.observed_projection;
+        if !self.observed_projection.is_empty() && !pure_append {
+            self.reset(
+                self.backend.clone(),
+                current.len(),
+                "request_projection_changed",
+            );
+        }
+        self.observed_projection = current;
+        true
+    }
+
+    pub(super) fn install(
+        &mut self,
+        surface_ids: Vec<SurfaceId>,
+        fragment: NativeContinuationFragment,
+    ) -> bool {
+        if fragment.backend() != self.backend || fragment.is_empty() || surface_ids.is_empty() {
+            return false;
+        }
+        self.spans.push(NativeSpanRecord {
+            surface_ids,
+            fragment,
+        });
+        true
+    }
+
+    pub(super) fn request_projection(
+        &self,
+        current_ids: &[SurfaceId],
+    ) -> NativeContinuationProjection {
+        let mut spans = Vec::with_capacity(self.spans.len());
+        for record in &self.spans {
+            let Some(start) = record
+                .surface_ids
+                .first()
+                .and_then(|first| current_ids.iter().position(|id| id == first))
+            else {
+                continue;
+            };
+            let end = start + record.surface_ids.len();
+            if current_ids.get(start..end) == Some(record.surface_ids.as_slice()) {
+                spans.push(NativeContinuationSpan {
+                    start,
+                    end,
+                    fragment: record.fragment.clone(),
+                });
+            }
+        }
+        NativeContinuationProjection {
+            portable_prefix_len: self.portable_prefix_len.min(current_ids.len()),
+            spans,
+        }
+    }
 }
 
 /// Tracks which append events belong to the current turn.
@@ -247,6 +409,10 @@ impl ChatState {
         let initial_tokens = estimate_conversation_tokens(timeline.surface());
 
         Self {
+            continuation: ContinuationLane::new(
+                sampling_config.api_backend.clone(),
+                timeline.surface_len(),
+            ),
             timeline,
             sampling_config,
             projected_tokens: initial_tokens,

@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use acp_transport::protocol as acp;
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -303,7 +304,11 @@ fn validate_jsonl_entry_size(
 fn referenced_blob_keys(
     timeline: &chat_state::Timeline,
 ) -> std::io::Result<std::collections::BTreeSet<String>> {
-    let mut keys = std::collections::BTreeSet::new();
+    let mut keys: std::collections::BTreeSet<_> =
+        crate::session::sampling_evidence::referenced_hashes(timeline)?
+            .into_iter()
+            .map(|hash| format!("sampling/{hash}"))
+            .collect();
     for event in timeline.events() {
         match &event.kind {
             chat_state::TimelineEventKind::Messages(messages) => {
@@ -337,6 +342,7 @@ fn blob_path(dir: &Path, key: &str) -> Option<PathBuf> {
     }
     match kind {
         "prompt" => Some(dir.join("prompts").join(format!("{hash}.txt"))),
+        "sampling" => Some(dir.join("artifacts/sampling").join(format!("{hash}.bin"))),
         "subagent-output" => Some(
             dir.join("artifacts")
                 .join("subagent-output")
@@ -374,7 +380,11 @@ fn read_entity_blobs(
         let bytes = directory.read_bounded(
             file_name,
             "session immutable blob",
-            crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES,
+            if key.starts_with("sampling/") {
+                crate::session::sampling_evidence::CHUNK_BYTES as u64
+            } else {
+                crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES
+            },
         )?;
         let hash = key
             .rsplit_once('/')
@@ -388,12 +398,16 @@ fn read_entity_blobs(
             ));
         }
         let path = session.display_path().join(&relative);
-        let text = String::from_utf8(bytes).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("immutable blob is not UTF-8: {}", path.display()),
-            )
-        })?;
+        let text = if key.starts_with("sampling/") {
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        } else {
+            String::from_utf8(bytes).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("immutable blob is not UTF-8: {}", path.display()),
+                )
+            })?
+        };
         blobs.insert(key, text);
     }
     Ok(blobs)
@@ -427,13 +441,15 @@ fn validate_blobs_column(
             .rsplit_once('/')
             .map(|(_, hash)| hash)
             .unwrap_or_default();
+        let content = decode_blob(key, content)
+            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
         if content.len() as u64 > crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES {
             return Err(acp::Error::invalid_params().data(format!(
                 "blob {key} exceeds {} bytes",
                 crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES
             )));
         }
-        if blake3::hash(content.as_bytes()).to_hex().as_str() != hash {
+        if blake3::hash(&content).to_hex().as_str() != hash {
             return Err(acp::Error::invalid_params()
                 .data(format!("blob {key} does not match its content hash")));
         }
@@ -596,7 +612,7 @@ fn write_import_staging(
         crate::session::persistence::write_immutable_blob_to_directory(
             staging,
             &path,
-            content.as_bytes(),
+            &decode_blob(&key, &content)?,
         )?;
     }
     let updates = state
@@ -984,5 +1000,70 @@ mod tests {
             .expect_err("session import must not traverse a symlinked target");
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+    }
+}
+
+/// Sampling blobs may contain malformed UTF-8 from a provider. Base64 belongs
+/// only to the transport column; the immutable artifact hashes the raw bytes.
+fn decode_blob<'a>(key: &str, text: &'a str) -> std::io::Result<std::borrow::Cow<'a, [u8]>> {
+    if !key.starts_with("sampling/") {
+        return Ok(std::borrow::Cow::Borrowed(text.as_bytes()));
+    }
+    let limit = crate::session::sampling_evidence::CHUNK_BYTES as u64;
+    if text.len() as u64 > limit.div_ceil(3) * 4 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "encoded sampling blob exceeds limit",
+        ));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if bytes.len() as u64 > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "sampling blob exceeds limit",
+        ));
+    }
+    Ok(std::borrow::Cow::Owned(bytes))
+}
+
+#[cfg(test)]
+mod sampling_blob_tests {
+    use super::*;
+
+    #[test]
+    fn binary_sampling_evidence_round_trips_and_is_required() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory =
+            st::ContainedDirectory::open(temp.path(), Path::new(""), "test session", false)
+                .unwrap();
+        let raw = b"data: malformed \xff\x00\r\n";
+        let hash = blake3::hash(raw).to_hex().to_string();
+        let relative = Path::new("artifacts/sampling").join(format!("{hash}.bin"));
+        crate::session::persistence::write_immutable_blob_to_directory(&directory, &relative, raw)
+            .unwrap();
+        let mut timeline = chat_state::Timeline::default();
+        let event = timeline.prepare(chat_state::TimelineEventKind::Observation(chat_state::ObservationEvent {
+            scope: "sampling_evidence".into(), name: "response".into(), turn: None, step: None,
+            data: Some(json!({"owner": {"request_id": "request"}, "kind": "response", "metadata": {}, "chunks": [{"blake3": hash, "bytes": raw.len()}], "bytes": raw.len()})),
+        })).unwrap();
+        timeline.accept(event).unwrap();
+        crate::session::sampling_evidence::verify(&directory, &timeline).unwrap();
+        let blobs = read_entity_blobs(&directory, &timeline).unwrap();
+        let key = format!("sampling/{hash}");
+        assert_eq!(&*decode_blob(&key, &blobs[&key]).unwrap(), raw);
+        let state = std::collections::HashMap::from([(
+            BLOBS_COLUMN.into(),
+            serde_json::to_value(&blobs).unwrap(),
+        )]);
+        assert_eq!(validate_blobs_column(&state, &timeline).unwrap(), blobs);
+        let missing = std::collections::HashMap::from([(BLOBS_COLUMN.into(), json!({}))]);
+        assert!(validate_blobs_column(&missing, &timeline).is_err());
+        std::fs::write(temp.path().join(&relative), b"changed").unwrap();
+        assert!(crate::session::sampling_evidence::verify(&directory, &timeline).is_err());
+        assert!(read_entity_blobs(&directory, &timeline).is_err());
+        std::fs::remove_file(temp.path().join(&relative)).unwrap();
+        assert!(crate::session::sampling_evidence::verify(&directory, &timeline).is_err());
     }
 }

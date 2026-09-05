@@ -740,7 +740,11 @@ fn handle_session_notification_inner(
                     .subagent_sessions
                     .insert(child_session_id.clone(), incoming);
             }
-            if let Some(ref sid) = agent.session.session_id
+            // Replay hydration is batched by `restore_descendant_state` after
+            // load. Reading the same parent Timeline here would make resume
+            // O(child count × Timeline size).
+            if !meta.is_replay
+                && let Some(ref sid) = agent.session.session_id
                 && let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id)
             {
                 crate::app::subagent::enrich_from_timeline(

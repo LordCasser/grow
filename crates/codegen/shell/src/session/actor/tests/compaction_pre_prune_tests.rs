@@ -234,7 +234,7 @@ fn async_compaction_scenario(action: &'static str) {
             } else if action == "model" {
                 let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
                 config.context_window = std::num::NonZeroU64::new(110_000).unwrap();
-                actor.chat_state_handle.update_sampling_config(config);
+                actor.chat_state_handle.replace_sampling_route(config);
             } else if promotes {
                 if action == "timeout" { tokio::time::sleep(std::time::Duration::from_millis(1_200)).await; }
                 actor.chat_state_handle.push_user_message_durably(ConversationItem::user("late input ".repeat(4_000))).await.unwrap();
@@ -261,7 +261,7 @@ fn async_compaction_scenario(action: &'static str) {
                 } else if action == "promote_model" {
                     let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
                     config.context_window = std::num::NonZeroU64::new(110_000).unwrap();
-                    actor.chat_state_handle.update_sampling_config(config);
+                    actor.chat_state_handle.replace_sampling_route(config);
                 }
             }
             if action == "timeout" {
@@ -466,7 +466,7 @@ async fn actor_with_sampler_cw_ex(
     if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
         cfg.base_url = server.url();
         cfg.api_backend = api_backend.clone();
-        actor.chat_state_handle.update_sampling_config(cfg);
+        actor.chat_state_handle.replace_sampling_route(cfg);
     }
     let sampler_config = sampler::SamplerConfig {
         api_key: Some("test-key".to_string()),

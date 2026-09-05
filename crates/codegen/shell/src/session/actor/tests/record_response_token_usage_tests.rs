@@ -22,6 +22,7 @@ fn response_with_usage(total_tokens: u32) -> ConversationResponse {
         message_id: None,
         raw_stop_reason: None,
         stop_sequence: None,
+        native_continuation: None,
     }
 }
 
@@ -37,6 +38,7 @@ fn response_without_usage() -> ConversationResponse {
         message_id: None,
         raw_stop_reason: None,
         stop_sequence: None,
+        native_continuation: None,
     }
 }
 
@@ -49,13 +51,16 @@ async fn quarantined_response_is_billed_without_restoring_its_context_anchor() {
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor
                 .chat_state_handle
-                .push_response_durably(vec![ConversationItem::assistant_tool_calls(vec![
-                    sampling_types::ToolCall {
-                        id: "".into(),
-                        name: "".into(),
-                        arguments: "{}".into(),
-                    },
-                ])])
+                .push_response_durably(
+                    vec![ConversationItem::assistant_tool_calls(vec![
+                        sampling_types::ToolCall {
+                            id: "".into(),
+                            name: "".into(),
+                            arguments: "{}".into(),
+                        },
+                    ])],
+                    None,
+                )
                 .await
                 .unwrap();
             let repaired_tokens = actor.chat_state_handle.get_projected_tokens().await;

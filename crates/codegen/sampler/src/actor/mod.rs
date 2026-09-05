@@ -179,6 +179,7 @@ impl SamplerActor {
                 completion_tx,
                 scope_capture,
                 usage_sink,
+                evidence_sink,
             } => {
                 let cancel_token = CancellationToken::new();
                 let active = ActiveRequest {
@@ -205,6 +206,7 @@ impl SamplerActor {
                     completion_tx,
                     scope_capture,
                     usage_sink,
+                    evidence_sink,
                 ));
             }
             SamplerCommand::Cancel { request_id } => {

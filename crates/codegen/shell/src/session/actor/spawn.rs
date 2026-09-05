@@ -2788,6 +2788,7 @@ pub(crate) async fn spawn_session_actor(
                     reindex_storage.clone(),
                     index_config,
                     embed_dims,
+                    None,
                 )
                 .map_err(|error| error.to_string())?;
                 let files = reindex_storage
@@ -2836,6 +2837,7 @@ pub(crate) async fn spawn_session_actor(
                     storage.clone(),
                     embed_index_config,
                     embed_dims,
+                    endpoint.cache_identity(&embed_config).as_deref(),
                 ) {
                     Ok(index) => {
                         if let Some(provider) = endpoint.make_provider(&embed_config).await {

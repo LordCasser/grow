@@ -403,7 +403,14 @@ mod tests {
         let workspace = global.join("test_ws");
         let storage = MemoryStorage::with_paths(global, workspace);
         let db_path = tmp.path().join("test.sqlite");
-        MemoryIndex::open_or_create(&db_path, storage, MemoryIndexConfig::default(), 4).unwrap()
+        MemoryIndex::open_or_create(
+            &db_path,
+            storage,
+            MemoryIndexConfig::default(),
+            4,
+            Some("test"),
+        )
+        .unwrap()
     }
 
     #[tokio::test]

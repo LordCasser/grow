@@ -176,6 +176,7 @@ mod tests {
                 message_id: None,
                 raw_stop_reason: None,
                 stop_sequence: None,
+                native_continuation: None,
             }),
             metrics: InferenceLatencyStats::default(),
         };

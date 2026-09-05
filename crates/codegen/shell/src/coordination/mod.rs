@@ -2,7 +2,7 @@ mod inquiry;
 mod manifest;
 mod protocol;
 mod runtime;
-pub(crate) use inquiry::InquiryAudit;
+pub use inquiry::{InquiryAudit, InquiryEvent};
 
 pub use inquiry::{
     APPROVAL_TIMEOUT, CoordinationError, CoordinationErrorCode, INQUIRY_DEADLINE, InboundInquiry,

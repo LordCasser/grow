@@ -51,8 +51,14 @@ impl ChatStateActor {
             });
             if !already_present {
                 let item_tokens = super::state::estimate_item_tokens(&item);
-                let mut candidate = self.state.timeline.clone();
-                let event = candidate.append(item, MessageCause::MemoryContext)?;
+                let event = self
+                    .state
+                    .timeline
+                    .prepare(crate::TimelineEventKind::Messages(crate::MessageEvent {
+                        cause: MessageCause::MemoryContext,
+                        items: vec![item],
+                        surface: crate::SurfaceOp::Append,
+                    }))?;
                 self.commit_timeline_event(event).await?;
                 self.apply_projected_token_delta(0, item_tokens);
             }
@@ -60,9 +66,9 @@ impl ChatStateActor {
         let mut items = self.state.timeline.surface().to_vec();
         items = sampling_types::project_conversation_for_goal_scope(items, active_goal.as_ref());
 
-        // Measure the exact serialized body and evict only once it approaches
-        // the 50 MB ceiling. `conversation_body_bytes` is wire-accurate yet
-        // cheap — it skips the multi-MB base64 escape scan (see its docs) — so
+        // Measure the internal conversation body and evict as it approaches
+        // the 50 MB ceiling. The transport checks the final wire body after
+        // encoding. This estimate skips the multi-MB base64 escape scan, so
         // it runs inline on every turn with no blocking-thread offload.
         // Eviction rewrites earlier turns and busts the KV-cache prefix, so we
         // only pay it when the body is actually near the limit (the original
@@ -101,8 +107,40 @@ impl ChatStateActor {
             });
         }
 
+        let surface_ids = self.state.timeline.surface_ids().to_vec();
+        let projection_is_aligned = self
+            .state
+            .continuation
+            .reconcile_projection(&surface_ids, &items);
+        let native_continuation = Some(if projection_is_aligned {
+            self.state.continuation.request_projection(&surface_ids)
+        } else {
+            sampling_types::NativeContinuationProjection {
+                portable_prefix_len: items.len(),
+                spans: Vec::new(),
+            }
+        });
+        let epoch_nonce = self.state.continuation.epoch_nonce().to_owned();
+
         // Step 3: Assemble request
         let request = ConversationRequest {
+            source_projection: Some(serde_json::json!({
+                "timeline_id": timeline_id,
+                "source_seq": self.state.timeline.events().last().map(|event| event.seq.get()),
+                "surface_ids": surface_ids,
+                "active_goal": active_goal,
+                "image_budget": {
+                    "before_bytes": body_bytes,
+                    "trigger_bytes": IMAGE_COMPACT_TRIGGER_BYTES,
+                    "target_bytes": IMAGE_COMPACT_RECLAIM_TARGET_BYTES,
+                    "evicted_parts": eviction.as_ref().map(|value| &value.evicted_parts),
+                    "after_bytes": eviction.as_ref().map_or(body_bytes, |value| value.body_bytes_after),
+                },
+                "continuation_epoch": epoch_nonce,
+                "portable_prefix_len": native_continuation.as_ref().map(|value| value.portable_prefix_len),
+                "native_spans": native_continuation.as_ref().map(|value| value.spans.iter()
+                    .map(|span| [span.start, span.end]).collect::<Vec<_>>()),
+            })),
             items,
             tools: tool_definitions,
             tool_choice: None,
@@ -114,9 +152,11 @@ impl ChatStateActor {
                 timeline_id,
                 &self.state.timeline,
                 &self.state.sampling_config,
+                &epoch_nonce,
             )),
             reasoning_effort: self.state.sampling_config.reasoning_effort,
             json_output,
+            native_continuation,
         };
         let request_input_tokens = super::state::estimate_request_input_tokens(&request);
         self.apply_request_projection(request_input_tokens);
@@ -134,6 +174,7 @@ fn prompt_cache_key(
     timeline_id: &str,
     timeline: &crate::Timeline,
     sampling: &sampling_types::SamplingConfig,
+    epoch_nonce: &str,
 ) -> String {
     let branch_anchor = timeline
         .events()
@@ -159,6 +200,7 @@ fn prompt_cache_key(
         backend,
         sampling.base_url.as_str(),
         sampling.model.as_str(),
+        epoch_nonce,
     ] {
         hasher.update(component.as_bytes());
         hasher.update(&[0]);
@@ -181,7 +223,7 @@ const IMAGE_COMPACT_PLACEHOLDER: &str = "[An earlier image was removed to keep t
 /// (nginx `proxy-body-size`). Bodies larger than this are rejected with HTTP
 /// 413 — or a connection reset before the response is written. Inline image
 /// `data:` URLs (base64) are the dominant term in this size.
-const MAX_REQUEST_BYTES: usize = 50 * 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = sampling_types::MAX_REQUEST_BODY_BYTES;
 
 /// Evict old images once the serialized body reaches this size.
 ///
@@ -196,8 +238,8 @@ const MAX_REQUEST_BYTES: usize = 50 * 1024 * 1024;
 ///   wire format (the dominant base64 image bytes are identical in both).
 ///
 /// The uncounted remainder is only sub-MB to low-MB in practice, so 3 MB covers
-/// it without needlessly sacrificing image capacity. The sampler's reactive 413
-/// image-strip is the final backstop if this is ever under-estimated.
+/// it without needlessly sacrificing image capacity. Sampler rejects a final
+/// encoded body above the ceiling before sending it; it never rewrites images.
 ///
 /// Below this threshold every image stays in place so the KV-cache prefix is
 /// byte-stable across turns; eviction rewrites earlier turns and busts the
@@ -266,16 +308,29 @@ fn image_part_bytes(url: &str) -> usize {
     IMAGE_PART_FRAME_BYTES + url.len()
 }
 
+/// Both model-visible image carriers share the same budgeting policy.
+fn image_content(item: &ConversationItem) -> &[ContentPart] {
+    match item {
+        ConversationItem::User(user) => &user.content,
+        ConversationItem::ToolResult(result) => &result.images,
+        _ => &[],
+    }
+}
+
+fn image_content_mut(item: &mut ConversationItem) -> &mut [ContentPart] {
+    match item {
+        ConversationItem::User(user) => &mut user.content,
+        ConversationItem::ToolResult(result) => &mut result.images,
+        _ => &mut [],
+    }
+}
+
 /// Count of inline images in the conversation — for observability only.
 fn inline_image_count(conversation: &[ConversationItem]) -> usize {
     conversation
         .iter()
-        .filter_map(|item| match item {
-            ConversationItem::User(u) => Some(u),
-            _ => None,
-        })
-        .flat_map(|u| u.content.iter())
-        .filter(|p| matches!(p, ContentPart::Image { .. }))
+        .flat_map(image_content)
+        .filter(|part| matches!(part, ContentPart::Image { .. }))
         .count()
 }
 
@@ -284,13 +339,15 @@ fn inline_image_count(conversation: &[ConversationItem]) -> usize {
 pub(crate) struct ImageEvictionOutcome {
     /// Number of inline images replaced with the placeholder.
     pub evicted: usize,
+    /// Exact (Surface item index, content part index), before any wire lowering.
+    pub evicted_parts: Vec<(usize, usize)>,
     /// Estimated serialized body size after eviction (`current_bytes` minus the
     /// net bytes freed) — at or below `target_bytes` once enough images go.
     pub body_bytes_after: usize,
 }
 
-/// Exact serialized size of the conversation body — the figure the inference
-/// proxy weighs against its 50 MB limit — computed **without** scanning the
+/// Serialized size of the internal conversation body, leaving headroom for
+/// provider framing. Computed **without** scanning the
 /// multi-MB base64 image payloads.
 ///
 /// `serde_json` escape-scans every byte of every string, so encoding the real
@@ -307,12 +364,10 @@ fn conversation_body_bytes(conversation: &[ConversationItem]) -> usize {
     let mut blanked = conversation.to_vec();
     let mut image_url_bytes = 0usize;
     for item in &mut blanked {
-        if let ConversationItem::User(user) = item {
-            for part in &mut user.content {
-                if let ContentPart::Image { url } = part {
-                    image_url_bytes += url.len();
-                    *url = std::sync::Arc::<str>::from("");
-                }
+        for part in image_content_mut(item) {
+            if let ContentPart::Image { url } = part {
+                image_url_bytes += url.len();
+                *url = std::sync::Arc::<str>::from("");
             }
         }
     }
@@ -359,6 +414,7 @@ pub(crate) fn compact_images_to_byte_budget(
     if current_bytes <= target_bytes {
         return ImageEvictionOutcome {
             evicted: 0,
+            evicted_parts: Vec::new(),
             body_bytes_after: current_bytes,
         };
     }
@@ -375,11 +431,9 @@ pub(crate) fn compact_images_to_byte_budget(
     // image, oldest-first.
     let mut images: Vec<(usize, usize, usize)> = Vec::new();
     for (i, item) in conversation.iter().enumerate() {
-        if let ConversationItem::User(user) = item {
-            for (j, part) in user.content.iter().enumerate() {
-                if let ContentPart::Image { url } = part {
-                    images.push((i, j, image_part_bytes(url)));
-                }
+        for (j, part) in image_content(item).iter().enumerate() {
+            if let ContentPart::Image { url } = part {
+                images.push((i, j, image_part_bytes(url)));
             }
         }
     }
@@ -387,24 +441,27 @@ pub(crate) fn compact_images_to_byte_budget(
     // Evict oldest-first until the body fits again, keeping the newest images.
     let mut running = current_bytes;
     let mut evicted = 0usize;
+    let mut evicted_parts = Vec::new();
     for &(i, j, image_bytes) in &images {
         if running <= target_bytes {
             break;
         }
-        if let ConversationItem::User(user) = &mut conversation[i]
-            && let Some(part) = user.content.get_mut(j)
-        {
+        if let Some(part) = image_content_mut(&mut conversation[i]).get_mut(j) {
             *part = placeholder.clone();
             // Net body saving: the image part leaves, the placeholder takes its
             // slot. Everything else (siblings, commas, brackets) is untouched,
             // so this is the exact change in the serialized body size.
-            running = running.saturating_sub(image_bytes.saturating_sub(placeholder_bytes));
+            running = running
+                .saturating_sub(image_bytes)
+                .saturating_add(placeholder_bytes);
             evicted += 1;
+            evicted_parts.push((i, j));
         }
     }
 
     ImageEvictionOutcome {
         evicted,
+        evicted_parts,
         body_bytes_after: running,
     }
 }
@@ -412,6 +469,41 @@ pub(crate) fn compact_images_to_byte_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_image_carriers_share_count_eviction_and_byte_accounting() {
+        let tool = ConversationItem::tool_result_with_images(
+            "call",
+            "read image",
+            vec![ContentPart::Image {
+                url: format!("data:image/png;base64,{}", "A".repeat(TEST_IMG_BYTES)).into(),
+            }],
+        );
+        let mut items = vec![
+            tool.clone(),
+            user_with_image_of_bytes("newer", TEST_IMG_BYTES),
+        ];
+        let bytes = conversation_body_bytes(&items);
+        assert_eq!(inline_image_count(&items), 2);
+        assert_eq!(bytes, serde_json::to_vec(&items).unwrap().len());
+        let outcome = compact_images_to_byte_budget(&mut items, bytes, bytes - TEST_IMG_BYTES / 2);
+        assert_eq!(outcome.evicted, 1);
+        assert_eq!(
+            outcome.body_bytes_after,
+            serde_json::to_vec(&items).unwrap().len()
+        );
+        assert_eq!(inline_image_count(&items), 1);
+        let ConversationItem::ToolResult(result) = &items[0] else {
+            panic!()
+        };
+        assert_eq!(result.tool_call_id, "call");
+        assert_eq!(result.content.as_ref(), "read image");
+        assert!(matches!(&result.images[0], ContentPart::Text { .. }));
+        assert!(
+            super::super::state::estimate_item_tokens(&tool)
+                >= token_estimation::IMAGE_TOKEN_ESTIMATE
+        );
+    }
 
     // -- image size-gated compaction tests --
 
@@ -478,7 +570,8 @@ mod tests {
             user_with_image_of_bytes("newest", TEST_IMG_BYTES),
         ];
         // current 300k, target 250k: evicting the oldest (~100 KB) fits.
-        compact_images_to_byte_budget(&mut conv, 300_000, 250_000);
+        let outcome = compact_images_to_byte_budget(&mut conv, 300_000, 250_000);
+        assert_eq!(outcome.evicted_parts, vec![(0, 1)]);
         assert!(has_placeholder(&conv[0]), "oldest evicted");
         assert!(has_image(&conv[1]), "middle kept");
         assert!(has_image(&conv[2]), "newest kept");

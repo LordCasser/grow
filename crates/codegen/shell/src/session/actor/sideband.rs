@@ -28,6 +28,8 @@ pub(crate) enum SidebandRunError {
 }
 
 pub(crate) struct SidebandRun {
+    evidence_sink: Option<sampler::audit::EvidenceSink>,
+    evidence: Option<sampler::audit::AttemptEvidence>,
     background: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     timeline: chat_state::SidebandTimeline,
     persistence: NotificationSender,
@@ -174,6 +176,13 @@ impl SessionActor {
             },
         ))?;
         let mut run = SidebandRun {
+            evidence_sink: Some(crate::session::sampling_evidence::sink(
+                self.session_directory.clone(),
+                self.chat_state_handle.clone(),
+                serde_json::json!({"sideband_id": timeline.sideband_id()}),
+                None,
+            )),
+            evidence: None,
             background: None,
             timeline,
             persistence: self.notifications.clone(),
@@ -218,6 +227,30 @@ impl SessionActor {
 }
 
 impl SidebandRun {
+    async fn finish_evidence(
+        &mut self,
+        outcome: serde_json::Value,
+    ) -> Result<(), SidebandRunError> {
+        if let Some(evidence) = &self.evidence {
+            evidence.finish(outcome).await.map_err(|error| {
+                self.fail_stop
+                    .store(true, std::sync::atomic::Ordering::Release);
+                SidebandRunError::Persistence(error)
+            })?;
+            self.evidence = None;
+        }
+        Ok(())
+    }
+
+    fn usage_after_evidence_gate(&self, tokens: Option<i64>) -> Option<i64> {
+        tokens.or_else(|| {
+            self.evidence
+                .as_ref()
+                .filter(|evidence| !evidence.was_dispatched())
+                .map(|_| 0)
+        })
+    }
+
     /// Normalize one successful provider response. Goal accounting is applied
     /// by the root lifecycle mailbox so Goal mutation remains serialized with
     /// pause, edit, completion, and every other usage settlement.
@@ -241,7 +274,7 @@ impl SidebandRun {
             return Ok(());
         };
         self.goal_usage_window
-            .settle_attempt_via_root(attempt_id.clone(), tokens)
+            .settle_attempt_via_root(attempt_id.clone(), self.usage_after_evidence_gate(tokens))
             .await
             .map_err(SidebandRunError::Persistence)?;
         if self.admitted_attempt_id.as_deref() == Some(attempt_id.as_str()) {
@@ -254,7 +287,7 @@ impl SidebandRun {
         let attempt_id = self.admitted_attempt_id.clone()?;
         if !self
             .goal_usage_window
-            .claim_attempt_settlement(&attempt_id, tokens)
+            .claim_attempt_settlement(&attempt_id, self.usage_after_evidence_gate(tokens))
         {
             self.admitted_attempt_id = None;
             return None;
@@ -309,6 +342,8 @@ impl SidebandRun {
         strategy: &str,
         feedback: Option<String>,
     ) -> Result<(), SidebandRunError> {
+        self.finish_evidence(serde_json::json!({"discarded": true, "retry_feedback": feedback}))
+            .await?;
         if !request.tools.is_empty() || request.tool_choice.is_some() {
             let error = chat_state::SidebandError::ToolCapabilityForbidden;
             self.append(chat_state::SidebandEventKind::End(
@@ -366,6 +401,13 @@ impl SidebandRun {
         self.goal_usage_window
             .wait_for_owner_settlements_through(&self.usage_owner_id, self.usage_epoch)
             .await;
+        let evidence = self.evidence_sink.as_ref().map(|sink| {
+            let sink = sink.clone();
+            sampler::audit::AttemptEvidence::new(std::sync::Arc::new(move |mut evidence| {
+                evidence.metadata["sideband_attempt"] = serde_json::json!(attempt_no);
+                sink(evidence)
+            }))
+        });
         let result = self
             .append(chat_state::SidebandEventKind::Attempt(
                 chat_state::SidebandAttempt {
@@ -386,6 +428,9 @@ impl SidebandRun {
                 },
             ))
             .await;
+        if result.is_ok() {
+            self.evidence = evidence;
+        }
         result
     }
 
@@ -405,7 +450,10 @@ impl SidebandRun {
             _ = cancellation.cancelled() => Err(SidebandRunError::Cancelled),
             output = async {
                 self.provider_attempt_started().await?;
-                Ok(provider.await)
+                Ok(match &self.evidence {
+                    Some(evidence) => evidence.scope(provider).await,
+                    None => provider.await,
+                })
             } => output,
         };
         if let Some(id) = &self.admitted_attempt_id {
@@ -457,6 +505,8 @@ impl SidebandRun {
         finish: String,
         evidence_refs: Vec<chat_state::TimelineRangeRef>,
     ) -> Result<chat_state::TimelineRangeRef, SidebandRunError> {
+        self.finish_evidence(serde_json::json!({"accepted": true, "finish": finish}))
+            .await?;
         let attempt_seq = self
             .timeline
             .events()
@@ -514,6 +564,8 @@ impl SidebandRun {
     ) -> Result<chat_state::TimelineRangeRef, SidebandRunError> {
         debug_assert_ne!(outcome, chat_state::SidebandOutcome::Completed);
         let error = error.into();
+        self.finish_evidence(serde_json::json!({"failed": true, "error": error}))
+            .await?;
         let error = crate::util::truncate(error.trim(), 2_000).to_string();
         let terminal_seq = self.timeline.events().len() as u64;
         self.append(chat_state::SidebandEventKind::End(
@@ -622,7 +674,7 @@ impl Drop for SidebandRun {
     fn drop(&mut self) {
         if let Some(attempt_id) = self.admitted_attempt_id.take() {
             self.goal_usage_window
-                .settle_attempt_detached(attempt_id, None);
+                .settle_attempt_detached(attempt_id, self.usage_after_evidence_gate(None));
         }
         if self.timeline.is_ended() {
             return;
@@ -640,6 +692,8 @@ impl Drop for SidebandRun {
         let pending = self.pending.take();
         let persistence = self.persistence.clone();
         let cancellation = self.repair_cancellation.clone();
+        let evidence = self.evidence.take();
+        let fail_stop = self.fail_stop.clone();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             tracing::error!(
                 sideband_id = %timeline.sideband_id(),
@@ -649,6 +703,16 @@ impl Drop for SidebandRun {
         };
         runtime.spawn(async move {
             let _activity = activity;
+            if let Some(evidence) = evidence {
+                if let Err(error) = evidence
+                    .finish(serde_json::json!({"cancelled": true}))
+                    .await
+                {
+                    fail_stop.store(true, std::sync::atomic::Ordering::Release);
+                    tracing::error!(%error, "failed to persist interrupted Sideband evidence");
+                    return;
+                }
+            }
             // The foreground future may have been aborted after enqueueing an
             // immutable event but before receiving its acknowledgement. Replay
             // that exact event first; persistence deduplicates it by identity.
@@ -817,6 +881,8 @@ mod tests {
         let (goal_tx, _goal_rx) = tokio::sync::mpsc::unbounded_channel();
         (
             SidebandRun {
+                evidence_sink: None,
+                evidence: None,
                 background: None,
                 timeline,
                 persistence,
@@ -871,6 +937,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         }
     }
 
@@ -936,6 +1003,48 @@ mod tests {
             }
         });
         window
+    }
+
+    #[tokio::test]
+    async fn sideband_retry_waits_for_evidence_and_fails_closed_on_lost_ack() {
+        let (mut run, mut persistence_rx) = test_run();
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<()>();
+        let ack = std::sync::Arc::new(std::sync::Mutex::new(Some(ack_rx)));
+        run.evidence = Some(sampler::audit::AttemptEvidence::new(std::sync::Arc::new(
+            move |record| {
+                let entered = entered_tx.clone();
+                let ack = ack.lock().unwrap().take();
+                Box::pin(async move {
+                    entered.send(record.kind).unwrap();
+                    match ack {
+                        Some(ack) => ack.await.map_err(|_| "lost evidence ACK".into()),
+                        None => Err("lost evidence ACK".into()),
+                    }
+                })
+            },
+        )));
+        let request = provider_request();
+        let mut retry = Box::pin(run.attempt_all_sources(
+            &request,
+            sampling_types::ApiBackend::Responses,
+            Some("discarded response".into()),
+        ));
+        tokio::select! {
+            _ = &mut retry => panic!("retry passed the evidence barrier"),
+            entered = entered_rx.recv() => assert_eq!(entered, Some("response")),
+        }
+        assert!(
+            persistence_rx.try_recv().is_err(),
+            "next Sideband attempt must not commit before evidence"
+        );
+        drop(ack_tx);
+        assert!(matches!(retry.await, Err(SidebandRunError::Persistence(_))));
+        assert!(run.fail_stop.load(std::sync::atomic::Ordering::Acquire));
+        assert!(persistence_rx.try_recv().is_err());
+        // No provider attempt belongs to this fixture; avoid scheduling its
+        // unrelated interrupted terminal after the assertion scope ends.
+        run.cancellation.cancel();
     }
 
     #[tokio::test]

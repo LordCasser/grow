@@ -168,6 +168,7 @@ pub struct SamplingErrorInfo {
 /// its own terminal context-exhaustion classification only after recovery.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SamplingErrorKind {
+    Persistence,
     Auth,
     Http,
     Api,
@@ -187,6 +188,7 @@ impl SamplingErrorKind {
     pub fn as_str(self) -> &'static str {
         match self {
             SamplingErrorKind::Auth => "auth",
+            SamplingErrorKind::Persistence => "persistence",
             SamplingErrorKind::Http => "http",
             SamplingErrorKind::Api => "api",
             SamplingErrorKind::Serialization => "serialization",
@@ -206,6 +208,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
         let (kind, status_code, retry_after_secs, model_metadata) = match err {
             SamplingError::Auth { .. } => (SamplingErrorKind::Auth, None, None, None),
             SamplingError::InvalidConfiguration(_) => (SamplingErrorKind::Api, None, None, None),
+            SamplingError::Persistence(_) => (SamplingErrorKind::Persistence, None, None, None),
             SamplingError::Http(_) => (SamplingErrorKind::Http, None, None, None),
             SamplingError::Serialization(_) => (SamplingErrorKind::Serialization, None, None, None),
             SamplingError::Api {
@@ -272,6 +275,12 @@ impl From<&SamplingError> for SamplingErrorInfo {
 /// crossed the serializable `SamplingErrorInfo` boundary.
 pub(crate) fn sampling_error_from_info(info: &SamplingErrorInfo) -> SamplingError {
     match info.kind {
+        SamplingErrorKind::Persistence => SamplingError::Persistence(
+            info.message
+                .strip_prefix("attempt persistence failed: ")
+                .unwrap_or(&info.message)
+                .to_owned(),
+        ),
         SamplingErrorKind::IdleTimeout => SamplingError::IdleTimeout {
             elapsed_secs: info
                 .message
@@ -524,4 +533,20 @@ mod tests {
         assert!(!info.is_retryable);
         assert!(info.message.contains("300s"));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn persistence_failure_stays_non_retryable_across_event_transport() {
+    let original = SamplingError::Persistence("writer ACK lost".into());
+    let info = SamplingErrorInfo::from(&original);
+    assert_eq!(info.kind, SamplingErrorKind::Persistence);
+    assert!(!info.is_retryable);
+    let restored = sampling_error_from_info(&info);
+    assert_eq!(restored.to_string(), original.to_string());
+    assert!(!restored.is_retryable());
+    assert!(matches!(
+        crate::retry::classify_error(&restored, 0, 5, 5),
+        crate::retry::RetryDecision::Fatal(SamplingError::Persistence(_))
+    ));
 }

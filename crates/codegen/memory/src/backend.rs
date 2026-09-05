@@ -48,6 +48,12 @@ pub struct MemoryBackendParams {
 }
 
 impl MemoryBackendParams {
+    pub fn embedding_cache_identity(&self) -> Option<String> {
+        self.embedding_endpoint
+            .as_ref()?
+            .cache_identity(self.embed_config.as_ref()?)
+    }
+
     /// Async because command-backed BYOK providers resolve per request.
     pub async fn make_embedding_provider(&self) -> Option<super::embedding::ApiEmbeddingProvider> {
         let config = self.embed_config.as_ref()?;
@@ -212,11 +218,16 @@ impl MemoryBackend for MemoryBackendImpl {
         // structured into sync phases (borrow &index) and async phases
         // (no &index borrow) to satisfy this constraint.
         let embed_dims = self.embed_config.as_ref().map_or(1024, |ec| ec.dimensions);
+        let identity = self
+            .embedding_endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.cache_identity(self.embed_config.as_ref()?));
         let mut index = super::index::MemoryIndex::open_or_create(
             &self.db_path,
             self.storage.clone(),
             config_types::MemoryIndexConfig::default(),
             embed_dims,
+            identity.as_deref(),
         )
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             Box::new(std::io::Error::other(e.to_string()))
@@ -258,10 +269,15 @@ impl MemoryBackend for MemoryBackendImpl {
                     }
                 }
             }
-            if dirty_count > 0 {
-                reindex_chunks = index.chunks_without_embeddings().unwrap_or_default();
-            }
             watcher_sync_stats = Some((dirty_count, changed_chunk_count, sync_start));
+        }
+
+        // A new vector space needs backfill even when no Markdown changed.
+        if index.vec_available()
+            && (needs_release || index.try_claim_reindex(self.stale_claim_secs))
+        {
+            needs_release = true;
+            reindex_chunks = index.chunks_without_embeddings().unwrap_or_default();
         }
 
         // ── Async phase: embed missing chunks (no &index borrow) ──
@@ -290,9 +306,10 @@ impl MemoryBackend for MemoryBackendImpl {
             }
             // Sync: upsert embeddings back (borrows &index, no await)
             for (chunk_id, emb) in &upserts {
-                let _ = index.upsert_embedding(chunk_id, emb);
+                if index.upsert_embedding(chunk_id, emb).is_ok() {
+                    embedded_count += 1;
+                }
             }
-            embedded_count = upserts.len();
         }
         if needs_release {
             index.release_claim();
@@ -494,6 +511,7 @@ mod factory_tests {
             storage.clone(),
             config_types::MemoryIndexConfig::default(),
             4,
+            Some("test"),
         )
         .unwrap();
         let file = tmp.path().join("note.md");
@@ -544,6 +562,7 @@ mod factory_tests {
             storage.clone(),
             config_types::MemoryIndexConfig::default(),
             4,
+            Some("test"),
         )
         .unwrap();
         for i in 0..10 {
@@ -758,6 +777,7 @@ mod factory_tests {
             storage.clone(),
             config_types::MemoryIndexConfig::default(),
             4,
+            Some("test"),
         )
         .unwrap();
         let f = tmp.path().join("note.md");
@@ -792,6 +812,7 @@ mod factory_tests {
             storage.clone(),
             config_types::MemoryIndexConfig::default(),
             4,
+            Some("test"),
         )
         .unwrap();
         let f = tmp.path().join("note.md");
@@ -836,6 +857,7 @@ mod factory_tests {
             storage.clone(),
             config_types::MemoryIndexConfig::default(),
             4,
+            Some("test"),
         )
         .unwrap();
         let f = tmp.path().join("note.md");
@@ -965,6 +987,7 @@ mod factory_tests {
                 storage.clone(),
                 config_types::MemoryIndexConfig::default(),
                 4,
+                Some("test"),
             )
             .unwrap();
             // Index with the canonical path so DB key matches watcher event paths.
@@ -1127,15 +1150,116 @@ mod tests {
         let storage = MemoryStorage::with_paths(global, workspace);
         let db_path = tmp.path().join("test.sqlite");
 
-        let mut idx =
-            MemoryIndex::open_or_create(&db_path, storage.clone(), MemoryIndexConfig::default(), 4)
-                .unwrap();
+        let mut idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            MemoryIndexConfig::default(),
+            4,
+            Some("test"),
+        )
+        .unwrap();
 
         let file_path = tmp.path().join("test.md");
         std::fs::write(&file_path, "# Guide\n\nRust programming tutorial.").unwrap();
         idx.reindex_file(&file_path, "workspace").unwrap();
 
         (db_path, storage)
+    }
+
+    #[tokio::test]
+    async fn model_switch_backfills_unchanged_chunks_without_a_watcher() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let tmp = TempDir::new().unwrap();
+        let (db_path, storage) = setup_index(&tmp);
+        let old = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            MemoryIndexConfig::default(),
+            4,
+            Some("test"),
+        )
+        .unwrap();
+        let id = old.chunks_without_embeddings().unwrap()[0].0.clone();
+        old.upsert_embedding(&id, &[0., 1., 0., 0.]).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = EmbeddingEndpoint::from_static(
+            &format!("http://{}/v1", listener.local_addr().unwrap()),
+            "test-key".into(),
+        )
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let mut payloads = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let (start, len) = loop {
+                    let mut bytes = [0u8; 4096];
+                    let n = stream.read(&mut bytes).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&bytes[..n]);
+                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        let len = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .unwrap()
+                            .trim()
+                            .parse::<usize>()
+                            .unwrap();
+                        break (end + 4, len);
+                    }
+                };
+                while request.len() < start + len {
+                    let mut bytes = [0u8; 4096];
+                    let n = stream.read(&mut bytes).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&bytes[..n]);
+                }
+                payloads.push(
+                    serde_json::from_slice::<serde_json::Value>(&request[start..start + len])
+                        .unwrap(),
+                );
+                let body = r#"{"data":[{"embedding":[1,0,0,0]}]}"#;
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+            payloads
+        });
+        let config = config_types::MemoryEmbeddingConfig {
+            model: Some("model-b".into()),
+            dimensions: 4,
+            ..Default::default()
+        };
+        let backend = MemoryBackendImpl::new(db_path.clone(), storage.clone())
+            .with_embedding(config.clone(), endpoint.clone());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            backend.search("Rust", 5, 0.),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let requests = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(requests[0]["model"], "model-b");
+        assert!(
+            requests[0]["input"][0]
+                .as_str()
+                .unwrap()
+                .contains("programming tutorial")
+        );
+        assert_eq!(requests[1]["input"][0], "Rust");
+        let current = MemoryIndex::open_or_create(
+            &db_path,
+            storage,
+            MemoryIndexConfig::default(),
+            4,
+            endpoint.cache_identity(&config).as_deref(),
+        )
+        .unwrap();
+        assert!(current.chunks_without_embeddings().unwrap().is_empty());
+        assert!(old.vector_search(&[0., 1., 0., 0.], 1).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1230,9 +1354,14 @@ mod tests {
         let storage = MemoryStorage::with_paths(global, workspace);
         let db_path = storage.workspace_dir().join("index.sqlite");
 
-        let mut idx =
-            MemoryIndex::open_or_create(&db_path, storage.clone(), MemoryIndexConfig::default(), 4)
-                .unwrap();
+        let mut idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            MemoryIndexConfig::default(),
+            4,
+            Some("test"),
+        )
+        .unwrap();
 
         // Index global + workspace with matching content.
         let global_file = tmp.path().join("global_mem.md");
@@ -1322,6 +1451,7 @@ mod index_embedding_tests {
             storage,
             config_types::MemoryIndexConfig::default(),
             4,
+            Some("test"),
         )
         .unwrap();
 

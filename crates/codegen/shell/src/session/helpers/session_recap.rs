@@ -535,16 +535,9 @@ mod tests {
     }
 
     fn mk_reasoning(id: &str) -> ConversationItem {
-        use crate::sampling::rs;
-        ConversationItem::Reasoning(rs::ReasoningItem {
-            id: Some(id.to_string()),
-            summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                text: format!("secret thinking {id}"),
-            })],
-            content: None,
-            encrypted_content: None,
-            status: None,
-        })
+        ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(format!(
+            "secret thinking {id}"
+        )))
     }
 
     fn mk_tool_call(id: &str, args: &str) -> sampling_types::ToolCall {

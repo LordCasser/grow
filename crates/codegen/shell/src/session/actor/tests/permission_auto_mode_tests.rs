@@ -225,7 +225,7 @@ async fn live_child_judge_receives_primary_context_without_chat_state_pollution(
             config.base_url = server.url();
             config.api_backend = sampling_types::ApiBackend::Responses;
             config.reasoning_effort = Some(sampling_types::ReasoningEffort::Max);
-            actor.chat_state_handle.update_sampling_config(config);
+            actor.chat_state_handle.replace_sampling_route(config);
             let mut trusted_user =
                 super::ConversationItem::user(format!("implement {PRIMARY_MARKER}"));
             trusted_user.set_prompt_index(0);
@@ -369,7 +369,7 @@ async fn chat_child_judge_retries_empty_invalid_and_transient_responses_once() {
                 let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
                 config.base_url = server.url();
                 config.api_backend = sampling_types::ApiBackend::ChatCompletions;
-                actor.chat_state_handle.update_sampling_config(config);
+                actor.chat_state_handle.replace_sampling_route(config);
                 let mut trusted_user =
                     super::ConversationItem::user(format!("implement {PRIMARY_MARKER}"));
                 trusted_user.set_prompt_index(0);

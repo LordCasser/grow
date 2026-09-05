@@ -79,8 +79,8 @@ fn decode_tagged_event<T: serde::de::DeserializeOwned>(data: &str) -> Result<Opt
                 && !envelope.kind.trim().is_empty()
                 && is_unknown_event_type::<T>(&envelope.kind)
             {
-                // Full frames belong only in the opt-in sampling log. Custom
-                // frames make no progress and never reach the L2 idle timer.
+                // Raw attempt evidence retains these frames before decoding.
+                // Custom frames make no progress and never reach the L2 idle timer.
                 return Ok(None);
             }
             Err(SamplingError::Serialization(error))
@@ -526,6 +526,27 @@ fn auth_rejected(message: String, sent_bearer: Option<&str>) -> SamplingError {
     }
 }
 
+/// Validate the already encoded body without serializing or copying it again.
+fn check_request_body_size(request: &reqwest::Request) -> Result<()> {
+    let bytes = request
+        .body()
+        .and_then(reqwest::Body::as_bytes)
+        .map_or(0, <[u8]>::len);
+    if bytes > sampling_types::MAX_REQUEST_BODY_BYTES {
+        return Err(SamplingError::Api {
+            status: reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            message: format!(
+                "Request rejected locally: encoded body is {bytes} bytes, limit is {} bytes",
+                sampling_types::MAX_REQUEST_BODY_BYTES
+            ),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: Some(false),
+        });
+    }
+    Ok(())
+}
+
 // =============================================================================
 // SamplingClient
 // =============================================================================
@@ -649,6 +670,35 @@ impl SamplingClient {
             endpoint,
             idle_timeout: std::time::Duration::from_secs(config.idle_timeout_secs.unwrap_or(300)),
         })
+    }
+
+    /// Validate the encoded body and await its owner's evidence barrier.
+    async fn check_and_record_request(&self, request: &reqwest::Request) -> Result<()> {
+        check_request_body_size(request)?;
+        if let Some(audit) = crate::audit::AttemptEvidence::current() {
+            audit
+                .request(
+                    request
+                        .body()
+                        .and_then(reqwest::Body::as_bytes)
+                        .unwrap_or_default(),
+                    self.api_backend(),
+                    {
+                        let mut route = request.url().clone();
+                        let _ = route.set_username("");
+                        let _ = route.set_password(None);
+                        route.set_query(None);
+                        route.set_fragment(None);
+                        route.to_string()
+                    },
+                )
+                .await
+                .map_err(SamplingError::Persistence)?;
+            // No await separates this return from the execute future's first
+            // poll in any of the six dispatch paths.
+            audit.mark_dispatched();
+        }
+        Ok(())
     }
 
     /// The configured API backend for this client.
@@ -842,10 +892,13 @@ impl SamplingClient {
         sent_bearer: Option<&str>,
     ) -> Result<ChatCompletionResponse> {
         let status = response.status();
+        if let Some(audit) = crate::audit::AttemptEvidence::current() {
+            audit.status(status.as_u16());
+        }
         let model_metadata = extract_model_metadata(response.headers());
         let retry_after_secs = extract_retry_after(response.headers());
         let should_retry = extract_should_retry(response.headers());
-        let bytes = response.bytes().await?;
+        let bytes = read_response_bytes(response).await?;
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -904,7 +957,9 @@ impl SamplingClient {
         } = self.post(self.endpoint("chat/completions"));
         let http_request = builder.json(&payload);
 
-        let response = http_request.send().await.map_err(|e| {
+        let built_request = http_request.build()?;
+        self.check_and_record_request(&built_request).await?;
+        let response = self.http.execute(built_request).await.map_err(|e| {
             // Log at debug level; errors are surfaced to the caller.
             tracing::debug!("HTTP request failed: {}", e);
             e
@@ -965,7 +1020,7 @@ impl SamplingClient {
             "Sending chat/completions request"
         );
         Self::log_request_headers(&built_request, "chat/completions");
-
+        self.check_and_record_request(&built_request).await?;
         let response = self.http.execute(built_request).await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
             record_stream_request_failure(&e);
@@ -973,6 +1028,9 @@ impl SamplingClient {
         })?;
 
         let status = response.status();
+        if let Some(audit) = crate::audit::AttemptEvidence::current() {
+            audit.status(status.as_u16());
+        }
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
@@ -987,7 +1045,7 @@ impl SamplingClient {
                     sent_bearer.as_deref(),
                 );
                 let endpoint = self.endpoint("chat/completions");
-                let body = response.bytes().await.unwrap_or_default();
+                let body = read_response_bytes(response).await?;
                 let server_message = user_facing_api_error_message(status, body.as_ref());
                 return Err(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
@@ -995,7 +1053,7 @@ impl SamplingClient {
                 ));
             }
 
-            let bytes = response.bytes().await?;
+            let bytes = read_response_bytes(response).await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
             span.record("error", message.as_str());
             tracing::error!(
@@ -1017,15 +1075,19 @@ impl SamplingClient {
         // Strip UTF-8 BOM if present: eventsource-stream 0.2.3 incorrectly slices BOM at byte 1 instead of 3.
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
         let mut is_first = true;
+        let audit = crate::audit::AttemptEvidence::current();
         let byte_stream = response.bytes_stream().map(move |result| {
-            result.map(|bytes| {
+            result.map_err(|error| error.to_string()).and_then(|bytes| {
+                if let Some(audit) = &audit {
+                    audit.response(&bytes)?;
+                }
                 if is_first {
                     is_first = false;
                     if bytes.starts_with(UTF8_BOM) {
-                        return bytes.slice(UTF8_BOM.len()..);
+                        return Ok(bytes.slice(UTF8_BOM.len()..));
                     }
                 }
-                bytes
+                Ok(bytes)
             })
         });
 
@@ -1126,8 +1188,11 @@ impl SamplingClient {
         self.apply_response_defaults(&mut request)?;
         let model_id = request.inner.model.clone().unwrap_or_default();
 
-        tracing::debug!("create_response: {:?}", &request);
-        tracing::debug!("endpoint: {:?}", self.endpoint("responses"));
+        tracing::debug!(
+            model_id = %model_id,
+            endpoint = %self.endpoint("responses"),
+            "Sending responses API request"
+        );
 
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
             tracing::error!("Failed to serialize responses request: {}", e);
@@ -1144,16 +1209,21 @@ impl SamplingClient {
         } = self.post(self.endpoint("responses"));
         let http_request = builder.json(&request_body);
 
-        let response = http_request.send().await.map_err(|e| {
+        let built_request = http_request.build()?;
+        self.check_and_record_request(&built_request).await?;
+        let response = self.http.execute(built_request).await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
             e
         })?;
 
         let status = response.status();
+        if let Some(audit) = crate::audit::AttemptEvidence::current() {
+            audit.status(status.as_u16());
+        }
         let model_metadata = extract_model_metadata(response.headers());
         let retry_after_secs = extract_retry_after(response.headers());
         let should_retry = extract_should_retry(response.headers());
-        let bytes = response.bytes().await?;
+        let bytes = read_response_bytes(response).await?;
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -1285,6 +1355,7 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "responses");
 
+        self.check_and_record_request(&built_request).await?;
         let response = self.http.execute(built_request).await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
             record_stream_request_failure(&e);
@@ -1292,6 +1363,9 @@ impl SamplingClient {
         })?;
 
         let status = response.status();
+        if let Some(audit) = crate::audit::AttemptEvidence::current() {
+            audit.status(status.as_u16());
+        }
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
@@ -1303,7 +1377,7 @@ impl SamplingClient {
                     sent_bearer.as_deref(),
                 );
                 let endpoint = self.endpoint("responses");
-                let body = response.bytes().await.unwrap_or_default();
+                let body = read_response_bytes(response).await?;
                 let server_message = user_facing_api_error_message(status, body.as_ref());
                 return Err(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
@@ -1313,7 +1387,7 @@ impl SamplingClient {
             let model_metadata = extract_model_metadata(response.headers());
             let retry_after_secs = extract_retry_after(response.headers());
             let should_retry = extract_should_retry(response.headers());
-            let bytes = response.bytes().await?;
+            let bytes = read_response_bytes(response).await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
             span.record("error", message.as_str());
             tracing::error!(
@@ -1337,15 +1411,19 @@ impl SamplingClient {
         // Strip UTF-8 BOM if present
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
         let mut is_first = true;
+        let audit = crate::audit::AttemptEvidence::current();
         let byte_stream = response.bytes_stream().map(move |result| {
-            result.map(|bytes| {
+            result.map_err(|error| error.to_string()).and_then(|bytes| {
+                if let Some(audit) = &audit {
+                    audit.response(&bytes)?;
+                }
                 if is_first {
                     is_first = false;
                     if bytes.starts_with(UTF8_BOM) {
-                        return bytes.slice(UTF8_BOM.len()..);
+                        return Ok(bytes.slice(UTF8_BOM.len()..));
                     }
                 }
-                bytes
+                Ok(bytes)
             })
         });
 
@@ -1446,8 +1524,11 @@ impl SamplingClient {
         self.apply_message_defaults(&mut request)?;
         let model_id = request.model.clone();
 
-        tracing::debug!("create_message: {:?}", &request);
-        tracing::debug!("endpoint: {:?}", self.endpoint("messages"));
+        tracing::debug!(
+            model_id = %model_id,
+            endpoint = %self.endpoint("messages"),
+            "Sending messages API request"
+        );
 
         let SentRequest {
             builder,
@@ -1455,16 +1536,21 @@ impl SamplingClient {
         } = self.post(self.endpoint("messages"));
         let http_request = builder.json(&request);
 
-        let response = http_request.send().await.map_err(|e| {
+        let built_request = http_request.build()?;
+        self.check_and_record_request(&built_request).await?;
+        let response = self.http.execute(built_request).await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
             e
         })?;
 
         let status = response.status();
+        if let Some(audit) = crate::audit::AttemptEvidence::current() {
+            audit.status(status.as_u16());
+        }
         let model_metadata = extract_model_metadata(response.headers());
         let retry_after_secs = extract_retry_after(response.headers());
         let should_retry = extract_should_retry(response.headers());
-        let bytes = response.bytes().await?;
+        let bytes = read_response_bytes(response).await?;
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -1567,6 +1653,7 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "messages");
 
+        self.check_and_record_request(&built_request).await?;
         let response = self.http.execute(built_request).await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
             record_stream_request_failure(&e);
@@ -1574,6 +1661,9 @@ impl SamplingClient {
         })?;
 
         let status = response.status();
+        if let Some(audit) = crate::audit::AttemptEvidence::current() {
+            audit.status(status.as_u16());
+        }
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
@@ -1585,7 +1675,7 @@ impl SamplingClient {
                     sent_bearer.as_deref(),
                 );
                 let endpoint = self.endpoint("messages");
-                let body = response.bytes().await.unwrap_or_default();
+                let body = read_response_bytes(response).await?;
                 let server_message = user_facing_api_error_message(status, body.as_ref());
                 return Err(auth_rejected(
                     format!("Unauthorized (401) from {endpoint}: {server_message}"),
@@ -1595,7 +1685,7 @@ impl SamplingClient {
             let model_metadata = extract_model_metadata(response.headers());
             let retry_after_secs = extract_retry_after(response.headers());
             let should_retry = extract_should_retry(response.headers());
-            let bytes = response.bytes().await?;
+            let bytes = read_response_bytes(response).await?;
             let message = user_facing_api_error_message(status, bytes.as_ref());
             span.record("error", message.as_str());
             tracing::error!(
@@ -1619,15 +1709,19 @@ impl SamplingClient {
         // Strip UTF-8 BOM if present
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
         let mut is_first = true;
+        let audit = crate::audit::AttemptEvidence::current();
         let byte_stream = response.bytes_stream().map(move |result| {
-            result.map(|bytes| {
+            result.map_err(|error| error.to_string()).and_then(|bytes| {
+                if let Some(audit) = &audit {
+                    audit.response(&bytes)?;
+                }
                 if is_first {
                     is_first = false;
                     if bytes.starts_with(UTF8_BOM) {
-                        return bytes.slice(UTF8_BOM.len()..);
+                        return Ok(bytes.slice(UTF8_BOM.len()..));
                     }
                 }
-                bytes
+                Ok(bytes)
             })
         });
 
@@ -1864,6 +1958,31 @@ mod tests {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
         }
+    }
+
+    #[test]
+    fn encoded_request_size_is_checked_before_dispatch() {
+        let client = reqwest::Client::new();
+        let at_limit = client
+            .post("http://localhost/")
+            .body(vec![b'a'; sampling_types::MAX_REQUEST_BODY_BYTES])
+            .build()
+            .unwrap();
+        assert!(check_request_body_size(&at_limit).is_ok());
+        let oversized = client
+            .post("http://localhost/")
+            .body(vec![b'a'; sampling_types::MAX_REQUEST_BODY_BYTES + 1])
+            .build()
+            .unwrap();
+        let error = check_request_body_size(&oversized).unwrap_err();
+        assert!(error.is_retry_vetoed());
+        assert!(matches!(
+            error,
+            SamplingError::Api {
+                status: reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2803,4 +2922,21 @@ mod tests {
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
         ));
     }
+}
+
+// Audit capture bounds error and non-streaming response reads as well as SSE.
+async fn read_response_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
+    let Some(audit) = crate::audit::AttemptEvidence::current() else {
+        return Ok(response.bytes().await?.to_vec());
+    };
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        audit
+            .response(&chunk)
+            .map_err(SamplingError::EventStreamError)?;
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }

@@ -603,6 +603,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                 call.status = Some(rs::OutputStatus::Completed);
             }
         }
+        let native_continuation = Some(sampling_types::responses_native_fragment(&response));
         let mut items = match sampling_types::response_to_conversation_items(response) {
             Ok(items) => items,
             Err(err) => {
@@ -658,6 +659,7 @@ pub(crate) fn stream_responses_tracked<'a>(
             message_id: None,   // no provider message id on the Responses API
             raw_stop_reason: Some(raw_stop_reason),
             stop_sequence: None,
+            native_continuation,
         };
 
         yield SamplingEvent::Completed {

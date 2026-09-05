@@ -30,6 +30,7 @@ pub(crate) enum SamplerCommand {
         completion_tx: Option<oneshot::Sender<crate::actor::request_task::CompletionResult>>,
         scope_capture: Option<crate::handle::AttemptScopeCapture>,
         usage_sink: Option<crate::handle::AttemptUsageSink>,
+        evidence_sink: Option<crate::audit::EvidenceSink>,
     },
 
     /// Cancel an in-flight request.

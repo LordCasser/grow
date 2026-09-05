@@ -1325,6 +1325,23 @@ impl SessionActor {
                     auth_retry_schedule.reset();
                     continue;
                 }
+                Ok(SamplerTurnOutcome::ResetContinuationAndResubmit) => {
+                    if !self.chat_state_handle.reset_continuation().await {
+                        let message =
+                            "native continuation could not be cleared; sampling was not resumed";
+                        self.send_grow_notification(GrowSessionUpdate::RetryState(
+                            crate::extensions::notification::RetryState::Failed {
+                                error_type: "continuation_reset_failed".to_owned(),
+                                message: message.to_owned(),
+                            },
+                        ))
+                        .await;
+                        return Err(acp::Error::internal_error().data(message));
+                    }
+                    context_overflow_recovery_pending = false;
+                    auth_retry_schedule.reset();
+                    continue;
+                }
                 Ok(SamplerTurnOutcome::RefreshByokAndResubmit { credential }) => {
                     match auth_retry_schedule.on_recovered_401(credential) {
                         AuthRetryDecision::UnchargedResubmit { resubmit } => {
@@ -1493,6 +1510,7 @@ impl SessionActor {
             let response_model_id = response.assistant().and_then(|item| item.model_id.clone());
             let persisted_items = response.items.len();
             let response_items = std::mem::take(&mut response.items);
+            let native_continuation = response.native_continuation.take();
             for item in &response_items {
                 if matches!(item, sampling_types::ConversationItem::Assistant(_)) {
                     self.signals_handle().record_assistant_message();
@@ -1500,7 +1518,7 @@ impl SessionActor {
             }
             let quarantined = self
                 .chat_state_handle
-                .push_response_durably(response_items)
+                .push_response_durably(response_items, native_continuation)
                 .await
                 .map_err(|error| {
                     acp::Error::internal_error().data(format!(

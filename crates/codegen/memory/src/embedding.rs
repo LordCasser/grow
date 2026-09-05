@@ -111,6 +111,12 @@ impl std::fmt::Debug for EmbeddingEndpoint {
 }
 
 impl EmbeddingEndpoint {
+    /// Credential-free cache identity for the exact endpoint and vector model.
+    pub fn cache_identity(&self, config: &config_types::MemoryEmbeddingConfig) -> Option<String> {
+        let model = config.model.as_deref().filter(|model| !model.is_empty())?;
+        Some(serde_json::json!([self.request_url.as_str(), model, config.dimensions]).to_string())
+    }
+
     /// Bind a static API key to exactly one endpoint.
     pub fn from_static(endpoint: &str, api_key: String) -> Option<Self> {
         if api_key.trim().is_empty() {
@@ -492,6 +498,30 @@ mod tests {
         assert!(request.starts_with("post /v1/embeddings "));
         assert!(request.contains("authorization: bearer static-secret"));
         assert!(request.contains("x-grow-token-auth: grow-cli"));
+    }
+
+    #[test]
+    fn cache_identity_binds_endpoint_model_and_dimensions_without_credentials() {
+        let endpoint =
+            EmbeddingEndpoint::from_static("https://one.example/v1", "secret-one".into()).unwrap();
+        let rotated =
+            EmbeddingEndpoint::from_static("https://one.example/v1/", "secret-two".into()).unwrap();
+        let other =
+            EmbeddingEndpoint::from_static("https://two.example/v1", "secret-one".into()).unwrap();
+        let mut config = config_types::MemoryEmbeddingConfig {
+            model: Some("model-a".into()),
+            dimensions: 4,
+            ..Default::default()
+        };
+        let identity = endpoint.cache_identity(&config).unwrap();
+        assert!(!identity.contains("secret"));
+        assert_eq!(Some(identity.clone()), rotated.cache_identity(&config));
+        assert_ne!(Some(identity.clone()), other.cache_identity(&config));
+        config.model = Some("model-b".into());
+        assert_ne!(Some(identity.clone()), endpoint.cache_identity(&config));
+        config.model = Some("model-a".into());
+        config.dimensions = 8;
+        assert_ne!(Some(identity), endpoint.cache_identity(&config));
     }
 
     #[test]

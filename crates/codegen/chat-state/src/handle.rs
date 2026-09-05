@@ -181,9 +181,14 @@ impl ChatStateHandle {
     pub async fn push_response_durably(
         &self,
         items: Vec<ConversationItem>,
+        native_continuation: Option<sampling_types::NativeContinuationFragment>,
     ) -> Result<usize, TimelineWriteError> {
         self.query("PushResponseDurably", |reply| {
-            ChatStateCommand::PushResponseDurably { items, reply }
+            ChatStateCommand::PushResponseDurably {
+                items,
+                native_continuation,
+                reply,
+            }
         })
         .await
         .ok_or(TimelineWriteError::AcknowledgementLost)?
@@ -280,11 +285,27 @@ impl ChatStateHandle {
         .is_some()
     }
 
-    /// Update the sampling config (e.g., model switch).
+    /// Replace the active provider route and start a fresh continuation epoch.
+    pub fn replace_sampling_route(&self, config: SamplingConfig) {
+        let _ = self
+            .cmd_tx
+            .send(ChatStateCommand::ReplaceSamplingRoute { config });
+    }
+
+    /// Update sampling parameters without invalidating same-route continuation.
     pub fn update_sampling_config(&self, config: SamplingConfig) {
         let _ = self
             .cmd_tx
             .send(ChatStateCommand::UpdateSamplingConfig { config });
+    }
+
+    /// Acknowledged continuation reset used before a silent portable retry.
+    pub async fn reset_continuation(&self) -> bool {
+        self.query("ResetContinuation", |reply| {
+            ChatStateCommand::ResetContinuation { reply }
+        })
+        .await
+        .is_some()
     }
 
     /// Track that the agent edited a file path.

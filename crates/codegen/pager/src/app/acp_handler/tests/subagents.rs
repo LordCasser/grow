@@ -994,6 +994,58 @@
         });
     }
 
+    /// Resume enrichment is projected from the parent's Timeline once, after
+    /// replay, rather than reloading that Timeline for every spawned child.
+    #[test]
+    fn replayed_subagent_defers_enrichment_until_descendant_restore() {
+        with_replay_disk_home(|home| {
+            let parent_sid = "resume-enrichment-parent";
+            let child_sid = "resume-enrichment-child";
+            write_subagent_spawn_timeline(home, parent_sid, child_sid, "canonical prompt");
+
+            let mut app = make_app_with_agent(parent_sid);
+            app.agents
+                .get_mut(&AgentId(0))
+                .unwrap()
+                .session
+                .loading_replay = true;
+            let spawned = subagent_ext_replay(
+                parent_sid,
+                serde_json::json!({
+                    "sessionUpdate": "subagent_spawned",
+                    "subagent_id": child_sid,
+                    "parent_session_id": parent_sid,
+                    "child_session_id": child_sid,
+                    "subagent_type": "general-purpose",
+                    "description": "restore metadata",
+                }),
+                &format!("{parent_sid}-1"),
+            );
+            handle_ext_notification(&spawned, &mut app);
+
+            assert!(
+                app.agents[&AgentId(0)].session.subagent_sessions[child_sid]
+                    .prompt
+                    .is_none(),
+                "replay must not synchronously reload the parent Timeline"
+            );
+
+            app.agents
+                .get_mut(&AgentId(0))
+                .unwrap()
+                .session
+                .loading_replay = false;
+            crate::app::subagent::restore_descendant_state(&mut app, AgentId(0));
+
+            assert_eq!(
+                app.agents[&AgentId(0)].session.subagent_sessions[child_sid]
+                    .prompt
+                    .as_deref(),
+                Some("canonical prompt")
+            );
+        });
+    }
+
     /// Regression (resume): a subagent that already finished must still show its
     /// full transcript on open. The finished handler's `TurnCompleted` push is
     /// suppressed during replay — otherwise it vetoes the deferred load

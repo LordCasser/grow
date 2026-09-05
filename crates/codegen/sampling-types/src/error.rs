@@ -150,6 +150,10 @@ pub enum SamplingError {
     },
     #[error("invalid client configuration: {0}")]
     InvalidConfiguration(&'static str),
+    /// Local causal persistence failed. Re-emitting a provider request cannot
+    /// repair this boundary and must never be treated as a transport retry.
+    #[error("attempt persistence failed: {0}")]
+    Persistence(String),
     #[error("request error: {0}")]
     Http(reqwest::Error),
     #[error("{prefix}{0}", prefix = SERIALIZATION_DISPLAY_PREFIX)]
@@ -327,25 +331,10 @@ impl SamplingError {
         )
     }
 
-    /// The server rejected the request because the conversation history
-    /// contains `encrypted_content` from a different model family that the
-    /// current model cannot decrypt. Never retryable — the user must start
-    /// a new session.
-    pub fn is_encrypted_content_error(&self) -> bool {
-        matches!(
-            self,
-            SamplingError::Api {
-                status: StatusCode::BAD_REQUEST,
-                message,
-                ..
-            } if message.contains("encrypted_content")
-        )
-    }
-
     pub fn is_retryable(&self) -> bool {
         match self {
             SamplingError::Auth { .. } => false,
-            SamplingError::InvalidConfiguration(_) => false,
+            SamplingError::InvalidConfiguration(_) | SamplingError::Persistence(_) => false,
             SamplingError::Http(err) => is_retryable_reqwest(err),
             SamplingError::Serialization(_) => false,
             SamplingError::Api { status, .. } => {
@@ -1121,52 +1110,6 @@ mod tests {
         assert_eq!(
             SamplingError::IdleTimeout { elapsed_secs: 10 }.retry_after(),
             None
-        );
-    }
-
-    #[test]
-    fn encrypted_content_400_is_detected() {
-        let err = SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message: "Could not decrypt the provided encrypted_content. Ensure the value is the unmodified encrypted_content from a previous response.".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        };
-        assert!(err.is_encrypted_content_error());
-        assert!(
-            !err.is_retryable(),
-            "encrypted_content errors must not be retried"
-        );
-    }
-
-    #[test]
-    fn encrypted_content_wrong_status_not_detected() {
-        let err = SamplingError::Api {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "encrypted_content decryption failed".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        };
-        assert!(
-            !err.is_encrypted_content_error(),
-            "only 400 should match, not 500"
-        );
-    }
-
-    #[test]
-    fn encrypted_content_unrelated_400_not_detected() {
-        let err = SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message: "Invalid model parameter".into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: None,
-        };
-        assert!(
-            !err.is_encrypted_content_error(),
-            "unrelated 400 errors must not match"
         );
     }
 }

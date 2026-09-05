@@ -26,6 +26,10 @@ pub(crate) enum SamplerFailureRecovery {
     /// capability and irreversible ImageShadows were persisted; the turn
     /// should rebuild a text-only request projection over canonical evidence.
     ImageInputUnsupportedAndResubmit,
+    /// The provider rejected same-route native continuation. ChatState has
+    /// not been changed yet; the outer loop must reset it with acknowledgement
+    /// and rebuild a portable request without notifying the user.
+    ResetContinuationAndResubmit,
     /// A BYOK helper or newly available configured key replaced the credential.
     /// `credential` records what the rejected request actually sent so retry
     /// accounting can distinguish a missing header from a rejected key.
@@ -46,6 +50,7 @@ pub(crate) enum SamplerTurnOutcome {
     GoalSpendingStopped,
     CompactAndResubmit(compaction::AutoCompactTriggerInfo),
     ImageInputUnsupportedAndResubmit,
+    ResetContinuationAndResubmit,
     RefreshByokAndResubmit {
         credential: sampling_types::SentCredential,
     },

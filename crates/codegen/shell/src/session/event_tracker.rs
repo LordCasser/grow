@@ -458,19 +458,6 @@ impl EventTracker {
         Ok(())
     }
 
-    pub fn request_retrying(&self, event: RequestEvent) {
-        let RequestEvent::Retrying { id, .. } = &event else {
-            tracing::error!("request_retrying only accepts retry events");
-            return;
-        };
-        if !self.active_requests.borrow().contains_key(id) {
-            tracing::debug!(request_id = id, "ignored late request progress event");
-            return;
-        }
-        self.timeline
-            .record_timeline_event(TimelineEventKind::Request(event));
-    }
-
     pub fn request_cancel_requested(&self, id: &str, reason: &str) {
         if let Some(request) = self.active_requests.borrow_mut().get_mut(id) {
             request.cancellation_reason = Some(reason.to_owned());
@@ -748,12 +735,17 @@ mod tests {
                     .request_started("request".into(), "model".into(), 0, 0)
                     .await
                     .unwrap();
-                tracker.request_retrying(RequestEvent::Retrying {
-                    id: "request".into(),
-                    attempt: 1,
-                    max_retries: 2,
-                    reason: "transient".into(),
-                });
+                handle
+                    .record_timeline_event_durably(TimelineEventKind::Request(
+                        RequestEvent::Retrying {
+                            id: "request".into(),
+                            attempt: 1,
+                            max_retries: 2,
+                            reason: "transient".into(),
+                        },
+                    ))
+                    .await
+                    .unwrap();
                 assert!(tracker.request_completed("request", Some(3), RequestUsage::default(), 1,));
                 tracker
                     .emit_turn_ended(

@@ -163,7 +163,7 @@ fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id()
                     cfg.base_url = server.url();
                     cfg.api_backend = sampling_types::ApiBackend::Responses;
                     cfg.model = "test".to_string();
-                    actor.chat_state_handle.update_sampling_config(cfg);
+                    actor.chat_state_handle.replace_sampling_route(cfg);
                     let mut creds = actor.chat_state_handle.get_credentials().await;
                     creds.api_key = Some("test-key".to_string());
                     actor.chat_state_handle.update_credentials(creds);

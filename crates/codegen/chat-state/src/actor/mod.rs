@@ -440,8 +440,12 @@ impl ChatStateActor {
             ChatStateCommand::PushAssistantResponse { item } => {
                 self.push_message(item).await;
             }
-            ChatStateCommand::PushResponseDurably { items, reply } => {
-                let result = self.push_response_durably(items).await;
+            ChatStateCommand::PushResponseDurably {
+                items,
+                native_continuation,
+                reply,
+            } => {
+                let result = self.push_response_durably(items, native_continuation).await;
                 let _ = reply.send(result);
             }
             ChatStateCommand::PushToolResult { item } => {
@@ -499,8 +503,24 @@ impl ChatStateActor {
                 self.mark_usage_incomplete(prompt, session);
                 let _ = reply.send(());
             }
+            ChatStateCommand::ReplaceSamplingRoute { config } => {
+                self.state.continuation.reset(
+                    config.api_backend.clone(),
+                    self.state.timeline.surface_len(),
+                    "sampling_route_changed",
+                );
+                self.state.sampling_config = config;
+            }
             ChatStateCommand::UpdateSamplingConfig { config } => {
                 self.state.sampling_config = config;
+            }
+            ChatStateCommand::ResetContinuation { reply } => {
+                self.state.continuation.reset(
+                    self.state.sampling_config.api_backend.clone(),
+                    self.state.timeline.surface_len(),
+                    "provider_rejected_native_continuation",
+                );
+                let _ = reply.send(());
             }
             ChatStateCommand::RecordAgentEditedPath { path } => {
                 self.state.agent_edited_paths.insert(path);

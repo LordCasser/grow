@@ -238,7 +238,7 @@ async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_
 
             let mut vision_config = actor.chat_state_handle.get_sampling_config().await.unwrap();
             vision_config.model = "vision-model".to_owned();
-            actor.chat_state_handle.update_sampling_config(vision_config);
+            actor.chat_state_handle.replace_sampling_route(vision_config);
             let vision_request = actor
                 .chat_state_handle
                 .build_request(&actor.session_info.id.to_string(), vec![], None, None, None)

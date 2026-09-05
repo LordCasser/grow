@@ -26,3 +26,7 @@ pub use self::types::*;
 
 // Re-export async-openai crate Responses API types under `rs` namespace
 pub use async_openai::types::responses as rs;
+
+/// Maximum encoded sampling request body. ChatState leaves framing headroom
+/// while projecting images; the transport enforces this on the final bytes.
+pub const MAX_REQUEST_BODY_BYTES: usize = 50 * 1024 * 1024;

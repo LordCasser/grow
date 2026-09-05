@@ -876,6 +876,7 @@ pub(crate) fn verify_timeline_prompt_blobs_from_directory(
     session: &crate::session::storage::ContainedDirectory,
     timeline: &chat_state::Timeline,
 ) -> io::Result<usize> {
+    crate::session::sampling_evidence::verify(session, timeline)?;
     let mut hashes = BTreeSet::new();
     for event in timeline.events() {
         if let chat_state::TimelineEventKind::Messages(messages) = &event.kind {

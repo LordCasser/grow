@@ -1541,7 +1541,7 @@ fn describe_message(event: &MessageEvent) -> ReturnTuple {
     };
     let correlation_id = event.items.iter().find_map(|item| match item {
         sampling_types::ConversationItem::ToolResult(result) => Some(result.tool_call_id.clone()),
-        sampling_types::ConversationItem::BackendToolCall(call) => Some(call.id().to_owned()),
+        sampling_types::ConversationItem::BackendToolCall(_) => None,
         _ => None,
     });
     tuple(

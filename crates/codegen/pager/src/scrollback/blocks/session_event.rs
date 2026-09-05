@@ -176,11 +176,7 @@ impl SessionEvent {
             }
             SessionEvent::CompactionCancelled => "Compaction cancelled.".to_string(),
             SessionEvent::RetryFailed { error, error_type } => {
-                if error_type.as_deref() == Some("encrypted_content_mismatch") {
-                    "This session's conversation history is incompatible with the \
-                     current model. Please start a new session."
-                        .to_string()
-                } else if error_type.is_some() {
+                if error_type.is_some() {
                     format!("Model request failed: {error}")
                 } else {
                     format!("Retry failed: {error}")
@@ -682,19 +678,6 @@ mod tests {
             error_type: None,
         };
         assert_eq!(event.message(), "Retry failed: connection timeout");
-    }
-
-    #[test]
-    fn retry_failed_encrypted_content_mismatch() {
-        let event = SessionEvent::RetryFailed {
-            error: "raw API error message".into(),
-            error_type: Some("encrypted_content_mismatch".into()),
-        };
-        assert_eq!(
-            event.message(),
-            "This session's conversation history is incompatible with the \
-             current model. Please start a new session."
-        );
     }
 
     #[test]

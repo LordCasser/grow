@@ -164,6 +164,10 @@ impl SessionMemory {
             storage.clone(),
             Default::default(),
             embed_dims,
+            self.backend_params
+                .as_ref()
+                .and_then(|params| params.embedding_cache_identity())
+                .as_deref(),
         )
         .ok()
     }

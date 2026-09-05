@@ -17,7 +17,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -27,10 +26,9 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 /// Lock-free design:
 /// - **Insert** (notify thread): `dirty_files.rcu(|old| { clone + insert })`
 /// - **Take** (search path): `dirty_files.swap(empty)` — single atomic pointer exchange
-/// - **Quick check**: `dirty.load(Relaxed)` — single atomic load, no allocation
+/// - **Quick check**: inspect the same set snapshot, without a second dirty flag
 pub struct MemoryFileWatcher {
     dirty_files: Arc<ArcSwap<HashSet<PathBuf>>>,
-    dirty: Arc<AtomicBool>,
     _watcher: RecommendedWatcher,
 }
 
@@ -41,10 +39,8 @@ impl MemoryFileWatcher {
     pub fn start(memory_dir: &Path) -> Option<Self> {
         let dirty_files: Arc<ArcSwap<HashSet<PathBuf>>> =
             Arc::new(ArcSwap::new(Arc::new(HashSet::new())));
-        let dirty = Arc::new(AtomicBool::new(false));
 
         let df = dirty_files.clone();
-        let d = dirty.clone();
 
         let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             let Ok(event) = res else { return };
@@ -60,7 +56,6 @@ impl MemoryFileWatcher {
                         new.insert(path.clone());
                         new
                     });
-                    d.store(true, Ordering::Relaxed);
                 }
             }
         })
@@ -87,21 +82,19 @@ impl MemoryFileWatcher {
 
         Some(Self {
             dirty_files,
-            dirty,
             _watcher: watcher,
         })
     }
 
     /// Quick check: true if any files have been modified since last take.
     pub fn is_dirty(&self) -> bool {
-        self.dirty.load(Ordering::Relaxed)
+        !self.dirty_files.load().is_empty()
     }
 
     /// Take all accumulated dirty paths, resetting the dirty state.
     /// Returns the paths that changed since the last take.
     pub fn take_dirty(&self) -> Vec<PathBuf> {
         let old = self.dirty_files.swap(Arc::new(HashSet::new()));
-        self.dirty.store(false, Ordering::Relaxed);
         old.iter().cloned().collect()
     }
 }
@@ -110,6 +103,41 @@ impl MemoryFileWatcher {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn concurrent_insert_survives_take_and_remains_visible() {
+        // No OS subscription or sleeps: pause an RCU producer on the old
+        // snapshot, take it, then let the producer retry against the new set.
+        let watcher = MemoryFileWatcher {
+            dirty_files: Arc::new(ArcSwap::from_pointee(HashSet::from([PathBuf::from(
+                "old.md",
+            )]))),
+            _watcher: notify::recommended_watcher(|_: Result<Event, notify::Error>| {}).unwrap(),
+        };
+        let files = watcher.dirty_files.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            let mut first = true;
+            files.rcu(|old| {
+                if first {
+                    first = false;
+                    ready_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                }
+                let mut next = (**old).clone();
+                next.insert(PathBuf::from("new.md"));
+                next
+            });
+        });
+        ready_rx.recv().unwrap();
+        assert_eq!(watcher.take_dirty(), vec![PathBuf::from("old.md")]);
+        resume_tx.send(()).unwrap();
+        producer.join().unwrap();
+        assert!(watcher.is_dirty());
+        assert_eq!(watcher.take_dirty(), vec![PathBuf::from("new.md")]);
+        assert!(!watcher.is_dirty());
+    }
 
     #[test]
     fn test_watcher_starts_on_valid_dir() {

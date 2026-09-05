@@ -12,9 +12,9 @@
 
 询问的执行顺序：
 
-1. 来源先持久化开始 notice，再解析目标；首次解析的 peer/incarnation 固定在该请求上。
-2. 目标先持久化接收 notice，再进入 Session 的 FIFO 队列；队列最多 32 个等待项，单个 inquiry 执行。
-3. 在出队时快照 Surface。同 cwd 自动允许，不同 cwd 要求目标 UI 单次批准；没有在线 UI 则拒绝。
+1. 来源先将结构化 `OutgoingStarted` 写入 Timeline 并等待 durable ACK，再解析目标；首次解析的 peer/incarnation 固定在该请求上。
+2. 目标先将接收事实写入 Timeline，再进入 Session 的 FIFO 队列；队列最多 32 个等待项，单个 inquiry 执行。
+3. 在出队时快照 Surface。同 cwd 自动允许，不同 cwd 要求目标 UI 单次批准；没有在线 UI 则拒绝。自动允许与 UI 审批结果都先进入 Timeline，再决定是否执行旁路请求。
 4. 复用 `InfoRequest` sideband，只调用一次模型，不提供工具，不修改主 Surface。主 turn 忙不是拒绝理由。
 5. 同来源、同 ID、同 payload 复用运行或结果；payload 不同返回 `conflict`。IPC 断线重连到原 incarnation，发现目标更换进程身份则返回 `target_restarted`，不自动重新执行。
 
@@ -28,13 +28,13 @@
 
 一个已经终结的 ID 返回缓存结果。对于可重试的终态，应等待建议时间后省略 ID，启动新尝试，不能期待原 ID 自动重新执行。
 
-完成记录复用原有持久化 `UiNotice.details` 保存结构化结果，没有第二套审计账本。内存结果过期或来源进程重启后，`get` 可以从 Session 历史恢复已经持久化的终态。冲突重试不能覆盖原结果。
+询问事实复用 Timeline 的 `observation` 事件族，固定为 `coordination/inquiry`，payload 由 `InquiryEvent` 定义。来源保存开始和完成事实，接收侧保存来源身份、接收、审批及终态。内存结果过期或来源进程重启后，`get` 只从经过验证的 Timeline 读取终态；接收侧恢复也只从 actor 持有的 Timeline 找出未闭合询问，追加 `target_restarted`，不重跑模型。第一次终态不可被后续重复记录覆盖。
 
-审计事件不等于 TUI 的显示行。来源的开始/结束 notice 只持久化，不额外推送系统通知，重放时也不生成显示行；`list_active_sessions`、`ask_session` 使用普通 ACP 工具调用的等待、完成和展开路径，双击展开工具返回值或错误。
+`UiNotice` 从已提交的询问事实生成，`updates.jsonl` 只是可丢失的显示投影；写入投影失败会记录诊断，不会把已提交的回答改判为审计失败。来源的开始/结束 notice 不额外推送系统通知，重放时也不生成显示行；`list_active_sessions`、`ask_session` 使用普通 ACP 工具调用的等待、完成和展开路径，双击展开工具返回值或错误。
 
 来源还需要完整的 ACP 结果转换：`ListActiveSessions`、`CoordinationInquiry`、`CoordinationInquiryState` 都输出带 `content` 和 `rawOutput` 的 `ToolCallUpdate`。询问失败时状态为 `Failed`，结果查询成功则仍是 `Completed`，即使查询出来的是一个失败的 inquiry。漏掉这个转换时，模型能读到工具结果，但 TUI 只能看到没有正文的占位工具，不能靠修复双击事件解决。
 
-接收侧按 `(sourcePeerId, InquiryId)` 把开始、审批、结束事件投影到同一条工具样式记录，与运行时的去重范围一致。来源身份和结果保存在原有 `UiNotice.details` 的结构化 JSON 中，TUI 再投影成可读正文，不从标题猜测身份。开始是 `Answering session <sourceSessionId>`，成功后原位变成 `Answered session <sourceSessionId>`；失败、拒绝、取消和超时使用各自的终态标题。展开后保留来源、工作目录、问题和回答/错误。这个显示行不进入主 turn 的工具 tracker，也不接收主 turn 的工具 hook，所以主 turn 结束不能顺带结束 sideband 的展示。重载时不重复插入同一个 inquiry，旧开始事件不能覆盖终态；只有历史开始记录时，不把它当作仍在线执行的证明。
+接收侧按 `(sourcePeerId, InquiryId)` 把开始、审批、结束事件投影到同一条工具样式记录，与运行时的去重范围一致。来源身份和结果以 Timeline 为准，并投影到 `UiNotice.details` 的结构化 JSON 中，TUI 再生成可读正文，不从标题猜测身份。开始是 `Answering session <sourceSessionId>`，成功后原位变成 `Answered session <sourceSessionId>`；失败、拒绝、取消和超时使用各自的终态标题。展开后保留来源、工作目录、问题和回答/错误。这个显示行不进入主 turn 的工具 tracker，也不接收主 turn 的工具 hook，所以主 turn 结束不能顺带结束 sideband 的展示。重载时不重复插入同一个 inquiry，旧开始事件不能覆盖终态；只有历史开始记录时，不把它当作仍在线执行的证明。
 
 Minimal 模式的原生终端历史只能追加，不能修改已经打印的行。因此接收侧默认也只展示单行，并且必须等 inquiry 自己的终态再提交到原生历史，不能用“主 Agent 已空闲”推断它完成。执行中的同一行留在 live region，完成后只打印 `Answered` 一次。
 

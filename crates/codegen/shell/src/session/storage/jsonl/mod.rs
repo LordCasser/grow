@@ -8,7 +8,7 @@ use acp_transport::protocol as acp;
 use async_trait::async_trait;
 use chat_state::Timeline;
 use fs2::FileExt;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, BufRead, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use workspace::session::file_state::RewindPoint;
 #[derive(Clone)]
@@ -1248,37 +1248,44 @@ impl JsonlStorageAdapter {
         complete_len: u64,
     ) -> io::Result<LedgerPrefix> {
         file.seek(io::SeekFrom::Start(0))?;
-        let prefix_len = usize::try_from(complete_len).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Timeline prefix is too large to validate on this platform",
-            )
-        })?;
-        let mut bytes = Vec::with_capacity(prefix_len);
-        file.take(complete_len).read_to_end(&mut bytes)?;
-        if bytes.len() != prefix_len {
+        let mut hasher = blake3::Hasher::new();
+        let mut timeline = chat_state::Timeline::default();
+        let mut consumed = 0u64;
+        // Reuse one bounded record buffer. The fold retains canonical events,
+        // but validation never allocates a second copy of the whole JSONL file.
+        let mut record = Vec::new();
+        {
+            let mut reader = io::BufReader::new((&mut *file).take(complete_len));
+            loop {
+                record.clear();
+                let read = (&mut reader)
+                    .take(super::MAX_JSONL_ENTRY_BYTES.saturating_add(1))
+                    .read_until(b'\n', &mut record)?;
+                if read == 0 {
+                    break;
+                }
+                Self::validate_jsonl_line_size(&record, "Timeline event")?;
+                consumed += read as u64;
+                let json = record.strip_suffix(b"\n").ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Timeline committed prefix contains an incomplete record",
+                    )
+                })?;
+                let event = serde_json::from_slice::<chat_state::TimelineEvent>(json)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                timeline
+                    .accept(event)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                hasher.update(&record);
+            }
+        }
+        if consumed != complete_len {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "Timeline changed while its committed prefix was being validated",
             ));
         }
-        let mut events = Vec::new();
-        for record in bytes.split_inclusive(|byte| *byte == b'\n') {
-            let json = record.strip_suffix(b"\n").ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Timeline committed prefix contains an incomplete record",
-                )
-            })?;
-            events.push(
-                serde_json::from_slice::<chat_state::TimelineEvent>(json)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-            );
-        }
-        chat_state::Timeline::from_events(events)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&bytes);
         Ok(LedgerPrefix {
             len: complete_len,
             hash: hasher.finalize(),

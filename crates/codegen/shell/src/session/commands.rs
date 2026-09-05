@@ -772,9 +772,12 @@ pub enum SessionCommand {
     RunCoordinationInquiry {
         inquiry: crate::coordination::InboundInquiry,
     },
-    /// Persist one coordination audit fact through the Session's
-    /// canonical UiNotice timeline. The acknowledgement is a durability
-    /// barrier: callers must not continue remote execution if it fails.
+    /// Commit a typed inquiry fact to Timeline before remote execution or reply.
+    RecordCoordinationInquiry {
+        event: crate::coordination::InquiryEvent,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Persist a display-only coordination diagnostic.
     RecordCoordinationNotice {
         notice: crate::extensions::notification::UiNotice,
         /// Source tool calls already have their own live ACP presentation.

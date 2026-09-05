@@ -1455,26 +1455,6 @@
     // ── apply_retry_state ─────────────────────────────────────────────
 
     #[test]
-    fn retry_failed_encrypted_content_suppresses_duplicate_failure() {
-        use shell::extensions::notification::RetryState;
-        let mut session = make_session(Some("s1"));
-        let mut scrollback = ScrollbackState::new();
-
-        assert!(!session.model_failure_reported);
-        apply_retry_state(
-            &RetryState::Failed {
-                error_type: "encrypted_content_mismatch".into(),
-                message: "incompatible history".into(),
-            },
-            &mut session,
-            &mut scrollback);
-        assert!(
-            session.model_failure_reported,
-            "encrypted_content_mismatch already displayed its error"
-        );
-    }
-
-    #[test]
     fn retry_failed_other_type_also_suppresses_duplicate_failure() {
         use shell::extensions::notification::RetryState;
         let mut session = make_session(Some("s1"));

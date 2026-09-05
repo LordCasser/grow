@@ -149,7 +149,7 @@ impl SessionActor {
             {
                 CoordinationApproval::Allowed => {
                     if let Err(error) = self
-                        .record_coordination_approval_notice(inquiry, "approved", true)
+                        .record_coordination_approval_notice(inquiry, "approved")
                         .await
                     {
                         return failed(
@@ -160,7 +160,7 @@ impl SessionActor {
                 }
                 CoordinationApproval::Rejected => {
                     if let Err(error) = self
-                        .record_coordination_approval_notice(inquiry, "rejected", false)
+                        .record_coordination_approval_notice(inquiry, "rejected")
                         .await
                     {
                         return failed(
@@ -176,7 +176,7 @@ impl SessionActor {
                 }
                 CoordinationApproval::Cancelled => {
                     if let Err(error) = self
-                        .record_coordination_approval_notice(inquiry, "cancelled", false)
+                        .record_coordination_approval_notice(inquiry, "cancelled")
                         .await
                     {
                         return failed(
@@ -188,7 +188,7 @@ impl SessionActor {
                 }
                 CoordinationApproval::TimedOut => {
                     if let Err(error) = self
-                        .record_coordination_approval_notice(inquiry, "timed out", false)
+                        .record_coordination_approval_notice(inquiry, "timed out")
                         .await
                     {
                         return failed(
@@ -207,7 +207,6 @@ impl SessionActor {
                         .record_coordination_approval_notice(
                             inquiry,
                             "rejected because no online UI is available",
-                            false,
                         )
                         .await
                     {
@@ -222,6 +221,17 @@ impl SessionActor {
                         "target session has no online UI for approval",
                     );
                 }
+            }
+        }
+        if same_cwd {
+            if let Err(error) = self
+                .record_coordination_approval_notice(inquiry, "approved (same workspace)")
+                .await
+            {
+                return failed(
+                    inquiry,
+                    format!("failed to persist coordination approval audit: {error}"),
+                );
             }
         }
         if inquiry.cancellation.is_cancelled() {
@@ -375,14 +385,36 @@ impl SessionActor {
         });
     }
 
+    pub(super) async fn persist_coordination_inquiry(
+        &self,
+        event: crate::coordination::InquiryEvent,
+    ) -> Result<(), String> {
+        self.chat_state_handle
+            .record_timeline_event_durably(event.timeline_kind())
+            .await
+            .map_err(|error| error.to_string())?;
+        let notice = event.notice();
+        let projection = if matches!(event, crate::coordination::InquiryEvent::Incoming { .. }) {
+            self.persist_ui_notice(notice).await
+        } else {
+            self.persist_grow_audit_notification(GrowSessionUpdate::UiNotice(notice))
+                .await
+                .map_err(|error| error.to_string())
+        };
+        if let Err(error) = projection {
+            tracing::warn!(%error, "failed to project durable inquiry into UI replay");
+        }
+        Ok(())
+    }
+
     async fn record_incoming_coordination_notice(
         &self,
         inquiry: &crate::coordination::InboundInquiry,
     ) -> Result<(), String> {
-        self.persist_ui_notice(
-            crate::coordination::IncomingInquiryAudit::received(inquiry)
-                .notice(&inquiry.inquiry_id),
-        )
+        self.persist_coordination_inquiry(crate::coordination::InquiryEvent::Incoming {
+            inquiry_id: inquiry.inquiry_id.clone(),
+            audit: crate::coordination::IncomingInquiryAudit::received(inquiry),
+        })
         .await
     }
 
@@ -390,17 +422,14 @@ impl SessionActor {
         &self,
         inquiry: &crate::coordination::InboundInquiry,
         result: &str,
-        approved: bool,
     ) -> Result<(), String> {
         let mut audit = crate::coordination::IncomingInquiryAudit::received(inquiry);
         audit.approval = Some(result.into());
-        let mut notice = audit.notice(&inquiry.inquiry_id);
-        notice.tone = if approved {
-            crate::extensions::notification::UiNoticeTone::Success
-        } else {
-            crate::extensions::notification::UiNoticeTone::Warning
-        };
-        self.persist_ui_notice(notice).await
+        self.persist_coordination_inquiry(crate::coordination::InquiryEvent::Incoming {
+            inquiry_id: inquiry.inquiry_id.clone(),
+            audit,
+        })
+        .await
     }
 
     async fn record_coordination_terminal_notice(
@@ -410,49 +439,43 @@ impl SessionActor {
     ) -> Result<(), String> {
         let mut audit = crate::coordination::IncomingInquiryAudit::received(inquiry);
         audit.outcome = Some(outcome.clone());
-        self.persist_ui_notice(audit.notice(&inquiry.inquiry_id))
-            .await
+        self.persist_coordination_inquiry(crate::coordination::InquiryEvent::Incoming {
+            inquiry_id: inquiry.inquiry_id.clone(),
+            audit,
+        })
+        .await
     }
 
-    /// Read the existing durable audit, not a second inquiry ledger. Holding a
-    /// pinned directory keeps restore independent of ambient GROW_HOME paths.
+    /// The actor already owns the validated Timeline, including restore facts.
     async fn pending_coordination_notices(
         &self,
     ) -> Result<Vec<(String, crate::coordination::IncomingInquiryAudit)>, String> {
-        let directory = self.session_directory.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut latest = indexmap::IndexMap::<
-                (String, String),
-                crate::coordination::IncomingInquiryAudit,
-            >::new();
-            let _ = crate::session::storage::stream_replay_grow_notifications_in(
-                &directory,
-                |notification| {
-                    let GrowSessionUpdate::UiNotice(notice) = notification.update else {
-                        return;
-                    };
-                    let Some(audit) =
-                        crate::coordination::IncomingInquiryAudit::from_notice(&notice)
-                    else {
-                        return;
-                    };
-                    let key = (audit.source_peer_id.clone(), notice.correlation_id);
-                    if latest
-                        .get(&key)
-                        .is_none_or(|previous| previous.outcome.is_none())
-                    {
-                        latest.insert(key, audit);
-                    }
-                },
-            )
-            .map_err(|error| error.to_string())?;
-            Ok(latest
-                .into_iter()
-                .filter_map(|((_, id), audit)| audit.outcome.is_none().then_some((id, audit)))
-                .collect())
-        })
-        .await
-        .map_err(|error| error.to_string())?
+        let events = self
+            .chat_state_handle
+            .timeline_events()
+            .await
+            .ok_or("Timeline actor unavailable")?;
+        let mut latest =
+            indexmap::IndexMap::<(String, String), crate::coordination::IncomingInquiryAudit>::new(
+            );
+        for event in &events {
+            let Some(crate::coordination::InquiryEvent::Incoming { inquiry_id, audit }) =
+                crate::coordination::InquiryEvent::from_timeline(event)?
+            else {
+                continue;
+            };
+            let key = (audit.source_peer_id.clone(), inquiry_id);
+            if latest
+                .get(&key)
+                .is_none_or(|previous| previous.outcome.is_none())
+            {
+                latest.insert(key, audit);
+            }
+        }
+        Ok(latest
+            .into_iter()
+            .filter_map(|((_, id), audit)| audit.outcome.is_none().then_some((id, audit)))
+            .collect())
     }
 
     /// Only called while constructing a new SessionActor, under its exclusive
@@ -467,7 +490,11 @@ impl SessionActor {
                     "target session restarted before a terminal answer was recorded; the inquiry was not replayed",
                 ),
             ));
-            self.persist_ui_notice(audit.notice(&id)).await?;
+            self.persist_coordination_inquiry(crate::coordination::InquiryEvent::Incoming {
+                inquiry_id: id,
+                audit,
+            })
+            .await?;
         }
         Ok(())
     }
@@ -620,6 +647,104 @@ mod tests {
             },
             response,
         )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inquiry_restore_closes_only_open_timeline_receipts_without_ui_replay() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+                let (open, _) = inquiry(1);
+                let (completed, _) = inquiry(2);
+                actor
+                    .record_incoming_coordination_notice(&open)
+                    .await
+                    .unwrap();
+                actor
+                    .record_coordination_approval_notice(&open, "approved")
+                    .await
+                    .unwrap();
+                actor
+                    .record_incoming_coordination_notice(&completed)
+                    .await
+                    .unwrap();
+                actor
+                    .record_coordination_terminal_notice(
+                        &completed,
+                        &crate::coordination::InquiryOutcome::answered(
+                            &completed.inquiry_id,
+                            "answer".into(),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let (mut restored, _gateway) =
+                    crate::session::actor::tests::support::build_actor().await;
+                let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                Arc::get_mut(&mut restored).unwrap().chat_state_handle =
+                    chat_state::ChatStateActor::spawn_from_timeline(
+                        events,
+                        config,
+                        Box::new(chat_state::NullTimelinePersistence),
+                        event_tx,
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap();
+                let replay = restored
+                    .session_dir
+                    .join(crate::session::storage::UPDATES_FILE);
+                std::fs::write(&replay, "obsolete UI projection").unwrap();
+                std::fs::remove_file(&replay).unwrap();
+                let pending = restored.pending_coordination_notices().await.unwrap();
+                assert_eq!(pending.len(), 1);
+                assert_eq!(pending[0].0, open.inquiry_id);
+                restored
+                    .recover_interrupted_coordination_inquiries()
+                    .await
+                    .unwrap();
+                assert!(
+                    restored
+                        .pending_coordination_notices()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                let after = restored.chat_state_handle.timeline_events().await.unwrap();
+                let Some(crate::coordination::InquiryEvent::Incoming { audit, .. }) =
+                    crate::coordination::InquiryEvent::from_timeline(after.last().unwrap())
+                        .unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(
+                    audit.outcome.unwrap().error.unwrap().code,
+                    crate::coordination::CoordinationErrorCode::TargetRestarted
+                );
+                restored
+                    .recover_interrupted_coordination_inquiries()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    restored
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .unwrap()
+                        .len(),
+                    after.len()
+                );
+                assert!(
+                    !after.iter().any(|event| matches!(
+                        event.kind,
+                        chat_state::TimelineEventKind::Sideband(_)
+                    )),
+                    "restore must never replay the inquiry model request"
+                );
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]

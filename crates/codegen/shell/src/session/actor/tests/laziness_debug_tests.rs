@@ -49,17 +49,9 @@ fn assistant_with_tool_call(text: &str, name: &str, args: &str) -> ConversationI
     })
 }
 
-/// Build an `AssistantItem` with arbitrary `reasoning`, `content`,
-/// and `tool_calls` for the `[assistant reasoning]` test coverage.
-/// Trivially-defaulted fields (`raw_output`, `model_id`,
-/// `model_fingerprint`) are filled with `None` so each test stays a
-/// one-liner.
 /// Build `[Reasoning(text), Assistant(content, tool_calls)]` as the
-/// reasoning-as-sibling equivalent of the old
-/// `AssistantItem { reasoning, content, tool_calls }` literal. When
-/// `reasoning_text` is empty, no Reasoning item is emitted (callers
-/// who want an encrypted-only sibling should build that variant
-/// inline).
+/// durable visible-reasoning form. Native encrypted reasoning never reaches
+/// this Timeline classifier.
 fn assistant_with_reasoning_items(
     reasoning_text: &str,
     content: &str,
@@ -68,17 +60,7 @@ fn assistant_with_reasoning_items(
     let mut out = Vec::new();
     if !reasoning_text.is_empty() {
         out.push(ConversationItem::Reasoning(
-            sampling_types::rs::ReasoningItem {
-                id: Some(String::new()),
-                summary: vec![sampling_types::rs::SummaryPart::SummaryText(
-                    sampling_types::rs::SummaryTextContent {
-                        text: reasoning_text.to_string(),
-                    },
-                )],
-                content: None,
-                encrypted_content: None,
-                status: None,
-            },
+            sampling_types::synthesized_reasoning_item(reasoning_text),
         ));
     }
     out.push(ConversationItem::Assistant(AssistantItem {
@@ -189,49 +171,11 @@ fn flatten_renders_assistant_reasoning() {
 }
 
 #[test]
-fn flatten_skips_reasoning_when_encrypted_only() {
-    // Encrypted reasoning is opaque to a text classifier — drop it
-    // rather than emit a meaningless line.
-    let items = vec![
-        ConversationItem::Reasoning(sampling_types::rs::ReasoningItem {
-            id: Some(String::new()),
-            summary: vec![],
-            content: None,
-            encrypted_content: Some("opaque_base64".into()),
-            status: None,
-        }),
-        ConversationItem::Assistant(AssistantItem {
-            content: "ok".into(),
-            tool_calls: vec![],
-            model_id: None,
-            model_fingerprint: None,
-            reasoning_effort: None,
-        }),
-    ];
-    let out = flatten_transcript_for_classifier(&items, true);
-    assert!(
-        !out.contains("[assistant reasoning]"),
-        "encrypted-only reasoning must NOT produce a line: {out}",
-    );
-    assert_eq!(out, "[assistant] ok\n");
-}
-
-#[test]
 fn flatten_skips_reasoning_when_text_is_empty() {
     // Empty-string reasoning is treated as "no reasoning" — a
     // zero-info line would just waste tokens.
     let items = vec![
-        ConversationItem::Reasoning(sampling_types::rs::ReasoningItem {
-            id: Some(String::new()),
-            summary: vec![sampling_types::rs::SummaryPart::SummaryText(
-                sampling_types::rs::SummaryTextContent {
-                    text: String::new(),
-                },
-            )],
-            content: None,
-            encrypted_content: None,
-            status: None,
-        }),
+        ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("")),
         ConversationItem::Assistant(AssistantItem {
             content: "ok".into(),
             tool_calls: vec![],

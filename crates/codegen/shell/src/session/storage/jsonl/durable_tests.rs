@@ -52,6 +52,58 @@ fn append_timeline_with_prefix_state(
 }
 
 #[test]
+fn prefix_validation_hashes_exact_bounded_bytes_and_validates_each_event() {
+    let mut file = tempfile::tempfile().unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    let mut bytes = Vec::new();
+    for index in 0..300 {
+        let event = timeline_event(&format!("event-{index}"), &mut timeline);
+        serde_json::to_writer(&mut bytes, &event).unwrap();
+        // Whitespace is semantically insignificant, but must be included in
+        // the immutable prefix digest just like the old whole-file reader.
+        bytes.extend_from_slice(b" \r\n");
+    }
+    file.write_all(&bytes).unwrap();
+    file.write_all(b"uncommitted tail").unwrap();
+    let prefix = JsonlStorageAdapter::load_timeline_prefix(&mut file, bytes.len() as u64).unwrap();
+    assert_eq!(prefix.hash, blake3::hash(&bytes));
+    let mut extended = prefix.hasher;
+    extended.update(b"next");
+    bytes.extend_from_slice(b"next");
+    assert_eq!(extended.finalize(), blake3::hash(&bytes));
+}
+
+#[test]
+fn prefix_validation_rejects_short_blank_and_oversized_records() {
+    let mut file = tempfile::tempfile().unwrap();
+    let error = JsonlStorageAdapter::load_timeline_prefix(&mut file, 100)
+        .err()
+        .unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    file.write_all(b"\n").unwrap();
+    assert_eq!(
+        JsonlStorageAdapter::load_timeline_prefix(&mut file, 1)
+            .err()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    // A sparse oversized record exercises the read bound without constructing
+    // a huge test string or allocating storage for a whole history file.
+    let size = super::super::MAX_JSONL_ENTRY_BYTES + 2;
+    file.set_len(size).unwrap();
+    file.seek(io::SeekFrom::Start(0)).unwrap();
+    file.write_all(b" ").unwrap();
+    file.seek(io::SeekFrom::End(-1)).unwrap();
+    file.write_all(b"\n").unwrap();
+    let error = JsonlStorageAdapter::load_timeline_prefix(&mut file, size)
+        .err()
+        .unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("exceeds"));
+}
+
+#[test]
 fn timeline_append_rejects_same_length_interior_replacement() {
     let dir = tempfile::tempdir().unwrap();
     let directory = crate::session::storage::ContainedDirectory::open(

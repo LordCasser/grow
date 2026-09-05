@@ -1889,6 +1889,7 @@ mod tests {
             storage.clone(),
             config_types::MemoryIndexConfig::default(),
             64,
+            Some("test"),
         )
         .unwrap();
         assert_eq!(storage.total_chunk_count(), 0);

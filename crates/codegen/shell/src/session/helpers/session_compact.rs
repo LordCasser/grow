@@ -94,6 +94,7 @@ fn classify_sampling_error(err: SamplingError, image_count: usize) -> CompactFai
     let deterministic = match &err {
         SamplingError::Auth { .. }
         | SamplingError::InvalidConfiguration(_)
+        | SamplingError::Persistence(_)
         | SamplingError::Serialization(_)
         | SamplingError::IdleTimeout { .. } => true,
         SamplingError::Api {
@@ -1270,15 +1271,9 @@ mod reasoning_compaction_regression_tests {
         let input_surface = vec![
             ConversationItem::system("You are a helpful assistant."),
             ConversationItem::user("<user_query>\nfix the bug\n</user_query>"),
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r1".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: "thinking about the bug".to_string(),
-                })],
-                content: None,
-                encrypted_content: None,
-                status: None,
-            }),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "thinking about the bug",
+            )),
             ConversationItem::assistant("I fixed it."),
             ConversationItem::user("Summarize the conversation so far."),
         ];

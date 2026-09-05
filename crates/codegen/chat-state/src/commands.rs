@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use compaction::PrunePlan;
 use sampling_types::{
     ConversationItem, ConversationRequest, DanglingToolCallReason, GoalDirectiveTag,
-    JsonOutputFormat, SamplingConfig, TokenUsage, ToolSpec,
+    JsonOutputFormat, NativeContinuationFragment, SamplingConfig, TokenUsage, ToolSpec,
 };
 use tokio::sync::oneshot;
 
@@ -172,6 +172,7 @@ pub enum ChatStateCommand {
     /// exchanges before any reader or tool dispatcher can consume the Surface.
     PushResponseDurably {
         items: Vec<ConversationItem>,
+        native_continuation: Option<NativeContinuationFragment>,
         reply: oneshot::Sender<Result<usize, TimelineWriteError>>,
     },
 
@@ -221,8 +222,15 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<()>,
     },
 
-    /// Update the sampling config (e.g., model switch).
+    /// Replace the active provider route and start a fresh continuation epoch.
+    ReplaceSamplingRoute { config: SamplingConfig },
+
+    /// Update sampling parameters without changing the provider route.
     UpdateSamplingConfig { config: SamplingConfig },
+
+    /// Drop provider-native continuation and acknowledge the new epoch before
+    /// a portable fallback request is rebuilt.
+    ResetContinuation { reply: oneshot::Sender<()> },
 
     /// Track that the agent edited a file path.
     RecordAgentEditedPath { path: String },
@@ -550,11 +558,27 @@ mod tests {
         let _ = ChatStateCommand::RecordProviderContextAnchor {
             provider_total_tokens: 100,
         };
-        let _ = ChatStateCommand::UpdateSamplingConfig {
+        let _ = ChatStateCommand::ReplaceSamplingRoute {
             config: SamplingConfig {
                 base_url: String::new(),
                 model: String::new(),
                 output_limit: None,
+                temperature: None,
+                top_p: None,
+                api_backend: Default::default(),
+                extra_headers: Default::default(),
+                query_params: Default::default(),
+                env_http_headers: Default::default(),
+                context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+                reasoning_effort: None,
+                stream_tool_calls: None,
+            },
+        };
+        let _ = ChatStateCommand::UpdateSamplingConfig {
+            config: SamplingConfig {
+                base_url: String::new(),
+                model: String::new(),
+                output_limit: Some(4096),
                 temperature: None,
                 top_p: None,
                 api_backend: Default::default(),

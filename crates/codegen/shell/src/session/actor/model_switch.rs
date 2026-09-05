@@ -535,7 +535,7 @@ impl SessionActor {
         self.compaction_at_tokens
             .set(sampling_config.compaction_at_tokens);
         self.chat_state_handle
-            .update_sampling_config(sampling_types::SamplingConfig {
+            .replace_sampling_route(sampling_types::SamplingConfig {
                 base_url: sampling_config.base_url.clone(),
                 model: sampling_config.model.clone(),
                 output_limit: sampling_config.output_limit,
@@ -686,27 +686,14 @@ impl SessionActor {
             auto_compact_threshold_percent,
         } = route;
         let previous_route = self.model_route.snapshot();
-        let previous_transport = sampling_types::model_image_input_key_from_parts(
-            &previous_route.sampling_config.model,
-            &previous_route.sampling_config.api_backend,
-            &previous_route.sampling_config.base_url,
-            &previous_route.sampling_config.query_params,
-        );
-        let next_transport = sampling_types::model_image_input_key_from_parts(
-            &sampling_config.model,
-            &sampling_config.api_backend,
-            &sampling_config.base_url,
-            &sampling_config.query_params,
-        );
-        let sampling_epoch_changed = previous_route.model_id != model_id
-            || previous_route.sampling_config.model != sampling_config.model
-            || previous_route.sampling_config.reasoning_effort != sampling_config.reasoning_effort
-            || previous_transport != next_transport;
+        let route_changed = previous_route.model_id != model_id;
+        let sampling_changed = route_changed
+            || previous_route.sampling_config.reasoning_effort != sampling_config.reasoning_effort;
         // Stage every fallible derivative before publishing the authoritative
         // ModelChanged fact. After that durable commit, live activation must
         // be an infallible swap; returning Rejected would otherwise disagree
         // with replay and the control receipt.
-        let next_run_route = if sampling_epoch_changed {
+        let next_run_route = if sampling_changed {
             let mut workflow_default_sampler = sampling_config.clone();
             workflow_default_sampler.idle_timeout_secs = Some(inference_idle_timeout.as_secs());
             workflow_default_sampler.max_retries = Some(max_retries);
@@ -754,10 +741,10 @@ impl SessionActor {
         // but an identical Sampling epoch is not a model reload. In particular,
         // do not replace live credentials or invalidate provider/compaction
         // memoization merely because the client selected the current target.
-        if !sampling_epoch_changed {
+        if !sampling_changed {
             return Ok((model_id, false));
         }
-        let next_run_route = next_run_route.expect("changed Sampling route was staged");
+        let next_run_route = next_run_route.expect("changed Sampling config was staged");
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
@@ -794,21 +781,27 @@ impl SessionActor {
             .set(sampling_config.compactions_remaining);
         self.compaction_at_tokens
             .set(sampling_config.compaction_at_tokens);
-        self.chat_state_handle
-            .update_sampling_config(sampling_types::SamplingConfig {
-                base_url: sampling_config.base_url.clone(),
-                model: sampling_config.model.clone(),
-                output_limit: sampling_config.output_limit,
-                temperature: sampling_config.temperature,
-                top_p: sampling_config.top_p,
-                api_backend: sampling_config.api_backend.clone(),
-                extra_headers: sampling_config.extra_headers.clone(),
-                query_params: sampling_config.query_params.clone(),
-                env_http_headers: sampling_config.env_http_headers.clone(),
-                context_window: new_context_window,
-                reasoning_effort: sampling_config.reasoning_effort,
-                stream_tool_calls: Some(sampling_config.stream_tool_calls),
-            });
+        let chat_sampling_config = sampling_types::SamplingConfig {
+            base_url: sampling_config.base_url.clone(),
+            model: sampling_config.model.clone(),
+            output_limit: sampling_config.output_limit,
+            temperature: sampling_config.temperature,
+            top_p: sampling_config.top_p,
+            api_backend: sampling_config.api_backend.clone(),
+            extra_headers: sampling_config.extra_headers.clone(),
+            query_params: sampling_config.query_params.clone(),
+            env_http_headers: sampling_config.env_http_headers.clone(),
+            context_window: new_context_window,
+            reasoning_effort: sampling_config.reasoning_effort,
+            stream_tool_calls: Some(sampling_config.stream_tool_calls),
+        };
+        if route_changed {
+            self.chat_state_handle
+                .replace_sampling_route(chat_sampling_config);
+        } else {
+            self.chat_state_handle
+                .update_sampling_config(chat_sampling_config);
+        }
         let existing = self.chat_state_handle.get_credentials().await;
         self.chat_state_handle
             .update_credentials(chat_state::Credentials {
@@ -843,7 +836,7 @@ impl SessionActor {
             ),
         )
         .await;
-        Ok((model_id, sampling_epoch_changed))
+        Ok((model_id, sampling_changed))
     }
 
     async fn begin_sampling_intent<'a>(
@@ -2565,13 +2558,13 @@ mod tests {
                     actor.compaction.threshold_percent.get(),
                 );
                 let mut workflow_admission = actor.workflow_manager.lock().await;
-                let (_, sampling_epoch_changed) = actor
+                let (_, sampling_changed) = actor
                     .apply_user_model_selection(&mut workflow_admission, route, Some(catalog), None)
                     .await
                     .expect("identical sampling route must apply");
                 drop(workflow_admission);
 
-                assert!(!sampling_epoch_changed);
+                assert!(!sampling_changed);
                 assert_eq!(
                     actor
                         .chat_state_handle
@@ -2609,6 +2602,72 @@ mod tests {
                         .expect("no-op must retain previous model state")
                         .model_slug,
                     "previous-wire-model"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn effort_only_update_preserves_continuation_epoch() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                let before = actor
+                    .chat_state_handle
+                    .build_request("effort-only", vec![], None, None, None)
+                    .await
+                    .unwrap()
+                    .prompt_cache_key
+                    .unwrap();
+                let current = actor.model_route.snapshot();
+                let next_effort = if current.sampling_config.reasoning_effort
+                    == Some(sampling_types::ReasoningEffort::High)
+                {
+                    sampling_types::ReasoningEffort::Low
+                } else {
+                    sampling_types::ReasoningEffort::High
+                };
+                let mut next_sampling = current.sampling_config.clone();
+                next_sampling.reasoning_effort = Some(next_effort);
+                let image_description_model = actor.image_description_model.read().clone();
+                let route = crate::agent::models::PublishedSessionRoute {
+                    model_id: current.model_id.clone(),
+                    sampling_config: next_sampling.clone(),
+                    image_description_model: image_description_model.clone(),
+                    inference_idle_timeout: actor.inference_idle_timeout.get(),
+                    max_retries: actor.max_retries.get(),
+                    auto_compact_threshold_percent: actor.compaction.threshold_percent.get(),
+                };
+                let catalog = SessionActor::published_catalog_for_test(
+                    current.model_id,
+                    next_sampling,
+                    image_description_model,
+                    route.inference_idle_timeout,
+                    route.max_retries,
+                    route.auto_compact_threshold_percent,
+                );
+                let mut workflow_admission = actor.workflow_manager.lock().await;
+                let (_, sampling_changed) = actor
+                    .apply_user_model_selection(&mut workflow_admission, route, Some(catalog), None)
+                    .await
+                    .unwrap();
+                drop(workflow_admission);
+
+                let after = actor
+                    .chat_state_handle
+                    .build_request("effort-only", vec![], None, None, None)
+                    .await
+                    .unwrap();
+                assert!(sampling_changed);
+                assert_eq!(after.prompt_cache_key.as_deref(), Some(before.as_str()));
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .unwrap()
+                        .reasoning_effort,
+                    Some(next_effort)
                 );
             })
             .await;

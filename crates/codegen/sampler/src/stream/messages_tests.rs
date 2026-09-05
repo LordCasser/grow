@@ -418,9 +418,19 @@ async fn thinking_block_emits_reasoning_channel_and_preserved_in_response() {
                 .reasoning_items()
                 .next()
                 .expect("reasoning sibling preserved");
-            let rs::SummaryPart::SummaryText(t) = &r.summary[0];
-            assert_eq!(t.text, "let me think...");
-            assert_eq!(r.encrypted_content.as_deref(), Some("abc123"));
+            assert_eq!(r.text.as_ref(), "let me think...");
+            let sampling_types::NativeContinuationFragment::Messages(blocks) = response
+                .native_continuation
+                .as_ref()
+                .expect("native continuation preserved")
+            else {
+                panic!("messages continuation expected")
+            };
+            assert!(blocks.iter().any(|block| matches!(
+                block,
+                sampling_types::messages::ContentBlock::Thinking { signature, .. }
+                    if signature == "abc123"
+            )));
         }
         other => panic!("expected Completed, got {other:?}"),
     }

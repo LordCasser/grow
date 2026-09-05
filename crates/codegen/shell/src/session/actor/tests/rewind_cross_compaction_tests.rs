@@ -77,10 +77,7 @@ async fn seed_compacted_timeline(actor: &super::SessionActor) {
         .unwrap();
     actor
         .chat_state_handle
-        .replace_compaction_range(
-            target,
-            vec![ConversationItem::user_meta("SUMMARY")],
-        )
+        .replace_compaction_range(target, vec![ConversationItem::user_meta("SUMMARY")])
         .await
         .unwrap();
     actor

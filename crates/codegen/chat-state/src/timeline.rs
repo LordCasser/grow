@@ -1538,6 +1538,9 @@ pub struct Timeline {
     surface: Vec<ConversationItem>,
     surface_ids: Vec<SurfaceId>,
     surface_revision: u64,
+    /// Branch-local coordinates derived incrementally from accepted events.
+    prompt_indices: BTreeSet<usize>,
+    next_prompt_index: usize,
     pending_control_contexts: BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
     pending_notifications: BTreeMap<String, PendingNotification>,
     received_notification_ids: BTreeSet<String>,
@@ -2115,38 +2118,35 @@ impl Timeline {
     /// starts and rewind branch selections. Every v2 turn start carries both
     /// its coordinate and prompt text; this fold consumes only the coordinate.
     pub fn next_prompt_index(&self) -> usize {
-        let mut prompts = BTreeMap::<usize, ()>::new();
-        for event in &self.events {
-            match &event.kind {
-                TimelineEventKind::Turn(TurnEvent::Started {
-                    prompt_index: index,
-                    ..
-                }) => {
-                    prompts.insert(*index, ());
+        self.next_prompt_index
+    }
+
+    fn apply_prompt_coordinate(&mut self, kind: &TimelineEventKind) {
+        match kind {
+            TimelineEventKind::Turn(TurnEvent::Started { prompt_index, .. }) => {
+                self.prompt_indices.insert(*prompt_index);
+                while self.prompt_indices.contains(&self.next_prompt_index) {
+                    self.next_prompt_index += 1;
                 }
-                TimelineEventKind::Messages(MessageEvent {
-                    cause: MessageCause::Rewind,
-                    items,
-                    ..
-                }) => {
-                    let next = items
-                        .iter()
-                        .filter_map(|item| match item {
-                            ConversationItem::User(user) => user.prompt_index,
-                            _ => None,
-                        })
-                        .max()
-                        .map_or(0, |index| index.saturating_add(1));
-                    prompts.retain(|index, _| *index < next);
-                }
-                _ => {}
             }
+            TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Rewind,
+                items,
+                ..
+            }) => {
+                let next = items
+                    .iter()
+                    .filter_map(|item| match item {
+                        ConversationItem::User(user) => user.prompt_index,
+                        _ => None,
+                    })
+                    .max()
+                    .map_or(0, |index| index.saturating_add(1));
+                self.prompt_indices.split_off(&next);
+                self.next_prompt_index = self.next_prompt_index.min(next);
+            }
+            _ => {}
         }
-        let mut next = 0;
-        while prompts.remove(&next).is_some() {
-            next += 1;
-        }
-        next
     }
 
     pub fn last_completed_compaction_prompt_index(&self) -> Option<usize> {
@@ -3098,6 +3098,7 @@ impl Timeline {
         if matches!(&event.kind, TimelineEventKind::SubagentResult(_)) {
             self.subagent_result_recorded = true;
         }
+        self.apply_prompt_coordinate(&event.kind);
         self.lifecycle = lifecycle;
         self.events.push(event);
         Ok(())
@@ -6940,6 +6941,35 @@ mod tests {
     }
 
     #[test]
+    fn prompt_coordinate_handles_holes_and_replays_incrementally() {
+        let mut timeline = Timeline::default();
+        for (id, index, expected) in [(1, 2, 0), (2, 0, 1), (3, 1, 3)] {
+            record_prompt(&mut timeline, id, index, "prompt");
+            assert_eq!(timeline.next_prompt_index(), expected);
+            let restored = Timeline::from_events(timeline.events().to_vec()).unwrap();
+            assert_eq!(restored.next_prompt_index(), expected);
+        }
+    }
+
+    #[test]
+    fn prompt_coordinate_rewinds_and_reuses_branch_indices() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+        for index in 0..4 {
+            record_prompt(&mut timeline, index as u64 + 1, index, "prompt");
+        }
+        let rewound = timeline.rewind_surface(2).unwrap();
+        timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        assert_eq!(timeline.next_prompt_index(), 2);
+        record_prompt(&mut timeline, 9, 2, "new branch");
+        assert_eq!(timeline.next_prompt_index(), 3);
+        let restored = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(restored.next_prompt_index(), 3);
+        let rewound = timeline.rewind_surface(0).unwrap();
+        timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        assert_eq!(timeline.next_prompt_index(), 0);
+    }
+
+    #[test]
     fn hook_event_type_all_is_exhaustive_and_gate_stable() {
         assert_eq!(HookEventType::ALL.len(), 15);
         assert_eq!(
@@ -10232,7 +10262,7 @@ mod tests {
     #[test]
     fn image_projection_atomically_redacts_parallel_tool_call_paths() {
         use sampling_types::conversation::{
-            BackendToolCallItem, BackendToolKind, ContentPart, ToolCall, conversation_image_groups,
+            BackendToolCallItem, ContentPart, ToolCall, conversation_image_groups,
         };
 
         let mut assistant = ConversationItem::assistant_tool_calls(vec![
@@ -10255,17 +10285,9 @@ mod tests {
             ConversationItem::Reasoning(sampling_types::conversation::synthesized_reasoning_item(
                 "Reading /secret/from-reasoning.png",
             )),
-            ConversationItem::BackendToolCall(BackendToolCallItem {
-                kind: BackendToolKind::CodeInterpreter(
-                    sampling_types::rs::CodeInterpreterToolCall {
-                        code: Some("open('/secret/from-backend-tool.png')".into()),
-                        container_id: "container_1".into(),
-                        id: "ci_1".into(),
-                        outputs: None,
-                        status: sampling_types::rs::CodeInterpreterToolCallStatus::Completed,
-                    },
-                ),
-            }),
+            ConversationItem::BackendToolCall(BackendToolCallItem::code_interpreter(Some(
+                "open('/secret/from-backend-tool.png')",
+            ))),
             ConversationItem::Reasoning(sampling_types::conversation::synthesized_reasoning_item(
                 "Continuing /secret/from-reasoning-2.png",
             )),
@@ -12558,4 +12580,16 @@ mod tests {
                 .all(|pair| { pair[0].received_seq.get() < pair[1].received_seq.get() })
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn architecture_document_names_current_timeline_schema() {
+    let architecture = include_str!("../../../../docs/architecture/agent-core-timeline.md");
+    assert!(
+        architecture.lines().any(|line| line.starts_with(&format!(
+            "> Current Timeline schema is v{TIMELINE_SCHEMA_VERSION}."
+        ))),
+        "update the current architecture contract when changing the schema"
+    );
 }

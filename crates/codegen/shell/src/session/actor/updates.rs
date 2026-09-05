@@ -825,8 +825,9 @@ impl SessionActor {
                     reasoning_tokens: u64::from(u.reasoning_tokens),
                 });
         let signature = response
-            .reasoning_items()
-            .find_map(|r| r.encrypted_content.clone());
+            .native_continuation
+            .as_ref()
+            .and_then(sampling_types::NativeContinuationFragment::signature);
         GrowSessionUpdate::ResponseCompleted {
             message_id: response.message_id.clone(),
             stop_reason: response.raw_stop_reason.clone(),

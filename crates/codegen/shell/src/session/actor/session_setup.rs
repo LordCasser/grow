@@ -332,13 +332,12 @@ impl SessionActor {
         if !config_changed {
             return;
         }
-        let updated_config = sampling_types::SamplingConfig {
-            context_window: new_context_window,
-            output_limit: new_output_limit,
-            ..current_config
-        };
         self.chat_state_handle
-            .update_sampling_config(updated_config);
+            .update_sampling_config(sampling_types::SamplingConfig {
+                context_window: new_context_window,
+                output_limit: new_output_limit,
+                ..current_config
+            });
     }
     /// Inject the actor's managed Read-deny globs into the current ToolBridge so
     /// the Grep tool excludes policy-forbidden paths. No-op when empty. Called on

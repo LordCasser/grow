@@ -453,7 +453,8 @@ impl SessionActor {
                 crate::session::commands::fatal_turn_boundary_error("panic usage settlement", error)
             })?;
         self.compaction.cancel.request_cancel();
-        self.cancel_background_compaction("foreground_owner_panicked").await?;
+        self.cancel_background_compaction("foreground_owner_panicked")
+            .await?;
         self.chat_state_handle
             .settle_open_compaction_durably("foreground_owner_panicked")
             .await
@@ -641,7 +642,8 @@ impl SessionActor {
             }
         };
         if let Some(non_turn) = non_turn {
-            self.cancel_background_compaction("cancelled_by_stop").await?;
+            self.cancel_background_compaction("cancelled_by_stop")
+                .await?;
             if matches!(non_turn, NonTurnForeground::Compaction) {
                 self.compaction.cancel.request_cancel();
             }
@@ -683,7 +685,8 @@ impl SessionActor {
         // Abort in-flight `/compact` or auto-compact generation (stream select +
         // pre-replace guard). Safe when no compact is running.
         self.compaction.cancel.request_cancel();
-        self.cancel_background_compaction("cancelled_by_stop").await?;
+        self.cancel_background_compaction("cancelled_by_stop")
+            .await?;
         // Linearize Stop against the causal Step boundary before aborting the
         // producer. A control transaction owns this gate from its durable
         // append through live-state swap and authoritative terminal receipt.

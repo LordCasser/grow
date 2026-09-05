@@ -120,8 +120,8 @@ pub enum RetryDecision {
     /// error, first retry only).
     RetryWithClientRebuild { backoff: Duration },
 
-    /// Emit the error to the session and let it decide what to do
-    /// (auth refresh, encrypted-content mismatch).
+    /// Emit an authentication error to the session so it can refresh the
+    /// credential without spending the ordinary transport retry budget.
     EmitToSession(SamplingError),
 
     /// Fatal: no further retries possible. Surface to the caller as the
@@ -142,13 +142,11 @@ pub fn classify_error(
     max_retries: u32,
     rate_limit_threshold: u32,
 ) -> RetryDecision {
-    // Auth and encrypted-content errors are session-owned. The sampler
-    // surfaces the raw error and lets the session refresh credentials
-    // or show a friendly message.
+    // Authentication errors are session-owned. Request-content failures,
+    // including rejected native continuation, remain ordinary fatal results;
+    // the session can decide whether its exact request carried recoverable
+    // continuation state.
     if err.is_auth_error() {
-        return RetryDecision::EmitToSession(clone_error(err));
-    }
-    if err.is_encrypted_content_error() {
         return RetryDecision::EmitToSession(clone_error(err));
     }
     if max_retries == 0 {
@@ -242,6 +240,7 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 retry_prefix, message
             )
         }
+        SamplingError::Persistence(message) => format!("Attempt persistence failed: {message}"),
         SamplingError::InvalidConfiguration(msg) => {
             format!(
                 "{}Invalid configuration: {}. Please check your model settings.",
@@ -358,6 +357,7 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             credential: *credential,
         },
         SamplingError::InvalidConfiguration(msg) => SamplingError::InvalidConfiguration(msg),
+        SamplingError::Persistence(message) => SamplingError::Persistence(message.clone()),
         SamplingError::Http(e) => {
             // reqwest::Error is not Clone; preserve the rendered message
             // as an EventStreamError (the closest retryable transport
@@ -494,18 +494,6 @@ mod tests {
                 assert_eq!(status, StatusCode::UNAUTHORIZED);
             }
             other => panic!("expected EmitToSession(Api 401), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn classify_encrypted_content_emits_to_session() {
-        let err = api_err(
-            StatusCode::BAD_REQUEST,
-            "Could not decrypt the provided encrypted_content",
-        );
-        match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::EmitToSession(_) => {}
-            other => panic!("expected EmitToSession, got {other:?}"),
         }
     }
 

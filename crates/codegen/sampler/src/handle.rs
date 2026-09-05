@@ -93,6 +93,7 @@ impl SamplerHandle {
             completion_tx: None,
             scope_capture: None,
             usage_sink: None,
+            evidence_sink: None,
         });
     }
 
@@ -114,6 +115,7 @@ impl SamplerHandle {
             completion_tx: None,
             scope_capture: None,
             usage_sink: None,
+            evidence_sink: None,
         });
     }
 
@@ -199,6 +201,7 @@ impl SamplerHandle {
                 completion_tx: Some(completion_tx),
                 scope_capture: None,
                 usage_sink: None,
+                evidence_sink: None,
             })
             .ok()
             .map(|_| CancelOnDrop {
@@ -221,6 +224,7 @@ impl SamplerHandle {
         request: ConversationRequest,
         scope_capture: Option<AttemptScopeCapture>,
         usage_sink: Option<AttemptUsageSink>,
+        evidence_sink: Option<crate::audit::EvidenceSink>,
     ) -> Result<(sampling_types::ConversationResponse, InferenceLatencyStats), SamplingError> {
         if !self.accepting.load(Ordering::Acquire) {
             return Err(SamplingError::auth_unknown(
@@ -249,6 +253,7 @@ impl SamplerHandle {
                 completion_tx: Some(completion_tx),
                 scope_capture,
                 usage_sink,
+                evidence_sink,
             })
             .ok()
             .map(|_| CancelOnDrop {

@@ -121,6 +121,7 @@ pub(crate) async fn run_request_task(
     completion_tx: Option<oneshot::Sender<CompletionResult>>,
     scope_capture: Option<AttemptScopeCapture>,
     usage_sink: Option<AttemptUsageSink>,
+    evidence_sink: Option<crate::audit::EvidenceSink>,
 ) -> RequestId {
     let mut completion_tx = completion_tx;
     let idle_timeout = Duration::from_secs(
@@ -176,6 +177,18 @@ pub(crate) async fn run_request_task(
         // Once the resample budget is spent, the attempt runs with the abort
         // disarmed so it can complete and be accepted as-is.
         let doom_check = doom_policy.filter(|_| doom_retry_count < doom_max_retries);
+        let attempt_number = retry_count + doom_retry_count + 1;
+        let evidence_sink: Option<crate::audit::EvidenceSink> =
+            evidence_sink.as_ref().map(|sink| {
+                let sink = sink.clone();
+                Arc::new(move |mut evidence: crate::audit::Evidence| {
+                    evidence.metadata["attempt_number"] = serde_json::json!(attempt_number);
+                    sink(evidence)
+                }) as crate::audit::EvidenceSink
+            });
+        let evidence = evidence_sink
+            .as_ref()
+            .map(|sink| crate::audit::AttemptEvidence::new(sink.clone()));
         let attempt = run_one_attempt(
             &client,
             request.clone(),
@@ -187,8 +200,11 @@ pub(crate) async fn run_request_task(
             Arc::clone(&output_observed),
             scope_capture.as_ref(),
         )
-        .instrument(sampling_span.clone())
-        .await;
+        .instrument(sampling_span.clone());
+        let attempt = match &evidence {
+            Some(evidence) => evidence.scope(attempt).await,
+            None => attempt.await,
+        };
         let AttemptRun {
             outcome,
             scope: attempt_scope,
@@ -222,6 +238,12 @@ pub(crate) async fn run_request_task(
             AttemptOutcome::Cancelled | AttemptOutcome::InitFailed { .. } => None,
         }
         .or_else(|| {
+            evidence
+                .as_ref()
+                .filter(|evidence| !evidence.was_dispatched())
+                .map(|_| TokenUsage::default())
+        })
+        .or_else(|| {
             // An unconditional image-capability rejection is a provider-side
             // request validation failure: inference never started, so the
             // attempt has exact zero usage. Keeping it out of the generic
@@ -243,6 +265,20 @@ pub(crate) async fn run_request_task(
             )
             .then(sampling_types::TokenUsage::default)
         });
+        let evidence_result = if let Some(evidence) = &evidence {
+            let details = match &outcome {
+                AttemptOutcome::Failed { error, .. } | AttemptOutcome::InitFailed { error } => {
+                    serde_json::json!({"error": SamplingErrorInfo::from(error)})
+                }
+                AttemptOutcome::Empty { context, .. } => serde_json::json!({"empty": context}),
+                AttemptOutcome::Cancelled => serde_json::json!({"cancelled": true}),
+                _ => serde_json::json!({"accepted": true}),
+            };
+            evidence.finish(serde_json::json!({"attempt": retry_count + doom_retry_count + 1, "details": details})).await
+        } else {
+            Ok(())
+        };
+
         if provider_started
             && let Some(usage) = &outcome_usage
             && let Some(sink) = &usage_sink
@@ -252,7 +288,7 @@ pub(crate) async fn run_request_task(
             })
             .await
         {
-            finish_usage_settlement_failure(&event_tx, &request_id, &mut completion_tx, error);
+            finish_attempt_persistence_failure(&event_tx, &request_id, &mut completion_tx, error);
             return request_id;
         } else if provider_started
             && outcome_usage.is_none()
@@ -262,7 +298,16 @@ pub(crate) async fn run_request_task(
             })
             .await
         {
-            finish_usage_settlement_failure(&event_tx, &request_id, &mut completion_tx, error);
+            finish_attempt_persistence_failure(&event_tx, &request_id, &mut completion_tx, error);
+            return request_id;
+        }
+
+        if let Err(error) = evidence_result {
+            finish_attempt_persistence_failure(&event_tx, &request_id, &mut completion_tx, error);
+            return request_id;
+        }
+        if cancel_token.is_cancelled() {
+            handle_cancellation(&event_tx, &request_id, &mut completion_tx);
             return request_id;
         }
 
@@ -339,6 +384,7 @@ pub(crate) async fn run_request_task(
                     &cancel_token,
                     &mut completion_tx,
                     None,
+                    evidence_sink.as_ref(),
                 )
                 .await
                 {
@@ -360,6 +406,27 @@ pub(crate) async fn run_request_task(
                         outcome = "resampled",
                         "doom-loop recovery: discarding the poisoned attempt and resampling"
                     );
+                    let persisted = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            handle_cancellation(&event_tx, &request_id, &mut completion_tx);
+                            return request_id;
+                        }
+                        persisted = crate::audit::record(evidence_sink.as_ref(), "retry", serde_json::json!({
+                            "attempt": doom_retry_count, "max_retries": doom_max_retries,
+                            "decision": "doom_loop_resample", "backoff_ms": backoff.as_millis(),
+                            "error": SamplingErrorInfo::from(&error),
+                        })) => persisted,
+                    };
+                    if let Err(error) = persisted {
+                        finish_attempt_persistence_failure(
+                            &event_tx,
+                            &request_id,
+                            &mut completion_tx,
+                            error,
+                        );
+                        return request_id;
+                    }
                     emit_retrying(
                         &event_tx,
                         &request_id,
@@ -385,6 +452,7 @@ pub(crate) async fn run_request_task(
                     &cancel_token,
                     &mut completion_tx,
                     usage,
+                    evidence_sink.as_ref(),
                 )
                 .await
                 {
@@ -408,6 +476,7 @@ pub(crate) async fn run_request_task(
                     &cancel_token,
                     &mut completion_tx,
                     None,
+                    evidence_sink.as_ref(),
                 )
                 .await
                 {
@@ -475,6 +544,7 @@ async fn apply_retry_decision(
     cancel_token: &CancellationToken,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
     terminal_usage: Option<TokenUsage>,
+    evidence_sink: Option<&crate::audit::EvidenceSink>,
 ) -> bool {
     let rate_limit_threshold = if retry_policy.rate_limit_retry_threshold == 0 {
         retry_mod::RATE_LIMIT_RETRY_THRESHOLD
@@ -483,6 +553,29 @@ async fn apply_retry_decision(
     };
     let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
 
+    if matches!(
+        &decision,
+        RetryDecision::Retry { .. }
+            | RetryDecision::RetryWithBackoff { .. }
+            | RetryDecision::RetryWithClientRebuild { .. }
+    ) {
+        let details = serde_json::json!({
+            "attempt": *retry_count + 1, "max_retries": max_retries,
+            "decision": format!("{decision:?}"), "error": SamplingErrorInfo::from(err),
+        });
+        let persisted = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => {
+                handle_cancellation(event_tx, request_id, completion_tx);
+                return false;
+            }
+            persisted = crate::audit::record(evidence_sink, "retry", details) => persisted,
+        };
+        if let Err(error) = persisted {
+            finish_attempt_persistence_failure(event_tx, request_id, completion_tx, error);
+            return false;
+        }
+    }
     match decision {
         RetryDecision::Retry { backoff } => {
             *retry_count += 1;
@@ -936,11 +1029,9 @@ fn response_has_observed_output(response: &ConversationResponse) -> bool {
     response
         .assistant()
         .is_some_and(|assistant| !assistant.content.is_empty() || !assistant.tool_calls.is_empty())
-        || response.reasoning_items().any(|reasoning| {
-            !reasoning.summary.is_empty()
-                || reasoning.content.is_some()
-                || reasoning.encrypted_content.is_some()
-        })
+        || response
+            .reasoning_items()
+            .any(|reasoning| !reasoning.text.is_empty())
         || response.backend_tool_items().next().is_some()
         || response
             .usage
@@ -968,9 +1059,7 @@ fn build_empty_context(
     reason: sampling_types::EmptyReason,
     response: &ConversationResponse,
 ) -> EmptyResponseContext {
-    let had_reasoning = response
-        .reasoning_items()
-        .any(|r| !r.summary.is_empty() || r.content.is_some() || r.encrypted_content.is_some());
+    let had_reasoning = response.reasoning_items().any(|r| !r.text.is_empty());
     let (content_len, tool_call_count, model, first_choice_seen) = match response.assistant() {
         Some(a) => (
             a.content.len(),
@@ -1077,14 +1166,13 @@ fn handle_cancellation(
     );
 }
 
-fn finish_usage_settlement_failure(
+fn finish_attempt_persistence_failure(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     request_id: &RequestId,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
     error: String,
 ) {
-    let error =
-        SamplingError::EventStreamError(format!("attempt usage settlement failed: {error}"));
+    let error = SamplingError::Persistence(error);
     // RequestStarted must always have a sampler terminal. Shell's stream
     // drain barrier consumes this event; completing only the oneshot would
     // otherwise manufacture a fixed five-second timeout during persistence
@@ -1164,6 +1252,211 @@ mod tests {
         assert!(!attempt.provider_started);
         assert!(attempt.scope.is_none());
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn request_evidence_ack_gates_wire_for_every_backend() {
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let (entered, mut records) = mpsc::unbounded_channel();
+            let sink: crate::audit::EvidenceSink = Arc::new(move |evidence| {
+                let entered = entered.clone();
+                Box::pin(async move {
+                    let is_request = evidence.kind == "request";
+                    entered.send(evidence).unwrap();
+                    if is_request {
+                        std::future::pending::<()>().await;
+                    }
+                    Ok(())
+                })
+            });
+            let cancel = CancellationToken::new();
+            let (events, _event_rx) = mpsc::unbounded_channel();
+            let (usage_tx, mut usage_rx) = mpsc::unbounded_channel();
+            let usage_sink: AttemptUsageSink = Arc::new(move |usage| {
+                let usage_tx = usage_tx.clone();
+                Box::pin(async move {
+                    usage_tx.send(usage).unwrap();
+                    Ok(())
+                })
+            });
+            let task = tokio::spawn(run_request_task(
+                RequestId::from("request-evidence"),
+                ConversationRequest::default(),
+                SamplerConfig {
+                    api_backend: backend,
+                    base_url: format!("http://{}", listener.local_addr().unwrap()),
+                    model: "audit-model".into(),
+                    ..Default::default()
+                },
+                RetryPolicy::default(),
+                events,
+                cancel.clone(),
+                None,
+                Some(Arc::new(|| {
+                    Box::pin(async { Ok(Some("pre-wire-lease".into())) })
+                })),
+                Some(usage_sink),
+                Some(sink),
+            ));
+            let request = tokio::time::timeout(Duration::from_secs(2), records.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(request.kind, "request");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["model"],
+                "audit-model"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), listener.accept())
+                    .await
+                    .is_err()
+            );
+            cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(usage_rx.recv().await,
+                Some(AttemptUsage::Known { scope: Some(scope), usage })
+                if scope == "pre-wire-lease" && usage.total_tokens == 0));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(25), listener.accept())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn response_and_retry_evidence_ack_gate_resampling_and_keep_raw_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for blocked_kind in ["response", "retry"] {
+            for finish in ["ack", "failure", "lost_ack", "cancel"] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let count = requests.clone();
+                // Preserve even invalid UTF-8 and the tail of long diagnostics.
+                let raw = [vec![b'x'; 2048], vec![0xff], b"final evidence".to_vec()].concat();
+                let body = raw.clone();
+                let server = tokio::spawn(async move {
+                    loop {
+                        let (mut socket, _) = listener.accept().await.unwrap();
+                        count.fetch_add(1, Ordering::SeqCst);
+                        let mut request = Vec::new();
+                        let mut buf = [0; 4096];
+                        loop {
+                            let n = socket.read(&mut buf).await.unwrap();
+                            if n == 0 {
+                                break;
+                            }
+                            request.extend_from_slice(&buf[..n]);
+                            if let Some(end) =
+                                request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                            {
+                                let headers =
+                                    String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                                let len: usize = headers
+                                    .lines()
+                                    .find_map(|line| line.strip_prefix("content-length:"))
+                                    .unwrap()
+                                    .trim()
+                                    .parse()
+                                    .unwrap();
+                                if request.len() >= end + 4 + len {
+                                    break;
+                                }
+                            }
+                        }
+                        socket.write_all(format!("HTTP/1.1 502 Bad Gateway\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
+                        socket.write_all(&body).await.unwrap();
+                    }
+                });
+                let (record_tx, mut records) = mpsc::unbounded_channel();
+                let (gate_tx, gate_rx) = oneshot::channel::<Result<(), String>>();
+                let gate = Arc::new(Mutex::new(Some(gate_rx)));
+                let sink: crate::audit::EvidenceSink = Arc::new(move |evidence| {
+                    let wait = if evidence.kind == blocked_kind {
+                        gate.lock().unwrap().take()
+                    } else {
+                        None
+                    };
+                    let record_tx = record_tx.clone();
+                    Box::pin(async move {
+                        record_tx.send(evidence).unwrap();
+                        match wait {
+                            Some(wait) => wait.await.map_err(|_| "ACK lost".to_string())?,
+                            None => Ok(()),
+                        }
+                    })
+                });
+                let cancel = CancellationToken::new();
+                let (events, _event_rx) = mpsc::unbounded_channel();
+                let task = tokio::spawn(run_request_task(
+                    RequestId::from("retry-evidence"),
+                    ConversationRequest::default(),
+                    SamplerConfig {
+                        base_url: format!("http://{address}"),
+                        model: "audit-model".into(),
+                        max_retries: Some(2),
+                        ..Default::default()
+                    },
+                    RetryPolicy::default(),
+                    events,
+                    cancel.clone(),
+                    None,
+                    None,
+                    None,
+                    Some(sink),
+                ));
+                let mut saw_raw = false;
+                loop {
+                    let record = tokio::time::timeout(Duration::from_secs(3), records.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if record.kind == "response" {
+                        assert_eq!(*record.body, raw);
+                        saw_raw = true;
+                    }
+                    if record.kind == blocked_kind {
+                        break;
+                    }
+                }
+                assert!(saw_raw);
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                assert_eq!(
+                    requests.load(Ordering::SeqCst),
+                    1,
+                    "unacknowledged {blocked_kind}"
+                );
+                match finish {
+                    "ack" => gate_tx.send(Ok(())).unwrap(),
+                    "failure" => gate_tx.send(Err("disk failed".into())).unwrap(),
+                    "lost_ack" => drop(gate_tx),
+                    "cancel" => {
+                        cancel.cancel();
+                        let _ = gate_tx.send(Ok(()));
+                    }
+                    _ => unreachable!(),
+                }
+                tokio::time::timeout(Duration::from_secs(10), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    requests.load(Ordering::SeqCst),
+                    if finish == "ack" { 2 } else { 1 }
+                );
+                server.abort();
+            }
+        }
     }
 
     #[tokio::test]
@@ -1270,6 +1563,7 @@ mod tests {
                 None,
                 Some(capture),
                 Some(sink),
+                None,
             ));
 
             tokio::time::timeout(Duration::from_secs(2), scope_rx.recv())
@@ -1298,7 +1592,7 @@ mod tests {
         let mut completion_tx = Some(completion_tx);
         let request_id = RequestId::from("usage-settlement-failure");
 
-        finish_usage_settlement_failure(
+        finish_attempt_persistence_failure(
             &event_tx,
             &request_id,
             &mut completion_tx,
@@ -1449,18 +1743,20 @@ mod tests {
             &cancel_token,
             &mut completion_tx,
             None,
+            None,
         )
         .await;
 
         assert!(!should_continue);
-        assert!(matches!(
-            event_rx.recv().await,
-            Some(SamplingEvent::Retrying { .. })
-        ));
+        assert_eq!(
+            retry_count, 0,
+            "cancelled intent never becomes a retry decision"
+        );
         assert!(matches!(
             event_rx.recv().await,
             Some(SamplingEvent::Failed { .. })
         ));
+        assert!(event_rx.try_recv().is_err());
         assert!(completion_rx.await.expect("completion sent").is_err());
     }
 
@@ -1499,6 +1795,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: Some("unexpected_state".into()),
             stop_sequence: None,
+            native_continuation: None,
         };
 
         let context = build_empty_context(sampling_types::EmptyReason::ReasoningOnly, &response);
@@ -1519,6 +1816,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
 
         assert!(!response_has_observed_output(&response(vec![
@@ -1575,6 +1873,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: None,
             stop_sequence: None,
+            native_continuation: None,
         };
         let metrics = InferenceLatencyStats::from_timestamps(Instant::now(), &[], Instant::now());
         let l2 = stream::iter(vec![SamplingEvent::Completed {
@@ -1710,6 +2009,7 @@ mod tests {
             message_id: None,
             raw_stop_reason: Some("stop".into()),
             stop_sequence: None,
+            native_continuation: None,
         };
         let metrics = InferenceLatencyStats::from_timestamps(Instant::now(), &[], Instant::now());
         let l2 = stream::iter(vec![SamplingEvent::Completed {

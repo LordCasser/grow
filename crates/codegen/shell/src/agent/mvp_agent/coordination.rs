@@ -246,18 +246,12 @@ impl SessionCoordinationBackend {
                 "question must be nonempty and at most 16384 bytes",
             ));
         }
-        record_coordination_notice(
+        record_coordination_inquiry(
             &self.source,
-            crate::extensions::notification::UiNotice {
-                correlation_id: inquiry_id.clone(),
-                category: crate::extensions::notification::UiNoticeCategory::Coordination,
-                subject: Some("outgoing inquiry".to_owned()),
-                description: Some("Attempting to send a question to another local Grow session".to_owned()),
-                message: format!("Asking session {target_session_id}"),
-                tone: crate::extensions::notification::UiNoticeTone::Info,
-                details: Some(format!(
-                    "Inquiry ID: {inquiry_id}\nTarget session: {target_session_id}\n\nQuestion:\n{question}"
-                )),
+            crate::coordination::InquiryEvent::OutgoingStarted {
+                inquiry_id: inquiry_id.clone(),
+                target_session_id: target_session_id.clone(),
+                question: question.clone(),
             },
         )
         .await?;
@@ -290,9 +284,15 @@ impl SessionCoordinationBackend {
                     error,
                 ),
             };
-            if let Err(error) = record_coordination_notice(
+            if let Err(error) = record_coordination_inquiry(
                 &task_source,
-                source_terminal_notice(&task_target_session_id, &task_question, &outcome),
+                crate::coordination::InquiryEvent::OutgoingCompleted {
+                    audit: crate::coordination::InquiryAudit {
+                        target_session_id: task_target_session_id,
+                        question: task_question,
+                        outcome: outcome.clone(),
+                    },
+                },
             )
             .await
             {
@@ -454,18 +454,14 @@ impl Drop for CancelCoordinationOnDrop {
     }
 }
 
-async fn record_coordination_notice(
+async fn record_coordination_inquiry(
     session: &SessionHandle,
-    notice: crate::extensions::notification::UiNotice,
+    event: crate::coordination::InquiryEvent,
 ) -> Result<(), CoordinationError> {
     let (respond_to, response) = tokio::sync::oneshot::channel();
     session
         .cmd_tx
-        .send(SessionCommand::RecordCoordinationNotice {
-            notice,
-            publish: false,
-            respond_to,
-        })
+        .send(SessionCommand::RecordCoordinationInquiry { event, respond_to })
         .map_err(|_| {
             CoordinationError::new(
                 CoordinationErrorCode::AuditFailure,
@@ -487,40 +483,6 @@ async fn record_coordination_notice(
             )
         })?
         .map_err(|error| CoordinationError::new(CoordinationErrorCode::AuditFailure, error))
-}
-
-fn source_terminal_notice(
-    target_session_id: &str,
-    question: &str,
-    outcome: &crate::coordination::InquiryOutcome,
-) -> crate::extensions::notification::UiNotice {
-    let status = serde_json::to_value(outcome.status)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "failed".to_owned());
-    let details = Some(
-        serde_json::to_string_pretty(&crate::coordination::InquiryAudit {
-            target_session_id: target_session_id.to_owned(),
-            question: question.to_owned(),
-            outcome: outcome.clone(),
-        })
-        .expect("inquiry audit serializes"),
-    );
-    crate::extensions::notification::UiNotice {
-        correlation_id: outcome.inquiry_id.clone(),
-        category: crate::extensions::notification::UiNoticeCategory::Coordination,
-        subject: Some("outgoing inquiry completed".to_owned()),
-        description: Some("Local coordination inquiry terminal state".to_owned()),
-        message: format!("Inquiry to session {target_session_id} finished: {status}"),
-        tone: if outcome.status == crate::coordination::InquiryStatus::Answered {
-            crate::extensions::notification::UiNoticeTone::Success
-        } else if outcome.status == crate::coordination::InquiryStatus::Failed {
-            crate::extensions::notification::UiNoticeTone::Error
-        } else {
-            crate::extensions::notification::UiNoticeTone::Warning
-        },
-        details,
-    }
 }
 
 fn reject_unavailable(inquiry: crate::coordination::InboundInquiry) {

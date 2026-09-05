@@ -674,29 +674,25 @@ impl CoordinationHandle {
         let source = source.to_owned();
         let home = self.shared.grow_home.clone();
         tokio::task::spawn_blocking(move || {
+            let timeline = crate::session::storage::load_timeline_by_id_at(&source, &home)
+                .map_err(|error| {
+                    CoordinationError::new(CoordinationErrorCode::AuditFailure, error.to_string())
+                })?;
             let mut found = None;
-            let _ = crate::session::storage::stream_replay_grow_notifications_at(
-                &source,
-                &home,
-                |notification| {
-                    if let crate::extensions::notification::SessionUpdate::UiNotice(notice) =
-                        notification.update
-                        && notice.category
-                            == crate::extensions::notification::UiNoticeCategory::Coordination
-                        && notice.correlation_id == id
-                        && notice.subject.as_deref() == Some("outgoing inquiry completed")
-                        && let Some(details) = notice.details
-                        && let Ok(audit) =
-                            serde_json::from_str::<super::inquiry::InquiryAudit>(&details)
+            if let Some(timeline) = timeline {
+                for event in timeline.events() {
+                    let fact =
+                        super::inquiry::InquiryEvent::from_timeline(event).map_err(|error| {
+                            CoordinationError::new(CoordinationErrorCode::AuditFailure, error)
+                        })?;
+                    if let Some(super::inquiry::InquiryEvent::OutgoingCompleted { audit }) = fact
                         && audit.outcome.inquiry_id == id
+                        && found.is_none()
                     {
                         found = Some(audit);
                     }
-                },
-            )
-            .map_err(|error| {
-                CoordinationError::new(CoordinationErrorCode::AuditFailure, error.to_string())
-            })?;
+                }
+            }
             Ok(found)
         })
         .await
@@ -1451,6 +1447,71 @@ mod tests {
             activity: crate::agent::roster::RosterActivity::Idle,
             subagents: Default::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn inquiry_terminal_survives_missing_ui_replay_and_runtime_restart() {
+        use crate::session::storage::{JsonlStorageAdapter, StorageAdapter, UPDATES_FILE};
+        let home = tempfile::tempdir().unwrap();
+        let info = crate::session::info::Info {
+            id: acp_transport::protocol::SessionId::new("source"),
+            cwd: "/repo".into(),
+        };
+        let storage = JsonlStorageAdapter::with_root(home.path().to_owned());
+        storage
+            .init_session(&info, crate::session::persistence::default_model_id())
+            .await
+            .unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        let outcome = InquiryOutcome::answered(&id, "durable answer".into());
+        let mut timeline = chat_state::Timeline::default();
+        for fact in [
+            super::super::inquiry::InquiryEvent::OutgoingStarted {
+                inquiry_id: id.clone(),
+                target_session_id: "target".into(),
+                question: "question".into(),
+            },
+            super::super::inquiry::InquiryEvent::OutgoingCompleted {
+                audit: super::super::inquiry::InquiryAudit {
+                    target_session_id: "target".into(),
+                    question: "question".into(),
+                    outcome: outcome.clone(),
+                },
+            },
+        ] {
+            let event = timeline.record(fact.timeline_kind()).unwrap();
+            storage
+                .append_timeline_event_durable(&info, &event)
+                .await
+                .unwrap();
+        }
+        let opened = storage.open_session(&info).unwrap();
+        let replay = opened.directory().display_path().join(UPDATES_FILE);
+        std::fs::write(&replay, "discardable UI projection\n").unwrap();
+        std::fs::remove_file(&replay).unwrap();
+        drop(opened);
+        drop(storage);
+        let runtime = CoordinationRuntime::new(home.path().to_owned());
+        runtime.ensure_started().await.unwrap();
+        runtime.publish_sessions(vec![snapshot("source", "/repo")]);
+        let state = runtime.handle().get_inquiry(&id, "source").await.unwrap();
+        assert_eq!(state.outcome, Some(outcome.clone()));
+        assert_eq!(state.phase, InquiryPhase::Finished);
+        let reused = runtime
+            .ask_session(
+                &id,
+                "source",
+                "target",
+                "question",
+                None,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reused, outcome,
+            "durable result must not dispatch the absent target again"
+        );
     }
 
     #[tokio::test]

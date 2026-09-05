@@ -564,11 +564,7 @@ mod tests {
     fn test_select_flush_window_expands_to_user_boundary() {
         let mut messages = vec![ChatRequestMessage::user("early question")];
         for i in 0..20 {
-            messages.push(ChatRequestMessage::assistant(
-                format!("response {i}"),
-                "",
-                None,
-            ));
+            messages.push(ChatRequestMessage::assistant(format!("response {i}"), None));
         }
 
         let window = select_flush_window(messages, 20);
@@ -582,7 +578,7 @@ mod tests {
         let messages = vec![
             ChatRequestMessage::system("you are helpful"),
             ChatRequestMessage::user("hi"),
-            ChatRequestMessage::assistant("hello", "", None),
+            ChatRequestMessage::assistant("hello", None),
         ];
 
         let window = select_flush_window(messages, 20);
@@ -595,7 +591,7 @@ mod tests {
     fn test_select_flush_window_short_conversation() {
         let messages = vec![
             ChatRequestMessage::user("hi"),
-            ChatRequestMessage::assistant("hello", "", None),
+            ChatRequestMessage::assistant("hello", None),
         ];
 
         let window = select_flush_window(messages, 20);
@@ -618,7 +614,9 @@ mod tests {
         let db_path = tmp.path().join("test.sqlite");
         let storage =
             MemoryStorage::with_paths(tmp.path().join("global"), tmp.path().join("workspace"));
-        let index = MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4).unwrap();
+        let index =
+            MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4, Some("test"))
+                .unwrap();
 
         // No embedding provider → always returns false (allow write).
         let result = is_semantically_duplicate(
@@ -642,7 +640,9 @@ mod tests {
         let db_path = tmp.path().join("test.sqlite");
         let storage =
             MemoryStorage::with_paths(tmp.path().join("global"), tmp.path().join("workspace"));
-        let index = MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4).unwrap();
+        let index =
+            MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4, Some("test"))
+                .unwrap();
 
         let provider = MockEmbeddingProvider { dimensions: 4 };
 
@@ -669,7 +669,8 @@ mod tests {
         let storage =
             MemoryStorage::with_paths(tmp.path().join("global"), tmp.path().join("workspace"));
         let mut index =
-            MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4).unwrap();
+            MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4, Some("test"))
+                .unwrap();
 
         let provider = MockEmbeddingProvider { dimensions: 4 };
         let content = "## Decisions\n\nWe chose Rust for memory safety.";
@@ -709,7 +710,8 @@ mod tests {
         let storage =
             MemoryStorage::with_paths(tmp.path().join("global"), tmp.path().join("workspace"));
         let mut index =
-            MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4).unwrap();
+            MemoryIndex::open_or_create(&db_path, storage, Default::default(), 4, Some("test"))
+                .unwrap();
 
         let provider = MockEmbeddingProvider { dimensions: 4 };
         let existing = "## Decisions\n\nWe chose Rust for memory safety.";

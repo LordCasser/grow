@@ -729,13 +729,8 @@ impl SessionActor {
                 doom_loop_triggers,
                 doom_loop_aborted_at_chunk,
             } => {
-                self.events
-                    .request_retrying(chat_state::RequestEvent::Retrying {
-                        id: request_id.as_str().to_string(),
-                        attempt,
-                        max_retries,
-                        reason: crate::util::truncate(&reason, 500).to_string(),
-                    });
+                // The sampler's evidence sink has already acknowledged the
+                // full retry fact. This event only projects live diagnostics.
                 if kind == sampler::SamplingErrorKind::DoomLoopDetected {
                     let triggers = doom_loop_triggers.unwrap_or_default();
                     {

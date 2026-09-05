@@ -1,0 +1,43 @@
+name: Core regression
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core tests and CLI build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_SPLIT_DEBUGINFO: "off"
+      CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: "off"
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.1"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core-regression
+          cache-on-failure: true
+      - name: Run core and presentation regressions
+        run: >-
+          cargo test --locked --lib
+          -p chat-state -p sampling-types -p sampler -p memory -p workflow
+          -p shell -p pager -p pager-minimal
+          -- --test-threads=4
+      - name: Build the application entry point
+        run: cargo build --locked -p cli --bin grow

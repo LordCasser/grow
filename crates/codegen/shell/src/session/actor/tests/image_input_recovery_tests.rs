@@ -33,7 +33,7 @@ async fn actor_with_sampler(
     if let Some(mut config) = actor.chat_state_handle.get_sampling_config().await {
         config.base_url = server.url();
         config.api_backend = sampling_types::ApiBackend::Messages;
-        actor.chat_state_handle.update_sampling_config(config);
+        actor.chat_state_handle.replace_sampling_route(config);
     }
     if let Some(auxiliary_slug) = image_description_model {
         let mut info = crate::agent::config::ModelInfo::baseline("vision-model");
@@ -476,7 +476,7 @@ fn auxiliary_image_400_fails_without_installing_a_lossy_shadow() {
             auxiliary_config.model = "vision-model".to_owned();
             actor
                 .chat_state_handle
-                .update_sampling_config(auxiliary_config);
+                .replace_sampling_route(auxiliary_config);
             assert_eq!(
                 actor
                     .unsupported_current_model_for_images()

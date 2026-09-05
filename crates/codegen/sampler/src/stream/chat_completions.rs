@@ -11,7 +11,8 @@ use futures_util::stream::{BoxStream, Stream};
 
 use sampling_types::{
     AssistantItem, ChatCompletionChunk, ConversationItem, ConversationResponse,
-    ResponseModelMetadata, SamplingError, StopReason, TokenUsage, ToolCall,
+    NativeContinuationFragment, ResponseModelMetadata, SamplingError, StopReason, TokenUsage,
+    ToolCall,
 };
 
 use super::protocol_failure;
@@ -379,20 +380,30 @@ pub fn stream_chat_completions<'a>(
 
         // Build the trailing Assistant + any reasoning sibling.
         let mut items: Vec<ConversationItem> = Vec::new();
+        let mut native_continuation = None;
         if first_choice_seen {
-            if !reasoning_acc.is_empty() {
-                items.push(ConversationItem::Reasoning(
-                    sampling_types::synthesized_reasoning_item(reasoning_acc),
-                ));
-            }
-            items.push(ConversationItem::Assistant(AssistantItem {
+            let assistant = AssistantItem {
                 content: std::sync::Arc::<str>::from(content_acc),
                 tool_calls,
                 model_id: Some(model),
                 model_fingerprint,
                 // Chat Completions does not echo the applied reasoning effort.
                 reasoning_effort: None,
-            }));
+            };
+            let mut native_message = sampling_types::conversation_item_to_chat_message(
+                ConversationItem::Assistant(assistant.clone()),
+            );
+            native_message.reasoning_content =
+                (!reasoning_acc.is_empty()).then(|| reasoning_acc.clone());
+            native_continuation = Some(NativeContinuationFragment::ChatCompletions(
+                native_message,
+            ));
+            if !reasoning_acc.is_empty() {
+                items.push(ConversationItem::Reasoning(
+                    sampling_types::synthesized_reasoning_item(reasoning_acc),
+                ));
+            }
+            items.push(ConversationItem::Assistant(assistant));
         } else {
             items.push(ConversationItem::assistant(""));
         }
@@ -412,6 +423,7 @@ pub fn stream_chat_completions<'a>(
             message_id: None,
             raw_stop_reason: raw_finish_reason,
             stop_sequence: None,
+            native_continuation,
         };
 
         yield SamplingEvent::Completed {
@@ -428,7 +440,7 @@ mod tests {
     use futures_util::stream;
     use sampling_types::{
         ChatChunkChoice, ChatChunkDelta, FinishReason, Role, ToolCallDelta as ChunkToolCallDelta,
-        ToolCallFunctionDelta, Usage, rs,
+        ToolCallFunctionDelta, Usage,
     };
     use std::pin::pin;
 
@@ -874,8 +886,7 @@ mod tests {
                     .reasoning_items()
                     .next()
                     .expect("reasoning sibling preserved");
-                let rs::SummaryPart::SummaryText(t) = &r.summary[0];
-                assert_eq!(t.text, "thinking...");
+                assert_eq!(r.text.as_ref(), "thinking...");
             }
             other => panic!("expected Completed, got {other:?}"),
         }

@@ -42,6 +42,15 @@ pub(super) fn is_image_input_unsupported(
     )
 }
 
+fn is_native_continuation_rejection(
+    error: &sampler::SamplingErrorInfo,
+    request_had_native_continuation: bool,
+) -> bool {
+    request_had_native_continuation
+        && matches!(error.kind, sampler::SamplingErrorKind::Api)
+        && error.status_code == Some(400)
+}
+
 fn sampler_model_image_input_key(
     config: &sampler::SamplerConfig,
 ) -> sampling_types::ModelImageInputKey {
@@ -1544,6 +1553,7 @@ impl SessionActor {
         error: sampler::SamplingErrorInfo,
         request_image_count: usize,
         request_image_input_key: Option<sampling_types::ModelImageInputKey>,
+        request_had_native_continuation: bool,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use sampler::SamplingErrorKind;
         // The sampler settles every provider attempt before returning its
@@ -1654,26 +1664,14 @@ impl SessionActor {
                 return Ok(SamplerFailureRecovery::CompactAndResubmit(trigger_info));
             }
         }
-        let detailed_message = error.message.clone();
-        if matches!(error.kind, SamplingErrorKind::Api)
-            && error.status_code == Some(400)
-            && error.message.contains("encrypted_content")
-        {
-            self.signals_handle()
-                .record_error_typed("encrypted_content_mismatch");
-            let friendly = "This session's conversation history is incompatible \
-                            with the current model. Please start a new session."
-                .to_string();
-            self.log_terminal_failure("encrypted_content_mismatch", error.status_code, &friendly);
-            self.send_grow_notification(GrowSessionUpdate::RetryState(
-                crate::extensions::notification::RetryState::Failed {
-                    error_type: "encrypted_content_mismatch".to_string(),
-                    message: friendly.clone(),
-                },
-            ))
-            .await;
-            return Err(acp::Error::invalid_params().data(friendly));
+        if is_native_continuation_rejection(&error, request_had_native_continuation) {
+            tracing::info!(
+                native_continuation = true,
+                "provider rejected native continuation; rebuilding portable context once"
+            );
+            return Ok(SamplerFailureRecovery::ResetContinuationAndResubmit);
         }
+        let detailed_message = error.message.clone();
         if matches!(error.kind, SamplingErrorKind::RateLimited) {
             self.log_terminal_failure("rate_limited", error.status_code, &detailed_message);
             self.send_grow_notification(GrowSessionUpdate::RetryState(
@@ -1859,6 +1857,7 @@ impl SessionActor {
             })?;
         let request_image_input_key = self.prepare_sampler_for_turn().await;
         let request_image_count = request.image_count();
+        let request_had_native_continuation = request.has_native_continuation();
         let stream_drained_rx = {
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.turn_stream_drained.lock() = Some(tx);
@@ -1950,11 +1949,21 @@ impl SessionActor {
                 Ok(())
             })
         });
+        let evidence_owner = serde_json::json!({
+            "request_id": request_id_str,
+            "source_projection": request.source_projection,
+        });
         let collect = self.sampler_handle.submit_and_collect_accounted(
             request_id.clone(),
             request,
             Some(scope_capture),
             Some(usage_sink),
+            Some(crate::session::sampling_evidence::sink(
+                self.session_directory.clone(),
+                self.chat_state_handle.clone(),
+                evidence_owner,
+                Some(request_id_str.clone()),
+            )),
         );
         tokio::pin!(collect);
         let (collected, steered) = tokio::select! {
@@ -2031,6 +2040,7 @@ impl SessionActor {
                         info,
                         request_image_count,
                         Some(request_image_input_key),
+                        request_had_native_continuation,
                     )
                     .await?
                 {
@@ -2042,6 +2052,9 @@ impl SessionActor {
                     }
                     SamplerFailureRecovery::ImageInputUnsupportedAndResubmit => {
                         Ok(SamplerTurnOutcome::ImageInputUnsupportedAndResubmit)
+                    }
+                    SamplerFailureRecovery::ResetContinuationAndResubmit => {
+                        Ok(SamplerTurnOutcome::ResetContinuationAndResubmit)
                     }
                     SamplerFailureRecovery::RefreshByokAndResubmit { credential } => {
                         Ok(SamplerTurnOutcome::RefreshByokAndResubmit { credential })
@@ -2272,6 +2285,25 @@ mod image_input_rejection_tests {
         wrong_status.status_code = Some(400);
         wrong_status.kind = sampler::SamplingErrorKind::Http;
         assert!(!is_image_input_unsupported(&wrong_status, 1));
+    }
+
+    #[test]
+    fn native_continuation_fallback_depends_on_request_shape_not_error_text() {
+        for message in [
+            "Could not decrypt encrypted_content",
+            "thinking signature is invalid",
+            "provider-specific continuation was rejected",
+        ] {
+            assert!(is_native_continuation_rejection(&api_400(message), true));
+            assert!(!is_native_continuation_rejection(&api_400(message), false));
+        }
+
+        let mut wrong_status = api_400("provider error");
+        wrong_status.status_code = Some(422);
+        assert!(!is_native_continuation_rejection(&wrong_status, true));
+        wrong_status.status_code = Some(400);
+        wrong_status.kind = sampler::SamplingErrorKind::Serialization;
+        assert!(!is_native_continuation_rejection(&wrong_status, true));
     }
 
     #[test]

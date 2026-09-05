@@ -1,6 +1,6 @@
 //! Mutation handlers for the ChatStateActor.
 
-use sampling_types::{ConversationItem, DanglingToolCallReason};
+use sampling_types::{ConversationItem, DanglingToolCallReason, NativeContinuationFragment};
 
 use super::ChatStateActor;
 use crate::MessageCause;
@@ -68,9 +68,14 @@ impl ChatStateActor {
             return false;
         };
         let item_tokens = super::state::estimate_item_tokens(&item);
-        let mut candidate = self.state.timeline.clone();
-        let event = candidate
-            .append(item, cause)
+        let event = self
+            .state
+            .timeline
+            .prepare(crate::TimelineEventKind::Messages(crate::MessageEvent {
+                cause,
+                items: vec![item],
+                surface: crate::SurfaceOp::Append,
+            }))
             .expect("an assembled conversation item must append to the timeline");
         let committed = self.commit_buffered_timeline_event(event).await;
         if committed {
@@ -132,10 +137,17 @@ impl ChatStateActor {
     pub(super) async fn push_response_durably(
         &mut self,
         items: Vec<ConversationItem>,
+        native_continuation: Option<NativeContinuationFragment>,
     ) -> Result<usize, crate::commands::TimelineWriteError> {
         if items.is_empty() {
+            self.state.continuation.reset(
+                self.state.sampling_config.api_backend.clone(),
+                self.state.timeline.surface_len(),
+                "empty_response_admission",
+            );
             return Ok(0);
         }
+        let first_new_index = self.state.timeline.surface_len();
         let tokens = super::state::estimate_conversation_tokens(&items);
         let event = self
             .state
@@ -154,6 +166,18 @@ impl ChatStateActor {
         if quarantined > 0 {
             self.replace_conversation_durably(conversation, MessageCause::IntegrityRepair)
                 .await?;
+            return Ok(quarantined);
+        }
+
+        let surface_ids = self.state.timeline.surface_ids()[first_new_index..].to_vec();
+        let installed = native_continuation
+            .is_some_and(|fragment| self.state.continuation.install(surface_ids, fragment));
+        if !installed {
+            self.state.continuation.reset(
+                self.state.sampling_config.api_backend.clone(),
+                self.state.timeline.surface_len(),
+                "native_continuation_missing_or_mismatched",
+            );
         }
         Ok(quarantined)
     }
@@ -640,6 +664,11 @@ impl ChatStateActor {
     }
 
     fn finish_surface_replacement(&mut self, surface_tokens_before: u64) {
+        self.state.continuation.reset(
+            self.state.sampling_config.api_backend.clone(),
+            self.state.timeline.surface_len(),
+            "surface_replaced",
+        );
         let projected_tokens = self.apply_surface_token_delta(surface_tokens_before);
         self.send_event(ChatStateEvent::ConversationReset {
             new_len: self.state.timeline.surface_len(),

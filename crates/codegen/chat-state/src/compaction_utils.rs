@@ -2420,16 +2420,10 @@ actual user question";
     /// against this guarantee by chaining `strip_reasoning_blocks` after.
     #[test]
     fn conversation_item_preserves_reasoning_siblings() {
-        use sampling_types::{AssistantItem, rs};
+        use sampling_types::AssistantItem;
         let result = strip_tool_messages_for_conversation_item(vec![
             ConversationItem::system("system"),
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r_123".to_string()),
-                summary: vec![],
-                content: None,
-                encrypted_content: Some("encrypted_sig".to_string()),
-                status: None,
-            }),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("thinking")),
             ConversationItem::Assistant(AssistantItem {
                 content: "response".into(),
                 tool_calls: vec![],
@@ -2443,17 +2437,9 @@ actual user question";
     }
     #[test]
     fn strip_reasoning_blocks_drops_reasoning_siblings() {
-        use sampling_types::{AssistantItem, rs};
+        use sampling_types::AssistantItem;
         let result = strip_reasoning_blocks(vec![
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r_123".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: "thinking".to_string(),
-                })],
-                content: None,
-                encrypted_content: Some("encrypted_sig".to_string()),
-                status: None,
-            }),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("thinking")),
             ConversationItem::Assistant(AssistantItem {
                 content: "response".into(),
                 tool_calls: vec![],
@@ -2484,18 +2470,9 @@ actual user question";
     /// the message must have no `reasoning` left for the provider to validate.
     #[test]
     fn prepare_for_summarization_drops_reasoning_sibling_on_mutated_assistant() {
-        use sampling_types::{AssistantItem, ToolCall, rs};
-        let mk_reasoning = || {
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r_123".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: "plan".to_string(),
-                })],
-                content: None,
-                encrypted_content: Some("encrypted_sig".to_string()),
-                status: None,
-            })
-        };
+        use sampling_types::{AssistantItem, ToolCall};
+        let mk_reasoning =
+            || ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("plan"));
         let result = prepare_conversation_for_summarization(vec![
             ConversationItem::system("system"),
             ConversationItem::user("do stuff"),
@@ -2536,17 +2513,9 @@ actual user question";
     }
     #[test]
     fn prepare_for_summarization_drops_standalone_reasoning_sibling() {
-        use sampling_types::{AssistantItem, rs};
+        use sampling_types::AssistantItem;
         let result = prepare_conversation_for_summarization(vec![
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r_123".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: "thinking".to_string(),
-                })],
-                content: None,
-                encrypted_content: None,
-                status: None,
-            }),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("thinking")),
             ConversationItem::Assistant(AssistantItem {
                 content: "plain text response".into(),
                 tool_calls: vec![],
@@ -2564,18 +2533,9 @@ actual user question";
     /// Multi-assistant conversation with mixed reasoning/tool_calls states.
     #[test]
     fn prepare_for_summarization_handles_multi_assistant_mixed_conversation() {
-        use sampling_types::{AssistantItem, ToolCall, rs};
-        let mk_reasoning = || {
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: "thinking".to_string(),
-                })],
-                content: None,
-                encrypted_content: Some("sig".to_string()),
-                status: None,
-            })
-        };
+        use sampling_types::{AssistantItem, ToolCall};
+        let mk_reasoning =
+            || ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("thinking"));
         let result = prepare_conversation_for_summarization(vec![
             ConversationItem::user("first turn"),
             mk_reasoning(),
@@ -2654,19 +2614,11 @@ actual user question";
     /// layers (e.g. memory flush + compaction both routing through it).
     #[test]
     fn prepare_for_summarization_is_idempotent() {
-        use sampling_types::{AssistantItem, ToolCall, rs};
+        use sampling_types::{AssistantItem, ToolCall};
         let input = vec![
             ConversationItem::system("system prompt"),
             ConversationItem::user("hello"),
-            ConversationItem::Reasoning(rs::ReasoningItem {
-                id: Some("r1".to_string()),
-                summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text: "thought".to_string(),
-                })],
-                content: None,
-                encrypted_content: Some("sig".to_string()),
-                status: None,
-            }),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("thought")),
             ConversationItem::Assistant(AssistantItem {
                 content: "hi".into(),
                 tool_calls: vec![ToolCall {
@@ -2745,17 +2697,11 @@ actual user question";
     /// Reasoning kept on non-Messages backends, stripped on Messages — tool I/O survives either way.
     #[test]
     fn verbatim_reasoning_kept_unless_messages_backend() {
-        use sampling_types::{ToolCall, rs};
+        use sampling_types::ToolCall;
         let mk = || {
             vec![
                 ConversationItem::system("sys"),
-                ConversationItem::Reasoning(rs::ReasoningItem {
-                    id: Some("r1".to_string()),
-                    summary: vec![],
-                    content: None,
-                    encrypted_content: Some("sig".to_string()),
-                    status: None,
-                }),
+                ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("thought")),
                 ConversationItem::assistant_tool_calls(vec![ToolCall {
                     id: "c1".into(),
                     name: "grep".to_string(),
@@ -2979,21 +2925,16 @@ actual user question";
             "recent turn must survive"
         );
     }
-    /// Incompactable-state regression: `fit` must charge encrypted-reasoning bytes (enc/4), so the old turn is trimmed.
+    /// Incompactable-state regression: `fit` must charge visible reasoning bytes,
+    /// so an old reasoning-heavy turn is trimmed. Encrypted continuation is not durable.
     #[test]
-    fn fit_counts_encrypted_reasoning_against_budget() {
-        use sampling_types::rs;
-        let big_enc = "Z".repeat(40_000);
-        let reasoning = ConversationItem::Reasoning(rs::ReasoningItem {
-            id: Some("r1".to_string()),
-            summary: vec![],
-            content: None,
-            encrypted_content: Some(big_enc),
-            status: None,
-        });
+    fn fit_counts_visible_reasoning_against_budget() {
+        let reasoning = ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+            "Z".repeat(40_000),
+        ));
         let conv = vec![
             ConversationItem::system("sys"),
-            reasoning, // old turn, huge by encrypted bytes, 0 by visible text
+            reasoning,
             ConversationItem::user("recent question"),
             ConversationItem::assistant("recent answer"),
         ];
@@ -3001,7 +2942,7 @@ actual user question";
         assert!(
             !out.iter()
                 .any(|i| matches!(i, ConversationItem::Reasoning(_))),
-            "encrypted-reasoning bytes must be counted and the old turn trimmed"
+            "visible reasoning bytes must be counted and the old turn trimmed"
         );
         assert!(
             out.iter().any(|i| i.text_content() == "recent answer"),

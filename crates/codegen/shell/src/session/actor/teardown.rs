@@ -398,7 +398,10 @@ pub(super) async fn terminate_failed_timeline_writer(
         tracing::warn!(%error, "fatal teardown failed to join restored Plan approval");
     }
     session.compaction.cancel.request_cancel();
-    if let Err(error) = session.cancel_background_compaction("session_teardown").await {
+    if let Err(error) = session
+        .cancel_background_compaction("session_teardown")
+        .await
+    {
         tracing::warn!(%error, "failed to close background compaction during teardown");
     }
     session.sideband_cancel.cancel();

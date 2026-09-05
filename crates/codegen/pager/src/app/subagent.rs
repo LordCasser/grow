@@ -110,16 +110,18 @@ impl SubagentInfo {
         }
     }
 }
-/// Resolve the immediate durable children owned by `parent_session_id`.
-/// Ownership comes exclusively from the identity-bound parent Timeline.
-fn durable_child_session_ids(
+/// Load the immediate durable child spawn facts owned by `parent_session_id`.
+/// Ownership and enrichment both come from the same identity-bound parent
+/// Timeline, so resume parses that Timeline once per parent instead of once
+/// per replayed child.
+fn durable_child_spawns(
     grow_home: &std::path::Path,
     parent_session_id: &str,
-) -> std::collections::BTreeSet<String> {
+) -> std::collections::BTreeMap<String, chat_state::SubagentSpawnEvent> {
     let Ok(Some(timeline)) =
         shell::session::storage::load_timeline_by_id_at(parent_session_id, grow_home)
     else {
-        return std::collections::BTreeSet::new();
+        return std::collections::BTreeMap::new();
     };
     let mut children = std::collections::BTreeMap::new();
     for event in timeline.events() {
@@ -128,14 +130,14 @@ fn durable_child_session_ids(
         else {
             continue;
         };
-        children.insert(spawn.child_session_id.clone(), ());
+        children.insert(spawn.child_session_id.clone(), spawn.clone());
     }
     tracing::trace!(
         parent_session_id,
         children = children.len(),
         "projected durable child ownership from Timeline"
     );
-    children.into_keys().collect()
+    children
 }
 /// Grow home for the replay path. In production this is just `grow_home()`; the
 /// whole test override below is `#[cfg(test)]`, so no thread-local or dead
@@ -192,9 +194,44 @@ fn enrich_from_timeline_with_home(
     else {
         return;
     };
+    enrich_from_spawn(info, spawn);
+}
+
+fn enrich_from_spawn(info: &mut SubagentInfo, spawn: &chat_state::SubagentSpawnEvent) {
     info.prompt = Some(Arc::from(spawn.prompt.as_str()));
     info.child_cwd = Some(Arc::from(spawn.child_cwd.as_str()));
     info.worktree_path = spawn.worktree_path.as_deref().map(Arc::from);
+}
+
+/// Apply one canonical spawn fact to both the flat subagent index and its
+/// already-created child view. Replay creates views before this batched pass,
+/// initially inheriting the parent CWD; the durable fact corrects that
+/// temporary projection without replaying the child transcript.
+fn enrich_projected_subagent(
+    root: &mut crate::app::agent_view::AgentView,
+    spawn: &chat_state::SubagentSpawnEvent,
+) {
+    let Some(info) = root
+        .session
+        .subagent_sessions
+        .get_mut(&spawn.child_session_id)
+    else {
+        return;
+    };
+    if info.subagent_id.as_ref() != spawn.subagent_id {
+        tracing::debug!(
+            child_session_id = spawn.child_session_id,
+            replayed_subagent_id = %info.subagent_id,
+            durable_subagent_id = spawn.subagent_id,
+            "ignored mismatched durable subagent spawn enrichment"
+        );
+        return;
+    }
+    enrich_from_spawn(info, spawn);
+    if let Some(child) = root.subagent_views.get_mut(&spawn.child_session_id) {
+        child.session.cwd = std::path::PathBuf::from(&spawn.child_cwd);
+        child.session.set_worktree(spawn.worktree_path.is_some());
+    }
 }
 /// Best-effort replay of a child's inherited conversation, streamed one typed
 /// update at a time so a large inherited transcript is not materialized as a
@@ -250,13 +287,17 @@ pub(crate) fn restore_descendant_state(
         .keys()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let mut queue = durable_child_session_ids(&grow_home, &root_session_id)
-        .into_iter()
-        .filter(|child_session_id| replayed_direct_children.contains(child_session_id))
-        .collect::<std::collections::VecDeque<_>>();
+    let root_spawns = durable_child_spawns(&grow_home, &root_session_id);
+    let mut queue = std::collections::VecDeque::new();
     let mut visited = std::collections::HashSet::new();
     let previous_loading_replay = root.session.loading_replay;
     if let Some(root) = app.agents.get_mut(&root_agent_id) {
+        for (child_session_id, spawn) in &root_spawns {
+            if replayed_direct_children.contains(child_session_id) {
+                enrich_projected_subagent(root, spawn);
+                queue.push_back(child_session_id.clone());
+            }
+        }
         // Reuse the lifecycle projection's restoration semantics: spawn does
         // not eagerly replay a whole child transcript and finish does not add
         // a second live footer. The descendant-specific handler bypasses the
@@ -269,7 +310,7 @@ pub(crate) fn restore_descendant_state(
         if !visited.insert(parent_session_id.clone()) {
             continue;
         }
-        let mut durable_children = durable_child_session_ids(&grow_home, &parent_session_id);
+        let mut durable_children = durable_child_spawns(&grow_home, &parent_session_id);
         let mut lifecycle = Vec::new();
         if let Err(error) = shell::session::storage::stream_replay_grow_notifications_at(
             &parent_session_id,
@@ -320,8 +361,11 @@ pub(crate) fn restore_descendant_state(
             );
             crate::app::acp_handler::handle_descendant_state_replay(&ext, app, root_agent_id);
             if let Some(child) = discovered_child
-                && durable_children.remove(&child)
+                && let Some(spawn) = durable_children.remove(&child)
             {
+                if let Some(root) = app.agents.get_mut(&root_agent_id) {
+                    enrich_projected_subagent(root, &spawn);
+                }
                 queue.push_back(child);
             }
         }

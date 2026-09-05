@@ -576,18 +576,12 @@ async fn manual_recap_over_budget_is_display_only_and_references_timeline() {
 fn over_budget_recap_serializes_to_well_formed_messages_request() {
     use crate::session::helpers::session_recap;
     use sampling_types::messages::{ContentBlock, MessageContent, MessageRole};
-    use sampling_types::{ConversationRequest, ToolCall, rs};
+    use sampling_types::{ConversationRequest, ToolCall};
 
     let mk_reasoning = |id: &str| {
-        ConversationItem::Reasoning(rs::ReasoningItem {
-            id: Some(id.to_string()),
-            summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                text: format!("secret thinking {id}"),
-            })],
-            content: None,
-            encrypted_content: None,
-            status: None,
-        })
+        ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(format!(
+            "secret thinking {id}"
+        )))
     };
     let mk_call = |id: &str| ToolCall {
         id: std::sync::Arc::from(id),
@@ -693,7 +687,7 @@ async fn recap_request_rides_parent_prompt_cache() {
             let mut cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
             cfg.base_url = server.url();
             cfg.api_backend = sampling_types::ApiBackend::Responses;
-            actor.chat_state_handle.update_sampling_config(cfg);
+            actor.chat_state_handle.replace_sampling_route(cfg);
 
             replace_test_surface(
                 &actor.chat_state_handle,

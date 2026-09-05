@@ -11,8 +11,8 @@ use futures_util::stream::{BoxStream, Stream};
 
 use sampling_types::messages::{self, MessageStreamEvent};
 use sampling_types::{
-    AssistantItem, ConversationItem, ConversationResponse, ResponseModelMetadata, SamplingError,
-    StopReason, TokenUsage, ToolCall, rs,
+    AssistantItem, ConversationItem, ConversationResponse, NativeContinuationFragment,
+    ResponseModelMetadata, SamplingError, StopReason, TokenUsage, ToolCall,
 };
 
 use super::protocol_failure;
@@ -70,6 +70,7 @@ struct BlockState {
     args_started: bool,
     thinking_acc: String,
     signature: String,
+    redacted_data: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,13 +138,12 @@ pub fn stream_messages<'a>(
         // headless `streaming-messages-json` consumer can echo it.
         let mut final_stop_sequence: Option<String> = None;
 
-        // Assistant-response accumulators (built up as ContentBlockStop
-        // events fire). Reasoning is collected into a synthesized
-        // `rs::ReasoningItem` and emitted as a sibling
-        // `ConversationItem::Reasoning` before the trailing Assistant.
+        // Durable visible facts and exact same-route native blocks are built
+        // independently. Opaque signatures/redacted data never enter items.
         let mut assistant_text = String::new();
         let mut assistant_tool_calls: Vec<ToolCall> = Vec::new();
-        let mut assistant_reasoning: Option<rs::ReasoningItem> = None;
+        let mut assistant_reasoning = Vec::new();
+        let mut native_blocks: BTreeMap<u32, ContentBlock> = BTreeMap::new();
 
         // Index counters
         let mut chunk_index: u64 = 0;
@@ -287,6 +287,7 @@ pub fn stream_messages<'a>(
                                 args_started: false,
                                 thinking_acc: thinking.clone(),
                                 signature: signature.clone(),
+                                redacted_data: String::new(),
                             },
                         );
                         if !first_token_emitted {
@@ -309,6 +310,7 @@ pub fn stream_messages<'a>(
                                 args_started: false,
                                 thinking_acc: String::new(),
                                 signature: String::new(),
+                                redacted_data: String::new(),
                             },
                         );
                         if !first_token_emitted {
@@ -339,6 +341,7 @@ pub fn stream_messages<'a>(
                                 args_started: false,
                                 thinking_acc: String::new(),
                                 signature: String::new(),
+                                redacted_data: String::new(),
                             },
                         );
 
@@ -362,12 +365,13 @@ pub fn stream_messages<'a>(
                     // through the deferred sampler→shell→reducer hop and handled by
                     // every `SamplingEvent` consumer (TUI included), so it is not
                     // wired. No consumer claims redacted_thinking support.
-                    ContentBlock::RedactedThinking { .. } => {
+                    ContentBlock::RedactedThinking { data } => {
                         blocks.insert(index, BlockState {
                             block_type: BlockType::RedactedThinking,
                             text_acc: String::new(), tool_name: String::new(), tool_id: String::new(),
                             args_acc: String::new(), initial_input: None, args_started: false,
                             thinking_acc: String::new(), signature: String::new(),
+                            redacted_data: data,
                         });
                     }
                     // Image / ToolResult are not expected in assistant streams.
@@ -445,6 +449,10 @@ pub fn stream_messages<'a>(
                                     }
                                     assistant_text.push_str(&state.text_acc);
                                 }
+                                native_blocks.insert(index, ContentBlock::Text {
+                                    text: state.text_acc,
+                                    cache_control: None,
+                                });
                             }
                             BlockType::Thinking => {
                                 // Surface the encrypted signature in order (at the
@@ -456,36 +464,17 @@ pub fn stream_messages<'a>(
                                         signature: state.signature.clone(),
                                     };
                                 }
-                                if !state.thinking_acc.is_empty() || !state.signature.is_empty() {
-                                    // Anthropic Messages API `Thinking` blocks uniquely
-                                    // carry an encrypted `signature` distinct
-                                    // from the text; either field may be
-                                    // empty. Build directly rather than via
-                                    // `synthesized_reasoning_item` since the
-                                    // helper assumes a non-empty summary.
-                                    let summary = if state.thinking_acc.is_empty() {
-                                        vec![]
-                                    } else {
-                                        vec![rs::SummaryPart::SummaryText(
-                                            rs::SummaryTextContent {
-                                                text: state.thinking_acc,
-                                            },
-                                        )]
-                                    };
-                                    let encrypted_content = if state.signature.is_empty() {
-                                        None
-                                    } else {
-                                        Some(state.signature)
-                                    };
-                                    assistant_reasoning = Some(rs::ReasoningItem {
-                                        // async-openai >= 0.41: `id` is `Option<String>`.
-                                        id: Some(String::new()),
-                                        summary,
-                                        content: None,
-                                        encrypted_content,
-                                        status: None,
-                                    });
+                                if !state.thinking_acc.is_empty() {
+                                    assistant_reasoning.push(
+                                        sampling_types::synthesized_reasoning_item(
+                                            state.thinking_acc.clone(),
+                                        ),
+                                    );
                                 }
+                                native_blocks.insert(index, ContentBlock::Thinking {
+                                    thinking: state.thinking_acc,
+                                    signature: state.signature,
+                                });
                             }
                             BlockType::ToolUse => {
                                 let input = state.initial_input.take().expect("tool block has initial input");
@@ -501,6 +490,14 @@ pub fn stream_messages<'a>(
                                         "invalid or incomplete JSON object at tool block {index}"
                                     ));
                                 } else {
+                                    let input_value = serde_json::from_str(&state.args_acc)
+                                        .expect("validated tool JSON must deserialize");
+                                    native_blocks.insert(index, ContentBlock::ToolUse {
+                                        id: state.tool_id.clone(),
+                                        name: state.tool_name.clone(),
+                                        input: input_value,
+                                        cache_control: None,
+                                    });
                                     assistant_tool_calls.push(ToolCall {
                                         id: std::sync::Arc::<str>::from(state.tool_id),
                                         name: state.tool_name,
@@ -508,7 +505,11 @@ pub fn stream_messages<'a>(
                                     });
                                 }
                             }
-                            BlockType::RedactedThinking => {}
+                            BlockType::RedactedThinking => {
+                                native_blocks.insert(index, ContentBlock::RedactedThinking {
+                                    data: state.redacted_data,
+                                });
+                            }
                         }
                     }
                 }
@@ -658,7 +659,7 @@ pub fn stream_messages<'a>(
         });
 
         let mut items: Vec<ConversationItem> = Vec::new();
-        if let Some(r) = assistant_reasoning {
+        for r in assistant_reasoning {
             items.push(ConversationItem::Reasoning(r));
         }
         items.push(assistant_item);
@@ -679,6 +680,9 @@ pub fn stream_messages<'a>(
             message_id: final_message_id,
             raw_stop_reason: final_raw_stop_reason,
             stop_sequence: final_stop_sequence,
+            native_continuation: Some(NativeContinuationFragment::Messages(
+                native_blocks.into_values().collect(),
+            )),
         };
 
         yield SamplingEvent::Completed {

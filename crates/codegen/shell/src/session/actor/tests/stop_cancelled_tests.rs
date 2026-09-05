@@ -99,7 +99,7 @@ async fn actor_with_sampler(
     if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
         cfg.base_url = server.url();
         cfg.api_backend = sampling_types::ApiBackend::Messages;
-        actor.chat_state_handle.update_sampling_config(cfg);
+        actor.chat_state_handle.replace_sampling_route(cfg);
     }
     let sampler_config = sampler::SamplerConfig {
         api_key: Some("test-key".to_string()),

@@ -710,9 +710,22 @@ async fn response_repair_retains_raw_fact_and_allows_the_next_request() {
     let mut h = TestHarness::new();
     h.handle.begin_turn_capture();
     let raw = malformed_response();
+    let native = native_fragment_for(&test_config().api_backend);
     assert_eq!(
-        h.handle.push_response_durably(raw.clone()).await.unwrap(),
+        h.handle
+            .push_response_durably(raw.clone(), Some(native))
+            .await
+            .unwrap(),
         1
+    );
+    let repaired_request = h
+        .handle
+        .build_request("after-quarantine", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        !repaired_request.has_native_continuation(),
+        "quarantined responses must never install provider continuation"
     );
     let records = h.drain_persistence();
     assert_eq!(records.len(), 2);
@@ -744,7 +757,7 @@ async fn response_repair_retains_raw_fact_and_allows_the_next_request() {
     );
     assert_eq!(
         h.handle
-            .push_response_durably(vec![ConversationItem::assistant("next response")])
+            .push_response_durably(vec![ConversationItem::assistant("next response")], None,)
             .await
             .unwrap(),
         0
@@ -776,15 +789,15 @@ async fn repaired_history_stays_non_executable_across_all_backend_switches() {
                 continue;
             }
             let h = TestHarness::new();
-            h.handle.update_sampling_config(SamplingConfig {
+            h.handle.replace_sampling_route(SamplingConfig {
                 api_backend: source.clone(),
                 ..test_config()
             });
             h.handle
-                .push_response_durably(malformed_response())
+                .push_response_durably(malformed_response(), None)
                 .await
                 .unwrap();
-            h.handle.update_sampling_config(SamplingConfig {
+            h.handle.replace_sampling_route(SamplingConfig {
                 api_backend: target.clone(),
                 ..test_config()
             });
@@ -845,8 +858,11 @@ async fn repaired_history_stays_non_executable_across_all_backend_switches() {
 async fn response_repair_waits_for_both_durable_acknowledgements() {
     let mut h = TestHarness::with_manual_timeline_ack(vec![]);
     let handle = h.handle.clone();
-    let task =
-        tokio::spawn(async move { handle.push_response_durably(malformed_response()).await });
+    let task = tokio::spawn(async move {
+        handle
+            .push_response_durably(malformed_response(), None)
+            .await
+    });
     let raw_ack = h.persistence_rx.next_timeline_ack().await.unwrap();
     assert!(!task.is_finished());
     raw_ack.send(Ok(())).unwrap();
@@ -871,8 +887,11 @@ async fn response_repair_waits_for_both_durable_acknowledgements() {
 async fn failed_response_repair_can_recover_from_only_the_durable_raw_prefix() {
     let mut h = TestHarness::with_manual_timeline_ack(vec![]);
     let handle = h.handle.clone();
-    let task =
-        tokio::spawn(async move { handle.push_response_durably(malformed_response()).await });
+    let task = tokio::spawn(async move {
+        handle
+            .push_response_durably(malformed_response(), None)
+            .await
+    });
     h.persistence_rx
         .next_timeline_ack()
         .await
@@ -917,7 +936,10 @@ async fn response_admission_does_not_close_healthy_pending_calls() {
         },
     ])];
     assert_eq!(
-        h.handle.push_response_durably(items.clone()).await.unwrap(),
+        h.handle
+            .push_response_durably(items.clone(), None)
+            .await
+            .unwrap(),
         0
     );
     assert_eq!(
@@ -1401,7 +1423,7 @@ async fn image_projection_preserves_raw_events_and_never_restores_images_to_surf
 
     let mut other_route = test_config();
     other_route.model = "vision-model".to_owned();
-    h.handle.update_sampling_config(other_route);
+    h.handle.replace_sampling_route(other_route);
     let after_model_change = h
         .handle
         .build_request("test-timeline", vec![], None, None, None)
@@ -2226,7 +2248,7 @@ async fn prompt_records_are_projected_from_timeline_turns() {
 }
 
 #[tokio::test]
-async fn update_sampling_config_is_queryable() {
+async fn replace_sampling_route_is_queryable() {
     let h = TestHarness::new();
     let new_config = SamplingConfig {
         base_url: "https://new.example.com".to_string(),
@@ -2242,7 +2264,7 @@ async fn update_sampling_config_is_queryable() {
         reasoning_effort: None,
         stream_tool_calls: None,
     };
-    h.handle.update_sampling_config(new_config.clone());
+    h.handle.replace_sampling_route(new_config.clone());
 
     let config = h.handle.get_sampling_config().await.unwrap();
     assert_eq!(config.model, "grow-3");
@@ -4625,12 +4647,11 @@ async fn context_window_downgrade_triggers_auto_compact() {
 // deleted the placeholder/splice machinery these tests previously had to work
 // around.
 //
-// These target the refactored sibling-Reasoning shape:
+// These target the provider-neutral durable reasoning shape:
 //   - No `__RAW_OUTPUT_PLACEHOLDER__` sentinels
 //   - No `extract_raw_input_items()` / `splice_raw_input_items()`
-//   - Reasoning lives as `ConversationItem::Reasoning(rs::ReasoningItem)`
-//     siblings; the From<&ConversationRequest> for rs::CreateResponse impl
-//     emits them inline in `input` order.
+//   - Visible reasoning lives as a durable sibling but is not emitted by the
+//     portable projector; same-route native fragments are memory-only.
 // ============================================================================
 
 /// Serialize a ConversationRequest using only the public
@@ -4691,20 +4712,12 @@ fn assert_prefix_stable_pair(
     );
 }
 
-/// Build a sibling Reasoning item with the given id and (optionally)
-/// encrypted_content. Replaces the pre-refactor "AssistantItem.raw_output"
-/// helper.
-fn reasoning_sibling(id: &str, encrypted: Option<&str>) -> ConversationItem {
-    use sampling_types::rs;
-    ConversationItem::Reasoning(rs::ReasoningItem {
-        id: Some(id.to_string()),
-        summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-            text: format!("thinking for {id}"),
-        })],
-        content: None,
-        encrypted_content: encrypted.map(str::to_owned),
-        status: None,
-    })
+/// Build a durable, visible reasoning sibling. Native encrypted continuation is
+/// intentionally kept out of Timeline fixtures.
+fn reasoning_sibling(id: &str, _encrypted: Option<&str>) -> ConversationItem {
+    ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(format!(
+        "thinking for {id}"
+    )))
 }
 
 /// Basic multi-turn prefix stability through build_request().
@@ -4920,7 +4933,7 @@ async fn prefix_stable_after_model_switch() {
         model: "grow-3-mini".to_string(),
         ..test_config()
     };
-    h.handle.update_sampling_config(new_config);
+    h.handle.replace_sampling_route(new_config);
 
     let req2 = h
         .handle
@@ -4929,6 +4942,387 @@ async fn prefix_stable_after_model_switch() {
         .unwrap();
 
     assert_prefix_stable_pair(&req1, &req2, "model switch");
+}
+
+fn native_fragment_for(
+    backend: &sampling_types::ApiBackend,
+) -> sampling_types::NativeContinuationFragment {
+    use sampling_types::{NativeContinuationFragment, messages, rs};
+
+    match backend {
+        sampling_types::ApiBackend::ChatCompletions => NativeContinuationFragment::ChatCompletions(
+            sampling_types::ChatRequestMessage::assistant(
+                "answer",
+                Some("native_secret".to_owned()),
+            ),
+        ),
+        sampling_types::ApiBackend::Responses => NativeContinuationFragment::Responses(vec![
+            rs::InputItem::Item(rs::Item::Reasoning(rs::ReasoningItem {
+                id: Some("reasoning_native_id".to_owned()),
+                summary: Vec::new(),
+                content: None,
+                encrypted_content: Some("native_secret".to_owned()),
+                status: None,
+            })),
+            rs::InputItem::EasyMessage(rs::EasyInputMessage {
+                r#type: rs::MessageType::Message,
+                role: rs::Role::Assistant,
+                content: rs::EasyInputContent::Text("answer".to_owned()),
+                phase: None,
+            }),
+        ]),
+        sampling_types::ApiBackend::Messages => NativeContinuationFragment::Messages(vec![
+            messages::ContentBlock::Thinking {
+                thinking: "visible thought".to_owned(),
+                signature: "native_secret".to_owned(),
+            },
+            messages::ContentBlock::Text {
+                text: "answer".to_owned(),
+                cache_control: None,
+            },
+        ]),
+    }
+}
+
+fn wire_request_json(
+    request: &sampling_types::ConversationRequest,
+    backend: &sampling_types::ApiBackend,
+) -> serde_json::Value {
+    match backend {
+        sampling_types::ApiBackend::ChatCompletions => {
+            serde_json::to_value(sampling_types::ChatCompletionRequest::from(request.clone()))
+                .unwrap()
+        }
+        sampling_types::ApiBackend::Responses => {
+            serde_json::to_value(sampling_types::rs::CreateResponse::from(request)).unwrap()
+        }
+        sampling_types::ApiBackend::Messages => {
+            serde_json::to_value(sampling_types::build_messages_request(request)).unwrap()
+        }
+    }
+}
+
+/// Same-route native state is useful only inside one live sampling epoch. Every
+/// one of the six cross-endpoint directions must rebuild portable history and
+/// must not resurrect the source state after A -> B -> A.
+#[tokio::test]
+async fn endpoint_switch_matrix_strips_native_reasoning_and_diagnostics() {
+    use sampling_types::{ApiBackend, AssistantItem};
+
+    let backends = [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+    ];
+    for source in &backends {
+        for target in &backends {
+            if source == target {
+                continue;
+            }
+            let source_config = SamplingConfig {
+                model: "source-model".to_owned(),
+                api_backend: source.clone(),
+                ..test_config()
+            };
+            let h = TestHarness::with_config(
+                vec![
+                    ConversationItem::system("sys"),
+                    ConversationItem::user("q1"),
+                ],
+                source_config.clone(),
+            );
+            let _ = h
+                .handle
+                .build_request("switch-matrix", vec![], None, None, None)
+                .await
+                .unwrap();
+            h.handle
+                .push_response_durably(
+                    vec![
+                        ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                            "visible thought",
+                        )),
+                        ConversationItem::Assistant(AssistantItem {
+                            content: "answer".into(),
+                            tool_calls: Vec::new(),
+                            model_id: Some("source-model".to_owned()),
+                            model_fingerprint: Some("source-fingerprint".to_owned()),
+                            reasoning_effort: Some(sampling_types::ReasoningEffort::High),
+                        }),
+                    ],
+                    Some(native_fragment_for(source)),
+                )
+                .await
+                .unwrap();
+            h.handle
+                .push_user_message_durably(ConversationItem::user("q2"))
+                .await
+                .unwrap();
+
+            let same_route = h
+                .handle
+                .build_request("switch-matrix", vec![], None, None, None)
+                .await
+                .unwrap();
+            assert!(same_route.has_native_continuation());
+            assert!(
+                wire_request_json(&same_route, source)
+                    .to_string()
+                    .contains("native_secret")
+            );
+            let source_key = same_route.prompt_cache_key.clone().unwrap();
+
+            h.handle.replace_sampling_route(SamplingConfig {
+                model: "target-model".to_owned(),
+                api_backend: target.clone(),
+                ..test_config()
+            });
+            let switched = h
+                .handle
+                .build_request("switch-matrix", vec![], None, None, None)
+                .await
+                .unwrap();
+            assert!(!switched.has_native_continuation());
+            let switched_wire = wire_request_json(&switched, target).to_string();
+            for forbidden in [
+                "native_secret",
+                "reasoning_native_id",
+                "visible thought",
+                "source-model",
+                "source-fingerprint",
+                "model_id",
+            ] {
+                assert!(
+                    !switched_wire.contains(forbidden),
+                    "{source:?} -> {target:?} leaked {forbidden}: {switched_wire}"
+                );
+            }
+
+            h.handle.replace_sampling_route(source_config);
+            let switched_back = h
+                .handle
+                .build_request("switch-matrix", vec![], None, None, None)
+                .await
+                .unwrap();
+            assert!(!switched_back.has_native_continuation());
+            assert!(
+                !wire_request_json(&switched_back, source)
+                    .to_string()
+                    .contains("native_secret")
+            );
+            assert_ne!(
+                switched_back.prompt_cache_key.as_deref(),
+                Some(source_key.as_str())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn sampling_config_updates_preserve_same_route_native_continuation() {
+    let backend = sampling_types::ApiBackend::Responses;
+    let h = TestHarness::with_config(
+        vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("q1"),
+        ],
+        SamplingConfig {
+            api_backend: backend.clone(),
+            ..test_config()
+        },
+    );
+    let _ = h
+        .handle
+        .build_request("limit-update", vec![], None, None, None)
+        .await
+        .unwrap();
+    h.handle
+        .push_response_durably(
+            vec![ConversationItem::assistant("answer")],
+            Some(native_fragment_for(&backend)),
+        )
+        .await
+        .unwrap();
+    h.handle
+        .push_user_message_durably(ConversationItem::user("q2"))
+        .await
+        .unwrap();
+
+    let before = h
+        .handle
+        .build_request("limit-update", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(before.has_native_continuation());
+    let cache_key = before.prompt_cache_key.clone();
+
+    let mut updated = h.handle.get_sampling_config().await.unwrap();
+    updated.context_window = NonZeroU64::new(256_000).unwrap();
+    updated.output_limit = Some(8192);
+    updated.reasoning_effort = Some(sampling_types::ReasoningEffort::High);
+    h.handle.update_sampling_config(updated);
+    let after = h
+        .handle
+        .build_request("limit-update", vec![], None, None, None)
+        .await
+        .unwrap();
+    let config = h.handle.get_sampling_config().await.unwrap();
+
+    assert!(after.has_native_continuation());
+    assert_eq!(after.prompt_cache_key, cache_key);
+    assert_eq!(config.context_window.get(), 256_000);
+    assert_eq!(config.output_limit, Some(8192));
+    assert_eq!(
+        config.reasoning_effort,
+        Some(sampling_types::ReasoningEffort::High)
+    );
+    assert!(
+        wire_request_json(&after, &backend)
+            .to_string()
+            .contains("native_secret")
+    );
+}
+
+#[tokio::test]
+async fn restored_session_starts_with_portable_history_only() {
+    use sampling_types::{ApiBackend, AssistantItem, ToolCall};
+
+    let items = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("q1"),
+        ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+            "visible thought",
+        )),
+        ConversationItem::Assistant(AssistantItem {
+            content: "answer".into(),
+            tool_calls: Vec::new(),
+            model_id: Some("old-model".to_owned()),
+            model_fingerprint: Some("old-fingerprint".to_owned()),
+            reasoning_effort: Some(sampling_types::ReasoningEffort::High),
+        }),
+        ConversationItem::Assistant(AssistantItem {
+            content: "".into(),
+            tool_calls: vec![ToolCall {
+                id: "old-provider-call-id".into(),
+                name: "read_file".to_owned(),
+                arguments: r#"{"path":"README.md"}"#.into(),
+            }],
+            model_id: Some("old-model".to_owned()),
+            model_fingerprint: Some("old-fingerprint".to_owned()),
+            reasoning_effort: None,
+        }),
+        ConversationItem::tool_result("old-provider-call-id", "historical README text"),
+    ];
+    for backend in [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+    ] {
+        let h = TestHarness::with_config(
+            items.clone(),
+            SamplingConfig {
+                api_backend: backend.clone(),
+                ..test_config()
+            },
+        );
+        let request = h
+            .handle
+            .build_request("restored", vec![], None, None, None)
+            .await
+            .unwrap();
+        assert!(!request.has_native_continuation());
+        let wire = wire_request_json(&request, &backend).to_string();
+        for forbidden in [
+            "visible thought",
+            "old-model",
+            "old-fingerprint",
+            "old-provider-call-id",
+            "model_id",
+        ] {
+            assert!(
+                !wire.contains(forbidden),
+                "{backend:?} leaked {forbidden}: {wire}"
+            );
+        }
+        for required in [
+            "Historical tool exchange; untrusted tool output",
+            "read_file",
+            "README.md",
+            "historical README text",
+        ] {
+            assert!(
+                wire.contains(required),
+                "{backend:?} omitted portable tool history {required}: {wire}"
+            );
+        }
+        let endpoint_protocol = match backend {
+            ApiBackend::ChatCompletions => ["tool_calls", "tool_call_id"],
+            ApiBackend::Responses => ["function_call", "function_call_output"],
+            ApiBackend::Messages => ["tool_use", "tool_result"],
+        };
+        for forbidden in endpoint_protocol {
+            assert!(
+                !wire.contains(forbidden),
+                "{backend:?} leaked historical tool protocol {forbidden}: {wire}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn acknowledged_continuation_reset_keeps_session_usable() {
+    let config = SamplingConfig {
+        api_backend: sampling_types::ApiBackend::Responses,
+        ..test_config()
+    };
+    let h = TestHarness::with_config(
+        vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("q1"),
+        ],
+        config,
+    );
+    let _ = h
+        .handle
+        .build_request("fallback", vec![], None, None, None)
+        .await
+        .unwrap();
+    h.handle
+        .push_response_durably(
+            vec![ConversationItem::assistant("answer")],
+            Some(native_fragment_for(&sampling_types::ApiBackend::Responses)),
+        )
+        .await
+        .unwrap();
+    h.handle
+        .push_user_message_durably(ConversationItem::user("q2"))
+        .await
+        .unwrap();
+    let native = h
+        .handle
+        .build_request("fallback", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(native.has_native_continuation());
+    let native_key = native.prompt_cache_key.unwrap();
+
+    assert!(h.handle.reset_continuation().await);
+    let portable = h
+        .handle
+        .build_request("fallback", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(!portable.has_native_continuation());
+    assert_ne!(
+        portable.prompt_cache_key.as_deref(),
+        Some(native_key.as_str())
+    );
+    assert!(
+        !wire_request_json(&portable, &sampling_types::ApiBackend::Responses)
+            .to_string()
+            .contains("native_secret")
+    );
+    assert!(!h.handle.is_closed());
 }
 
 #[tokio::test]
@@ -4960,7 +5354,7 @@ async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
         "ordinary appends stay on one cache lineage"
     );
 
-    h.handle.update_sampling_config(SamplingConfig {
+    h.handle.replace_sampling_route(SamplingConfig {
         model: "other-model".into(),
         ..test_config()
     });
@@ -4974,7 +5368,7 @@ async fn prompt_cache_key_tracks_timeline_model_and_rewind_lineage() {
         Some(first_key.as_str())
     );
 
-    h.handle.update_sampling_config(test_config());
+    h.handle.replace_sampling_route(test_config());
     h.handle.rewind_durably(1).await.unwrap();
     let rewound = h
         .handle
@@ -5889,4 +6283,124 @@ async fn durable_input_submission_is_idempotent_and_rejects_payload_conflicts() 
         conflict,
         crate::commands::TimelineWriteError::Invalid(crate::TimelineError::InvalidInput)
     ));
+}
+
+#[tokio::test]
+async fn live_tool_images_are_budgeted_without_changing_timeline_evidence() {
+    for backend in [
+        sampling_types::ApiBackend::ChatCompletions,
+        sampling_types::ApiBackend::Responses,
+        sampling_types::ApiBackend::Messages,
+    ] {
+        assert_live_tool_image_budget(backend).await;
+    }
+}
+
+async fn assert_live_tool_image_budget(backend: sampling_types::ApiBackend) {
+    use sampling_types::{ContentPart, NativeContinuationFragment, ToolCall};
+    let mut config = test_config();
+    config.api_backend = backend.clone();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        vec![
+            ConversationItem::system("test"),
+            ConversationItem::user("read images"),
+        ],
+        config,
+        Box::new(crate::NullTimelinePersistence),
+        tx,
+        Default::default(),
+    );
+    handle
+        .build_request("image-budget", vec![], None, None, None)
+        .await
+        .unwrap();
+    let url: std::sync::Arc<str> =
+        format!("data:image/png;base64,{}", "A".repeat(15 * 1024 * 1024)).into();
+    let mut saw_eviction = false;
+    for index in 0..4 {
+        let id = format!("call_{index}");
+        let assistant = ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: id.clone().into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }]);
+        let fragment = match &backend {
+            sampling_types::ApiBackend::ChatCompletions => NativeContinuationFragment::ChatCompletions(
+                sampling_types::conversation_item_to_chat_message(assistant.clone()),
+            ),
+            sampling_types::ApiBackend::Responses => NativeContinuationFragment::Responses(vec![
+                serde_json::from_value(serde_json::json!({"type":"function_call", "call_id":id, "name":"read_file", "arguments":"{}"})).unwrap(),
+            ]),
+            sampling_types::ApiBackend::Messages => NativeContinuationFragment::Messages(vec![
+                serde_json::from_value(serde_json::json!({"type":"tool_use", "id":id, "name":"read_file", "input":{}})).unwrap(),
+            ]),
+        };
+        handle
+            .push_response_durably(vec![assistant], Some(fragment))
+            .await
+            .unwrap();
+        let marker = format!("image{index:03}");
+        handle.push_tool_result(ConversationItem::tool_result_with_images(
+            id,
+            "Read image.",
+            vec![ContentPart::Image {
+                url: format!("{url}{marker}").into(),
+            }],
+        ));
+        let request = handle
+            .build_request("image-budget", vec![], None, None, None)
+            .await
+            .unwrap();
+        if index == 0 {
+            assert!(
+                crate::estimate_request_input_tokens(&request)
+                    >= token_estimation::IMAGE_TOKEN_ESTIMATE
+            );
+        }
+        let wire = wire_request_json(&request, &backend);
+        let wire_bytes = serde_json::to_vec(&wire).unwrap();
+        assert!(wire_bytes.len() <= sampling_types::MAX_REQUEST_BODY_BYTES);
+        fn contains_image(value: &serde_json::Value, marker: &str) -> bool {
+            match value {
+                serde_json::Value::String(text) => {
+                    text.len() > 15 * 1024 * 1024 && text.ends_with(marker)
+                }
+                serde_json::Value::Array(values) => {
+                    values.iter().any(|value| contains_image(value, marker))
+                }
+                serde_json::Value::Object(values) => {
+                    values.values().any(|value| contains_image(value, marker))
+                }
+                _ => false,
+            }
+        }
+        assert!(
+            contains_image(&wire, &marker),
+            "newest image must survive a native epoch reset on {backend:?}"
+        );
+        assert!(
+            crate::estimate_request_input_tokens(&request)
+                >= token_estimation::IMAGE_TOKEN_ESTIMATE
+        );
+        while let Ok(event) = rx.try_recv() {
+            if let ChatStateEvent::ImageBudget {
+                inline_images,
+                evicted,
+                ..
+            } = event
+            {
+                assert!(inline_images > 0);
+                saw_eviction |= evicted > 0;
+            }
+        }
+    }
+    assert!(saw_eviction);
+    let images = handle.get_conversation().await.iter().filter(|item| matches!(item,
+        ConversationItem::ToolResult(result) if result.images.iter().any(|part| matches!(part, ContentPart::Image { .. }))
+    )).count();
+    assert_eq!(
+        images, 4,
+        "request projection must preserve original Timeline images"
+    );
 }

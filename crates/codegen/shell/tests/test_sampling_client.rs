@@ -251,6 +251,7 @@ async fn test_chat_completions_streaming_text() {
 #[tokio::test]
 async fn test_chat_completions_streaming_tool_calls() {
     let tool_calls = vec![json!({
+        "index": 0,
         "id": "call_abc123",
         "type": "function",
         "function": {
@@ -379,11 +380,10 @@ async fn chat_completions_collect_synthesizes_reasoning_sibling() {
         .reasoning_items()
         .next()
         .expect("a reasoning sibling must be synthesized from reasoning_content");
-    let rs::SummaryPart::SummaryText(summary) = &reasoning.summary[0];
     assert!(
-        summary.text.contains("Let me think"),
+        reasoning.text.contains("Let me think"),
         "reasoning sibling should carry the streamed reasoning_content, got: {:?}",
-        summary.text
+        reasoning.text
     );
 
     let assistant = response.assistant().expect("assistant item present");
