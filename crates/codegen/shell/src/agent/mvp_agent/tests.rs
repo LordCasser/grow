@@ -1057,6 +1057,61 @@ async fn session_lifecycle_gate_serializes_close_behind_load_incarnation() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn session_delete_tears_down_resident_actor_before_releasing_lifecycle() {
+    let agent = build_minimal_agent_for_tests();
+    for running_prompt in [None, Some("turn-1")] {
+        let sid = acp::SessionId::new(format!("sess-delete-{running_prompt:?}"));
+        let (handle, _tx, mut cmd_rx) = make_live_session_handle(&sid, running_prompt);
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        let thread = std::thread::spawn(move || {
+            assert!(matches!(
+                cmd_rx.blocking_recv(),
+                Some(TestSessionCommand::Cancel {
+                    cancel_subagents: true,
+                    kill_background_tasks: true,
+                    rewind_if_pristine: false,
+                    pause_goal: false,
+                    trigger: Some(trigger),
+                }) if trigger == "session_delete"
+            ));
+            assert!(matches!(
+                cmd_rx.blocking_recv(),
+                Some(TestSessionCommand::Shutdown)
+            ));
+        });
+        agent.session_threads.borrow_mut().insert(
+            sid.clone(),
+            crate::session::SessionThread::from_handle(thread),
+        );
+
+        let deletion = agent
+            .teardown_live_session_before_delete(&sid)
+            .await
+            .expect("resident session deletion must not panic or fail");
+        assert!(!agent.has_live_or_draining_session(&sid));
+        assert!(
+            agent
+                .roster_delta_spy
+                .borrow()
+                .iter()
+                .any(|(id, state)| id == sid.0.as_ref() && *state == SessionLiveState::Completed),
+            "the writer must consume cancel/shutdown and exit cleanly before history deletion"
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                agent.lock_session_lifecycle(&sid),
+            )
+            .await
+            .is_err(),
+            "the delete guard must exclude reloads until history deletion completes"
+        );
+        drop(deletion);
+        assert!(agent.session_lifecycle_gates.borrow().is_empty());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn catalog_failure_cannot_evict_a_new_actor_incarnation() {
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("catalog-incarnation");

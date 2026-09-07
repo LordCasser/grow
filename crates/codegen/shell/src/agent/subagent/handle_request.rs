@@ -448,11 +448,10 @@ pub(crate) async fn run_shell_child(
                 tracing::warn!(
                     subagent_id = %request.id,
                     error = %e,
-                    "Could not resolve worktree base dir, using temp dir for subagent worktree"
+                    "Could not resolve repository root, using source directory for worktree base"
                 );
-                std::env::temp_dir()
-                    .join("grow-subagent-worktrees")
-                    .join(&request.id)
+                crate::session::worktree::worktree_base_dir(&source_cwd)
+                    .join(format!("subagent-{}", request.id))
             }
         };
         (
@@ -938,17 +937,13 @@ pub(crate) async fn run_shell_child(
             let target_for_task = target.clone();
             let subagent_id = request.id.clone();
             let creation_mode: fast_worktree::CreationMode = ctx.worktree_type.into();
-            let btrfs_delegate = crate::session::worktree::btrfs_delegate_from_env();
             match tokio::task::spawn_blocking(move || {
-                let mut builder = fast_worktree::WorktreeBuilder::new(&source, &target_for_task)
-                    .working_tree_mode(fast_worktree::WorkingTreeMode::PreserveWorkingTree)
-                    .creation_mode(creation_mode)
-                    .worktree_kind(fast_worktree::WorktreeKind::Subagent)
-                    .session_id(subagent_id);
-                if let Some(delegate) = btrfs_delegate {
-                    builder = builder.btrfs_delegate(delegate);
-                }
-                builder.create()
+                crate::session::worktree::create_subagent_worktree(
+                    &source,
+                    &target_for_task,
+                    creation_mode,
+                    &subagent_id,
+                )
             })
             .await
             {

@@ -10,6 +10,102 @@ use std::path::Path;
 use workspace::session::git::find_git_root_from_path;
 pub use workspace::worktree::*;
 const WORKTREE_LOG: &str = "grow_worktree";
+
+/// Prepare a source for an explicitly requested isolated subagent. Call only
+/// after the parent Timeline has committed the spawn intent, on a blocking thread.
+fn ensure_subagent_worktree_repository(source: &Path) -> Result<()> {
+    use workspace::session::git::{GitDiscoveryResult, discover_git_root};
+
+    let source = dunce::canonicalize(source).context("resolve subagent worktree source")?;
+    anyhow::ensure!(
+        source.is_dir(),
+        "subagent worktree source is not a directory"
+    );
+    let root = match discover_git_root(&source) {
+        GitDiscoveryResult::Found(root) => root,
+        GitDiscoveryResult::NotARepo => source.clone(),
+        GitDiscoveryResult::DiscoveryFailed(error) => return Err(error),
+    };
+
+    // Serialize initialization across both sibling subagents and Grow processes.
+    // Keep the lock outside the source so it cannot be copied into the child.
+    let lock_dir = worktree_base_dir(&root);
+    std::fs::create_dir_all(&lock_dir).context("create worktree initialization lock directory")?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_dir.join(".repo-init.lock"))
+        .context("open worktree initialization lock")?;
+    fs2::FileExt::lock_exclusive(&lock).context("lock worktree source initialization")?;
+
+    // Discovery must be repeated under the lock: another child may have just
+    // initialized the same directory. Never reinitialize an existing repository.
+    let repo = match discover_git_root(&source) {
+        GitDiscoveryResult::Found(_) => git2::Repository::discover(&source)?,
+        GitDiscoveryResult::NotARepo => git2::Repository::init_opts(
+            &source,
+            git2::RepositoryInitOptions::new()
+                .no_reinit(true)
+                .external_template(false)
+                .initial_head("codex/worktree-base"),
+        )
+        .context("initialize Git repository for subagent isolation")?,
+        GitDiscoveryResult::DiscoveryFailed(error) => return Err(error),
+    };
+    match repo.head() {
+        Ok(head) => {
+            head.peel_to_commit()
+                .context("resolve worktree source HEAD")?;
+            return Ok(());
+        }
+        Err(error) if error.code() == git2::ErrorCode::UnbornBranch => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    // A worktree needs a commit. An empty baseline leaves all source files and
+    // any existing staging state untouched; PreserveWorkingTree copies them.
+    let tree_id = repo.treebuilder(None)?.write()?;
+    let tree = repo.find_tree(tree_id)?;
+    let signature = git2::Signature::now("Grow", "grow@localhost")?;
+    let commit = repo.commit(
+        Some("HEAD"),
+        &signature,
+        &signature,
+        "Initialize repository for isolated worktrees",
+        &tree,
+        &[],
+    )?;
+    tracing::info!(source = %root.display(), %commit, "Initialized worktree source HEAD");
+    Ok(())
+}
+
+pub(crate) fn create_subagent_worktree(
+    source: &Path,
+    target: &Path,
+    creation_mode: fast_worktree::CreationMode,
+    subagent_id: &str,
+) -> Result<fast_worktree::WorktreeReport> {
+    ensure_subagent_worktree_repository(source)?;
+    // Subagents inherit the working directory, including untracked inputs.
+    // GitCheckout only checks out committed files; use the linked copy path
+    // for this request so an empty baseline cannot produce an empty child.
+    let creation_mode = match creation_mode {
+        fast_worktree::CreationMode::GitCheckout => fast_worktree::CreationMode::Linked,
+        mode => mode,
+    };
+    let mut builder = fast_worktree::WorktreeBuilder::new(source, target)
+        .working_tree_mode(fast_worktree::WorkingTreeMode::PreserveWorkingTree)
+        .creation_mode(creation_mode)
+        .worktree_kind(fast_worktree::WorktreeKind::Subagent)
+        .session_id(subagent_id);
+    if let Some(delegate) = btrfs_delegate_from_env() {
+        builder = builder.btrfs_delegate(delegate);
+    }
+    builder.create()
+}
+
 impl From<ShellWorktreeType> for WorktreeType {
     fn from(t: ShellWorktreeType) -> Self {
         match t {
@@ -306,6 +402,131 @@ async fn resume_local_session_in_worktree(
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn subagent_worktree_initializes_non_repo_and_copies_untracked_inputs() {
+        crate::test_support::ensure_hermetic_git_on_path();
+        for mode in [
+            fast_worktree::CreationMode::Linked,
+            fast_worktree::CreationMode::Standalone,
+            fast_worktree::CreationMode::GitCheckout,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let source = tmp.path().join("source");
+            let target = tmp.path().join("child");
+            std::fs::create_dir(&source).unwrap();
+            std::fs::write(source.join("firmware.bin"), [0, 255, 1, 2]).unwrap();
+            std::fs::write(source.join(".gitignore"), "ignored.bin\n").unwrap();
+            std::fs::write(source.join("ignored.bin"), "ignored").unwrap();
+
+            let report = create_subagent_worktree(&source, &target, mode, "test-init").unwrap();
+            let repo = git2::Repository::open(&source).unwrap();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            assert_eq!(report.commit, head.id().to_string());
+            assert_eq!(head.parent_count(), 0);
+            assert!(head.tree().unwrap().is_empty());
+            assert!(repo.index().unwrap().is_empty());
+            assert_eq!(
+                std::fs::read(target.join("firmware.bin")).unwrap(),
+                [0, 255, 1, 2]
+            );
+            assert!(!target.join("ignored.bin").exists());
+            std::fs::write(target.join("firmware.bin"), "changed").unwrap();
+            assert_eq!(
+                std::fs::read(source.join("firmware.bin")).unwrap(),
+                [0, 255, 1, 2]
+            );
+            fast_worktree::remove_worktree(&target).unwrap();
+        }
+    }
+
+    #[test]
+    fn subagent_worktree_concurrent_initialization_shares_one_baseline() {
+        crate::test_support::ensure_hermetic_git_on_path();
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("input.txt"), "input").unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let reports = std::thread::scope(|scope| {
+            let children = (0..2)
+                .map(|i| {
+                    let source = &source;
+                    let target = tmp.path().join(format!("child-{i}"));
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        create_subagent_worktree(
+                            source,
+                            &target,
+                            fast_worktree::CreationMode::Linked,
+                            &format!("test-concurrent-{i}"),
+                        )
+                        .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            children
+                .into_iter()
+                .map(|child| child.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(reports[0].commit, reports[1].commit);
+        for report in reports {
+            assert_eq!(
+                std::fs::read(report.worktree_path.join("input.txt")).unwrap(),
+                b"input"
+            );
+            fast_worktree::remove_worktree(&report.worktree_path).unwrap();
+        }
+        let repo = git2::Repository::open(&source).unwrap();
+        assert_eq!(
+            repo.head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .parent_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn subagent_worktree_reuses_existing_repo_without_changing_head_or_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        std::fs::write(tmp.path().join("tracked.txt"), "baseline").unwrap();
+        git_commit_all(tmp.path(), "baseline");
+        let repo = git2::Repository::open(tmp.path()).unwrap();
+        let head = repo.head().unwrap().target().unwrap();
+        std::fs::write(tmp.path().join("tracked.txt"), "staged").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        let original_index = std::fs::read(repo.path().join("index")).unwrap();
+        let subdir = tmp.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+
+        ensure_subagent_worktree_repository(&subdir).unwrap();
+
+        assert_eq!(repo.head().unwrap().target().unwrap(), head);
+        assert_eq!(
+            std::fs::read(repo.path().join("index")).unwrap(),
+            original_index
+        );
+        assert!(!subdir.join(".git").exists());
+    }
+
+    #[test]
+    fn subagent_worktree_does_not_reinitialize_broken_git_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".git"), "gitdir: missing-repository\n").unwrap();
+        assert!(ensure_subagent_worktree_repository(tmp.path()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".git")).unwrap(),
+            "gitdir: missing-repository\n"
+        );
+    }
+
     #[test]
     fn resume_request_deserializes_with_defaults() {
         let json = r#"{"sessionId":"s1","sourceCwd":"/project"}"#;

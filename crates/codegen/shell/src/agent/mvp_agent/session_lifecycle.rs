@@ -108,7 +108,9 @@ impl MvpAgent {
         id: &acp::SessionId,
     ) -> Result<SessionLifecycleGuard<'_>, String> {
         let lifecycle = self.lock_session_lifecycle(id).await;
-        if let Some(handle) = self.sessions.borrow().get(id).cloned() {
+        // Release the map borrow before take_session mutably borrows it below.
+        let handle = self.sessions.borrow().get(id).cloned();
+        if let Some(handle) = handle {
             let _ = handle.cmd_tx.send(SessionCommand::Cancel {
                 cancel_subagents: true,
                 kill_background_tasks: true,
