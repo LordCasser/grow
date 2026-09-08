@@ -812,3 +812,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager agent viewer混合查看状态、滚动和内容投影
 
 `app/agent_view/viewer.rs`同时处理viewer状态、滚动/布局和内容投影。9条静态契约已登记，后续需按查看模型、布局状态和内容投影拆分并补真实终端验证；本轮不改viewer行为。
+
+## 待拆分：Pager agent session混合绑定、子Agent身份和工作区投影
+
+`app/agent_view/session.rs`同时处理会话绑定/解绑定、子Agent身份、cwd/工作区投影和状态清理。静态事实已登记，后续需按会话身份、工作区投影和清理生命周期拆分并补真实会话验证；本轮不改session行为。

@@ -3799,6 +3799,10 @@
         "sha256": "fa2e63ca1c6b663ab8acc0ffd05179df0fd1a66942b6ac510377a082864d7310"
       },
       {
+        "path": "crates/codegen/pager/src/app/agent_view/session.rs",
+        "sha256": "7237d96b0e886617e9cc2f34a543ac7653eba997edf85e4eb2e0a033e5f0fb7b"
+      },
+      {
         "path": "crates/codegen/pager/src/app/agent_view/shell_completion.rs",
         "sha256": "8df7509c9226c483b4691a5856d042c579a661910ad4179b75b1e833c884a744"
       },

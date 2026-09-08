@@ -65401,6 +65401,66 @@
       [
         "crates/codegen/pager/src/app/acp_handler/prompt_origin.rs",
         "viewer_turn_anchor"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "TurnElapsedParams"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "wall_since_ms"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::turn_elapsed"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::turn_elapsed_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed_tests::base"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed_tests::no_wall_anchor_keeps_instant_net"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed_tests::suspend_outside_questions_defers_to_wall_net"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed_tests::suspend_while_question_open_is_not_worked_time"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed_tests::instant_net_bounds_below_after_backward_wall_jump"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed_tests::foreign_prompt_anchor_falls_back_to_instant_net"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed_tests::missing_current_prompt_ignores_anchor"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed_tests::future_wall_anchor_is_ignored"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed_tests::turn_elapsed_reflects_wall_span_for_current_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "honest_turn_elapsed_tests::turn_elapsed_nets_wall_pauses_against_wall_span"
       ]
     ]
   },
@@ -65439,6 +65499,78 @@
       [
         "crates/codegen/pager/src/app/acp_handler/subagent_activity.rs",
         "subagent_activity_label"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::resolve_turn_activity"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::reconcile_activity_phase"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::enrich_waiting_activity"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::subject_for_task_output"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::lookup_task_subject"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::has_running_foreground_subagent"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::running_view"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::idle_turn_has_no_activity"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::running_with_no_stream_waits_on_model"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::in_flight_agent_control_names_the_rebuild_wait"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::bash_turn_stays_none"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::real_activity_passes_through"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::task_output_wait_uses_bg_task_description"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::task_output_wait_falls_back_to_short_command"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::task_output_wait_multi_id_uses_full_task_count"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::task_output_wait_multi_id_preserves_suffix_when_first_is_long"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::task_output_wait_resolves_subagent_by_subagent_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "resolve_turn_activity_tests::task_output_wait_long_command_keeps_generic_label"
       ]
     ]
   },
@@ -71585,6 +71717,46 @@
       [
         "crates/codegen/pager/src/app/agent_view/mod.rs",
         "wf_snapshot"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::rearm_controls_for_reconnect_recursively"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::begin_session_reload"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::abort_session_reload"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::finish_session_reload"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::apply_reload_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "reconnect_workflow_maps_tests::wf_snapshot"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "reconnect_workflow_maps_tests::cursor_reconnect_restores_stashed_workflow_run_maps"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "reconnect_workflow_maps_tests::cursor_reconnect_prefers_live_workflow_maps_over_stash"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "reconnect_workflow_maps_tests::cursor_reconnect_does_not_resurrect_cleared_runs"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "reconnect_control_tests::reconnect_invalidates_controls_for_every_descendant_view"
       ]
     ]
   },
@@ -71730,6 +71902,54 @@
       [
         "crates/codegen/pager/src/app/agent_view/mod.rs",
         "reconnect_reload_adopts_live_id_and_rejects_terminal_in_replay"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::begin_replay_window"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::mark_reload_replay_seen"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::advance_reconnect_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::mark_reload_todo_update"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::start_turn_boundary"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::adopt_running_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::should_adopt_running_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::finalize_reload_and_maybe_adopt"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "status_window_tests::start_turn_boundary_enters_turn_running"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "status_window_tests::begin_replay_window_rearms_prompt_status_watchdog"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "status_window_tests::begin_replay_window_closes_transcript_search"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "status_window_tests::session_rebind_and_replay_invalidate_minimal_btw"
       ]
     ]
   },
@@ -89448,6 +89668,90 @@
       [
         "crates/codegen/pager/src/app/session/mod.rs",
         "stopped_label_is_consistent_across_renderers"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::behavior_supported"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::behavior_unavailable_reason"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::bind_session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::unbind_session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::note_self_originated_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::is_self_originated_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::note_rewound_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::is_rewound_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::new"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::mark_as_subagent_view"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::insert_subagent_view"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::mark_turn_finished"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::clear_minimal_btw_lifecycle"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::apply_full_context_info"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::apply_context_used"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::record_input"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::set_dashboard_visible"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::set_has_session_announcements"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::apply_app_scoped_gates"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "AgentView::set_session_recap_available"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/session.rs",
+        "behavior_capability_tests::structured_projection_replaces_bootstrap_command_inference"
       ]
     ]
   },
