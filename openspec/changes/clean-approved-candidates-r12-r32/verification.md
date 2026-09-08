@@ -21,3 +21,6 @@ Removed duplicate ManagedTextInspection original text field/accessor/allocation 
 
 ## R18
 Removed unreachable image send/orphan builder chain, exclusive seam helper and self-tests. Preserved persistence byte/MIME assertions via saved files and stash/deleted-chip ownership via drained image data; live send loader unchanged. Fresh pager-render prompt_images 142/142; Pager prompt widget 241/241; actual image loader admission 4/4 passed. Corrected obsolete drop-text limit comment only; no limit changed.
+
+## R19
+Removed dedicated imageDisplayNumber helpers/key and two active writes. Numbered placeholders/display fields, data/URI and generic ACP meta preservation unchanged. Fresh shared placeholder recovery tests 54/54 (including absence of unused emitted metadata); Pager live image loader tests 4/4 passed.

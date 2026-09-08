@@ -69,34 +69,6 @@ pub const MAX_PLACEHOLDERS_PER_PROMPT: usize = 16;
 /// runners.
 pub const MAX_PLACEHOLDER_AGGREGATE_BYTES: usize = 200 * 1024 * 1024;
 
-/// `_meta` key under which an attached image's `[Image #N]` display number
-/// is recorded on its ACP image block, so the server can resolve
-/// `[Image #N]` tokens to the right attachment by number rather than list
-/// position (the two diverge — see `AttachedImages` in `tools`).
-pub const IMAGE_DISPLAY_NUMBER_META_KEY: &str = "grow.dev/imageDisplayNumber";
-
-/// Build an ACP image-block `_meta` value carrying `display_number` under
-/// [`IMAGE_DISPLAY_NUMBER_META_KEY`].
-pub fn display_number_meta(display_number: usize) -> agent_client_protocol::schema::v1::Meta {
-    let mut meta = agent_client_protocol::schema::v1::Meta::new();
-    meta.insert(
-        IMAGE_DISPLAY_NUMBER_META_KEY.to_owned(),
-        serde_json::json!(display_number),
-    );
-    meta
-}
-
-/// Read the `[Image #N]` display number recorded in an image block's
-/// `_meta`, if present.
-pub fn display_number_from_meta(
-    meta: Option<&agent_client_protocol::schema::v1::Meta>,
-) -> Option<usize> {
-    meta?
-        .get(IMAGE_DISPLAY_NUMBER_META_KEY)?
-        .as_u64()
-        .and_then(|n| usize::try_from(n).ok())
-}
-
 /// File extensions accepted by the placeholder loader.
 ///
 /// SVG is intentionally **not** in this list: SVG is XML text with no
@@ -630,11 +602,7 @@ pub fn recover_orphan_placeholders_with_prefixes_and_caps(
                 let data = base64::engine::general_purpose::STANDARD.encode(&loaded.data);
                 raw_images.push(
                     agent_client_protocol::schema::v1::ImageContent::new(data, loaded.mime_type)
-                        .uri(file_uri_from_path(&canonical))
-                        // Record the real `[Image #N]` number so it resolves by
-                        // number, matching the TUI-attached images (which set it
-                        // too) and avoiding position-based collisions.
-                        .meta(display_number_meta(ph.display_number)),
+                        .uri(file_uri_from_path(&canonical)),
                 );
                 recovered += 1;
             }
@@ -1280,9 +1248,7 @@ mod tests {
         assert_eq!(raw[0].mime_type, "image/png");
         assert!(!raw[0].data.is_empty());
         assert!(raw[0].uri.as_deref().unwrap().starts_with("file://"));
-        // The recovered image carries its real `[Image #N]` number so the
-        // visual attachment keeps the same stable display label.
-        assert_eq!(display_number_from_meta(raw[0].meta.as_ref()), Some(1));
+        assert!(raw[0].meta.is_none(), "recovery does not emit unused numbering metadata");
     }
 
     #[test]
@@ -1467,7 +1433,6 @@ mod tests {
                 1
             );
             assert_eq!(raw.len(), 1);
-            assert_eq!(display_number_from_meta(raw[0].meta.as_ref()), Some(2));
         }
     }
 

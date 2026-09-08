@@ -78,7 +78,7 @@ pub(super) fn append_prompt_images(
             .and_then(|path| shell::session::placeholder_images::file_uri_from_path(path));
         blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(
             base64::engine::general_purpose::STANDARD.encode(&bytes), image.mime_type.clone(),
-        ).uri(uri).meta(Some(shell::session::placeholder_images::display_number_meta(image.display_number)))));
+        ).uri(uri)));
     }
     Ok(blocks)
 }

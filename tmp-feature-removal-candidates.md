@@ -186,7 +186,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 删除理由：维护了未被当前内部行为消费的专用协议与“按编号解析”的过时说明。它是候选，不等于图片编号整体无用；仓库外ACP消费者仍未知。
 - 拟删除范围：仅专用key、setter/getter、专用写入和独占断言；执行前核对已归档编号保持契约，必要时在用户确认后的change中调整协议。
 - 必须保留：PastedImage.display_number、文本[Image #N]和真实匹配逻辑、图片内容/URI/持久化身份、泛化_meta保存和转码透传测试。不得以此候选删除所有ACP元数据。
-- 状态：等待用户确认，尚未删除。证据见audit-image-number-metadata-and-legacy-builder。
+- 状态：已获批并删除；图片恢复 54/54、真实发送 4/4 回归通过。证据见audit-image-number-metadata-and-legacy-builder。
 
 ## R20 · 无生产调用的同步路径图片查看器构造器
 
