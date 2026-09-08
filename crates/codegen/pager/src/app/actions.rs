@@ -259,7 +259,7 @@ pub enum Action {
     /// re-enabling restores in-app mouse handling. Invoked explicitly through
     /// `/toggle-mouse-reporting`; there is no configuration shortcut.
     ToggleMouseCapture,
-    /// Toggle the scroll-diagnostics HUD (hidden `/scroll-debug` command,
+    /// Toggle the scroll-diagnostics HUD (hidden `/debug scroll` command,
     /// also `/debug scroll`; `GROW_SCROLL_DEBUG=1` enables it from startup).
     ToggleScrollDebugHud,
     /// Toggle the release-safe FPS HUD (`/debug fps`).

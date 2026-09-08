@@ -31,7 +31,7 @@ const PANEL_WIDTH: u16 = 46;
 
 /// Runtime enablement for the HUD. Mirrors `FrameMetrics`' env machinery:
 /// `GROW_SCROLL_DEBUG` (nonempty and not `"0"`) enables at startup, and the
-/// hidden `/scroll-debug` command toggles it live. Deliberately NOT a
+/// hidden `/debug scroll` command toggles it live. Deliberately NOT a
 /// settings-registry entry: it is a diagnostic, not a preference to persist.
 pub struct ScrollDebugHud {
     enabled: bool,
@@ -54,7 +54,7 @@ impl ScrollDebugHud {
         self.enabled
     }
 
-    /// `/scroll-debug` runtime toggle.
+    /// `/debug scroll` runtime toggle.
     pub fn toggle(&mut self) {
         self.enabled = !self.enabled;
     }
@@ -90,7 +90,7 @@ impl ScrollDebugPanel {
         let ctx = crate::terminal::terminal_context();
 
         let mut lines: Vec<String> = Vec::with_capacity(10);
-        lines.push("scroll debug  (/scroll-debug)".to_string());
+        lines.push("scroll debug  (/debug scroll)".to_string());
         lines.push(format!("term:{} mux:{}", ctx.brand, ctx.multiplexer));
         lines.push(format!(
             "mode:{} inv:{} speed:x{:.2}",

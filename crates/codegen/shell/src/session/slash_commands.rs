@@ -531,7 +531,6 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "rename",
             "resume",
             "rewind",
-            "scroll-debug",
             "session-info",
             "settings",
             "shortcuts",

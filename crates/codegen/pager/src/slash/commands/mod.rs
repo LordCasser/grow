@@ -49,7 +49,6 @@ pub mod rename;
 pub mod resume;
 pub mod rewind;
 pub mod screen_mode_switch;
-pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod shortcuts;
@@ -144,8 +143,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(release_notes::ReleaseNotesCommand),
         Arc::new(tutorial::TutorialCommand),
         Arc::new(config_agents::ConfigAgentsCommand),
-        // Hidden diagnostic: never listed, toggles the scroll-debug HUD.
-        Arc::new(scroll_debug::ScrollDebugCommand),
         // Debug toggles: always registered, listed only on debug binaries.
         Arc::new(debug::DebugCommand),
     ]
@@ -302,7 +299,6 @@ mod tests {
             "rename",
             "resume",
             "rewind",
-            "scroll-debug",
             "session-info",
             "settings",
             "shortcuts",

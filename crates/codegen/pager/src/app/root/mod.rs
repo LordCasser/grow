@@ -481,7 +481,7 @@ pub struct AppView {
     /// Tracing log channel receiver. Set by the event loop after
     /// `init_tracing()`. Drained into `tracing_pane` each tick in debug/dev
     /// builds; otherwise drained-and-discarded.
-    /// Scroll-diagnostics HUD (`GROW_SCROLL_DEBUG` env / `/scroll-debug`).
+    /// Scroll-diagnostics HUD (`GROW_SCROLL_DEBUG` env / `/debug scroll`).
     /// Release-compiled behind its runtime gate — see the module doc.
     pub scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud,
     /// Release-safe FPS HUD (`/debug fps`; `GROW_FPS` env on release

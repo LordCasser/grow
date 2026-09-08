@@ -27,3 +27,6 @@ Removed dedicated imageDisplayNumber helpers/key and two active writes. Numbered
 
 ## R20
 Removed unused synchronous ImageViewerState::open_from_path. Migrated PNG/JPEG dimension/payload and missing-file assertions to deferred constructor plus actual load_image_data/apply_loaded path. Fresh prompt_images regressions 142/142 passed. No remaining synchronous constructor reference; active background admission retained.
+
+## R22
+Removed redundant scroll-debug alias module/registry/classification and changed live HUD guidance to /debug scroll. Retained actual debug toggle assertion and common HUD implementation. Fresh Pager slash tests 374/374; same freshly built executable HUD rendering 1/1 passed. No remaining /scroll-debug command references in Rust source.

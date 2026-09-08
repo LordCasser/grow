@@ -1,17 +1,15 @@
 //! `/debug` — debug-overlay toggles (scroll HUD, FPS HUD, scroll log).
 //!
 //! Registration/visibility split: the command is registered on EVERY binary
-//! and fully functional in release — like the hidden diagnostics it fronts
-//! (`/scroll-debug`) — but it is LISTED (dropdown, completion,
+//! and fully functional in release, but it is LISTED (dropdown, completion,
 //! recognized-token highlight via `visible()`) only on debug binaries
 //! (`cfg(debug_assertions)`). Discoverable where developers live, out of
 //! sight for users, yet still typeable in the field when support asks.
 //!
 //! Subcommands (args-based; a popup menu can come later):
 //! - `/debug` bare — print the toggles and their state to the transcript.
-//! - `/debug scroll` — the scroll-diagnostics HUD; same
-//!   [`Action::ToggleScrollDebugHud`] as `/scroll-debug`, which stays
-//!   registered as the hidden long-form alias.
+//! - `/debug scroll` — the scroll-diagnostics HUD via
+//!   [`Action::ToggleScrollDebugHud`].
 //! - `/debug fps` — the release-safe FPS HUD
 //!   ([`crate::views::fps_hud`]).
 //! - `/debug log` — the scroll flight recorder
@@ -96,7 +94,6 @@ impl SlashCommand for DebugCommand {
 mod tests {
     use super::*;
     use crate::acp::model_state::ModelState;
-    use crate::slash::commands::scroll_debug::ScrollDebugCommand;
     use crate::slash::commands::tests::make_ctx;
 
     fn app_ctx(models: &ModelState) -> AppCtx<'_> {
@@ -135,18 +132,13 @@ mod tests {
         assert_eq!(listed, LISTED_IN_COMPLETIONS);
     }
 
-    /// `/debug scroll` and `/scroll-debug` must stay routed to the SAME
-    /// action — the HUD has one toggle, two spellings.
+    /// The supported command dispatches the actual HUD toggle.
     #[test]
-    fn debug_scroll_routes_to_same_action_as_scroll_debug() {
+    fn debug_scroll_routes_to_hud_toggle() {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
         assert!(matches!(
             DebugCommand.run(&mut ctx, "scroll"),
-            CommandResult::Action(Action::ToggleScrollDebugHud)
-        ));
-        assert!(matches!(
-            ScrollDebugCommand.run(&mut ctx, ""),
             CommandResult::Action(Action::ToggleScrollDebugHud)
         ));
     }

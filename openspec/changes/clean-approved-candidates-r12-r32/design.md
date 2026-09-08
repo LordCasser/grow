@@ -29,3 +29,12 @@ Dedicated key/helper reads exist only in tests; writes are the shared placeholde
 
 ## R20 reviewed boundary
 open_from_path is a separate synchronous constructor with exactly three direct tests. Preserve their PNG/JPEG dimensions, byte and display-number assertions by using open_from_path_deferred + finish_loading (which delegates to the actual load_image_data/apply_loaded path); preserve failed-path coverage there too. Remove only synchronous constructor and its obsolete preference comment. The actual background admission is already wired in AppView::prepare_agent_image_load; no additional viewer redesign is required.
+
+## R22 reviewed boundary
+/debug scroll already dispatches exactly ToggleScrollDebugHud. Remove the alias module/registry/reserved-name classification and exclusive assertions. Keep debug scroll assertion, actual HUD and environment enablement; update live HUD hint and comments to the supported command. Regress slash registry/debug and HUD rendering.
+
+## R23 reviewed boundary
+ActivePaneSnapshot::Other has no constructors or match consumers; record_input maps every actual pane explicitly. Remove only this unused diagnostic enum variant and regress input_log. No runtime behavior change or new contract.
+
+## R24 reviewed boundary
+Announcement.persistent participates only in serde and default assignment; no client filter/display consumer exists. Remove field/default, preserve dismissible, expires_at, hidden-ID persistence and update payloads. Regress announcement library and actual client announcement tests.

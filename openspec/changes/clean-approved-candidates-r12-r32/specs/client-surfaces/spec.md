@@ -28,3 +28,17 @@ ACP image construction SHALL omit the unused grow.dev/imageDisplayNumber metadat
 #### Scenario: Other metadata survives normalization
 - **WHEN** an ACP image with unrelated metadata is normalized or admitted
 - **THEN** generic metadata remains preserved by the existing normalization and admission paths.
+
+### Requirement: Scroll diagnostics use the debug command entry
+Pager SHALL expose the existing scroll HUD toggle through /debug scroll and SHALL NOT register the redundant /scroll-debug alias. The HUD, environment enablement, FPS and scroll logging SHALL remain available.
+
+#### Scenario: Toggle scroll diagnostics
+- **WHEN** the user executes /debug scroll
+- **THEN** Pager dispatches the existing ToggleScrollDebugHud action and HUD hints reference /debug scroll.
+
+### Requirement: Announcement metadata omits inactive persistence flag
+Announcements SHALL NOT expose the unused persistent field. Dismissibility, expiry and hidden-announcement persistence SHALL retain their existing behavior.
+
+#### Scenario: Default announcement payload
+- **WHEN** default announcements are serialized for clients
+- **THEN** no persistent field is emitted and supported announcement display controls remain present.

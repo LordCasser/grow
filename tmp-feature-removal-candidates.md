@@ -212,7 +212,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 删除理由：重复的命令入口和使用说明，/debug scroll已提供同一功能。不是未启用代码，也不是建议删除滚动诊断本身。
 - 拟删除范围：仅独立ScrollDebugCommand、注册和专属测试/说明；若确认，调整/debug中引用它的等价性测试。
 - 必须保留：/debug scroll、ToggleScrollDebugHud、实际HUD、FPS和滚动日志记录器、相关行为验证。
-- 状态：等待用户确认，尚未删除；旧脚本/人工习惯可能仍使用该别名，仓库外使用未知。证据见bound-export-completion-enumeration/design.md的邻接审计。
+- 状态：已获批并删除；命令 374/374、HUD 1/1 回归通过；旧脚本/人工习惯可能仍使用该别名，仓库外使用未知。证据见bound-export-completion-enumeration/design.md的邻接审计。
 
 ## R23 · 未构造的ActivePaneSnapshot::Other枚举项
 
