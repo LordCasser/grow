@@ -397,7 +397,7 @@ impl SessionActor {
             let prompt_blocks = match slash_commands::resolve(
                 prompt_blocks,
                 &slash_skills,
-                availability, slash_commands::SkillSlashRewrite::RewriteToRun,
+                availability,
 
                 &named_workflows,
             ) {

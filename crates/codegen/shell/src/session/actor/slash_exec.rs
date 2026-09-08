@@ -531,13 +531,8 @@ impl SessionActor {
         let slash_skills = self.slash_skills_for_resolve().await;
         let availability = self.command_availability().await;
         let (_, workflows, _) = self.named_workflow_snapshot();
-        let action = match slash_commands::resolve(
-            blocks,
-            &slash_skills,
-            availability,
-            slash_commands::SkillSlashRewrite::RewriteToRun,
-            &workflows,
-        ) {
+        let action = match slash_commands::resolve(blocks, &slash_skills, availability, &workflows)
+        {
             Err(SlashCommandOutcome::Builtin(action)) => action,
             Err(SlashCommandOutcome::InvokeSkill { .. }) => {
                 return Err(format!(

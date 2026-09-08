@@ -1006,15 +1006,6 @@ impl BuiltinAction {
         }
     }
 }
-/// Legacy selector retained pending removal review R11.
-/// `resolve` ignores both variants: skill invocations preserve the original
-/// prompt blocks, and callers expand skill bodies separately.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum SkillSlashRewrite {
-    #[default]
-    RewriteToRun,
-    Passthrough,
-}
 /// Scan user input left-to-right for `/{word}` tokens where `word` matches
 /// a **known registered skill name** (bare or qualified).
 ///
@@ -1189,7 +1180,6 @@ pub(super) fn resolve(
     prompt_blocks: Vec<acp::ContentBlock>,
     skills: &[SkillInfo],
     availability: CommandAvailability,
-    _skill_rewrite: SkillSlashRewrite,
 
     workflows: &[crate::session::workflow::registry::WorkflowListing],
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
@@ -1315,17 +1305,10 @@ mod tests {
         prompt_blocks: Vec<acp::ContentBlock>,
         skills: &[SkillInfo],
         availability: CommandAvailability,
-        _skill_rewrite: SkillSlashRewrite,
 
         workflows: &[crate::session::workflow::registry::WorkflowListing],
     ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
-        super::resolve(
-            prompt_blocks,
-            skills,
-            availability,
-            SkillSlashRewrite::default(),
-            workflows,
-        )
+        super::resolve(prompt_blocks, skills, availability, workflows)
     }
     fn all_gated() -> CommandAvailability {
         CommandAvailability::all_enabled()
@@ -1472,7 +1455,6 @@ mod tests {
             vec![text_block("/compact preserve auth")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
             &[],
         )
         .unwrap_err();
@@ -1493,14 +1475,8 @@ mod tests {
             "/reload-plugins",
         ] {
             let blocks = vec![text_block(text)];
-            let outcome = resolve(
-                blocks.clone(),
-                &[],
-                all_gated(),
-                SkillSlashRewrite::default(),
-                &[],
-            )
-            .expect("a removed alias must not dispatch a builtin command");
+            let outcome = resolve(blocks.clone(), &[], all_gated(), &[])
+                .expect("a removed alias must not dispatch a builtin command");
             assert_eq!(outcome, blocks);
         }
     }
@@ -1511,21 +1487,13 @@ mod tests {
             vec![text_block("/commit fix typo")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
             &[],
         )
         .unwrap_err();
         let skill = first_skill(outcome);
         assert_eq!(skill.name, "commit");
         assert_eq!(skill.args, "fix typo");
-        let outcome = resolve(
-            vec![text_block("/commit")],
-            &skills,
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
+        let outcome = resolve(vec![text_block("/commit")], &skills, all_gated(), &[]).unwrap_err();
         let skill = first_skill(outcome);
         assert_eq!(skill.name, "commit");
         assert_eq!(skill.args, "");
@@ -1626,7 +1594,6 @@ mod tests {
             vec![text_block("/loop 1m echo hello")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
             &[],
         )
         .unwrap_err();
@@ -1660,14 +1627,7 @@ mod tests {
     }
     #[test]
     fn resolve_loop_without_args_uses_bare_command_display_text() {
-        let outcome = resolve(
-            vec![text_block("/loop")],
-            &[],
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
+        let outcome = resolve(vec![text_block("/loop")], &[], all_gated(), &[]).unwrap_err();
         let SlashCommandOutcome::InvokeSkill { blocks, .. } = outcome else {
             panic!("expected InvokeSkill for /loop");
         };
@@ -1689,19 +1649,11 @@ mod tests {
             vec![text_block("/commit fix typo")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
             &[],
         )
         .unwrap_err();
         assert_eq!(invoke_text(outcome), "/commit fix typo");
-        let outcome = resolve(
-            vec![text_block("/commit")],
-            &skills,
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
+        let outcome = resolve(vec![text_block("/commit")], &skills, all_gated(), &[]).unwrap_err();
         assert_eq!(invoke_text(outcome), "/commit");
     }
     #[test]
@@ -1712,21 +1664,11 @@ mod tests {
                 vec![text_block("fix the login bug")],
                 &skills,
                 all_gated(),
-                SkillSlashRewrite::default(),
                 &[],
             )
             .is_ok()
         );
-        assert!(
-            resolve(
-                vec![text_block("/unknown")],
-                &skills,
-                all_gated(),
-                SkillSlashRewrite::default(),
-                &[],
-            )
-            .is_ok()
-        );
+        assert!(resolve(vec![text_block("/unknown")], &skills, all_gated(), &[],).is_ok());
     }
     #[test]
     fn resolve_filters_non_invocable_skills() {
@@ -1736,7 +1678,6 @@ mod tests {
                 vec![text_block("/internal-only")],
                 &skills,
                 all_gated(),
-                SkillSlashRewrite::default(),
                 &[],
             )
             .is_ok()
@@ -1745,14 +1686,7 @@ mod tests {
     #[test]
     fn resolve_builtin_shadows_same_named_skill() {
         let skills = vec![make_skill("compact", true)];
-        let outcome = resolve(
-            vec![text_block("/compact")],
-            &skills,
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
+        let outcome = resolve(vec![text_block("/compact")], &skills, all_gated(), &[]).unwrap_err();
         assert!(matches!(outcome, SlashCommandOutcome::Builtin(_)));
     }
     #[test]
@@ -1888,14 +1822,7 @@ mod tests {
             ..CommandAvailability::all_enabled()
         };
         assert!(
-            resolve(
-                vec![text_block("/goal status")],
-                &[],
-                availability,
-                SkillSlashRewrite::default(),
-                &[],
-            )
-            .is_ok(),
+            resolve(vec![text_block("/goal status")], &[], availability, &[],).is_ok(),
             "expected pass-through (Ok), got an outcome",
         );
     }
@@ -1910,7 +1837,6 @@ mod tests {
                 vec![text_block("/loop 5m do thing")],
                 &[],
                 availability,
-                SkillSlashRewrite::default(),
                 &[],
             )
             .is_ok(),
@@ -2049,14 +1975,7 @@ mod tests {
     }
     #[test]
     fn resolve_routes_flush_builtin() {
-        let outcome = resolve(
-            vec![text_block("/flush")],
-            &[],
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
+        let outcome = resolve(vec![text_block("/flush")], &[], all_gated(), &[]).unwrap_err();
         assert!(matches!(
             outcome,
             SlashCommandOutcome::Builtin(BuiltinAction::FlushMemory)
@@ -2065,14 +1984,7 @@ mod tests {
     #[test]
     fn flush_builtin_shadows_same_named_skill() {
         let skills = vec![make_skill("flush", true)];
-        let outcome = resolve(
-            vec![text_block("/flush")],
-            &skills,
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
+        let outcome = resolve(vec![text_block("/flush")], &skills, all_gated(), &[]).unwrap_err();
         assert!(matches!(outcome, SlashCommandOutcome::Builtin(_)));
     }
     #[test]
@@ -2088,14 +2000,7 @@ mod tests {
     }
     #[test]
     fn resolve_routes_dream_builtin() {
-        let outcome = resolve(
-            vec![text_block("/dream")],
-            &[],
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
+        let outcome = resolve(vec![text_block("/dream")], &[], all_gated(), &[]).unwrap_err();
         assert!(matches!(
             outcome,
             SlashCommandOutcome::Builtin(BuiltinAction::Dream)
@@ -2104,14 +2009,7 @@ mod tests {
     #[test]
     fn dream_builtin_shadows_same_named_skill() {
         let skills = vec![make_skill("dream", true)];
-        let outcome = resolve(
-            vec![text_block("/dream")],
-            &skills,
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
+        let outcome = resolve(vec![text_block("/dream")], &skills, all_gated(), &[]).unwrap_err();
         assert!(matches!(outcome, SlashCommandOutcome::Builtin(_)));
     }
     fn make_scoped_skill(name: &str, scope: SkillScope) -> SkillInfo {
@@ -2148,16 +2046,7 @@ mod tests {
             make_scoped_skill("commit", SkillScope::Local),
             make_scoped_skill("commit", SkillScope::User),
         ];
-        assert!(
-            resolve(
-                vec![text_block("/commit")],
-                &skills,
-                all_gated(),
-                SkillSlashRewrite::default(),
-                &[],
-            )
-            .is_ok()
-        );
+        assert!(resolve(vec![text_block("/commit")], &skills, all_gated(), &[],).is_ok());
     }
     #[test]
     fn resolve_qualified_skill_name() {
@@ -2169,21 +2058,14 @@ mod tests {
             vec![text_block("/local:commit fix typo")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
             &[],
         )
         .unwrap_err();
         let skill = first_skill(outcome);
         assert_eq!(skill.name, "local:commit");
         assert_eq!(skill.args, "fix typo");
-        let outcome = resolve(
-            vec![text_block("/user:commit")],
-            &skills,
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
+        let outcome =
+            resolve(vec![text_block("/user:commit")], &skills, all_gated(), &[]).unwrap_err();
         let skill = first_skill(outcome);
         assert_eq!(skill.name, "user:commit");
         assert_eq!(skill.args, "");
@@ -2234,20 +2116,12 @@ mod tests {
     #[test]
     fn resolve_qualified_builtin_colliding_skill() {
         let skills = vec![make_scoped_skill("compact", SkillScope::Local)];
-        let outcome = resolve(
-            vec![text_block("/compact")],
-            &skills,
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &[],
-        )
-        .unwrap_err();
+        let outcome = resolve(vec![text_block("/compact")], &skills, all_gated(), &[]).unwrap_err();
         assert!(matches!(outcome, SlashCommandOutcome::Builtin(_)));
         let outcome = resolve(
             vec![text_block("/local:compact")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
             &[],
         )
         .unwrap_err();
@@ -2262,7 +2136,6 @@ mod tests {
                 vec![text_block("/feedback hello")],
                 &[],
                 CommandAvailability::default(),
-                SkillSlashRewrite::default(),
                 &[],
             )
             .is_ok()
@@ -2367,13 +2240,7 @@ mod tests {
             memory: false,
             ..CommandAvailability::all_enabled()
         };
-        let outcome = resolve(
-            vec![text_block("/memory")],
-            &[],
-            availability,
-            SkillSlashRewrite::default(),
-            &[],
-        );
+        let outcome = resolve(vec![text_block("/memory")], &[], availability, &[]);
         assert!(
             outcome.is_err(),
             "expected /memory to resolve when memory_configured=true",
@@ -2387,14 +2254,7 @@ mod tests {
             ..CommandAvailability::all_enabled()
         };
         assert!(
-            resolve(
-                vec![text_block("/memory")],
-                &[],
-                availability,
-                SkillSlashRewrite::default(),
-                &[],
-            )
-            .is_ok(),
+            resolve(vec![text_block("/memory")], &[], availability, &[],).is_ok(),
             "expected pass-through (Ok) when memory_configured is false",
         );
     }
@@ -2475,7 +2335,7 @@ mod tests {
     }
     fn resolve_goal(args: &str) -> BuiltinAction {
         let blocks = vec![text_block(&format!("/goal {args}"))];
-        match resolve(blocks, &[], all_gated(), SkillSlashRewrite::default(), &[]).unwrap_err() {
+        match resolve(blocks, &[], all_gated(), &[]).unwrap_err() {
             SlashCommandOutcome::Builtin(action) => action,
             _ => panic!("expected Builtin outcome"),
         }
@@ -2514,15 +2374,7 @@ mod tests {
             wf.description
         );
         let blocks = vec![text_block("/triage-flakes fix the CI")];
-        match resolve(
-            blocks,
-            &[],
-            all_gated(),
-            SkillSlashRewrite::default(),
-            &workflows,
-        )
-        .unwrap_err()
-        {
+        match resolve(blocks, &[], all_gated(), &workflows).unwrap_err() {
             SlashCommandOutcome::Builtin(BuiltinAction::WorkflowLaunch { name, input }) => {
                 assert_eq!(name, "triage-flakes");
                 assert_eq!(input, "fix the CI");
@@ -2531,14 +2383,7 @@ mod tests {
         }
         let blocks = vec![text_block("/goal status")];
         assert!(matches!(
-            resolve(
-                blocks,
-                &[],
-                all_gated(),
-                SkillSlashRewrite::default(),
-                &workflows
-            )
-            .unwrap_err(),
+            resolve(blocks, &[], all_gated(), &workflows).unwrap_err(),
             SlashCommandOutcome::Builtin(BuiltinAction::GoalStatus)
         ));
     }
@@ -2564,7 +2409,7 @@ mod tests {
             resolve(
                 vec![text_block("/review inspect the patch")],
                 &[],
-                all_gated(), SkillSlashRewrite::default(),
+                all_gated(),
                 &workflows,
             )
             .unwrap_err(),
@@ -2600,7 +2445,7 @@ mod tests {
             resolve(
                 vec![text_block("/status")],
                 &skills,
-                all_gated(), SkillSlashRewrite::default(),
+                all_gated(),
                 &workflows,
             )
             .unwrap_err(),
@@ -2613,7 +2458,6 @@ mod tests {
                     vec![text_block(&format!("/{unavailable}"))],
                     &skills,
                     all_gated(),
-                    SkillSlashRewrite::default(),
                     &workflows,
                 )
                 .is_ok()
@@ -2637,7 +2481,6 @@ mod tests {
                 vec![text_block("/same-plugin:commit")],
                 &skills,
                 all_gated(),
-                SkillSlashRewrite::default(),
                 &[],
             )
             .is_ok()
@@ -2663,7 +2506,6 @@ mod tests {
                 vec![text_block("/workflow-run stop old-run")],
                 &[],
                 availability,
-                SkillSlashRewrite::default(),
                 &workflows,
             )
             .unwrap_err(),
@@ -2674,7 +2516,6 @@ mod tests {
                 vec![text_block("/workflow-run review")],
                 &[],
                 availability,
-                SkillSlashRewrite::default(),
                 &workflows,
             )
             .unwrap_err(),
@@ -2701,21 +2542,13 @@ mod tests {
                 vec![text_block("/workflow-run stop forged")],
                 &[],
                 availability,
-                SkillSlashRewrite::default(),
                 &[],
             )
             .unwrap_err(),
             SlashCommandOutcome::Builtin(BuiltinAction::WorkflowManage { .. })
         ));
         assert!(matches!(
-            resolve(
-                vec![text_block("/workflows")],
-                &[],
-                availability,
-                SkillSlashRewrite::default(),
-                &[],
-            )
-            .unwrap_err(),
+            resolve(vec![text_block("/workflows")], &[], availability, &[],).unwrap_err(),
             SlashCommandOutcome::Builtin(BuiltinAction::WorkflowWorkspace)
         ));
     }
@@ -2745,8 +2578,7 @@ mod tests {
     fn workflow_manage_parses_both_orders_and_optional_id() {
         let resolve_workflow = |args: &str| -> BuiltinAction {
             let blocks = vec![text_block(&format!("/workflow-run {args}"))];
-            match resolve(blocks, &[], all_gated(), SkillSlashRewrite::default(), &[]).unwrap_err()
-            {
+            match resolve(blocks, &[], all_gated(), &[]).unwrap_err() {
                 SlashCommandOutcome::Builtin(action) => action,
                 _ => panic!("expected Builtin outcome"),
             }

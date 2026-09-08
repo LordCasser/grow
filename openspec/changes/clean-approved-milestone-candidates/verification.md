@@ -30,3 +30,6 @@ Removed unused skill model/effort fields from discovery, both SkillInfo represen
 
 ### R10 integration follow-up
 Shell test-target compilation found three remaining SkillInfo fixture literals. Removed only their obsolete model/effort fields. Rebuilt shell slash_commands regressions passed 98/98 before resuming R11; no production behavior changed.
+
+## R11
+Removed the ignored SkillSlashRewrite selector and all production/test arguments. Fresh shell session::slash_commands regression passed 98/98; expansion and out-of-band rejection assertions retained. No selector references remain.

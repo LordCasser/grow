@@ -1,6 +1,6 @@
-# Grow 非必要功能删除候选（临时，等待确认）
+# Grow 非必要功能删除候选（临时，含执行状态）
 
-这里只记录候选，不代表已获删除授权。默认关闭不等于非必要；仍有明确使用入口的功能先审计正确性。
+R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化调用而谨慎保留；其余 9 项按对应验证记录逐项清理。R12 及之后仍待确认，不在本次删除范围。下列证据保留发现时的背景，当前执行结果以每项末尾和验证记录为准。
 
 ## R1 · 未接入生产的 FileOperationLockManager
 
@@ -10,7 +10,10 @@
 - 删除理由：未参与实际文件编辑，却维护另一套锁队列和异步释放协议。旧审计确认其取消窗口可能泄漏锁，保留会形成未来误接入的维护负担。
 - 拟删除范围：该实现、仅服务它的测试和导出；目录内其他代码需要在执行删除前重新检查引用。
 - 影响与限制：当前仓库未发现调用者，不能推断仓库外没有使用方。按本项目不考虑后向兼容的原则，无需为该公共导出保留兼容层。
-- 状态：等待用户确认；尚未删除，也未为闲置组件扩展修复工程。
+- 发现时状态：列为候选，等待逐项核准。
+
+
+- 当前决定：按用户要求保留，用于后续多 Agent 协作需求评估。
 
 ## R2 · Shell 的空 unstable 编译特性
 
@@ -18,7 +21,7 @@
 - 当前证据：Shell 源码、脚本、CI、Cargo 配置和架构文档内未发现对应 cfg 或启用点；不转接依赖，也没有启用任何功能。与 Pager 为统一构建约定保留的空 `jemalloc` 不同，这里未找到明确保留理由。
 - 删除理由：暴露了没有行为的编译开关，容易让人误以为可开启实验功能。收益很小，优先级低于 R1。
 - 拟删除范围：仅此 feature 声明。执行前再次检查全仓构建引用；不删除任何实际实验实现。
-- 状态：等待用户确认，尚未删除。仓库外构建参数是否使用它未知，不为其设计兼容层。
+- 发现时状态：列为候选，等待逐项核准。
 
 - 用户批准后已删除；Cargo 元数据回归确认仅移除该空 feature，其他声明未变。
 
@@ -29,7 +32,7 @@
 - 删除理由：保留了一个看似控制准入、实际没有接入执行的开关，容易误导维护者。
 - 拟删除范围：resolver、对应远程字段，以及只服务该 resolver 的空模块声明/导出。执行前再次核对全仓与生成配置引用。
 - 限制：这里只判断该开关的调用状态，不据此推断任何实际数据保留政策或外部服务行为。
-- 状态：等待用户确认，尚未删除。证据过程见 OpenSpec `fix-lsp-untrusted-source-precedence` 审计记录。
+- 发现时状态：列为候选，等待逐项核准。
 
 - 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R3 验证记录。
 
@@ -40,7 +43,7 @@
 - 删除理由：维护一套没有生产接入的平行答案格式；有效选项 ID 与 notes 同时存在时，该格式还会丢弃用户补充说明。普通问答格式会保留 notes。
 - 拟删除范围：内部格式开关、run 中的备用分支、专用 formatter 和仅服务它的测试。执行前重验引用；不顺带删除 Question/QuestionOption.id，也不删除实际问答能力。
 - 限制：未证明仓库外 Rust 调用者不存在；当前默认路径不受备用格式缺陷影响。同题重复 label 校验仍必要，正常问答也是按 label 返回。
-- 状态：等待用户确认，尚未删除。证据见 OpenSpec `audit-question-alternate-format`。
+- 发现时状态：列为候选，等待逐项核准。
 
 - 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R4 验证记录。
 
@@ -50,7 +53,7 @@
 - 证据：全 crates 检索只有上述生产写入和测试读取，has_skill 无调用；实际 slash 直接读取 SkillManager 并过滤 enabled。
 - 删除理由：维护重复技能快照与无调用查询方法，增加同步负担，容易误认为执行权限来源。
 - 拟删除范围：该资源类型、has_skill、仅维护副本的写入与仅验证该副本的测试；执行前复核泛型资源和外部调用。不要顺带删除 SkillManager、动态发现合并、SkillInput/SkillOutput、slash 或预加载功能。
-- 状态：等待用户确认，尚未删除。证据见 OpenSpec audit-skill-runtime-consumers。
+- 发现时状态：列为候选，等待逐项核准。
 
 - 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R5 验证记录。
 
@@ -61,7 +64,7 @@
 - 删除理由：维护已无内置执行入口的协议结构和跨模块处理分支，过时注释还指向不存在的实现。
 - 拟删除范围：上述旧 IO 结构、枚举分支及专用处理分支；执行前重新核对外部 ToolPack 和序列化值。此项会涉及旧 ToolInput/ToolOutput 的反序列化兼容面。
 - 必须保留：skill.rs 的加载、消息格式化、参数替换、内部链接和 slash/预加载函数；不要整文件删除，也不顺带删除 ToolKind::Skill 模板分类。
-- 状态：等待用户确认，尚未删除。证据见 OpenSpec audit-legacy-skill-tool-protocol。
+- 发现时状态：列为候选，等待逐项核准。
 
 - 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R6 验证记录。
 
@@ -72,7 +75,10 @@
 - 删除理由：保留一条未使用的整份 Config 写入路径，容易被新调用者用来保存过时或运行时展开后的配置快照。
 - 拟删除范围：上述两个包装函数及仅指向它们的过时注释；不删除 save_config_at、read_config_for_save、update_config、SAVE_LOCK、原子文件操作或实际回归测试。
 - 限制：pub use persist::* 暴露公开 API，未证明仓外没有调用者；删除前复核外部使用。
-- 状态：等待用户确认，尚未删除。证据见 OpenSpec audit-config-save-entrypoint。
+- 发现时状态：列为候选，等待逐项核准。
+
+
+- 当前决定：谨慎保留；仓库检索不能排除外部初始化使用，未改动配置整份写入路径。
 
 ## R8 · 未接入生产入口的旧权限保存协议
 
@@ -81,7 +87,7 @@
 - 删除理由：维护没有生产请求入口的独立保存/通知协议，且与已使用的普通设置保存协调重复。
 - 拟删除范围：旧 Effect 和策略枚举、persist_permission_mode_and_notify 及仅供旧路径使用的分支/测试、SettingPersistFailedBestEffort 专用结果；删除前复核 helper 是否有其他调用。
 - 必须保留：NotifySessionPermissionMode、普通 PersistSetting(permission_mode)、SettingPersisted/SettingPersistFailed、默认权限回滚、授权与队列逻辑。不要删除权限模式功能。
-- 状态：等待用户确认，尚未删除。最初证据见 audit-permission-persistence-reachability，当前范围更新见 fix-default-permission-persistence-order。
+- 发现时状态：列为候选，等待逐项核准。
 
 - 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R8 验证记录。
 
@@ -90,7 +96,7 @@
 - 位置：tools/src/implementations/skills/discovery.rs 的 quote_problematic_values、RECOVERABLE_KEYS、recover_scalar_fields。
 - 原因：严格损坏元数据修复后，生产不再尝试重新引号化或只恢复标量字段，以免改变或丢失限制。上述私有 helper 无调用。
 - 拟删除范围：仅两个 helper 和常量及专属说明；保留严格 YAML 解析、合法纯 Markdown 回退与错误回归。
-- 状态：等待用户确认；当前保留并显式标注 dead_code 原因，未删除。
+- 发现时状态：列为候选，等待逐项核准。
 
 - 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R9 验证记录。
 
@@ -100,7 +106,7 @@
 - 证据：仓内只见解析、复制、序列化及测试；技能展开返回提示文本，不消费这两个字段。指南此前误称 override，已纠正。
 - 删除理由：没有实际覆盖效果，却保留了易误导的覆盖配置面。
 - 拟删除范围：仅技能元数据字段和专属解析、说明、测试；不得删除会话模型、reasoning effort 或任务 runtime overrides。执行前核对外部 RPC 消费。
-- 状态：等待用户确认，尚未删除；也未临时发明多技能覆盖冲突规则。
+- 发现时状态：列为候选，等待逐项核准。
 
 - 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R10 验证记录。
 
@@ -110,7 +116,9 @@
 - 证据：resolve 完全不读取参数；生产只构造 RewriteToRun，Passthrough 仅见测试。技能调用统一保留原文并单独展开正文，没有两套策略，也没有配置接入。
 - 删除理由：内部闲置参数扩大调用面，旧注释误称有 run 前缀和工具调用策略，已纠正注释。
 - 拟删除范围：该枚举及闲置形参/实参；保留现有技能解析、原文保留、正文展开、out-of-band 模型工作拒绝和行为回归。与 R6 旧 Skill 工具协议分开处理。
-- 状态：等待用户确认，尚未删除。证据见 OpenSpec audit-skill-slash-rewrite。
+- 发现时状态：列为候选，等待逐项核准。
+
+- 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R11 验证记录。
 
 ## R12 · 没有运行时消费者的恢复程度缓存
 
