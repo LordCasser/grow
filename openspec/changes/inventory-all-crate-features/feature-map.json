@@ -79865,6 +79865,158 @@
       [
         "crates/codegen/pager/src/views/shortcuts_help.rs",
         "build_entries_sets_action_id_on_registry_hints"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "space_prompt_hint"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "build_hints"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_hints"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_hints_with_vim_mode"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "first_two_labels"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_search_hints"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "next_prev_keys"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_hints_with_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_hints_with_text_and_turn"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "demotion_hint_uses_registered_ctrl_b_binding"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "group_header_shows_enter_toggle_hint_instead_of_open_and_fold"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_user_prompt_collapsed_hoists_expand_then_thinking"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_user_prompt_expanded_hoists_thinking_then_space"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_agent_message_hoists_copy_then_space"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_agent_message_no_duplicate_y_copy_in_full_list"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_default_block_shows_prompt_first"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_foldable_non_user_block_hoists_fold_then_open"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_vim_mode_on_shows_nav_and_turn_hints"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_vim_mode_off_hides_nav_turn_and_topbtm"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_vim_mode_off_hides_y_copy_on_agent_message"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_never_shows_rewind_hint_on_user_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_search_hint_not_in_bottom_bar"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_search_composing_shows_go_and_cancel_only"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_search_browsing_shows_next_prev_and_cancel"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_search_vim_browsing_uses_n_keys"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "scrollback_search_simple_mode_uses_arrow_keys_in_both_phases"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_branch_excludes_configuration_shortcuts_and_home_hint"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_idle_submit_hint_is_send"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_running_submit_hint_is_queue_and_send_now"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_empty_mid_turn_queue_advertises_send_now_including_multiline"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "running_turn_cancel_hint_key_tracks_esc_predicate"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "running_turn_with_scrollback_search_keeps_ctrl_c_cancel_hint"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "running_turn_editing_queued_keeps_ctrl_c_cancel_hint"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_legacy_vte_adds_alt_enter_newline_hint"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_modern_terminal_no_newline_hint"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_multiline_mode_no_extra_newline_hint"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_multiline_send_hint_uses_alt_on_legacy_vte"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "prompt_multiline_send_hint_uses_shift_on_modern_terminal"
       ]
     ]
   },
@@ -86516,6 +86668,62 @@
       [
         "crates/codegen/pager/src/app/agent_view/render.rs",
         "frame_reset_clears_model_and_companion_together"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "PaneAreas::hit_test"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "effective_compact"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "AgentViewLayout::compute"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "AgentViewLayout::inner_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "AgentViewLayout::pane_areas"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "timeline_rail_replaces_the_scrollbar_column"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "plugin_cta_row_present_above_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "plugin_cta_row_absent_when_height_zero"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "plugin_cta_row_suppressed_on_short_terminal"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "banner_row_present_above_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "banner_row_absent_when_height_zero"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "layout_with_rows"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "layout_with_cta"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "layout_with_rail"
       ]
     ]
   },
@@ -86840,6 +87048,30 @@
       [
         "crates/codegen/pager/src/app/agent_view/links.rs",
         "critical_banner_draw_path_yields_and_occludes_ephemeral_tip"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "fill_background"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_entry_hover"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_hook_hover_popup"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_todo_chrome"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_todo_chrome_with_close_label"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_scrollbar"
       ]
     ]
   },
@@ -90094,6 +90326,22 @@
       [
         "crates/codegen/pager/src/views/prompt_widget/mod.rs",
         "PromptWidget::render_info_line"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_todo_badge_spans"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "todo_badge_default_renders_done_over_total_fraction"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "todo_badge_absent_when_no_todos"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "todo_badge_absent_when_all_cancelled"
       ]
     ]
   },
@@ -119962,6 +120210,50 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
         "mark_turn_finished_clears_start_and_stamps_active"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_follow_ups"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_follow_ups_emits_clickable_chips"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_follow_ups_drops_chips_that_do_not_fit"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_follow_ups_zero_area_is_noop"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_follow_ups_clamps_long_label"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "render_follow_ups_applies_hover_style"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "follow_ups_row_present_above_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "follow_ups_row_below_plugin_cta"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "follow_ups_row_absent_when_height_zero"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "follow_ups_row_suppressed_on_short_terminal"
+      ],
+      [
+        "crates/codegen/pager/src/views/agent.rs",
+        "row_text"
       ]
     ]
   },

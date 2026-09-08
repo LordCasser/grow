@@ -4651,6 +4651,10 @@
         "sha256": "ab91bd60768ffb334508f9bf3018b878715a3c16177a1c031c3fd97dfa5c0622"
       },
       {
+        "path": "crates/codegen/pager/src/views/agent.rs",
+        "sha256": "94b1165a2b01994d0b315f355ba4bdba21ec3b1085fb3ce193aab61364aae3a8"
+      },
+      {
         "path": "crates/codegen/pager/src/views/completion_dropdown.rs",
         "sha256": "98b6310d345949e1b59c70a8979ddfae4da025854a846175e4499509f7db5464"
       },

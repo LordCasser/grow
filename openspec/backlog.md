@@ -760,3 +760,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager list pane methods耦合状态变更与布局失效
 
 `views/list_pane/state/methods.rs`集中列表状态方法、选择/过滤、布局缓存、滚动和输入操作。静态事实已登记，后续需按状态变更、布局失效和输入动作拆分并补真实列表交互验证；本轮不改实现。
+
+## 待拆分：Pager agent view混合列表、会话状态和工作区摘要
+
+`views/agent.rs`同时承载Agent列表/面板、工作区摘要、会话/子Agent状态和渲染投影。静态事实已登记，后续需按实体列表、会话状态和展示投影拆分并补真实Agent视图验证；本轮不改视图行为。
