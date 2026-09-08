@@ -9,3 +9,6 @@ Cargo metadata --locked --offline --no-deps resolved successfully. Compared decl
 
 ## R3
 Removed unused resolver, its sole module/exports and RemoteSettings field. Repository source search finds no remaining symbol/env consumer. config-types remote_settings: 27/27 passed; git diff --check passed.
+
+## R4
+Removed only unused internal ID formatter selector/branch and seven exclusive formatter tests. Freshly rebuilt tools ask_user_question group passed 59/59; normal notes, IDs and duplicate-label validation remain covered. An earlier cached run was discarded after restoring file timestamps; only the rebuilt 59-test run is counted.

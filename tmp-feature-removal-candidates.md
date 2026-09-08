@@ -42,6 +42,8 @@
 - 限制：未证明仓库外 Rust 调用者不存在；当前默认路径不受备用格式缺陷影响。同题重复 label 校验仍必要，正常问答也是按 label 返回。
 - 状态：等待用户确认，尚未删除。证据见 OpenSpec `audit-question-alternate-format`。
 
+- 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R4 验证记录。
+
 ## R5 · 未发现生产读取的 AvailableSkills 副本
 
 - 位置：tools/src/types/resources.rs 的 AvailableSkills / has_skill；registry 初始化和 bridge 协调时的写入（均位于 crates/codegen/）。

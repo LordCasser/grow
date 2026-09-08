@@ -152,13 +152,6 @@ pub struct AskUserQuestionInput {
     /// is required.
     #[schemars(description = "The questions to ask, each with its own options.")]
     pub questions: Vec<Question>,
-    /// Internal flag: when `true`, the tool result is formatted in the
-    /// alternate shape (referenced by id, not label).
-    /// Skipped on the wire and from the JSON schema so the model never
-    /// sees or controls this field.
-    #[serde(default, skip)]
-    #[schemars(skip)]
-    pub use_id_keyed_format: bool,
 }
 
 /// `AskUserQuestion` tool.
@@ -356,15 +349,7 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                 answers,
                 annotations,
             }) => {
-                let message = if input.use_id_keyed_format {
-                    format::format_id_keyed_accepted_tool_result(
-                        &input.questions,
-                        &answers,
-                        &annotations,
-                    )
-                } else {
-                    format::format_accepted_tool_result(&answers, &annotations)
-                };
+                let message = format::format_accepted_tool_result(&answers, &annotations);
                 Ok(AskUserQuestionOutput { message })
             }
             Ok(UserQuestionResponse::ChatAboutThis {
@@ -538,10 +523,7 @@ mod tests {
         let shared = resources.into_shared();
         let tool = AskUserQuestionTool;
 
-        let input = AskUserQuestionInput {
-            questions: vec![],
-            use_id_keyed_format: false,
-        };
+        let input = AskUserQuestionInput { questions: vec![] };
 
         let error =
             tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "test-call"), input)
@@ -558,7 +540,6 @@ mod tests {
 
         let input = AskUserQuestionInput {
             questions: vec![make_question("Pick one?", &["A", "B"])],
-            use_id_keyed_format: false,
         };
 
         let error = tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "call-q"), input)
@@ -580,7 +561,6 @@ mod tests {
                 make_question("Same question?", &["A"]),
                 make_question("Same question?", &["B"]),
             ],
-            use_id_keyed_format: false,
         };
 
         let err = tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "test-call"), input)
@@ -594,7 +574,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_option_labels_rejected_before_send() {
-        for id_format in [false, true] {
+        {
             let (shared, mut rx) = resources_with_sender();
             let mut question = make_question("Which version?", &["Same", "Same"]);
             question.id = Some("q1".into());
@@ -603,7 +583,6 @@ mod tests {
             question.options[1].description = "Different meaning".into();
             let input = AskUserQuestionInput {
                 questions: vec![question],
-                use_id_keyed_format: id_format,
             };
             let result = tokio::time::timeout(
                 std::time::Duration::from_millis(100),
@@ -633,7 +612,6 @@ mod tests {
                 make_question("First?", &["Yes", "No"]),
                 make_question("Second?", &["Yes", "No"]),
             ],
-            use_id_keyed_format: false,
         };
         let handle = tokio::spawn(async move {
             tool_runtime::Tool::run(
@@ -672,7 +650,6 @@ mod tests {
 
         let input = AskUserQuestionInput {
             questions: vec![make_question("Which database?", &["Redis", "Postgres"])],
-            use_id_keyed_format: false,
         };
 
         let handle = tokio::spawn({
@@ -713,7 +690,6 @@ mod tests {
 
         let input = AskUserQuestionInput {
             questions: vec![make_question("Q?", &["A"])],
-            use_id_keyed_format: false,
         };
 
         let handle = tokio::spawn({
@@ -744,7 +720,6 @@ mod tests {
                 make_question("Q1?", &["A", "B"]),
                 make_question("Q2?", &["C", "D"]),
             ],
-            use_id_keyed_format: false,
         };
 
         let handle = tokio::spawn({
@@ -770,7 +745,6 @@ mod tests {
 
         let input = AskUserQuestionInput {
             questions: vec![make_question("Which database?", &["Redis", "Postgres"])],
-            use_id_keyed_format: false,
         };
 
         let handle = tokio::spawn({
@@ -843,7 +817,6 @@ mod tests {
 
         let input = AskUserQuestionInput {
             questions: vec![make_question("Q?", &["A", "B"])],
-            use_id_keyed_format: false,
         };
 
         let handle = tokio::spawn({
@@ -873,7 +846,6 @@ mod tests {
 
         let input = AskUserQuestionInput {
             questions: vec![make_question("Which database?", &["Redis", "Postgres"])],
-            use_id_keyed_format: false,
         };
 
         let handle = tokio::spawn({
@@ -910,7 +882,6 @@ mod tests {
 
         let input = AskUserQuestionInput {
             questions: vec![make_question("Q?", &["A"])],
-            use_id_keyed_format: false,
         };
 
         let handle = tokio::spawn({
@@ -935,7 +906,6 @@ mod tests {
 
         let input = AskUserQuestionInput {
             questions: vec![make_question("Q?", &["A"])],
-            use_id_keyed_format: false,
         };
 
         let handle = tokio::spawn({
