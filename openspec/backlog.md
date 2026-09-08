@@ -1021,3 +1021,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The relaxed notification latch is a PathBuf equality cache coupled to app.cwd while selection anchoring uses the agent session cwd for modal surfaces, so notification and picker repository scopes can diverge during cwd transitions.
 - Pager 审计债务：Loaded and failed handlers always return empty effect vectors and mutate the view directly, so data reconciliation, notice production, and side effects are coupled in one dispatcher boundary.
 - Pager 审计债务：No inline tests exist in this module despite multiple race and surface-routing branches; the contract depends on external dispatch tests and integration paths.
+- Pager 审计债务：The test depends on long wall-clock waits and sentinel polling, making failure diagnosis and runtime stability dependent on PTY scheduling and model-fixture timing.
+- Pager 审计债务：Visual distinction is asserted through one hard-coded Unicode rail and DIM/ITALIC flags, coupling the test to presentation details instead of a semantic style contract.
+- Pager 审计债务：The fixture writes configuration files directly and selects NO_COLOR through process environment, so configuration precedence and color initialization are exercised implicitly rather than through an explicit test seam.
+- Pager 审计债务：Both end-to-end tests are ignored, leaving the minimal thinking visual and collapse/reopen behavior outside routine automated coverage.
+- Pager 审计债务：The collapse test uses raw byte 0x05 for Ctrl+E and substring-based full_text checks; neither expresses the key binding or fold target as a typed contract.

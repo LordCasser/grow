@@ -28292,3 +28292,267 @@ A JumpState SHALL retain oldest-first TimelineEntry rows, selected cursor, and a
 - **THEN** the picker is refused or dropped before hidden state can consume wheel/keys; Ctrl-C remains available to cancel a running turn.
 
 证据：`crates/codegen/pager/src/views/jump.rs` — `JumpRestore`；`crates/codegen/pager/src/views/jump.rs` — `JumpState`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::sync_jump_preview`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::dismiss_jump_picker`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::restore_jump_viewport`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::jump_slot_taken`；`crates/codegen/pager/src/app/agent_view/panes.rs` — `AgentPane::handle_scroll`；`crates/codegen/pager/src/app/root/dispatch/jump.rs` — `dispatch_jump_show_picker`；`crates/codegen/pager/src/app/root/dispatch/jump.rs` — `dispatch_jump_picker_select`；`crates/codegen/pager/src/app/root/dispatch/jump.rs` — `dispatch_jump_dismiss`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `dismiss_restores_viewport`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `picker_select_restores_viewport_on_out_of_range_turn`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `scroll_drops_hidden_jump_picker_behind_input_overlay`；`crates/codegen/pager/src/app/agent_view/input.rs` — `jump_picker_is_an_esc_consumer`。
+
+
+### Requirement: Minimal reasoning stream and native-palette fixture
+
+The implementation SHALL satisfy the following tested behavior: run_reasoning_turn starts a ContentController with a Responses-backed test model, scripts a reasoning summary followed by answer text, sets the expected answer, writes show_thinking_blocks=true into the sandbox .grow/config.toml, optionally writes minimal_collapse_thinking=true to the sandbox pager.toml, spawns the pager in minimal mode with NO_COLOR=1, enables query responses, waits for minimal readiness, submits PROMPT, and waits for the answer sentinel and Thought header. Turn retains the harness, content controller, and inference expectation for later assertions.
+
+#### Scenario: Reasoning stream setup
+- **WHEN** a test calls run_reasoning_turn with collapse_thinking false or true
+- **THEN** the isolated Responses fixture streams reasoning and answer content through a minimal PTY with thinking blocks enabled and optional collapse configuration.
+
+#### Scenario: Post-turn observation
+- **WHEN** the helper completes its readiness, prompt submission, answer wait, and Thought-header wait
+- **THEN** the returned Turn keeps the live harness and controller-backed expectation available to the caller.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `Turn`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `run_reasoning_turn`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `REASONING_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `RAIL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_ARGS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`。
+
+
+### Requirement: Minimal reasoning and answer visual distinction check
+
+The implementation SHALL satisfy the following tested behavior: The ignored minimal_thinking_is_visually_distinct_from_output PTY test waits for the reasoning sentinel, then checks plain screen text for a U+2503 accent rail on the reasoning row and its absence on the answer row. It inspects styled screen runs and requires every reasoning run containing the sentinel to be dim and italic, while at least one answer run containing its sentinel is neither dim nor italic. It also rejects a visible panicked marker and calls quit_minimal.
+
+#### Scenario: Structural distinction
+- **WHEN** a reasoning response and answer are committed in minimal mode
+- **THEN** the reasoning row starts with the configured rail and the answer row does not.
+
+#### Scenario: Native-palette emphasis
+- **WHEN** the test observes styled runs while NO_COLOR=1 is active
+- **THEN** reasoning sentinel runs are DIM and ITALIC, while at least one answer sentinel run remains upright and undimmed.
+
+#### Scenario: Liveness
+- **WHEN** the visual assertions complete
+- **THEN** the captured screen does not contain `panicked` and the test requests minimal-mode cleanup.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `minimal_thinking_is_visually_distinct_from_output`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `run_reasoning_turn`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `styled_rows_with`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `REASONING_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `RAIL`。
+
+
+### Requirement: Minimal collapsed-thinking hint and Ctrl+E reopen check
+
+The implementation SHALL satisfy the following tested behavior: The ignored minimal_collapse_thinking_toggle_folds_and_ctrl_e_reopens PTY test runs the fixture with minimal_collapse_thinking=true, waits for the `ctrl+e to expand` text, and requires the reasoning sentinel to be absent from full_text while collapsed. It injects byte 0x05 (Ctrl+E), then requires the reasoning sentinel to reappear in full_text, rejects a visible panicked marker, and calls quit_minimal.
+
+#### Scenario: Collapsed body
+- **WHEN** the configured minimal thinking turn settles
+- **THEN** the collapsed header advertises `ctrl+e to expand` and full_text does not contain the reasoning body sentinel.
+
+#### Scenario: Ctrl+E expansion
+- **WHEN** the test injects byte 0x05 after the collapsed assertion
+- **THEN** the reasoning sentinel is reprinted into full_text.
+
+#### Scenario: Liveness
+- **WHEN** the expansion assertion completes
+- **THEN** the captured screen does not contain `panicked` and the test requests minimal-mode cleanup.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `minimal_collapse_thinking_toggle_folds_and_ctrl_e_reopens`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `run_reasoning_turn`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs` — `REASONING_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`。
+
+
+### Requirement: The take-deferred test fixture SHALL construct ModelState with a current grow-build model, Medium reasoning state, and either a parseable or unsupported reasoning-effort metadata shape so resolution gates are exercised against explicit catalog facts.
+
+model_with_support SHALL create a ModelId from the supplied id and ModelInfo whose meta contains reasoningEffort=medium plus deep/xhigh and high/high menu options when supports is true, or only reasoningEffort=medium when false. models_with_current SHALL insert grow-build into available, set it current, and set reasoning_effort=Medium. All outcome assertions use these fixtures to distinguish supported menu, unsupported model, and active-model absence.
+
+#### Scenario: Supported fixture
+- **WHEN** supports is true
+- **THEN** the active model exposes remapped deep→Xhigh and canonical high→High choices.
+
+#### Scenario: Unsupported fixture
+- **WHEN** supports is false
+- **THEN** the active model lacks a parseable reasoning menu and gate-first resolution reports Unsupported.
+
+#### Scenario: No-model fixture
+- **WHEN** ModelState::default is used
+- **THEN** there is no current model for effort-only resolution.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `model_with_support`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `models_with_current`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `ModelState`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `ModelInfo`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `ModelId`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `ReasoningEffort::Medium`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `reasoningEffort`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `reasoningEfforts`。
+
+
+### Requirement: take_deferred_model_switch SHALL resolve an effort-only CLI token against the active model, accept canonical values and remapped menu IDs, skip equal state, and return typed errors for unsupported/unknown/no-active cases.
+
+For no stashed switch, a supported active model SHALL resolve high to ReasoningEffort::High and deep (menu id) to Xhigh. If current reasoning_effort already equals the resolved value, switch SHALL be None with no error. A model without a usable reasoning-efforts menu SHALL return switch=None and EffortTokenError::Unsupported before token classification, including unknown tokens. A supported menu with an unrecognized token, including max when not offered, SHALL return switch=None and UnknownToken{token,offered:[deep,high]}. No active model SHALL return NoActiveModel.
+
+#### Scenario: Canonical token
+- **WHEN** active grow-build supports menu and token is high
+- **THEN** outcome switch targets current model with High and no error.
+
+#### Scenario: Remapped menu id
+- **WHEN** token is deep
+- **THEN** outcome switch targets current model with Xhigh and no error.
+
+#### Scenario: Equal effort
+- **WHEN** current effort is already High and token is high
+- **THEN** no switch is emitted and no error is reported.
+
+#### Scenario: Unsupported canonical
+- **WHEN** active model lacks reasoning menu and token is high
+- **THEN** Unsupported is reported rather than silently applying effort.
+
+#### Scenario: Unsupported unknown
+- **WHEN** active model lacks reasoning menu and token is bogus
+- **THEN** Unsupported wins over unknown token classification.
+
+#### Scenario: Unknown supported token
+- **WHEN** supported model receives bogus or max
+- **THEN** UnknownToken carries original token and offered deep/high IDs.
+
+#### Scenario: No active model
+- **WHEN** only an effort token exists with no current model
+- **THEN** NoActiveModel is reported.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `take_deferred_model_switch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `DeferredSwitchOutcome`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `EffortTokenError::Unsupported`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `EffortTokenError::UnknownToken`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `EffortTokenError::NoActiveModel`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `effort_only_resolves_canonical_token`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `effort_only_resolves_remapped_menu_id`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `effort_only_unsupported_canonical_token_is_unsupported`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `effort_only_unsupported_unknown_token_is_unsupported`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `effort_only_skips_when_already_equal`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `effort_only_errors_on_unknown_token`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `effort_only_rejects_max_when_model_does_not_offer_it`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `effort_only_errors_without_active_model`。
+
+
+### Requirement: take_deferred_model_switch SHALL prefer an explicit stashed model/effort pair, re-resolve only when stashed effort is absent, and preserve a stashed model even when requested effort is unknown or unsupported.
+
+When a stashed (model,Some(effort)) exists, it SHALL be returned unchanged and ignore CLI effort. When a stashed model has None effort, CLI token resolution SHALL target that model/current catalog: deep can remap to Xhigh; an unknown token SHALL return switch=Some((model,None)) plus UnknownToken; an unsupported target model SHALL return switch=Some((model,None)) plus Unsupported. The model switch is never dropped merely because effort resolution fails.
+
+#### Scenario: Explicit stash
+- **WHEN** stash is other-model/Low and CLI says high
+- **THEN** outcome preserves other-model/Low with no error.
+
+#### Scenario: Missing stashed effort
+- **WHEN** stash is current/None and CLI says deep
+- **THEN** outcome keeps model and resolves Xhigh.
+
+#### Scenario: Unknown stashed effort
+- **WHEN** stash is current/None and CLI says bogus
+- **THEN** outcome keeps model with None effort and reports UnknownToken.
+
+#### Scenario: Unsupported stashed target
+- **WHEN** stash targets plain model with None and CLI says high
+- **THEN** outcome keeps plain model with None effort and reports Unsupported.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `take_deferred_model_switch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `stashed_model_switch_prefers_explicit_stash`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `stashed_model_re_resolves_remap_when_effort_missing`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `stashed_model_keeps_model_when_token_unresolvable`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `stashed_model_keeps_model_when_unsupported`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `EffortTokenError::UnknownToken`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `EffortTokenError::Unsupported`。
+
+
+### Requirement: apply_deferred_switch_outcome SHALL publish an effort-resolution failure as exactly one Error/Control Notice block, return no effect, and avoid also setting a toast.
+
+Given an agent and DeferredSwitchOutcome{switch=None, effort_error=Some(Unsupported)}, apply_deferred_switch_outcome SHALL return None, append exactly one scrollback entry, leave agent.toast None, and make the newest entry RenderBlock::Notice with NoticeTone::Error and NoticeCategory::Control. The test proves typed notice classification and no duplicate toast; it does not assert the complete notice text.
+
+#### Scenario: Unsupported apply error
+- **WHEN** outcome contains Unsupported and no switch
+- **THEN** one typed control error notice is appended and no effect is returned.
+
+#### Scenario: Toast exclusivity
+- **WHEN** the same failure is applied
+- **THEN** agent.toast remains None, so the failure is not duplicated as a toast.
+
+#### Scenario: Notice classification
+- **WHEN** the newest block is inspected
+- **THEN** it is RenderBlock::Notice with Error tone and Control category.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `apply_deferred_switch_outcome`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `DeferredSwitchOutcome`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `RenderBlock::Notice`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `NoticeTone::Error`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `NoticeCategory::Control`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `deferred_effort_error_uses_one_typed_control_notice`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `agent.scrollback.len`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `agent.toast`。
+
+
+### Requirement: The take-deferred test module SHALL record resolution and notice contracts as focused lifecycle evidence while leaving stash consumption, model application, request effects, and transport behavior to the lifecycle implementation and other tests.
+
+The implementation SHALL satisfy the following tested behavior: This 253-line source invokes take_deferred_model_switch and apply_deferred_switch_outcome only; it does not test apply_deferred_model_switch consumption, actual model-setting effects, ACP requests, or retry/transport. The fixture uses exact catalog IDs/menu IDs and asserts full DeferredSwitchOutcome equality, including offered IDs and preserved model. The notice test checks count, toast absence, variant, tone, and category but not message content.
+
+#### Scenario: Outcome evidence
+- **WHEN** a deferred switch input is resolved
+- **THEN** the test compares the complete typed outcome rather than only a boolean.
+
+#### Scenario: Notice evidence
+- **WHEN** an effort error is applied to an AgentView test app
+- **THEN** scrollback, toast, variant, tone, and category boundaries are checked.
+
+#### Scenario: Unproven caller behavior
+- **WHEN** stash application or request emission is needed
+- **THEN** this file provides no assertion about consuming stash or emitting a model/effort effect.
+
+#### Scenario: No runtime execution
+- **WHEN** the source is statically audited
+- **THEN** 13 inline tests are registered; Cargo/Rust execution is intentionally absent.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `take_deferred_model_switch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `apply_deferred_switch_outcome`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `DeferredSwitchOutcome`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `EffortTokenError`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `RenderBlock::Notice`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `tests module`；`crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs` — `deferred_effort_error_uses_one_typed_control_notice`。
+
+
+### Requirement: Scrollback horizontal column layout contract
+
+HorizontalLayout::new SHALL partition an input Rect into an accent column of width 1, a configurable left padding column, a flexible content column with Constraint::Min(1), and a configurable right padding column, preserving the input y/height. new_default SHALL use LayoutConfig::default, and chrome_width SHALL equal 1 + block_pad_left + block_pad_right. The partition is the shared column model for scrollback entry rendering and selection geometry.
+
+#### Scenario: Configured layout
+- **WHEN** an area and LayoutConfig are supplied
+- **THEN** accent width is 1, left/right widths equal the configured pads, content receives the remaining layout allocation, and all columns share the area's vertical extent.
+
+#### Scenario: Default layout
+- **WHEN** new_default is called
+- **THEN** the same partition is produced using LayoutConfig::default.
+
+#### Scenario: Chrome width
+- **WHEN** chrome_width is requested for a config
+- **THEN** the returned width is exactly accent plus both horizontal pads and excludes flexible content.
+
+#### Scenario: Narrow area
+- **WHEN** fixed pads consume most or all of the input width
+- **THEN** the ratatui layout remains the single source for the columns and callers receive the resulting bounded Rects.
+
+证据：`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout`；`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::ACCENT`；`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::new`；`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::new_default`；`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::chrome_width`；`crates/codegen/pager/src/scrollback/layout.rs` — `tests::test_horizontal_layout`。
+
+
+### Requirement: Scrollback entry area and content-width projection contract
+
+entry_content_area SHALL return one contiguous Rect beginning at accent.x/y and spanning accent, left padding, content, and right padding with the accent height. entry_area SHALL be an exact alias of entry_content_area. content_width SHALL return only the flexible content column width. These projections SHALL be used as the full EntryRenderer area versus the BlockContext/inline-edit content width so accent and padding are not double-counted.
+
+#### Scenario: Full entry area
+- **WHEN** a HorizontalLayout has configured columns
+- **THEN** entry_content_area and entry_area cover accent through right padding with the same y/height and total width.
+
+#### Scenario: Content width
+- **WHEN** a block or inline editor requests content width
+- **THEN** content_width returns only the content column, excluding accent and both padding columns.
+
+#### Scenario: Render integration
+- **WHEN** scrollback render constructs a HorizontalLayout and passes entry_content_area to EntryRenderer
+- **THEN** the renderer receives full entry chrome while its block context uses content width after any timestamp reservation.
+
+#### Scenario: Measurement integration
+- **WHEN** layout/cache or inline-edit sizing requests a simulated width
+- **THEN** entry_area_width and entry_text_column_width round-trip through the same HorizontalLayout projections, keeping measurement and paint widths consistent.
+
+证据：`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::entry_content_area`；`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::entry_area`；`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::content_width`；`crates/codegen/pager/src/scrollback/layout.rs` — `tests::test_entry_content_area`；`crates/codegen/pager/src/scrollback/render.rs` — `render_scrolled_entries_with_scratch`；`crates/codegen/pager/src/scrollback/state/layout.rs` — `ScrollbackState::entry_area_width`；`crates/codegen/pager/src/scrollback/state/layout.rs` — `ScrollbackState::entry_text_column_width`；`crates/codegen/pager/src/scrollback/wrappers/entry_renderer.rs` — `EntryRenderer::chrome_width`。
+
+
+### Requirement: Scrollback selection area and edge-safety contract
+
+selection_area SHALL preserve the entry row's y and height, begin one column before accent when available, and extend the entry_content_area width by two columns so selection borders occupy one outer-padding column on each side. The left x coordinate SHALL use saturating subtraction at screen edge. for_row SHALL preserve all x/width columns and replace only y/height, allowing selection and rendering to share identical horizontal geometry for each clipped or sticky row.
+
+#### Scenario: Selection expansion
+- **WHEN** an entry layout is inside outer padding
+- **THEN** selection_area starts at accent.x-1 and has entry_content_area.width+2, with the same vertical extent.
+
+#### Scenario: Left screen edge
+- **WHEN** accent.x is zero
+- **THEN** selection_area.x remains zero instead of underflowing.
+
+#### Scenario: Row projection
+- **WHEN** a base layout is projected to a row y/height
+- **THEN** for_row changes every column's y and height while retaining x and width, and the resulting selection area follows the row.
+
+#### Scenario: Sticky/selected rendering
+- **WHEN** scrollback or sticky-header code draws a SelectionBox for a row
+- **THEN** the selection border uses the same expanded area as the content row, including one column outside each content edge.
+
+证据：`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::selection_area`；`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::for_row`；`crates/codegen/pager/src/scrollback/layout.rs` — `tests::test_for_row`；`crates/codegen/pager/src/scrollback/layout.rs` — `tests::test_selection_area`；`crates/codegen/pager/src/scrollback/layout.rs` — `tests::test_selection_area_at_edge`；`crates/codegen/pager/src/scrollback/render.rs` — `VisibleBlockGeometry::selection_area`；`crates/codegen/pager/src/scrollback/scrollback_pane.rs` — `SelectionBox::new`。
+
+
+### Requirement: Scrollback layout width consistency across measurement and rendering contract
+
+Every scrollback path that paints, measures, hit-tests, or edits an entry SHALL derive horizontal chrome and content widths from HorizontalLayout with the active LayoutConfig. EntryRenderer height/paint calculations, ScrollbackState simulated width helpers, selection VisibleBlockGeometry, sticky-header rendering, and inline-edit text sizing SHALL therefore agree on accent and padding widths; callers may subtract block-specific reservations such as timestamps only after obtaining content_width.
+
+#### Scenario: Paint/measure agreement
+- **WHEN** a block is measured and later rendered at the same viewport width/config
+- **THEN** both paths derive the same content column before block-specific timestamp/media adjustments.
+
+#### Scenario: Selection agreement
+- **WHEN** an entry is selected or hit-tested, including a sticky header
+- **THEN** selection width is derived from the same HorizontalLayout as the painted entry and extends into outer padding consistently.
+
+#### Scenario: Inline edit agreement
+- **WHEN** the inline editor computes its text column from a viewport width
+- **THEN** the textarea width uses HorizontalLayout::content_width rather than the full entry or raw viewport width.
+
+#### Scenario: Config change
+- **WHEN** block_pad_left/right changes in active appearance
+- **THEN** all listed consumers observe the new pads through a fresh HorizontalLayout rather than stale hard-coded offsets.
+
+证据：`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::new`；`crates/codegen/pager/src/scrollback/render.rs` — `render_scrolled_entries_with_scratch`；`crates/codegen/pager/src/scrollback/state/layout.rs` — `ScrollbackState::entry_area_width`；`crates/codegen/pager/src/scrollback/state/layout.rs` — `ScrollbackState::entry_text_column_width`；`crates/codegen/pager/src/scrollback/wrappers/entry_renderer.rs` — `EntryRenderer::desired_height`；`crates/codegen/pager/src/app/agent_view/inline_edit.rs` — `render_inline_edit`；`crates/codegen/pager/src/scrollback/scrollback_pane.rs` — `render_sticky_header`。

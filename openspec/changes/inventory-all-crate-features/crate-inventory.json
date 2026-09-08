@@ -4073,7 +4073,19 @@
       "Jump picker key mapping and activation contract",
       "Jump picker cursor and hit-test contract",
       "Jump picker row rendering contract",
-      "Jump picker transcript preview and viewport ownership contract"
+      "Jump picker transcript preview and viewport ownership contract",
+      "Minimal reasoning stream and native-palette fixture",
+      "Minimal reasoning and answer visual distinction check",
+      "Minimal collapsed-thinking hint and Ctrl+E reopen check",
+      "The take-deferred test fixture SHALL construct ModelState with a current grow-build model, Medium reasoning state, and either a parseable or unsupported reasoning-effort metadata shape so resolution gates are exercised against explicit catalog facts.",
+      "take_deferred_model_switch SHALL resolve an effort-only CLI token against the active model, accept canonical values and remapped menu IDs, skip equal state, and return typed errors for unsupported/unknown/no-active cases.",
+      "take_deferred_model_switch SHALL prefer an explicit stashed model/effort pair, re-resolve only when stashed effort is absent, and preserve a stashed model even when requested effort is unknown or unsupported.",
+      "apply_deferred_switch_outcome SHALL publish an effort-resolution failure as exactly one Error/Control Notice block, return no effect, and avoid also setting a toast.",
+      "The take-deferred test module SHALL record resolution and notice contracts as focused lifecycle evidence while leaving stash consumption, model application, request effects, and transport behavior to the lifecycle implementation and other tests.",
+      "Scrollback horizontal column layout contract",
+      "Scrollback entry area and content-width projection contract",
+      "Scrollback selection area and edge-safety contract",
+      "Scrollback layout width consistency across measurement and rendering contract"
     ],
     "reviewed_files": [
       {
@@ -6475,6 +6487,18 @@
       {
         "path": "crates/codegen/pager/src/views/jump.rs",
         "sha256": "80785ced1e1473f1ce9742304dba3b71cae8f3fb765a154a97522f511c4f40fd"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_thinking_is_visually_distinct_from_output.rs",
+        "sha256": "1580f266ac5428bbd648a4f404362e949d33888dd21cef5b25dc526ca6bcec4c"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/session/take_deferred.rs",
+        "sha256": "9cee1c8911a5d048480dc2c7b514b9076ea8a9c0603c740572d7817fb68e49bb"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/layout.rs",
+        "sha256": "863ad75266d7e991b299e41bc872c648ef54dba2bb023b2e7e2a01605c630c7c"
       }
     ],
     "review": "reviews/pager.md"
