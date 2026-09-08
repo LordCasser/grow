@@ -28867,3 +28867,369 @@ Renderable::render SHALL return without invoking the block when area.width or ar
 - **THEN** lines after the bottom boundary are not painted and no out-of-area Buffer access occurs.
 
 证据：`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `Renderable::render for BlockRenderer`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::resolve_background`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `SafeBuf::set_line_safe`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockLine`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `tests::test_render_with_explicit_background`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `tests::test_different_display_modes`；`crates/codegen/pager/src/scrollback/wrappers/entry_renderer.rs` — `flat_background_suppresses_panel_line_bg`。
+
+
+### Requirement: Shared overlay height and row-window geometry
+
+The implementation SHALL satisfy the following tested behavior: ListOverlay::height caps the data rows at MAX_ROWS (15), forms 2 + rows for title plus rows, caps that value at max(60% of screen_h using integer division, 6), and adds one padding row. ListOverlay::visible_rows subtracts three rows from the supplied area with saturating arithmetic, reserving the title and padding. ListOverlay::scroll_offset returns zero while the selected row fits in the visible window and otherwise shifts the first visible index to selected - visible_rows + 1.
+
+#### Scenario: Small list
+- **WHEN** a two-row list is measured on a 40-row screen
+- **THEN** height returns five rows for title, two data rows, and padding.
+
+#### Scenario: Maximum row cap
+- **WHEN** a list has thirty entries on a 40-row screen
+- **THEN** height returns eighteen rows after the fifteen-row cap and one padding row.
+
+#### Scenario: Screen fraction cap
+- **WHEN** a thirty-entry list is measured on a 12-row screen
+- **THEN** the 60% cap with its six-row minimum limits the returned height to eight.
+
+证据：`crates/codegen/pager/src/views/overlay_list.rs` — `MAX_ROWS`；`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::height`；`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::visible_rows`；`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::scroll_offset`；`crates/codegen/pager/src/views/overlay_list.rs` — `tests::height_caps_at_max_rows_and_screen_fraction`。
+
+
+### Requirement: Overlay row hit-testing excludes chrome and padding
+
+The implementation SHALL satisfy the following tested behavior: ListOverlay::row_at accepts only a nonzero area at least ten columns wide, with the point inside the Rect. It treats area.y + 2 as the first selectable row, rejects the title rows and the trailing rows outside visible_rows(area), then returns scroll_offset(visible_rows) + relative row only when the resulting index is below len. Horizontal and vertical coordinates outside the Rect return None.
+
+#### Scenario: Title and row mapping
+- **WHEN** a point is on the title row, first data row, later data row, or trailing padding row
+- **THEN** the title and padding return None, while the first and third data rows map to indices zero and two.
+
+#### Scenario: Horizontal exclusion
+- **WHEN** the column is outside the overlay Rect
+- **THEN** row_at returns None without producing a list index.
+
+#### Scenario: Last-row exclusion
+- **WHEN** the relative row is inside the geometry but the computed index is at or beyond len
+- **THEN** row_at returns None.
+
+证据：`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::row_at`；`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::visible_rows`；`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::scroll_offset`；`crates/codegen/pager/src/views/overlay_list.rs` — `tests::row_at_maps_rows_and_rejects_chrome`。
+
+
+### Requirement: Selected-row scrolling keeps the cursor visible
+
+The implementation SHALL satisfy the following tested behavior: For a valid selected index at or below the current visible-row count, ListOverlay::scroll_offset shifts the row window so the selected row is the last visible row. ListOverlay::row_at and ListOverlay::render use that same offset, so logical row indices and painted rows share the window projection.
+
+#### Scenario: Cursor at list end
+- **WHEN** a 20-row list has seven visible rows and selected is 19
+- **THEN** the window starts at index 13; the first painted or hit-tested row is 13 and the last is 19.
+
+#### Scenario: Cursor in initial window
+- **WHEN** selected is less than visible_rows
+- **THEN** the offset remains zero and the first row maps to index zero.
+
+证据：`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::scroll_offset`；`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::row_at`；`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::render`；`crates/codegen/pager/src/views/overlay_list.rs` — `tests::row_at_respects_scroll_window`。
+
+
+### Requirement: Shared overlay chrome and row-context rendering
+
+The implementation SHALL satisfy the following tested behavior: ListOverlay::render returns for zero-height or sub-ten-column areas. Otherwise it fills the area with theme.bg_light, paints the theme accent bar in the first column, places a bold accent title at area.y + 1 after a three-column inset, and renders at most visible_rows rows from the shared scroll window. Each row receives RowCtx with cursor state, resolved row background, and content width; the row closure supplies Line content while the renderer paints the row background and clips the line to content width. A focused cursor row uses theme.bg_visual and every other row uses the panel background.
+
+#### Scenario: Focused cursor row
+- **WHEN** render receives focused=true and the loop reaches selected
+- **THEN** the selected row gets theme.bg_visual and RowCtx::is_cursor is true.
+
+#### Scenario: Non-cursor row
+- **WHEN** render paints a row that is not selected or is unfocused
+- **THEN** the row background is theme.bg_light and RowCtx::is_cursor is false for a non-selected row.
+
+#### Scenario: Narrow or empty area
+- **WHEN** the area height is zero or width is below ten
+- **THEN** render returns before changing the buffer.
+
+#### Scenario: Row content projection
+- **WHEN** the supplied closure returns a Line for a visible index
+- **THEN** the closure receives the row index and RowCtx and the line is written at the content origin up to content_width.
+
+证据：`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::render`；`crates/codegen/pager/src/views/overlay_list.rs` — `RowCtx`；`crates/codegen/pager/src/views/overlay_list.rs` — `crate::glyphs::accent_bar`；`crates/codegen/pager/src/views/overlay_list.rs` — `Theme::current`。
+
+
+### Requirement: Unfocused overlay dimming and shared picker integration
+
+The implementation SHALL satisfy the following tested behavior: After painting the overlay, ListOverlay::render applies blend_area to the whole area with the panel background and a 0.66 blend when focused is false; focused overlays skip that dim pass. The /jump and /rewind views construct ListOverlay from their own length and selected state, delegate height and row hit-testing to it, and supply only picker-specific row content to render, so this module owns shared chrome and geometry while callers own entry formatting and input/state semantics.
+
+#### Scenario: Unfocused overlay
+- **WHEN** focused is false after rows and chrome are painted
+- **THEN** blend_area is applied across the full overlay with the bg_light target and 0.66 amount.
+
+#### Scenario: Focused overlay
+- **WHEN** focused is true
+- **THEN** the shared unfocus blend is skipped and row content keeps its resolved styles.
+
+#### Scenario: Jump picker reuse
+- **WHEN** render_jump_overlay, jump_overlay_height, or jump_row_at is used
+- **THEN** the jump view routes geometry through ListOverlay and its closure formats ordinal and preview content.
+
+#### Scenario: Rewind picker reuse
+- **WHEN** render_rewind_overlay, rewind_overlay_height, or rewind_row_at handles Picker phase
+- **THEN** the rewind view routes geometry through ListOverlay and its closure formats preview and file metadata.
+
+证据：`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::render`；`crates/codegen/pager/src/views/overlay_list.rs` — `crate::render::color::blend_area`；`crates/codegen/pager/src/views/jump.rs` — `JumpState::list`；`crates/codegen/pager/src/views/jump.rs` — `jump_row_at`；`crates/codegen/pager/src/views/jump.rs` — `jump_overlay_height`；`crates/codegen/pager/src/views/jump.rs` — `render_jump_overlay`；`crates/codegen/pager/src/views/rewind.rs` — `rewind_row_at`；`crates/codegen/pager/src/views/rewind.rs` — `rewind_overlay_height`；`crates/codegen/pager/src/views/rewind.rs` — `render_rewind_overlay`。
+
+
+### Requirement: format_doctor SHALL render the DiagnosticReport environment section in stable order, include only available optional facts, and map terminal/host/runtime capabilities to human-readable labels without inventing unavailable evidence.
+
+The output SHALL begin with Environment and terminal, then xtversion only for RuntimeFact::Available, multiplexer, optional byobu, ssh yes/no, color only for RuntimeFact::Available, and themes as all when available count equals total or `<count>/<total>: <display names>` otherwise. keyboard SHALL render modifier_delivery.label plus OS rescue active only for HostOs::Macos and unavailable text otherwise. newline SHALL render a fixed Alt+Enter prefix with VTE version/legacy, xterm.js, or Kitty-protocol explanation. Unavailable/NoReply runtime facts SHALL not produce false rows. The formatter preserves input display labels/order and does not probe the environment.
+
+#### Scenario: Healthy local
+- **WHEN** Ghostty, no tmux, truecolor, local route and no optional facts are present
+- **THEN** Environment and Clipboard sections use the stable minimal rows and end with No issues found.
+
+#### Scenario: Optional runtime
+- **WHEN** xtversion is Available
+- **THEN** an xtversion row is inserted after terminal.
+
+#### Scenario: Limited themes
+- **WHEN** color is available but available themes are fewer than total
+- **THEN** theme names render as count/total with display names.
+
+#### Scenario: Keyboard host
+- **WHEN** keyboard fact exists for MacOS
+- **THEN** the row includes modifier label and OS rescue active.
+
+#### Scenario: Newline capability
+- **WHEN** newline is Vte/XtermJs/NoKittyKeyboardProtocol
+- **THEN** the row consistently begins Alt+Enter and explains the capability limitation.
+
+#### Scenario: Unavailable probes
+- **WHEN** runtime/probe results are unavailable or errors
+- **THEN** the report omits unsupported evidence rather than creating false issues.
+
+证据：`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `format_doctor`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `RuntimeFact::Available`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `RuntimeFact::NoReply`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `RuntimeFact::Unavailable`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `HostOs::Macos`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `HostOs::label`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `KeyboardFact`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `NewlineFact::Vte`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `NewlineFact::XtermJs`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `NewlineFact::NoKittyKeyboardProtocol`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `healthy_local_output_is_stable`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `limited_color_output_is_stable`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `wezterm_xtversion_runtime_evidence_output_is_stable`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `unavailable_and_error_probes_do_not_create_false_issues`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `keyboard_fact_formats_from_explicit_target_evidence`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `healthy_local_output_is_stable`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `limited_color_output_is_stable`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `wezterm_xtversion_runtime_evidence_output_is_stable`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `unavailable_and_error_probes_do_not_create_false_issues`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `keyboard_fact_formats_from_explicit_target_evidence`。
+
+
+### Requirement: format_doctor SHALL project clipboard preflight, transport routes, display-server capability, and delivery confidence into a stable Clipboard section with safe human labels.
+
+Clipboard native SHALL map LocalAvailable to `local (tool)`, RemoteOnly plus container_no_display to `container (tool)`, RemoteOnly otherwise to `remote (tool)`, Unavailable to unavailable, and Disabled to off. tmux and wrap routes SHALL render on/off. osc 52 SHALL render osc52_capability.label only when osc52_route is true, otherwise off. data-control SHALL appear only for Wayland and be on only for DataControlFact::Available. delivery SHALL map Confirmed/Unverified/Failed to confirmed/unverified/unavailable. Clipboard output does not itself apply fixes or claim a successful copy beyond the supplied delivery fact.
+
+#### Scenario: Local native route
+- **WHEN** native preflight is LocalAvailable
+- **THEN** native row names local tool.
+
+#### Scenario: Remote SSH route
+- **WHEN** preflight is RemoteOnly
+- **THEN** native row names remote or container based on container_no_display.
+
+#### Scenario: Disabled/unavailable native
+- **WHEN** preflight is Disabled or Unavailable
+- **THEN** native row says off or unavailable.
+
+#### Scenario: Transport routes
+- **WHEN** tmux_route, osc52_route, wrap_sink vary
+- **THEN** each route gets the exact on/off or capability label.
+
+#### Scenario: Wayland data control
+- **WHEN** display server is Wayland
+- **THEN** data-control row appears and reflects Available vs other.
+
+#### Scenario: Non-Wayland data control
+- **WHEN** display server is not Wayland
+- **THEN** data-control row is omitted.
+
+#### Scenario: Delivery status
+- **WHEN** delivery is Confirmed, Unverified, or Failed
+- **THEN** status says confirmed, unverified, or unavailable.
+
+#### Scenario: SSH wrapping
+- **WHEN** SSH is true and wrap sink is inactive/active
+- **THEN** unwrapped output includes terminal.ssh-wrap recommendation; wrapped output does not.
+
+证据：`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `format_doctor`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `ClipboardDelivery::Confirmed`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `ClipboardDelivery::Unverified`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `ClipboardDelivery::Failed`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `NativeClipboardPreflight::LocalAvailable`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `NativeClipboardPreflight::RemoteOnly`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `NativeClipboardPreflight::Unavailable`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `NativeClipboardPreflight::Disabled`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `DisplayServer::Wayland`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `DataControlFact::Available`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `ClipboardFacts`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `unwrapped_ssh_recommendation_with_no_issues_output`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `wrapped_ssh_output_has_no_recommendation`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `legacy_fact_only_clipboard_issue_never_claims_no_issues`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `unwrapped_ssh_recommendation_with_no_issues_output`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `wrapped_ssh_output_has_no_recommendation`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `legacy_fact_only_clipboard_issue_never_claims_no_issues`。
+
+
+### Requirement: format_findings SHALL partition DiagnosticFinding values by disposition, render stable issue/recommendation sections, and choose remediation wording from automatic fix metadata and config path while preserving notes.
+
+Issues SHALL be collected in input order. When issue findings exist, output SHALL use `Issues (N)` and format each with `!`; when none exist and report.issue_count()==0 it SHALL emit `No issues found.`; when issue_count is nonzero without issue findings it SHALL emit `An issue is shown in the Clipboard status above.` Recommendations SHALL be omitted when empty and otherwise follow issues with `Recommendations` and `i` markers. format_finding SHALL print id/message, prefer human_fix_command(fix_id) over automatic.command for Automatic setup, then choose Add `<fix>` to `<config_path>` when path exists, One-off when automatic remediation exists without path, or Run otherwise, followed by Note when present.
+
+#### Scenario: No findings
+- **WHEN** issues and recommendations are empty and issue_count is zero
+- **THEN** No issues found is printed.
+
+#### Scenario: Legacy fact issue
+- **WHEN** issue findings are empty but report.issue_count is one
+- **THEN** the clipboard status phrase appears and No issues found is absent.
+
+#### Scenario: Issue list
+- **WHEN** issue findings are present
+- **THEN** Issues count and ! rows preserve finding order.
+
+#### Scenario: Recommendation list
+- **WHEN** recommendations are present
+- **THEN** Recommendations follows issues and i rows preserve order.
+
+#### Scenario: Automatic config fix
+- **WHEN** automatic remediation and config_path exist
+- **THEN** Automatic setup and Add wording are both shown.
+
+#### Scenario: Automatic one-off
+- **WHEN** automatic remediation exists without config path
+- **THEN** One-off wording is shown.
+
+#### Scenario: Manual fix
+- **WHEN** only remediation exists
+- **THEN** Run wording is shown.
+
+#### Scenario: Note
+- **WHEN** finding.note exists
+- **THEN** Note is appended after remediation.
+
+#### Scenario: Ordering
+- **WHEN** runtime merge yields issues plus recommendations
+- **THEN** one Issues section appears before Recommendations with no duplicate IDs.
+
+证据：`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `format_findings`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `format_finding`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `FindingDisposition::Issue`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `FindingDisposition::Recommendation`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `DiagnosticReport::issue_count`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `human_fix_command`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `automatic_remediation`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `remediation`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `fix_id`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `config_path`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `terminal.tmux-clipboard`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `runtime_merge_does_not_duplicate_view_findings`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `runtime_findings_merge_before_single_formatter_orders_issues_before_recommendations`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `runtime_merge_does_not_duplicate_view_findings`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `runtime_findings_merge_before_single_formatter_orders_issues_before_recommendations`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `tmux_config_and_reload_notes_output_is_stable`。
+
+
+### Requirement: The doctor formatter integration tests SHALL prove that runtime findings merge into one report, retain useful issue/recommendation content, and keep stable exact strings for terminal, clipboard, color, SSH, newline, keyboard, and WezTerm cases.
+
+The external doctor_format_tests module builds reports from probe snapshots, optionally merges collect_tui_runtime_findings, and asserts complete or substring-stable output. It SHALL demonstrate tmux issue IDs occur once after merge, startup notification/focus findings remain visible with config path, runtime issue sections precede recommendations, and exact formatted report strings remain stable for healthy local, tmux misconfiguration, limited color, SSH wrapping, WezTerm xtversion, VS Code newline, and explicit keyboard target evidence.
+
+#### Scenario: Snapshot formatting matrix
+- **WHEN** the tests supply local, tmux, SSH, WezTerm, VS Code, limited-color, keyboard, and unavailable probe snapshots
+- **THEN** format_doctor output matches the expected section/order/wording for each case.
+
+#### Scenario: Runtime merge
+- **WHEN** collect_tui_runtime_findings are merged into a report
+- **THEN** existing view findings are not duplicated and issue/recommendation sections remain ordered.
+
+#### Scenario: Runtime startup content
+- **WHEN** notification/focus findings are generated
+- **THEN** useful bell/config/focus guidance and exactly one ID occurrence are visible.
+
+#### Scenario: Host keyboard evidence
+- **WHEN** KeyboardFact uses explicit MacOS target
+- **THEN** the formatter uses snapshot host and emits OS rescue active with modifier labels.
+
+#### Scenario: Regression strings
+- **WHEN** formatter output is compared with concat literals or substring assertions
+- **THEN** small wording changes surface as test failures rather than silent schema drift.
+
+证据：`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `format_doctor`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `format_findings`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `build_doctor`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `build_doctor_with_runtime`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `healthy_local_output_is_stable`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `tmux_config_and_reload_notes_output_is_stable`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `limited_color_output_is_stable`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `unwrapped_ssh_recommendation_with_no_issues_output`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `wrapped_ssh_output_has_no_recommendation`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `wezterm_xtversion_runtime_evidence_output_is_stable`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `unavailable_and_error_probes_do_not_create_false_issues`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `vscode_newline_output_is_platform_neutral`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `runtime_merge_does_not_duplicate_view_findings`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `runtime_startup_findings_are_visible_with_useful_doctor_content`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `runtime_findings_merge_before_single_formatter_orders_issues_before_recommendations`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `legacy_fact_only_clipboard_issue_never_claims_no_issues`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `keyboard_fact_formats_from_explicit_target_evidence`。
+
+
+### Requirement: The doctor formatter SHALL consume a completed DiagnosticReport and produce human-readable text without probing terminals, mutating diagnostics, applying fixes, writing JSON, or executing clipboard/SSH remediation.
+
+The implementation SHALL satisfy the following tested behavior: format_doctor delegates fact collection and finding generation to callers and only reads report.facts, report.findings, and report.issue_count. format_findings/format_finding concatenate strings directly, preserve finding order, do not sanitize control characters or truncate messages, and use human_fix_command only for display fallback. The formatter does not alter the report or perform remediation; runtime test helpers invoke it after snapshot/view/merge setup.
+
+#### Scenario: Pure input
+- **WHEN** a DiagnosticReport is supplied
+- **THEN** the function returns a String based only on report values.
+
+#### Scenario: No side effects
+- **WHEN** formatting is requested for a finding with fix metadata
+- **THEN** commands are described in text but not executed.
+
+#### Scenario: Long/control text
+- **WHEN** finding message/note includes arbitrary content
+- **THEN** text is concatenated as supplied; no truncation or control-character filtering is applied.
+
+#### Scenario: Audit boundary
+- **WHEN** the source and external path test module are read
+- **THEN** main formatter has no inline tests; 13 external tests provide output evidence but do not prove probes/remediation execution.
+
+证据：`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `format_doctor`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `format_findings`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `format_finding`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `DiagnosticReport::facts`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `DiagnosticReport::findings`；`crates/codegen/pager/src/diagnostics/doctor_format.rs` — `DiagnosticReport::issue_count`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `build_doctor`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `build_doctor_with_runtime`；`crates/codegen/pager/src/diagnostics/doctor_format_tests.rs` — `format_doctor`。
+
+
+### Requirement: Welcome top-bar location and announcement rendering contract
+
+render_top_bar SHALL render the location_line at the first row of the supplied area after truncating it to the area's terminal width. If an announcement has a message and the area has more than one row, it SHALL render that message in text_primary on the rows below the location line using a Paragraph; absent messages or a one-row area SHALL render no announcement rows. The location row SHALL remain bounded by area.width through truncate_line and set_line.
+
+#### Scenario: Location row
+- **WHEN** render_top_bar receives a nonempty area
+- **THEN** the current location line is width-truncated and painted at area.x/area.y without exceeding area.width.
+
+#### Scenario: Announcement message
+- **WHEN** announcement.message is Some and area.height > 1
+- **THEN** the message is painted with text_primary beginning at area.y+1 in the remaining area height.
+
+#### Scenario: No announcement
+- **WHEN** announcement is absent or its message is None
+- **THEN** only the location row is rendered.
+
+#### Scenario: Single-row top bar
+- **WHEN** area.height is 0 or 1
+- **THEN** no announcement paragraph is rendered; the location write is still bounded by the supplied width.
+
+证据：`crates/codegen/pager/src/views/welcome/top_bar.rs` — `render_top_bar`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `location_line`；`crates/codegen/pager/src/views/welcome/mod.rs` — `render_welcome`；`crates/codegen/pager/src/views/welcome/mod.rs` — `top_bar_inner`。
+
+
+### Requirement: Git branch and worktree location-line contract
+
+location_line_at SHALL read the per-cwd lazy Git cache without spawning a blocking git operation in the render path, then compose spans in this order: optional branch span plus gray separator, optional accent_user worktree badge, and gray_dim actual cwd display. A present nonempty branch SHALL render branch_icon plus the branch; a present empty branch SHALL render branch_icon plus detached; is_worktree SHALL add exactly the worktree badge; absent Git info SHALL still render the cwd display. location_line SHALL apply the same formatting to the live process cwd, falling back to `.` when current_dir fails.
+
+#### Scenario: Branched repository
+- **WHEN** cached CwdGitInfo has a nonempty branch
+- **THEN** the line begins with the branch icon and branch in dim text_primary, followed by a gray separator and cwd.
+
+#### Scenario: Detached repository
+- **WHEN** cached branch is Some("")
+- **THEN** the branch span says detached after the branch icon.
+
+#### Scenario: Linked worktree
+- **WHEN** cached info has is_worktree=true
+- **THEN** a worktree badge in accent_user appears before the cwd display, while the branch span remains when present.
+
+#### Scenario: Cache miss or non-repository
+- **WHEN** cwd_git_info_lazy returns None
+- **THEN** the line omits branch and badge but still shows the cwd display.
+
+#### Scenario: Live cwd wrapper
+- **WHEN** location_line is called
+- **THEN** the helper reads process_cwd and delegates all composition to location_line_at.
+
+证据：`crates/codegen/pager/src/views/welcome/top_bar.rs` — `location_line_at`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `location_line`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `process_cwd`；`crates/codegen/pager/src/git_info.rs` — `cwd_git_info_lazy`；`crates/codegen/pager/src/git_info.rs` — `branch_icon`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `CwdGitInfo::branch`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `CwdGitInfo::is_worktree`。
+
+
+### Requirement: Cwd display and worktree provenance formatting contract
+
+format_cwd_display SHALL show the actual supplied cwd, collapse a home-directory prefix to `~`, and append ` (worktree of {main_repo})` only when CwdGitInfo.main_repo is Some. It SHALL preserve subdirectories under the worktree/current cwd, show the raw cwd on cache miss, and ignore worktree_label for this display. format_cwd_parts SHALL implement the same suffix decision without global state.
+
+#### Scenario: Plain repository cwd
+- **WHEN** main_repo is None and cwd is a path inside or outside home
+- **THEN** the display is the actual cwd, with a home prefix collapsed when home_dir is available.
+
+#### Scenario: Worktree provenance
+- **WHEN** main_repo is Some
+- **THEN** the actual worktree cwd is followed by the main repository suffix.
+
+#### Scenario: Subdirectory
+- **WHEN** cwd points below a repository or linked worktree root
+- **THEN** the subdirectory path remains visible; formatting does not replace it with the repo root or worktree label.
+
+#### Scenario: Cache miss
+- **WHEN** info is None
+- **THEN** the raw cwd is returned after home collapsing and no worktree suffix is added.
+
+#### Scenario: Pure formatting
+- **WHEN** format_cwd_parts receives display and optional main_repo
+- **THEN** the exact suffix result is deterministic without reading process or Git state.
+
+证据：`crates/codegen/pager/src/views/welcome/top_bar.rs` — `format_cwd_display`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `format_cwd_parts`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `collapse_home`；`crates/codegen/pager/src/git_info.rs` — `home_dir`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `tests::format_cwd_plain_repo`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `tests::format_cwd_worktree_shows_main_repo`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `tests::format_cwd_display_shows_subdir_not_repo_root`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `tests::format_cwd_display_worktree_subdir_shows_main_repo`；`crates/codegen/pager/src/views/welcome/top_bar.rs` — `tests::format_cwd_display_cache_miss_shows_raw_cwd`。
+
+
+### Requirement: Shared location header width and staged-cwd integration contract
+
+Consumers of location_line_at SHALL supply the effective/staged cwd rather than relying on the process cwd when the application owns a different directory, then truncate the returned Line to the available label budget before painting or recording hit geometry. Dashboard header integration SHALL preserve the location label and state chips, keep the label from overlapping chips, and use the same branch/cwd/worktree span semantics as the welcome top bar. Hover decorations MAY underline visible location text while leaving whitespace and branch icon padding bare.
+
+#### Scenario: Staged directory
+- **WHEN** dashboard state.cwd changes before the process cwd effect completes
+- **THEN** the header renders the staged cwd immediately.
+
+#### Scenario: Wide header
+- **WHEN** the label budget is large enough
+- **THEN** the header shows cwd location plus any Git/worktree context and preserves right-side state chips.
+
+#### Scenario: Narrow header
+- **WHEN** chips or CTA consume most of the row
+- **THEN** location_line_at output is truncated against the computed budget and does not overpaint chips or buttons.
+
+#### Scenario: Location hover
+- **WHEN** the dashboard location hit is hovered
+- **THEN** visible location text may be underlined while leading whitespace, separators and branch icon remain un-underlined.
+
+#### Scenario: Welcome caller
+- **WHEN** render_welcome builds its top_bar_inner
+- **THEN** the top bar receives the margin-adjusted one-row area and uses the live process cwd wrapper.
+
+证据：`crates/codegen/pager/src/views/welcome/top_bar.rs` — `location_line_at`；`crates/codegen/pager/src/views/welcome/mod.rs` — `render_welcome`；`crates/codegen/pager/src/views/dashboard/render.rs` — `render_header`；`crates/codegen/pager/src/views/dashboard/render.rs` — `header_location_renders_from_staged_cwd`；`crates/codegen/pager/src/views/dashboard/render.rs` — `render_header_location_label_never_overlaps_chips`；`crates/codegen/pager/src/views/dashboard/render.rs` — `underline_location_on_hover_excludes_branch_icon`。

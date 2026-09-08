@@ -1031,3 +1031,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Fuzzy matching indices are consumed against the normalized display path without a local invariant tying them to that transformed string; a path normalization change could silently shift accent positions.
 - Pager 审计债务：The manual cell-by-cell renderer mixes byte indexing, Unicode scalar widths, u16 coordinate arithmetic, and wide-character continuation handling without dedicated property tests in this file.
 - Pager 审计债务：The public height helper and the row renderer have no local tests, leaving visibility, truncation, scrollbar reservation, and styling regressions dependent on higher-level coverage.
+- Pager 审计债务：ListOverlay::height, visible_rows, scroll_offset, row_at, and render encode the shared geometry in one place, but the three-row reservation and the extra padding row remain implicit numeric constants rather than named layout roles.
+- Pager 审计债务：scroll_offset assumes selected is a valid list index and does not clamp the computed offset to len - visible_rows; invalid caller state can produce an empty render window even though row_at remains safe.
+- Pager 审计债务：The renderer uses manual Rect arithmetic and direct cell painting for the accent bar and row background while row content uses Line; this split has no render-level regression tests.
+- Pager 审计债务：Theme::current is read inside the renderer rather than passed as an explicit dependency, making deterministic style testing and cross-frame theme ownership less direct.
+- Pager 审计债务：The shared abstraction covers geometry but still leaves caller closures to independently truncate and style content, so visual consistency across jump and rewind remains partly distributed.

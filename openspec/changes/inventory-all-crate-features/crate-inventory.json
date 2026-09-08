@@ -4098,7 +4098,21 @@
       "The jump AgentView layer SHALL keep preview and restoration consistent across key/mouse/scroll entry points without duplicating picker geometry, cursor clamping, action dispatch, or overlay admission logic.",
       "BlockRenderer builder and BlockContext projection contract",
       "BlockRenderer desired-height and vertical-padding contract",
-      "BlockRenderer background and bounded line rendering contract"
+      "BlockRenderer background and bounded line rendering contract",
+      "Shared overlay height and row-window geometry",
+      "Overlay row hit-testing excludes chrome and padding",
+      "Selected-row scrolling keeps the cursor visible",
+      "Shared overlay chrome and row-context rendering",
+      "Unfocused overlay dimming and shared picker integration",
+      "format_doctor SHALL render the DiagnosticReport environment section in stable order, include only available optional facts, and map terminal/host/runtime capabilities to human-readable labels without inventing unavailable evidence.",
+      "format_doctor SHALL project clipboard preflight, transport routes, display-server capability, and delivery confidence into a stable Clipboard section with safe human labels.",
+      "format_findings SHALL partition DiagnosticFinding values by disposition, render stable issue/recommendation sections, and choose remediation wording from automatic fix metadata and config path while preserving notes.",
+      "The doctor formatter integration tests SHALL prove that runtime findings merge into one report, retain useful issue/recommendation content, and keep stable exact strings for terminal, clipboard, color, SSH, newline, keyboard, and WezTerm cases.",
+      "The doctor formatter SHALL consume a completed DiagnosticReport and produce human-readable text without probing terminals, mutating diagnostics, applying fixes, writing JSON, or executing clipboard/SSH remediation.",
+      "Welcome top-bar location and announcement rendering contract",
+      "Git branch and worktree location-line contract",
+      "Cwd display and worktree provenance formatting contract",
+      "Shared location header width and staged-cwd integration contract"
     ],
     "reviewed_files": [
       {
@@ -6524,6 +6538,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs",
         "sha256": "641edc30b1a15dea60033f2d037561a73e88b9a2b2d4971608db6df85275e81c"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/overlay_list.rs",
+        "sha256": "023568c4c6dc40f7332b1118e8e832d888972e189005d2f390c067423f6bbc17"
+      },
+      {
+        "path": "crates/codegen/pager/src/diagnostics/doctor_format.rs",
+        "sha256": "9d8311cda13241dc7edfc2e62204e7511999d3bc85d5c8f7ffd305b1a393df4f"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/welcome/top_bar.rs",
+        "sha256": "a51a6766e2e00295d9c8ffe3a9f7580456578ce6e37f4b44c0a00f3dc42b7c6a"
       }
     ],
     "review": "reviews/pager.md"
