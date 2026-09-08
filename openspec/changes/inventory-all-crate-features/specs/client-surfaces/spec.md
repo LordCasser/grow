@@ -21768,3 +21768,333 @@ image_references SHALL expose exactly the stored inline image reference when pre
 - **THEN** the same header formatter is used with Fullscreen path presentation and current cwd/detail configuration.
 
 证据：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `image_references`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `image_ref`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `ScrollbackImageRef`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `preamble`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `ToolPathSurface::Fullscreen`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `dim_details`。
+
+
+### Requirement: The edit highlight worker SHALL run full-file style computation off the UI thread, coalesce queued jobs by EntryId with latest-job-wins semantics, wake the async view after each result, and preserve hunk-only output whenever the job cannot produce a verified bounded FileScoped map.
+
+The implementation SHALL satisfy the following tested behavior: spawn_worker creates a named edit-hl std::thread with job/result mpsc channels. The worker receives one job, drains queued jobs by EntryId through drain_coalesced, runs the latest job per key in FIFO key order, sends EditHlResult, and calls async_view::wake; a closed result receiver ends the worker. EditHlOutcome::Ready carries an Arc line-style map plus the ThemeKind used to bake it; Failed covers cap, I/O, UTF-8, mismatch and syntax absence. EditHlRuntime owns channels, pending job/entry pairs and wrapping job ids.
+
+#### Scenario: Queued duplicate
+- **WHEN** multiple jobs for one entry are pending
+- **THEN** only the latest job for that EntryId runs, while different entries retain FIFO key order.
+
+#### Scenario: Ready result
+- **WHEN** a bounded readable file matches hunk content and syntax is available
+- **THEN** the worker sends Ready with line styles and the current baked theme.
+
+#### Scenario: Failed result
+- **WHEN** read/cap/UTF-8/syntax/mismatch validation fails
+- **THEN** the worker sends Failed so the caller retains hunk-only rendering.
+
+#### Scenario: Async wake
+- **WHEN** a worker result is sent
+- **THEN** the shared async view is signaled for completion polling.
+
+#### Scenario: Worker shutdown
+- **WHEN** the result receiver is dropped
+- **THEN** the worker exits after send failure rather than looping forever.
+
+证据：`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHlJob`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHlOutcome`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHlResult`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHlRuntime`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `spawn_worker`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `drain_coalesced`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EDIT_HL_TRACING_TARGET`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `drain_coalesced_latest_wins_per_entry`。
+
+
+### Requirement: A full-file edit highlight job SHALL read only regular UTF-8 files within EDIT_HL_MAX_BYTES and file_text_within_hl_caps, then require compute_file_scoped_styles to verify the disk hunk text and syntax before returning FileScoped styles; every rejection SHALL return Failed without unbounded work.
+
+The implementation SHALL satisfy the following tested behavior: read_file_capped checks metadata success, regular-file status, metadata length, read length and UTF-8 decoding. run_job rejects any read/cap failure, then rejects files outside the logical-line cap, captures the current theme kind beside the syntect computation, and returns Ready only when compute_file_scoped_styles(path, file_text, hunks) returns Some. Missing files, oversized/non-UTF8 files, line cap overflow, disk/hunk mismatch and missing syntax remain Failed.
+
+#### Scenario: Missing file
+- **WHEN** the target path does not exist
+- **THEN** read_file_capped returns None and run_job returns Failed.
+
+#### Scenario: Regular bounded file
+- **WHEN** a readable UTF-8 file is within byte and line caps
+- **THEN** run_job invokes file-scoped style computation and can return Ready.
+
+#### Scenario: Directory target
+- **WHEN** metadata identifies a non-file path
+- **THEN** the job fails closed without reading it.
+
+#### Scenario: Oversized input
+- **WHEN** metadata or actual bytes exceed EDIT_HL_MAX_BYTES
+- **THEN** the worker rejects the job before full-file style work.
+
+#### Scenario: Line cap overflow
+- **WHEN** file_text_within_hl_caps rejects the logical line count
+- **THEN** the worker remains HunkOnly.
+
+#### Scenario: Hunk mismatch
+- **WHEN** new-side hunk text differs from disk
+- **THEN** compute_file_scoped_styles returns no map and the outcome is Failed.
+
+证据：`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `run_job`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `read_file_capped`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EDIT_HL_MAX_BYTES`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `file_text_within_hl_caps`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `compute_file_scoped_styles`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `run_job_fails_on_missing_file`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `run_job_succeeds_on_temp_file`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `run_job_fails_on_hunk_disk_mismatch`。
+
+
+### Requirement: Edit highlight submission SHALL resolve tool paths through the shared tool-path target resolver with optional session cwd, preserve absolute and parent-sensitive path text, expand supported home-relative paths, and retain a compatibility fallback path when resolution fails.
+
+The implementation SHALL satisfy the following tested behavior: resolve_edit_target_path delegates to render::tool_paths::resolve_tool_path_target. resolve_edit_abs_path returns the resolved target when available and falls back to PathBuf::from(path) when it is not. The resolver is used by submit_edit_highlight against self.session.cwd; the public helper remains callable for compatibility callers.
+
+#### Scenario: Session-relative path
+- **WHEN** a relative edit path and session cwd are supplied
+- **THEN** the target is joined under the session cwd.
+
+#### Scenario: Absolute path
+- **WHEN** an absolute path is supplied
+- **THEN** the target remains absolute and is not re-rooted under cwd.
+
+#### Scenario: Parent-sensitive path
+- **WHEN** an absolute path contains .. components
+- **THEN** filesystem semantics are preserved without textual normalization in this façade.
+
+#### Scenario: Home-relative path
+- **WHEN** a tilde path is resolved without cwd
+- **THEN** the result becomes an absolute home-based path.
+
+#### Scenario: Resolution failure
+- **WHEN** shared resolution returns None
+- **THEN** resolve_edit_abs_path returns the original path as a PathBuf, while submit_edit_highlight declines to queue a job.
+
+证据：`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `resolve_edit_abs_path`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `resolve_edit_target_path`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `render::tool_paths::resolve_tool_path_target`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `public_edit_highlight_path_api_remains_source_compatible`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `resolve_edit_target_path_preserves_filesystem_semantics`。
+
+
+### Requirement: AgentView SHALL submit full-file highlighting only for an existing successful Edit with non-empty hunks and a resolvable target, mark it Pending with a fresh job id, prune older pending jobs for the same entry, and revert to HunkOnly if the worker send fails.
+
+The implementation SHALL satisfy the following tested behavior: submit_edit_highlight reads the live entry by EntryId and returns for missing/non-Edit/error/empty-hunk cases. It resolves against session.cwd, lazily creates EditHlRuntime, allocates a wrapping job id, removes earlier pending pairs for that EntryId, sets EditHighlightPhase::Pending before send, and sends EditHlJob containing abs_path/display path/hunks. Successful send records the pending pair; a failed send reverts the entry and abandons the runtime so all ownerless work is normalized. edit_hl_pending reports whether pending pairs remain and apply_edit_hl_completions delegates polling.
+
+#### Scenario: Eligible edit
+- **WHEN** a completed Edit has no error and at least one hunk with a resolvable target
+- **THEN** a Pending job is created and tracked.
+
+#### Scenario: Ineligible edit
+- **WHEN** the entry is missing, non-Edit, failed, or has no hunks
+- **THEN** submission is a no-op and no worker job is created.
+
+#### Scenario: Double submit
+- **WHEN** the same entry is submitted twice
+- **THEN** the older pending pair is pruned and only the latest job remains for that entry.
+
+#### Scenario: Worker send failure
+- **WHEN** the worker channel is disconnected
+- **THEN** the entry returns to HunkOnly and the runtime is abandoned.
+
+#### Scenario: Pending state
+- **WHEN** at least one job/entry pair is outstanding
+- **THEN** edit_hl_pending is true; after all results or abandonment it is false.
+
+证据：`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `AgentView::submit_edit_highlight`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `AgentView::edit_hl_pending`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `AgentView::apply_edit_hl_completions`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHlRuntime::alloc_job_id`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHighlightPhase::Pending`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `double_submit_prunes_pending_after_latest`。
+
+
+### Requirement: The completion reducer SHALL discard stale job ids, missing/replaced entries, changed display paths, and nonmatching highlight phases; Ready SHALL install FileScoped styles, invalidate the entry cache, and request redraw, while Failed SHALL revert to HunkOnly without a redraw-only mutation.
+
+The implementation SHALL satisfy the following tested behavior: poll_edit_hl_results drains all currently available results, removes each job id from pending, looks up the EntryId and Edit block, checks result.path equals edit.path, and requires EditHighlightPhase::Pending with the same job id. Ready installs FileScoped {by_new_line, theme}, invalidates the entry cache and sets redraw true. Failed installs HunkOnly without cache invalidation. A disconnected result channel invokes abandon_edit_hl_worker after draining available results.
+
+#### Scenario: Stale job
+- **WHEN** a result job_id differs from the block Pending job id
+- **THEN** the result is ignored and the newer Pending marker remains.
+
+#### Scenario: Replaced entry
+- **WHEN** the EntryId no longer exists or no longer contains an Edit block
+- **THEN** the result is ignored safely.
+
+#### Scenario: Changed path
+- **WHEN** the live Edit path differs from the result path
+- **THEN** the result is ignored as stale.
+
+#### Scenario: Matching Ready
+- **WHEN** job id/path/phase match and outcome is Ready
+- **THEN** FileScoped styles are installed, cache invalidated, and apply returns redraw true.
+
+#### Scenario: Matching Failed
+- **WHEN** job id/path/phase match and outcome is Failed
+- **THEN** the block returns to HunkOnly without claiming a redraw.
+
+#### Scenario: Channel disconnect
+- **WHEN** the result receiver reports Disconnected
+- **THEN** all pending jobs are reverted and runtime is dropped.
+
+证据：`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `AgentView::poll_edit_hl_results`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHlResult`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHlOutcome::Ready`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHlOutcome::Failed`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHighlightPhase::FileScoped`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `poll_drops_stale_job_id`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `disconnected_worker_reverts_pending_and_unpins_tick`。
+
+
+### Requirement: Runtime reset and worker abandonment SHALL detach the per-AgentView receiver, revert every owned Pending Edit highlight to HunkOnly, clear pending fast-tick work, and allow lazy respawn on a later eligible submission so a replayed/reloaded transcript cannot retain ownerless async state.
+
+The implementation SHALL satisfy the following tested behavior: reset_edit_hl_runtime takes the runtime, iterates its pending EntryIds, and changes only matching Pending Edit blocks to HunkOnly before dropping the receiver. abandon_edit_hl_worker logs context and delegates to reset. begin_session_reload/finish_session_reload callers therefore detach the old worker and normalize restored entries; because HunkOnly paints identically to Pending, reset does not request a redraw or cache invalidation. A later submit creates a new EditHlRuntime.
+
+#### Scenario: Session reload
+- **WHEN** a pending edit highlight exists when session reload starts
+- **THEN** the old runtime is detached and the restored edit is HunkOnly rather than ownerless Pending.
+
+#### Scenario: Dead worker
+- **WHEN** worker channels are gone while pending entries remain
+- **THEN** poll detects disconnect, resets all entries, clears fast-tick pending state, and drops runtime.
+
+#### Scenario: Partial stale state
+- **WHEN** pending list includes an entry that is missing or no longer Pending Edit
+- **THEN** reset skips it without panic.
+
+#### Scenario: Lazy respawn
+- **WHEN** a later eligible edit is submitted after reset
+- **THEN** a fresh runtime and job channel are created.
+
+证据：`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `AgentView::reset_edit_hl_runtime`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `AgentView::abandon_edit_hl_worker`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `session_reload_detaches_worker_and_normalizes_stashed_edit`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `disconnected_worker_reverts_pending_and_unpins_tick`；`crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs` — `EditHighlightPhase::HunkOnly`。
+
+
+### Requirement: Scrollback display modes, accents, selection bounds, and render context
+
+WrapMode SHALL provide Word, Character, and Truncate with Word as its default; DisplayMode SHALL provide Collapsed, Truncated, and Expanded with Expanded as its default. AccentStyle::static_color SHALL create a non-animated style and AccentStyle::animated SHALL set the animation flag. Selectable SHALL default to All, preserve None as non-selectable, and clamp span ranges to valid ordered indices. BlockContext SHALL derive bullet indentation from the configured bullet glyph width, saturating content width after that prefix, and mute collapsed content only when enabled and either unselected or on legacy Windows consoles.
+
+#### Scenario: Mode defaults
+- **WHEN** a mode is default-constructed
+- **THEN** wrapping defaults to Word and block display defaults to Expanded.
+
+#### Scenario: Accent construction
+- **WHEN** a static or animated accent is requested
+- **THEN** the color is preserved and only the animated constructor sets animated=true.
+
+#### Scenario: Selectable bounds
+- **WHEN** a span range exceeds the number of spans or has a start after the end
+- **THEN** the internal range is clamped to 0..len with start <= end; All/None produce no span range.
+
+#### Scenario: Context width/muting
+- **WHEN** a bullet, width, selection state, and mute setting are supplied
+- **THEN** bullet_indent uses glyph display width plus one, content_width saturates at zero, and mute_when_collapsed follows the configured legacy-console/selected predicate.
+
+证据：`crates/codegen/pager/src/scrollback/types.rs` — `WrapMode`；`crates/codegen/pager/src/scrollback/types.rs` — `AccentStyle`；`crates/codegen/pager/src/scrollback/types.rs` — `AccentStyle::static_color`；`crates/codegen/pager/src/scrollback/types.rs` — `AccentStyle::animated`；`crates/codegen/pager/src/scrollback/types.rs` — `DisplayMode`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable`；`crates/codegen/pager/src/scrollback/types.rs` — `clamped_span_range`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockContext`；`crates/codegen/pager/src/scrollback/types.rs` — `bullet_indent`；`crates/codegen/pager/src/scrollback/types.rs` — `content_width`；`crates/codegen/pager/src/scrollback/types.rs` — `mute_when_collapsed`；`crates/codegen/pager/src/scrollback/types.rs` — `is_legacy_windows_console`。
+
+
+### Requirement: BlockLine and BlockOutput construction with selectable metadata
+
+BlockLine SHALL default to an empty Word-wrapped, fully selectable line with no backgrounds, selection metadata, joiner, link target, or link source. Its text/styled constructors SHALL remain fully selectable, separator SHALL create a non-selectable region boundary, and builder methods SHALL set background/panel distinction, partial start column, wrap mode, selection range/text, and soft-wrap joiner. BlockOutput::plain SHALL create one fully selectable line per input text line; new/push/len/is_empty/height SHALL reflect its vector contents.
+
+#### Scenario: Plain output
+- **WHEN** a multiline string is passed to BlockOutput::plain
+- **THEN** each logical line becomes a Selectable::All BlockLine and length/height match the number of lines.
+
+#### Scenario: Separator
+- **WHEN** a decoration line is created
+- **THEN** the line is Selectable::None.
+
+#### Scenario: Literal completeness
+- **WHEN** a BlockLine is built with every field
+- **THEN** link_source and all current metadata fields are representable without omission.
+
+证据：`crates/codegen/pager/src/scrollback/types.rs` — `BlockLine`；`crates/codegen/pager/src/scrollback/types.rs` — `Default::default`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockLine::text`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockLine::styled`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockLine::separator`；`crates/codegen/pager/src/scrollback/types.rs` — `with_background`；`crates/codegen/pager/src/scrollback/types.rs` — `with_panel_background`；`crates/codegen/pager/src/scrollback/types.rs` — `with_background_from`；`crates/codegen/pager/src/scrollback/types.rs` — `with_wrap`；`crates/codegen/pager/src/scrollback/types.rs` — `with_selection_range`；`crates/codegen/pager/src/scrollback/types.rs` — `with_selection_text`；`crates/codegen/pager/src/scrollback/types.rs` — `with_joiner`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockOutput`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockOutput::new`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockOutput::plain`；`crates/codegen/pager/src/scrollback/types.rs` — `push`；`crates/codegen/pager/src/scrollback/types.rs` — `len`；`crates/codegen/pager/src/scrollback/types.rs` — `is_empty`；`crates/codegen/pager/src/scrollback/types.rs` — `height`；`crates/codegen/pager/src/scrollback/types.rs` — `background_is_panel`；`crates/codegen/pager/src/scrollback/types.rs` — `link_source`。
+
+
+### Requirement: Selection text derivation and trailing whitespace normalization
+
+line_plain_text SHALL concatenate all span text in order. derive_selection_text SHALL prefer an explicit selection_text override, return empty text for None, return the concatenated selected span range for Spans with clamped bounds, and trim only trailing whitespace for Selectable::All while preserving interior alignment spaces.
+
+#### Scenario: Explicit override
+- **WHEN** selection_text is Some
+- **THEN** the override is returned even when painted content differs.
+
+#### Scenario: Span selection
+- **WHEN** only a contiguous span range is selectable
+- **THEN** the selected spans are concatenated and non-selected prefix/suffix spans are omitted.
+
+#### Scenario: None selection
+- **WHEN** a decoration line is non-selectable
+- **THEN** an empty selection string is returned.
+
+#### Scenario: All selection
+- **WHEN** painted text has render-only trailing padding or interior spaces
+- **THEN** trailing whitespace is stripped while interior spaces remain unchanged.
+
+证据：`crates/codegen/pager/src/scrollback/types.rs` — `line_plain_text`；`crates/codegen/pager/src/scrollback/types.rs` — `line_plain_text_into`；`crates/codegen/pager/src/scrollback/types.rs` — `derive_selection_text`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable::All`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable::Spans`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable::None`；`crates/codegen/pager/src/scrollback/types.rs` — `clamped_span_range`；`crates/codegen/pager/src/scrollback/types.rs` — `selection_text`；`crates/codegen/pager/src/scrollback/types.rs` — `trim_end`。
+
+
+### Requirement: Unicode display-column slicing
+
+slice_display_cols SHALL select text by terminal display columns using grapheme boundaries, return empty for an empty or non-positive range, retain zero-width combining marks attached within the selected column window, and account for wide Unicode and tab widths without splitting a grapheme.
+
+#### Scenario: ASCII slice
+- **WHEN** a normal ASCII string and half-open columns are supplied
+- **THEN** the graphemes whose display columns intersect the range are returned.
+
+#### Scenario: Wide grapheme
+- **WHEN** a CJK grapheme occupies two columns
+- **THEN** the whole grapheme is returned when its two-column extent fits the range.
+
+#### Scenario: Combining mark
+- **WHEN** a base character and zero-width combining mark are present
+- **THEN** the combining mark remains attached when the base column is selected.
+
+#### Scenario: Tab/invalid range
+- **WHEN** a tab or start >= end/empty text is supplied
+- **THEN** tab width follows UnicodeWidthStr and invalid/empty requests return an empty string.
+
+证据：`crates/codegen/pager/src/scrollback/types.rs` — `slice_display_cols`；`crates/codegen/pager/src/scrollback/types.rs` — `grapheme_width`；`crates/codegen/pager/src/scrollback/types.rs` — `UnicodeSegmentation::graphemes`；`crates/codegen/pager/src/scrollback/types.rs` — `UnicodeWidthStr::width`；`crates/codegen/pager/src/scrollback/types.rs` — `start`；`crates/codegen/pager/src/scrollback/types.rs` — `end`；`crates/codegen/pager/src/scrollback/types.rs` — `saturating_add`。
+
+
+### Requirement: Selectable display columns and selection width
+
+selectable_cols_usize SHALL convert All to the full line width, None to None, and Spans to the summed display widths of the clamped span range without narrowing to u16. selectable_cols SHALL perform the same conversion but return None when either column exceeds terminal-sized u16. block_line_selectable_width SHALL measure the derived selection text, including explicit overrides, in display columns.
+
+#### Scenario: Selectable columns
+- **WHEN** All, a valid span range, or None is supplied
+- **THEN** the result is the full range, the span display range, or None respectively.
+
+#### Scenario: Large line
+- **WHEN** a span extends beyond u16::MAX display columns
+- **THEN** selectable_cols_usize preserves the usize range while selectable_cols returns None.
+
+#### Scenario: Selection override width
+- **WHEN** selection_text overrides the painted line
+- **THEN** block_line_selectable_width measures the override using display width.
+
+证据：`crates/codegen/pager/src/scrollback/types.rs` — `selectable_cols_usize`；`crates/codegen/pager/src/scrollback/types.rs` — `selectable_cols`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable::All`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable::Spans`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable::None`；`crates/codegen/pager/src/scrollback/types.rs` — `clamped_span_range`；`crates/codegen/pager/src/scrollback/types.rs` — `block_line_selectable_width`；`crates/codegen/pager/src/scrollback/types.rs` — `UnicodeWidthStr::width`；`crates/codegen/pager/src/scrollback/types.rs` — `u16::try_from`。
+
+
+### Requirement: Decorative prefixes/suffixes and shifted selection metadata
+
+BlockOutput::with_decorations SHALL prepend a display-only prefix to the first line and append a display-only suffix to the last line. Prefix insertion SHALL shift selectable span indices and link_source.display_start while preserving logical selection text/ranges; suffix insertion SHALL exclude the suffix from All selection while preserving existing Spans/None semantics. Empty outputs and absent decorations SHALL remain unchanged.
+
+#### Scenario: Decorated line
+- **WHEN** a one-line selectable output receives prefix and suffix
+- **THEN** three spans are present and only the original body span is selectable.
+
+#### Scenario: Metadata preservation
+- **WHEN** the body carries selection_range and selection_text before a prefix is added
+- **THEN** those logical values survive while the span range shifts past the prefix.
+
+#### Scenario: Partial/none selection
+- **WHEN** a line uses Spans or None and receives decorations
+- **THEN** the existing selected span range or non-selectable state is retained and the suffix is not selectable.
+
+证据：`crates/codegen/pager/src/scrollback/types.rs` — `BlockOutput::with_decorations`；`crates/codegen/pager/src/scrollback/types.rs` — `shift_selection_metadata_for_prefix`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable::All`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable::Spans`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable::None`；`crates/codegen/pager/src/scrollback/types.rs` — `selection_range`；`crates/codegen/pager/src/scrollback/types.rs` — `selection_text`；`crates/codegen/pager/src/scrollback/types.rs` — `link_source`；`crates/codegen/pager/src/scrollback/types.rs` — `display_start`；`crates/codegen/pager/src/scrollback/types.rs` — `content_end`。
+
+
+### Requirement: Pre-wrap source mapping and link sidecars
+
+BlockOutput::mark_link_sources SHALL capture each rendered row's logical pre-wrap line index, source columns, and display offset before later header/quote transformations; hard-break rows SHALL advance the logical line while soft-wrap joiners SHALL extend the current line by joiner width. prewrap_index_per_row SHALL produce the same logical-line index sequence for a row slice. selectable_cols_usize SHALL be used to anchor selectable content, with non-selectable rows yielding no source range.
+
+#### Scenario: Hard and soft rows
+- **WHEN** rows contain None or Some joiners
+- **THEN** hard breaks increment the pre-wrap index and soft continuations remain on the current source line.
+
+#### Scenario: Source columns
+- **WHEN** a wrapped row has a joiner and selectable spans
+- **THEN** the sidecar records joiner-adjusted source columns and display_start.
+
+#### Scenario: Row index projection
+- **WHEN** a row slice is traversed
+- **THEN** prewrap_index_per_row returns one index per row with increments only at hard breaks.
+
+证据：`crates/codegen/pager/src/scrollback/types.rs` — `BlockOutput::mark_link_sources`；`crates/codegen/pager/src/scrollback/types.rs` — `LinkSource`；`crates/codegen/pager/src/scrollback/types.rs` — `prewrap_index_per_row`；`crates/codegen/pager/src/scrollback/types.rs` — `selectable_cols_usize`；`crates/codegen/pager/src/scrollback/types.rs` — `joiner`；`crates/codegen/pager/src/scrollback/types.rs` — `line_index`；`crates/codegen/pager/src/scrollback/types.rs` — `columns`；`crates/codegen/pager/src/scrollback/types.rs` — `display_start`；`crates/codegen/pager/src/scrollback/types.rs` — `RenderedBlockOutput`。
+
+
+### Requirement: Selection boundary sidecars and rendered output conversion
+
+SelectionBoundary::apply SHALL concatenate optional prefix, selected text, and optional suffix in the requested order with capacity sized for included components. SelectionBoundaries SHALL represent an empty entry list as None, preserve immutable Arc-backed entries, and retrieve a boundary by exact output line index. RenderedBlockOutput SHALL pair BlockOutput with default empty boundaries and convert from a plain BlockOutput without changing its lines.
+
+#### Scenario: Boundary selection
+- **WHEN** prefix/suffix inclusion flags vary
+- **THEN** the resulting string includes exactly the requested boundary components around selected text.
+
+#### Scenario: Sparse lookup
+- **WHEN** entries are empty or contain line-indexed Arc boundaries
+- **THEN** empty sidecars return None and populated sidecars return only an exact line match.
+
+#### Scenario: Plain conversion
+- **WHEN** a BlockOutput is converted to RenderedBlockOutput
+- **THEN** the lines are preserved and boundaries start empty.
+
+证据：`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundary`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundary::new`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundary::apply`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundaryEntry`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundaries`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundaries::from_entries`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundaries::get`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundaries::is_empty`；`crates/codegen/pager/src/scrollback/types.rs` — `RenderedBlockOutput`；`crates/codegen/pager/src/scrollback/types.rs` — `From<BlockOutput>`；`crates/codegen/pager/src/scrollback/types.rs` — `Arc`。

@@ -3796,7 +3796,21 @@
       "Read header selection and semantic file links",
       "Read content syntax highlighting, absolute gutters, wrapping, and truncation",
       "Read display modes, folding, error presentation, and block protocol",
-      "Read image references and preamble projection"
+      "Read image references and preamble projection",
+      "The edit highlight worker SHALL run full-file style computation off the UI thread, coalesce queued jobs by EntryId with latest-job-wins semantics, wake the async view after each result, and preserve hunk-only output whenever the job cannot produce a verified bounded FileScoped map.",
+      "A full-file edit highlight job SHALL read only regular UTF-8 files within EDIT_HL_MAX_BYTES and file_text_within_hl_caps, then require compute_file_scoped_styles to verify the disk hunk text and syntax before returning FileScoped styles; every rejection SHALL return Failed without unbounded work.",
+      "Edit highlight submission SHALL resolve tool paths through the shared tool-path target resolver with optional session cwd, preserve absolute and parent-sensitive path text, expand supported home-relative paths, and retain a compatibility fallback path when resolution fails.",
+      "AgentView SHALL submit full-file highlighting only for an existing successful Edit with non-empty hunks and a resolvable target, mark it Pending with a fresh job id, prune older pending jobs for the same entry, and revert to HunkOnly if the worker send fails.",
+      "The completion reducer SHALL discard stale job ids, missing/replaced entries, changed display paths, and nonmatching highlight phases; Ready SHALL install FileScoped styles, invalidate the entry cache, and request redraw, while Failed SHALL revert to HunkOnly without a redraw-only mutation.",
+      "Runtime reset and worker abandonment SHALL detach the per-AgentView receiver, revert every owned Pending Edit highlight to HunkOnly, clear pending fast-tick work, and allow lazy respawn on a later eligible submission so a replayed/reloaded transcript cannot retain ownerless async state.",
+      "Scrollback display modes, accents, selection bounds, and render context",
+      "BlockLine and BlockOutput construction with selectable metadata",
+      "Selection text derivation and trailing whitespace normalization",
+      "Unicode display-column slicing",
+      "Selectable display columns and selection width",
+      "Decorative prefixes/suffixes and shifted selection metadata",
+      "Pre-wrap source mapping and link sidecars",
+      "Selection boundary sidecars and rendered output conversion"
     ],
     "reviewed_files": [
       {
@@ -5946,6 +5960,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
         "sha256": "6d52d8264b2749b89a54363060e1a2ab7e2611e1128c620ec1c42ccce5edcc4b"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/history_search.rs",
+        "sha256": "0d9c2edce50b08ab21849f0912df10de038783403d9c16b66c569721489a8afd"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "sha256": "2e1b6b70fa0acbb9929574a1e8980f3b137b44b378dcfcee0a7ac12b71910853"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/types.rs",
+        "sha256": "02f2c77d36cc566226993ec320c3175c76b4fb4b67688b356c8f2750ea4258bd"
       }
     ],
     "review": "reviews/pager.md"

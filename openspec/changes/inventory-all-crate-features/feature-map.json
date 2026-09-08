@@ -89585,6 +89585,31 @@
         "Image copy",
         "a copy-image hit is clicked",
         "set_image_file runs off-thread and the UI immediately reports Copied image."
+      ],
+      [
+        "Initial newest selection",
+        "history search activates with non-empty history",
+        "the selected index is initialized to the last displayed result, which is the most recent item for an empty query and the best ranked match for a non-empty query."
+      ],
+      [
+        "Hover selection",
+        "the pointer supplies an in-range result index",
+        "set_hovered records it and select_hovered selects it while clearing sticky-bottom mode; an out-of-range hover is cleared/rejected."
+      ],
+      [
+        "Move up",
+        "the selection is above the first result or the result list is empty",
+        "move_up returns false and does not wrap; otherwise it decrements the index and returns true."
+      ],
+      [
+        "Move down at end",
+        "the selection is at the last result",
+        "move_down returns false and keeps the selection at the end so the caller can handle overlay closure/end-of-history behavior."
+      ],
+      [
+        "Empty history",
+        "activation receives no non-empty history entries",
+        "polling leaves result_count at zero, selected_text returns None, and both directional movement methods return false without panicking."
       ]
     ],
     "sources": [
@@ -89835,6 +89860,70 @@
       [
         "crates/codegen/pager/src/app/agent_view/media.rs",
         "tests::image_viewer_close_releases_retained_memory"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "MAX_RESULTS"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "publish_matches"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "publish_query_matches"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::activate_inner"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::set_hovered"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::select_hovered"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::move_up"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::move_down"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::page_move"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::selected_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::result_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::empty_query_returns_all_reversed_most_recent_last"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::opens_with_most_recent_selected_at_bottom"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::move_up_selects_earlier_then_stops_at_top"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::move_down_at_bottom_reports_end_instead_of_wrapping"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::no_panic_on_empty_history"
       ]
     ]
   },
@@ -153925,12 +154014,88 @@
         "History search preservation",
         "a running execute tool exists while history browse or search is active",
         "demotion occurs and history state is unchanged."
+      ],
+      [
+        "Search activation",
+        "activate receives a current composer draft",
+        "the state becomes active in search mode and saved_text returns the supplied draft."
+      ],
+      [
+        "Browse activation",
+        "activate_browse receives a current composer draft",
+        "the state becomes active with browse mode true; a subsequent ordinary activate clears browse mode."
+      ],
+      [
+        "Deactivation",
+        "deactivate is called after activation",
+        "active and browse flags are cleared, the result snapshot is reset, and the selected index returns to zero while the daemon remains available for later activation."
+      ],
+      [
+        "Default state",
+        "HistorySearchState::default or new is constructed",
+        "the state is inactive with no results, no saved query/draft, no hover, and no selected history text."
       ]
     ],
     "sources": [
       [
         "crates/codegen/pager/src/app/agent_view/input.rs",
         "ctrl_b_preempts_history_browse_and_search_without_mutating_them"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::default"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::new"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::activate"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::activate_browse"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::activate_inner"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::is_active"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::saved_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::is_browse"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::deactivate"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::update_query"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::activate_stores_saved_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::deactivate_clears_state"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::browse_mode_flag_tracks_activation_kind"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::default_is_inactive"
       ]
     ]
   },
@@ -166069,6 +166234,31 @@
         "Search",
         "/history is dispatched",
         "history search activates with current text."
+      ],
+      [
+        "Atomic refresh and query",
+        "history entries are replaced while a query update is queued",
+        "drain_to_latest combines the updates, rebuilds the searchable items, trims the latest query, increments the generation, and publishes one matching snapshot."
+      ],
+      [
+        "Empty query",
+        "the trimmed query is empty",
+        "all non-empty items up to MAX_RESULTS are exposed in reversed display order with no highlight indices, and the previous query is cleared."
+      ],
+      [
+        "Non-empty query",
+        "the trimmed query is non-empty",
+        "matching items are scored with smart case and normalization, sorted by score, limited to MAX_RESULTS, and returned with matched UTF-32 column indices."
+      ],
+      [
+        "Query refinement",
+        "the new query extends the prior query without a trailing backslash or ASCII whitespace",
+        "the daemon marks the nucleo parse as an append; otherwise it reparses from the full query."
+      ],
+      [
+        "Sticky result update",
+        "a generation change is polled while stick_to_bottom is true",
+        "the selected index becomes the last result; when sticky mode is false the existing index is clamped instead."
       ]
     ],
     "sources": [
@@ -166091,6 +166281,54 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/prompt.rs",
         "history_search"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "Daemon::new"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "build_items"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "publish_matches"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "publish_query_matches"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "drain_to_latest"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::refresh_items"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::activate_inner"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::update_query"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "HistorySearchState::poll"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::refresh_items_and_query_are_applied_together"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::non_empty_query_filters"
+      ],
+      [
+        "crates/codegen/pager/src/views/history_search.rs",
+        "tests::typing_after_navigation_reanchors_to_best_match"
       ]
     ]
   },
@@ -187465,6 +187703,944 @@
       [
         "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
         "dim_details"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The edit highlight worker SHALL run full-file style computation off the UI thread, coalesce queued jobs by EntryId with latest-job-wins semantics, wake the async view after each result, and preserve hunk-only output whenever the job cannot produce a verified bounded FileScoped map.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: spawn_worker creates a named edit-hl std::thread with job/result mpsc channels. The worker receives one job, drains queued jobs by EntryId through drain_coalesced, runs the latest job per key in FIFO key order, sends EditHlResult, and calls async_view::wake; a closed result receiver ends the worker. EditHlOutcome::Ready carries an Arc line-style map plus the ThemeKind used to bake it; Failed covers cap, I/O, UTF-8, mismatch and syntax absence. EditHlRuntime owns channels, pending job/entry pairs and wrapping job ids.",
+    "scenarios": [
+      [
+        "Queued duplicate",
+        "multiple jobs for one entry are pending",
+        "only the latest job for that EntryId runs, while different entries retain FIFO key order."
+      ],
+      [
+        "Ready result",
+        "a bounded readable file matches hunk content and syntax is available",
+        "the worker sends Ready with line styles and the current baked theme."
+      ],
+      [
+        "Failed result",
+        "read/cap/UTF-8/syntax/mismatch validation fails",
+        "the worker sends Failed so the caller retains hunk-only rendering."
+      ],
+      [
+        "Async wake",
+        "a worker result is sent",
+        "the shared async view is signaled for completion polling."
+      ],
+      [
+        "Worker shutdown",
+        "the result receiver is dropped",
+        "the worker exits after send failure rather than looping forever."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHlJob"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHlOutcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHlResult"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHlRuntime"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "spawn_worker"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "drain_coalesced"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EDIT_HL_TRACING_TARGET"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "drain_coalesced_latest_wins_per_entry"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "A full-file edit highlight job SHALL read only regular UTF-8 files within EDIT_HL_MAX_BYTES and file_text_within_hl_caps, then require compute_file_scoped_styles to verify the disk hunk text and syntax before returning FileScoped styles; every rejection SHALL return Failed without unbounded work.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: read_file_capped checks metadata success, regular-file status, metadata length, read length and UTF-8 decoding. run_job rejects any read/cap failure, then rejects files outside the logical-line cap, captures the current theme kind beside the syntect computation, and returns Ready only when compute_file_scoped_styles(path, file_text, hunks) returns Some. Missing files, oversized/non-UTF8 files, line cap overflow, disk/hunk mismatch and missing syntax remain Failed.",
+    "scenarios": [
+      [
+        "Missing file",
+        "the target path does not exist",
+        "read_file_capped returns None and run_job returns Failed."
+      ],
+      [
+        "Regular bounded file",
+        "a readable UTF-8 file is within byte and line caps",
+        "run_job invokes file-scoped style computation and can return Ready."
+      ],
+      [
+        "Directory target",
+        "metadata identifies a non-file path",
+        "the job fails closed without reading it."
+      ],
+      [
+        "Oversized input",
+        "metadata or actual bytes exceed EDIT_HL_MAX_BYTES",
+        "the worker rejects the job before full-file style work."
+      ],
+      [
+        "Line cap overflow",
+        "file_text_within_hl_caps rejects the logical line count",
+        "the worker remains HunkOnly."
+      ],
+      [
+        "Hunk mismatch",
+        "new-side hunk text differs from disk",
+        "compute_file_scoped_styles returns no map and the outcome is Failed."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "run_job"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "read_file_capped"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EDIT_HL_MAX_BYTES"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "file_text_within_hl_caps"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "compute_file_scoped_styles"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "run_job_fails_on_missing_file"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "run_job_succeeds_on_temp_file"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "run_job_fails_on_hunk_disk_mismatch"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Edit highlight submission SHALL resolve tool paths through the shared tool-path target resolver with optional session cwd, preserve absolute and parent-sensitive path text, expand supported home-relative paths, and retain a compatibility fallback path when resolution fails.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: resolve_edit_target_path delegates to render::tool_paths::resolve_tool_path_target. resolve_edit_abs_path returns the resolved target when available and falls back to PathBuf::from(path) when it is not. The resolver is used by submit_edit_highlight against self.session.cwd; the public helper remains callable for compatibility callers.",
+    "scenarios": [
+      [
+        "Session-relative path",
+        "a relative edit path and session cwd are supplied",
+        "the target is joined under the session cwd."
+      ],
+      [
+        "Absolute path",
+        "an absolute path is supplied",
+        "the target remains absolute and is not re-rooted under cwd."
+      ],
+      [
+        "Parent-sensitive path",
+        "an absolute path contains .. components",
+        "filesystem semantics are preserved without textual normalization in this façade."
+      ],
+      [
+        "Home-relative path",
+        "a tilde path is resolved without cwd",
+        "the result becomes an absolute home-based path."
+      ],
+      [
+        "Resolution failure",
+        "shared resolution returns None",
+        "resolve_edit_abs_path returns the original path as a PathBuf, while submit_edit_highlight declines to queue a job."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "resolve_edit_abs_path"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "resolve_edit_target_path"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "render::tool_paths::resolve_tool_path_target"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "public_edit_highlight_path_api_remains_source_compatible"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "resolve_edit_target_path_preserves_filesystem_semantics"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "AgentView SHALL submit full-file highlighting only for an existing successful Edit with non-empty hunks and a resolvable target, mark it Pending with a fresh job id, prune older pending jobs for the same entry, and revert to HunkOnly if the worker send fails.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: submit_edit_highlight reads the live entry by EntryId and returns for missing/non-Edit/error/empty-hunk cases. It resolves against session.cwd, lazily creates EditHlRuntime, allocates a wrapping job id, removes earlier pending pairs for that EntryId, sets EditHighlightPhase::Pending before send, and sends EditHlJob containing abs_path/display path/hunks. Successful send records the pending pair; a failed send reverts the entry and abandons the runtime so all ownerless work is normalized. edit_hl_pending reports whether pending pairs remain and apply_edit_hl_completions delegates polling.",
+    "scenarios": [
+      [
+        "Eligible edit",
+        "a completed Edit has no error and at least one hunk with a resolvable target",
+        "a Pending job is created and tracked."
+      ],
+      [
+        "Ineligible edit",
+        "the entry is missing, non-Edit, failed, or has no hunks",
+        "submission is a no-op and no worker job is created."
+      ],
+      [
+        "Double submit",
+        "the same entry is submitted twice",
+        "the older pending pair is pruned and only the latest job remains for that entry."
+      ],
+      [
+        "Worker send failure",
+        "the worker channel is disconnected",
+        "the entry returns to HunkOnly and the runtime is abandoned."
+      ],
+      [
+        "Pending state",
+        "at least one job/entry pair is outstanding",
+        "edit_hl_pending is true; after all results or abandonment it is false."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "AgentView::submit_edit_highlight"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "AgentView::edit_hl_pending"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "AgentView::apply_edit_hl_completions"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHlRuntime::alloc_job_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHighlightPhase::Pending"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "double_submit_prunes_pending_after_latest"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The completion reducer SHALL discard stale job ids, missing/replaced entries, changed display paths, and nonmatching highlight phases; Ready SHALL install FileScoped styles, invalidate the entry cache, and request redraw, while Failed SHALL revert to HunkOnly without a redraw-only mutation.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: poll_edit_hl_results drains all currently available results, removes each job id from pending, looks up the EntryId and Edit block, checks result.path equals edit.path, and requires EditHighlightPhase::Pending with the same job id. Ready installs FileScoped {by_new_line, theme}, invalidates the entry cache and sets redraw true. Failed installs HunkOnly without cache invalidation. A disconnected result channel invokes abandon_edit_hl_worker after draining available results.",
+    "scenarios": [
+      [
+        "Stale job",
+        "a result job_id differs from the block Pending job id",
+        "the result is ignored and the newer Pending marker remains."
+      ],
+      [
+        "Replaced entry",
+        "the EntryId no longer exists or no longer contains an Edit block",
+        "the result is ignored safely."
+      ],
+      [
+        "Changed path",
+        "the live Edit path differs from the result path",
+        "the result is ignored as stale."
+      ],
+      [
+        "Matching Ready",
+        "job id/path/phase match and outcome is Ready",
+        "FileScoped styles are installed, cache invalidated, and apply returns redraw true."
+      ],
+      [
+        "Matching Failed",
+        "job id/path/phase match and outcome is Failed",
+        "the block returns to HunkOnly without claiming a redraw."
+      ],
+      [
+        "Channel disconnect",
+        "the result receiver reports Disconnected",
+        "all pending jobs are reverted and runtime is dropped."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "AgentView::poll_edit_hl_results"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHlResult"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHlOutcome::Ready"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHlOutcome::Failed"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHighlightPhase::FileScoped"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "poll_drops_stale_job_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "disconnected_worker_reverts_pending_and_unpins_tick"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Runtime reset and worker abandonment SHALL detach the per-AgentView receiver, revert every owned Pending Edit highlight to HunkOnly, clear pending fast-tick work, and allow lazy respawn on a later eligible submission so a replayed/reloaded transcript cannot retain ownerless async state.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: reset_edit_hl_runtime takes the runtime, iterates its pending EntryIds, and changes only matching Pending Edit blocks to HunkOnly before dropping the receiver. abandon_edit_hl_worker logs context and delegates to reset. begin_session_reload/finish_session_reload callers therefore detach the old worker and normalize restored entries; because HunkOnly paints identically to Pending, reset does not request a redraw or cache invalidation. A later submit creates a new EditHlRuntime.",
+    "scenarios": [
+      [
+        "Session reload",
+        "a pending edit highlight exists when session reload starts",
+        "the old runtime is detached and the restored edit is HunkOnly rather than ownerless Pending."
+      ],
+      [
+        "Dead worker",
+        "worker channels are gone while pending entries remain",
+        "poll detects disconnect, resets all entries, clears fast-tick pending state, and drops runtime."
+      ],
+      [
+        "Partial stale state",
+        "pending list includes an entry that is missing or no longer Pending Edit",
+        "reset skips it without panic."
+      ],
+      [
+        "Lazy respawn",
+        "a later eligible edit is submitted after reset",
+        "a fresh runtime and job channel are created."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "AgentView::reset_edit_hl_runtime"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "AgentView::abandon_edit_hl_worker"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "session_reload_detaches_worker_and_normalizes_stashed_edit"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "disconnected_worker_reverts_pending_and_unpins_tick"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/edit_highlight_worker.rs",
+        "EditHighlightPhase::HunkOnly"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Scrollback display modes, accents, selection bounds, and render context",
+    "contract": "WrapMode SHALL provide Word, Character, and Truncate with Word as its default; DisplayMode SHALL provide Collapsed, Truncated, and Expanded with Expanded as its default. AccentStyle::static_color SHALL create a non-animated style and AccentStyle::animated SHALL set the animation flag. Selectable SHALL default to All, preserve None as non-selectable, and clamp span ranges to valid ordered indices. BlockContext SHALL derive bullet indentation from the configured bullet glyph width, saturating content width after that prefix, and mute collapsed content only when enabled and either unselected or on legacy Windows consoles.",
+    "scenarios": [
+      [
+        "Mode defaults",
+        "a mode is default-constructed",
+        "wrapping defaults to Word and block display defaults to Expanded."
+      ],
+      [
+        "Accent construction",
+        "a static or animated accent is requested",
+        "the color is preserved and only the animated constructor sets animated=true."
+      ],
+      [
+        "Selectable bounds",
+        "a span range exceeds the number of spans or has a start after the end",
+        "the internal range is clamped to 0..len with start <= end; All/None produce no span range."
+      ],
+      [
+        "Context width/muting",
+        "a bullet, width, selection state, and mute setting are supplied",
+        "bullet_indent uses glyph display width plus one, content_width saturates at zero, and mute_when_collapsed follows the configured legacy-console/selected predicate."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "WrapMode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "AccentStyle"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "AccentStyle::static_color"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "AccentStyle::animated"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "DisplayMode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "clamped_span_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "BlockContext"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "bullet_indent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "content_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "mute_when_collapsed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "is_legacy_windows_console"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "BlockLine and BlockOutput construction with selectable metadata",
+    "contract": "BlockLine SHALL default to an empty Word-wrapped, fully selectable line with no backgrounds, selection metadata, joiner, link target, or link source. Its text/styled constructors SHALL remain fully selectable, separator SHALL create a non-selectable region boundary, and builder methods SHALL set background/panel distinction, partial start column, wrap mode, selection range/text, and soft-wrap joiner. BlockOutput::plain SHALL create one fully selectable line per input text line; new/push/len/is_empty/height SHALL reflect its vector contents.",
+    "scenarios": [
+      [
+        "Plain output",
+        "a multiline string is passed to BlockOutput::plain",
+        "each logical line becomes a Selectable::All BlockLine and length/height match the number of lines."
+      ],
+      [
+        "Separator",
+        "a decoration line is created",
+        "the line is Selectable::None."
+      ],
+      [
+        "Literal completeness",
+        "a BlockLine is built with every field",
+        "link_source and all current metadata fields are representable without omission."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "BlockLine"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Default::default"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "BlockLine::text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "BlockLine::styled"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "BlockLine::separator"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "with_background"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "with_panel_background"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "with_background_from"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "with_wrap"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "with_selection_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "with_selection_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "with_joiner"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "BlockOutput"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "BlockOutput::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "BlockOutput::plain"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "push"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "len"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "is_empty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "background_is_panel"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "link_source"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Selection text derivation and trailing whitespace normalization",
+    "contract": "line_plain_text SHALL concatenate all span text in order. derive_selection_text SHALL prefer an explicit selection_text override, return empty text for None, return the concatenated selected span range for Spans with clamped bounds, and trim only trailing whitespace for Selectable::All while preserving interior alignment spaces.",
+    "scenarios": [
+      [
+        "Explicit override",
+        "selection_text is Some",
+        "the override is returned even when painted content differs."
+      ],
+      [
+        "Span selection",
+        "only a contiguous span range is selectable",
+        "the selected spans are concatenated and non-selected prefix/suffix spans are omitted."
+      ],
+      [
+        "None selection",
+        "a decoration line is non-selectable",
+        "an empty selection string is returned."
+      ],
+      [
+        "All selection",
+        "painted text has render-only trailing padding or interior spaces",
+        "trailing whitespace is stripped while interior spaces remain unchanged."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "line_plain_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "line_plain_text_into"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "derive_selection_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Selectable::All"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Selectable::Spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Selectable::None"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "clamped_span_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "selection_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "trim_end"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Unicode display-column slicing",
+    "contract": "slice_display_cols SHALL select text by terminal display columns using grapheme boundaries, return empty for an empty or non-positive range, retain zero-width combining marks attached within the selected column window, and account for wide Unicode and tab widths without splitting a grapheme.",
+    "scenarios": [
+      [
+        "ASCII slice",
+        "a normal ASCII string and half-open columns are supplied",
+        "the graphemes whose display columns intersect the range are returned."
+      ],
+      [
+        "Wide grapheme",
+        "a CJK grapheme occupies two columns",
+        "the whole grapheme is returned when its two-column extent fits the range."
+      ],
+      [
+        "Combining mark",
+        "a base character and zero-width combining mark are present",
+        "the combining mark remains attached when the base column is selected."
+      ],
+      [
+        "Tab/invalid range",
+        "a tab or start >= end/empty text is supplied",
+        "tab width follows UnicodeWidthStr and invalid/empty requests return an empty string."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "slice_display_cols"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "grapheme_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "UnicodeSegmentation::graphemes"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "UnicodeWidthStr::width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "start"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "end"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "saturating_add"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Selectable display columns and selection width",
+    "contract": "selectable_cols_usize SHALL convert All to the full line width, None to None, and Spans to the summed display widths of the clamped span range without narrowing to u16. selectable_cols SHALL perform the same conversion but return None when either column exceeds terminal-sized u16. block_line_selectable_width SHALL measure the derived selection text, including explicit overrides, in display columns.",
+    "scenarios": [
+      [
+        "Selectable columns",
+        "All, a valid span range, or None is supplied",
+        "the result is the full range, the span display range, or None respectively."
+      ],
+      [
+        "Large line",
+        "a span extends beyond u16::MAX display columns",
+        "selectable_cols_usize preserves the usize range while selectable_cols returns None."
+      ],
+      [
+        "Selection override width",
+        "selection_text overrides the painted line",
+        "block_line_selectable_width measures the override using display width."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "selectable_cols_usize"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "selectable_cols"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Selectable::All"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Selectable::Spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Selectable::None"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "clamped_span_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "block_line_selectable_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "UnicodeWidthStr::width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "u16::try_from"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Decorative prefixes/suffixes and shifted selection metadata",
+    "contract": "BlockOutput::with_decorations SHALL prepend a display-only prefix to the first line and append a display-only suffix to the last line. Prefix insertion SHALL shift selectable span indices and link_source.display_start while preserving logical selection text/ranges; suffix insertion SHALL exclude the suffix from All selection while preserving existing Spans/None semantics. Empty outputs and absent decorations SHALL remain unchanged.",
+    "scenarios": [
+      [
+        "Decorated line",
+        "a one-line selectable output receives prefix and suffix",
+        "three spans are present and only the original body span is selectable."
+      ],
+      [
+        "Metadata preservation",
+        "the body carries selection_range and selection_text before a prefix is added",
+        "those logical values survive while the span range shifts past the prefix."
+      ],
+      [
+        "Partial/none selection",
+        "a line uses Spans or None and receives decorations",
+        "the existing selected span range or non-selectable state is retained and the suffix is not selectable."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "BlockOutput::with_decorations"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "shift_selection_metadata_for_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Selectable::All"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Selectable::Spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Selectable::None"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "selection_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "selection_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "link_source"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "display_start"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "content_end"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pre-wrap source mapping and link sidecars",
+    "contract": "BlockOutput::mark_link_sources SHALL capture each rendered row's logical pre-wrap line index, source columns, and display offset before later header/quote transformations; hard-break rows SHALL advance the logical line while soft-wrap joiners SHALL extend the current line by joiner width. prewrap_index_per_row SHALL produce the same logical-line index sequence for a row slice. selectable_cols_usize SHALL be used to anchor selectable content, with non-selectable rows yielding no source range.",
+    "scenarios": [
+      [
+        "Hard and soft rows",
+        "rows contain None or Some joiners",
+        "hard breaks increment the pre-wrap index and soft continuations remain on the current source line."
+      ],
+      [
+        "Source columns",
+        "a wrapped row has a joiner and selectable spans",
+        "the sidecar records joiner-adjusted source columns and display_start."
+      ],
+      [
+        "Row index projection",
+        "a row slice is traversed",
+        "prewrap_index_per_row returns one index per row with increments only at hard breaks."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "BlockOutput::mark_link_sources"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "LinkSource"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "prewrap_index_per_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "selectable_cols_usize"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "joiner"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "line_index"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "columns"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "display_start"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "RenderedBlockOutput"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Selection boundary sidecars and rendered output conversion",
+    "contract": "SelectionBoundary::apply SHALL concatenate optional prefix, selected text, and optional suffix in the requested order with capacity sized for included components. SelectionBoundaries SHALL represent an empty entry list as None, preserve immutable Arc-backed entries, and retrieve a boundary by exact output line index. RenderedBlockOutput SHALL pair BlockOutput with default empty boundaries and convert from a plain BlockOutput without changing its lines.",
+    "scenarios": [
+      [
+        "Boundary selection",
+        "prefix/suffix inclusion flags vary",
+        "the resulting string includes exactly the requested boundary components around selected text."
+      ],
+      [
+        "Sparse lookup",
+        "entries are empty or contain line-indexed Arc boundaries",
+        "empty sidecars return None and populated sidecars return only an exact line match."
+      ],
+      [
+        "Plain conversion",
+        "a BlockOutput is converted to RenderedBlockOutput",
+        "the lines are preserved and boundaries start empty."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "SelectionBoundary"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "SelectionBoundary::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "SelectionBoundary::apply"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "SelectionBoundaryEntry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "SelectionBoundaries"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "SelectionBoundaries::from_entries"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "SelectionBoundaries::get"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "SelectionBoundaries::is_empty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "RenderedBlockOutput"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "From<BlockOutput>"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "Arc"
       ]
     ]
   }
