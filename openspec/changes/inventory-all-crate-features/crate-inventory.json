@@ -4112,7 +4112,21 @@
       "Welcome top-bar location and announcement rendering contract",
       "Git branch and worktree location-line contract",
       "Cwd display and worktree provenance formatting contract",
-      "Shared location header width and staged-cwd integration contract"
+      "Shared location header width and staged-cwd integration contract",
+      "Minimal transcript pager race fixture and environment setup",
+      "Committed turn and queued composer edits before pager suspend",
+      "External less round trip and minimal live-region restoration",
+      "Restored screen artifact and panic assertions",
+      "SubagentCatalogPane SHALL adapt bundled agent names into ListItem entries with a nonselectable Agents header, stable name-derived identities, styled labels, and label-based search text.",
+      "SubagentCatalogPane::new SHALL configure a ListPaneState for a non-following, non-wrapping, searchable/filterable catalog with copy, visual select, and goto-line actions disabled.",
+      "SubagentCatalogPane SHALL expose overlay visibility/state-change behavior, a bounded responsive desired height, selected-agent projection, and delegated key/paste/scroll/mouse handling.",
+      "SubagentCatalogPane SHALL place its catalog inside accent/left/right block padding, render a neutral empty placeholder when no entries exist, and prepare/render the configured ListPane for nonempty entries.",
+      "The catalog pane SHALL project already loaded BundleState agent names without discovery, persistence, activation, copy side effects, or model mutation; callers own modal admission and agent switching.",
+      "Eighth-resolution progress glyph tables and legacy ConHost fallback",
+      "Clamped and rounded fill decomposition at eighth-cell resolution",
+      "Shared per-cell sequence and styled span contract",
+      "Bounded ratatui buffer rendering with track and fill styles",
+      "Context usage hover bar composition through the shared progress renderer"
     ],
     "reviewed_files": [
       {
@@ -6550,6 +6564,18 @@
       {
         "path": "crates/codegen/pager/src/views/welcome/top_bar.rs",
         "sha256": "a51a6766e2e00295d9c8ffe3a9f7580456578ce6e37f4b44c0a00f3dc42b7c6a"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_transcript_pager_restore_no_artifacts.rs",
+        "sha256": "2e9a8a6118046045dead1615fb3c4771635e86b46ff61af6edc286c7c11248cd"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/subagent_catalog_pane.rs",
+        "sha256": "ea992bd0a819cc2644d2b4ce01d84de2355ed331c278c1fc5f3f0f86fdcdc63e"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/progress_bar.rs",
+        "sha256": "7c9d89af405d2a0094d81a235093f682de41fa53f8d4a95020901c40ce3b871f"
       }
     ],
     "review": "reviews/pager.md"

@@ -29233,3 +29233,341 @@ Consumers of location_line_at SHALL supply the effective/staged cwd rather than 
 - **THEN** the top bar receives the margin-adjusted one-row area and uses the live process cwd wrapper.
 
 证据：`crates/codegen/pager/src/views/welcome/top_bar.rs` — `location_line_at`；`crates/codegen/pager/src/views/welcome/mod.rs` — `render_welcome`；`crates/codegen/pager/src/views/dashboard/render.rs` — `render_header`；`crates/codegen/pager/src/views/dashboard/render.rs` — `header_location_renders_from_staged_cwd`；`crates/codegen/pager/src/views/dashboard/render.rs` — `render_header_location_label_never_overlaps_chips`；`crates/codegen/pager/src/views/dashboard/render.rs` — `underline_location_on_hover_excludes_branch_icon`。
+
+
+### Requirement: Minimal transcript pager race fixture and environment setup
+
+The implementation SHALL satisfy the following tested behavior: The ignored Tokio PTY test first probes `less --version` and returns with a skip message when the executable is unavailable. When available, it starts ContentController, sets the mock response to MOCK_RESPONSE_SENTINEL followed by ` transcript body.`, constructs PAGER=less and GROW_TEST_FRAME_WRITE_DELAY_MS=40 overrides, resolves the pager binary, spawns DEFAULT_ROWS by DEFAULT_COLS with MINIMAL_ARGS, enables terminal query responses, and waits for the minimal idle sentinel.
+
+#### Scenario: Pager unavailable
+- **WHEN** the `less --version` command cannot be started
+- **THEN** the test prints a skip message and returns before starting the mock server or pager.
+
+#### Scenario: Deterministic minimal fixture
+- **WHEN** less is available
+- **THEN** the test runs against an isolated ContentController response with PAGER=less, a 40 ms frame-write delay, minimal/no-leader arguments, default 50x120 geometry, and query replies enabled.
+
+#### Scenario: Minimal readiness
+- **WHEN** the spawned pager reaches the MINIMAL_IDLE_SENTINEL
+- **THEN** the test proceeds with the transcript round trip from an idle minimal prompt.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_transcript_pager_restore_no_artifacts.rs` — `FRAME_DELAY_MS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_ARGS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `ContentController::start`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::spawn_with_content_env`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::set_respond_to_queries`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`。
+
+
+### Requirement: Committed turn and queued composer edits before pager suspend
+
+The implementation SHALL satisfy the following tested behavior: After readiness, the test submits PROMPT with carriage return and waits up to 30 seconds for MOCK_RESPONSE_SENTINEL in full_text, then gives the delayed writer three seconds to settle. It injects `zetaquxdraft` through inject_keys_paced, waits 120 ms, sends Ctrl+U (byte 0x15), injects `/transcript` one byte at a time, and submits it with carriage return. This sequence creates the committed transcript content and queues draft-kill, slash-dropdown, and submit-clear frames immediately before the external pager takes the tty.
+
+#### Scenario: Committed transcript
+- **WHEN** the minimal prompt is submitted and the mock sentinel appears in full_text
+- **THEN** the test has a completed turn available before exercising the transcript pager.
+
+#### Scenario: Queued draft mutation
+- **WHEN** the paced draft is typed, settled briefly, and Ctrl+U is injected
+- **THEN** the test requests deletion of the draft immediately before opening the transcript command.
+
+#### Scenario: Transcript launch sequence
+- **WHEN** the paced `/transcript` command is followed by carriage return
+- **THEN** the test requests the external pager while delayed composer and viewport frames may still be queued.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_transcript_pager_restore_no_artifacts.rs` — `FRAME_DELAY_MS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `inject_keys_paced`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`。
+
+
+### Requirement: External less round trip and minimal live-region restoration
+
+The implementation SHALL satisfy the following tested behavior: The test waits up to 20 seconds for `grow-transcript-` on the visible screen as the less transcript-file signal, waits 300 ms, injects `q` to quit the pager, waits up to 10 seconds for MINIMAL_IDLE_SENTINEL to reappear, then allows two seconds for redraw settling and reads screen_contents. The intended round trip includes less alternate-screen use and terminal `rmcup` restoration, but this file observes those stages through the path and restored idle sentinels.
+
+#### Scenario: Pager foreground
+- **WHEN** the transcript command exposes a visible `grow-transcript-` path
+- **THEN** the test treats less as foreground and sends `q` after a 300 ms settling interval.
+
+#### Scenario: Live region restored
+- **WHEN** less exits and MINIMAL_IDLE_SENTINEL returns within ten seconds
+- **THEN** the test captures the restored visible screen after an additional two-second settle period.
+
+#### Scenario: Restore timeout
+- **WHEN** the idle sentinel does not return before the deadline
+- **THEN** the test fails through the harness wait diagnostic instead of evaluating stale-screen assertions.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`。
+
+
+### Requirement: Restored screen artifact and panic assertions
+
+The implementation SHALL satisfy the following tested behavior: On the captured screen, the test requires exactly one MINIMAL_IDLE_SENTINEL and exactly one `ctrl+o transcript` info row, rejects the submitted command `❯ /transcript` and killed draft `zetaquxdraft`, rejects any visible row starting with a literal `[`, rejects the substring `panicked`, and finally calls quit_minimal. The test function is ignored, so these are executable assertions only when explicitly selected outside the default suite.
+
+#### Scenario: Single idle chrome
+- **WHEN** the pager round trip completes and screen_contents is captured
+- **THEN** the idle status and transcript info strings each occur exactly once.
+
+#### Scenario: No stale prompt artifacts
+- **WHEN** the restored screen is checked for the queued command and killed draft
+- **THEN** neither stale string is present.
+
+#### Scenario: No torn escape row
+- **WHEN** the restored screen is split into lines
+- **THEN** no line begins with a literal `[` fragment.
+
+#### Scenario: No panic and cleanup
+- **WHEN** all screen assertions pass
+- **THEN** the screen contains no `panicked` marker and quit_minimal is invoked.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_transcript_pager_restore_no_artifacts.rs` — `minimal_transcript_pager_restore_no_artifacts`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::contains_text`。
+
+
+### Requirement: SubagentCatalogPane SHALL adapt bundled agent names into ListItem entries with a nonselectable Agents header, stable name-derived identities, styled labels, and label-based search text.
+
+CatalogEntry::content SHALL return its prebuilt styled Line; stable_id SHALL return its id; is_selectable SHALL be false for header entries and true for agents; search_text SHALL return label. sync_from_bundle SHALL clear existing entries, return empty for no cache or no agents, otherwise add an Agents header and one indented styled entry per state.agents name. Header and agent ids SHALL be computed from DefaultHasher inputs "Agents" and name respectively.
+
+#### Scenario: No bundle
+- **WHEN** has_cache is false or agents is empty
+- **THEN** entries are cleared and no header/item is retained.
+
+#### Scenario: Agent projection
+- **WHEN** cache exists with one or more agent names
+- **THEN** one Agents header plus ordered agent entries are created.
+
+#### Scenario: Header selection
+- **WHEN** ListPane selects the header id
+- **THEN** is_selectable is false and selected_entry returns None.
+
+#### Scenario: Agent selection
+- **WHEN** ListPane selects a name-derived agent id
+- **THEN** selected_entry can return ("agent", label).
+
+#### Scenario: Search
+- **WHEN** ListPane filters entries
+- **THEN** search text is the raw agent label, while styled content keeps the visual two-space indent.
+
+#### Scenario: Refresh
+- **WHEN** bundle contents change
+- **THEN** sync clears and rebuilds entries, preventing stale agents.
+
+证据：`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `CatalogEntry`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `CatalogEntry::content`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `CatalogEntry::stable_id`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `CatalogEntry::is_selectable`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `CatalogEntry::search_text`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::sync_from_bundle`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `DefaultHasher`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `BundleState::has_cache`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `BundleState::agents`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `catalog_projects_agents_only`。
+
+
+### Requirement: SubagentCatalogPane::new SHALL configure a ListPaneState for a non-following, non-wrapping, searchable/filterable catalog with copy, visual select, and goto-line actions disabled.
+
+new SHALL create empty entries, ListPaneState::new_with_config(WrapMode::NoWrap,false,config), ListPaneStyle::default, and OverlayState::hidden. The config SHALL set follow_enabled=false, wrap_toggle_enabled=false, search_enabled=true, copy_enabled=false, show_selection_when_unfocused=false, visual_select_enabled=false, filter_enabled=true, and goto_line_enabled=false. Default SHALL delegate to new.
+
+#### Scenario: Construction
+- **WHEN** a new pane is created
+- **THEN** overlay is hidden, entries are empty, and list behavior matches the documented config.
+
+#### Scenario: Search/filter
+- **WHEN** user enters search or filter
+- **THEN** search/filter are enabled and use ListPaneState.
+
+#### Scenario: Unsupported action
+- **WHEN** user requests copy, wrap toggle, follow, visual selection, or goto-line
+- **THEN** the pane config leaves those features disabled.
+
+#### Scenario: Default
+- **WHEN** Default is requested
+- **THEN** the same state as new is returned.
+
+证据：`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::new`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::default`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPaneConfig`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPaneState::new_with_config`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `WrapMode::NoWrap`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPaneStyle::default`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `OverlayState::hidden`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `follow_enabled`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `wrap_toggle_enabled`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `search_enabled`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `copy_enabled`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `show_selection_when_unfocused`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `visual_select_enabled`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `filter_enabled`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `goto_line_enabled`。
+
+
+### Requirement: SubagentCatalogPane SHALL expose overlay visibility/state-change behavior, a bounded responsive desired height, selected-agent projection, and delegated key/paste/scroll/mouse handling.
+
+is_visible SHALL return overlay.visible. on_state_change SHALL close the list input bar only while the overlay is hidden. desired_height SHALL return 0 when hidden or view_height<12, return 1 for visible empty entries, and for visible entries cap height by entries.len, MAX_CATALOG_HEIGHT=8, and floor(view_height*0.15), with a minimum of 1. selected_entry SHALL resolve the selected stable id to a nonheader entry and return ("agent",label), otherwise None. handle_key SHALL reject empty entries and otherwise delegate list_state.handle_key_event; handle_paste SHALL delegate even when entries are empty; handle_scroll SHALL cap absolute lines to 1 for viewport<=5, 2 for 6..=10, and no additional cap for larger viewports before delegating; handle_mouse SHALL reject empty entries and otherwise delegate list_state.handle_mouse_event.
+
+#### Scenario: Visibility
+- **WHEN** overlay.visible changes
+- **THEN** is_visible mirrors it and hidden state closes input on_state_change.
+
+#### Scenario: Small viewport
+- **WHEN** pane hidden or view_height below 12
+- **THEN** desired_height is zero.
+
+#### Scenario: Empty catalog
+- **WHEN** visible pane has no entries and enough height
+- **THEN** desired_height is one.
+
+#### Scenario: Bounded height
+- **WHEN** visible nonempty catalog has large view
+- **THEN** height is no more than eight rows, fifteen percent of view (floored), or entry count, with at least one row.
+
+#### Scenario: Selected agent
+- **WHEN** selected id resolves to nonheader entry
+- **THEN** selected_entry returns agent plus label.
+
+#### Scenario: Header/stale selection
+- **WHEN** selected id is header or absent
+- **THEN** selected_entry returns None.
+
+#### Scenario: Input delegation
+- **WHEN** key/paste/mouse events arrive
+- **THEN** events route to ListPaneState with current entries and boolean consumption is returned.
+
+#### Scenario: Scroll cap
+- **WHEN** scroll event arrives in short viewport
+- **THEN** requested magnitude is capped to one or two lines based on viewport height.
+
+证据：`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::is_visible`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::on_state_change`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::desired_height`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::selected_entry`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::handle_key`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::handle_paste`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::handle_scroll`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::handle_mouse`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `MAX_CATALOG_HEIGHT`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `MAX_CATALOG_FRACTION`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `OverlayState::visible`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPaneState::selected_id`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPaneState::close_input_bar`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPaneState::handle_key_event`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPaneState::handle_paste`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPaneState::handle_scroll_event`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPaneState::handle_mouse_event`。
+
+
+### Requirement: SubagentCatalogPane SHALL place its catalog inside accent/left/right block padding, render a neutral empty placeholder when no entries exist, and prepare/render the configured ListPane for nonempty entries.
+
+content_area SHALL shift x by HorizontalLayout::ACCENT + block_pad_left, preserve y/height, and saturating-subtract left plus block_pad_right from width. render SHALL render `No bundled Agents.` in gray_bright only when entries are empty and the inner area has positive width and height; it SHALL return without ListPane preparation for empty/zero inner areas. For nonempty entries it SHALL call list_state.prepare_layout(entries,inner.width,inner.height), build ListPane::new(entries), apply focused and list_style, and render into inner.
+
+#### Scenario: Empty positive area
+- **WHEN** entries empty and padded inner area has dimensions
+- **THEN** gray_bright No bundled Agents. is painted at inner origin.
+
+#### Scenario: Empty zero area
+- **WHEN** entries empty but inner width or height is zero
+- **THEN** no placeholder is written and render returns safely.
+
+#### Scenario: Nonempty render
+- **WHEN** entries exist
+- **THEN** layout is prepared with inner dimensions and ListPane renders with focus/style.
+
+#### Scenario: Padding
+- **WHEN** layout config has accent/left/right pads
+- **THEN** content x and width account for those pads with saturating width.
+
+#### Scenario: Focused state
+- **WHEN** focused varies
+- **THEN** the same value is passed to ListPane::focused.
+
+证据：`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::content_area`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::render`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `HorizontalLayout::ACCENT`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `LayoutConfig::block_pad_left`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `LayoutConfig::block_pad_right`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `No bundled Agents.`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPaneState::prepare_layout`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPane::new`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPane::focused`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPane::style`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `ListPane::render`。
+
+
+### Requirement: The catalog pane SHALL project already loaded BundleState agent names without discovery, persistence, activation, copy side effects, or model mutation; callers own modal admission and agent switching.
+
+The implementation SHALL satisfy the following tested behavior: sync_from_bundle only reads has_cache/agents and current Theme, rebuilds local entries, and does not discover or mutate BundleState. selected_entry returns a display tuple only; key/paste/mouse/scroll delegate to ListPaneState but this file does not translate selection into agent activation or viewer actions. Overlay visibility is read through OverlayState and list rendering is delegated to ListPane. The one inline test proves one cached agent projects and can be selected, but not no-cache/empty/height/render/input/duplicate-name behavior.
+
+#### Scenario: Read-only bundle
+- **WHEN** a BundleState is supplied
+- **THEN** catalog reflects current names without changing the bundle.
+
+#### Scenario: Selection handoff
+- **WHEN** an agent row is selected
+- **THEN** caller receives ("agent",label) and decides what action to take.
+
+#### Scenario: Modal owner
+- **WHEN** overlay is hidden or shown
+- **THEN** the pane reports/maintains visibility state but does not open/close the global modal.
+
+#### Scenario: Audit boundary
+- **WHEN** source is read with one inline test
+- **THEN** only cached single-agent projection is runtime-tested; all other behavior remains source evidence.
+
+证据：`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::sync_from_bundle`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::selected_entry`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::handle_key`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::handle_mouse`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `SubagentCatalogPane::render`；`crates/codegen/pager/src/views/subagent_catalog_pane.rs` — `catalog_projects_agents_only`。
+
+
+### Requirement: Eighth-resolution progress glyph tables and legacy ConHost fallback
+
+The progress bar SHALL represent cell fill with a shared index domain 0..=8, using LEFT-fractional BLOCKS for normal terminals and the same-length SHADES table on legacy Windows ConHost. Index 0 SHALL be empty, index 8 SHALL be a full block, and partial_blocks SHALL select the table from crate::glyphs::is_legacy_windows_console so callers do not branch on host type.
+
+#### Scenario: Normal terminal glyphs
+- **WHEN** is_legacy_windows_console returns false
+- **THEN** partial cells use BLOCKS entries (▏▎▍▌▋▊▉) and full cells use █.
+
+#### Scenario: Legacy ConHost glyphs
+- **WHEN** is_legacy_windows_console returns true
+- **THEN** partial cells use SHADES entries (░▒▓) while the empty and full endpoints remain compatible.
+
+#### Scenario: Shared index domain
+- **WHEN** the two glyph tables are selected by partial_blocks
+- **THEN** both tables have nine entries with the same empty index and full-block index.
+
+证据：`crates/codegen/pager/src/views/progress_bar.rs` — `BLOCKS`；`crates/codegen/pager/src/views/progress_bar.rs` — `SHADES`；`crates/codegen/pager/src/views/progress_bar.rs` — `partial_blocks`；`crates/codegen/pager/src/views/progress_bar.rs` — `crate::glyphs::is_legacy_windows_console`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::shades_and_blocks_tables_match_in_length`；`crates/codegen/pager-render/src/glyphs.rs` — `is_legacy_windows_console`。
+
+
+### Requirement: Clamped and rounded fill decomposition at eighth-cell resolution
+
+cell_breakdown SHALL clamp the input fraction to 0.0..=1.0, convert width multiplied by the fraction into eighths, round to the nearest eighth, and return (whole_cells, remainder_eighths) with whole_cells bounded by width and remainder_eighths in 0..=7. A full value SHALL consume the requested width and an out-of-range high value SHALL behave as full rather than adding cells.
+
+#### Scenario: Whole-cell fill
+- **WHEN** width is 4 and value is 0.5
+- **THEN** cell_breakdown returns two full cells and zero remainder.
+
+#### Scenario: Partial-cell fill
+- **WHEN** width is 4 and value is 0.125
+- **THEN** cell_breakdown returns zero full cells and four eighths for the first partial cell.
+
+#### Scenario: Nearest eighth
+- **WHEN** width is 5 and value is 0.03
+- **THEN** the 1.2-eighth result rounds to one eighth instead of lighting a full cell.
+
+#### Scenario: Out-of-range value
+- **WHEN** value is greater than 1.0
+- **THEN** the fraction is clamped and width 4 produces four full cells with no remainder.
+
+证据：`crates/codegen/pager/src/views/progress_bar.rs` — `cell_breakdown`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::cell_breakdown_keeps_eighths_resolution`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::test_empty_bar`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::test_full_bar`。
+
+
+### Requirement: Shared per-cell sequence and styled span contract
+
+bar_cells SHALL be the single cell sequence used by both public renderers, yielding exactly width items in left-to-right order: full glyphs for whole cells, at most one partial glyph at the first remainder cell, and spaces thereafter. progress_bar_spans SHALL return one static span per cell, applying fg plus bg to filled symbols and bg-only style to empty spaces, while preserving the selected host glyph table.
+
+#### Scenario: Empty bar
+- **WHEN** width is 5 and value is 0.0
+- **THEN** the sequence contains five empty-space cells.
+
+#### Scenario: Full bar
+- **WHEN** width is 5 and value is 1.0
+- **THEN** the sequence contains five full-block cells.
+
+#### Scenario: Mixed fill
+- **WHEN** width is 4 and value is 0.5
+- **THEN** the first two cells are full and the remaining cells are empty.
+
+#### Scenario: Partial fill
+- **WHEN** width is 4 and value is 0.125
+- **THEN** the first cell is the half-block glyph and the next cells are spaces.
+
+#### Scenario: Span styling
+- **WHEN** progress_bar_spans is called with fg and bg colors
+- **THEN** filled spans carry both colors and empty spans carry only the track background.
+
+证据：`crates/codegen/pager/src/views/progress_bar.rs` — `bar_cells`；`crates/codegen/pager/src/views/progress_bar.rs` — `progress_bar_spans`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::test_empty_bar`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::test_full_bar`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::test_half_bar`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::test_partial_block`。
+
+
+### Requirement: Bounded ratatui buffer rendering with track and fill styles
+
+render_progress_bar SHALL paint at most width horizontal cells beginning at (x,y), using the same bar_cells output and the same filled/empty styles as progress_bar_spans. Filled cells SHALL use fg on bg, empty cells SHALL use bg-only style, and a coordinate outside the supplied Buffer SHALL be skipped without panicking.
+
+#### Scenario: Paint within buffer
+- **WHEN** the requested row and width fit in the Buffer
+- **THEN** each target cell receives the corresponding glyph and style.
+
+#### Scenario: Horizontal offset
+- **WHEN** x or y is nonzero
+- **THEN** painting begins at the supplied coordinate and retains left-to-right cell order.
+
+#### Scenario: Clamped fill in buffer
+- **WHEN** value is outside 0.0..=1.0
+- **THEN** the Buffer reflects the clamped cell breakdown rather than an over-wide write.
+
+#### Scenario: Out-of-bounds target
+- **WHEN** x+i,y is outside the Buffer area
+- **THEN** that cell is skipped and rendering continues without a panic.
+
+证据：`crates/codegen/pager/src/views/progress_bar.rs` — `render_progress_bar`；`crates/codegen/pager/src/views/progress_bar.rs` — `Buffer::cell_mut`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::test_empty_bar`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::test_full_bar`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::test_half_bar`；`crates/codegen/pager/src/views/progress_bar.rs` — `tests::test_partial_block`。
+
+
+### Requirement: Context usage hover bar composition through the shared progress renderer
+
+When context usage data is available, context_bar_line_for_session SHALL pass the percentage fraction to progress_bar_spans for the hover bar, use the quantized urgency color as fill foreground and theme.bg_highlight as track background, append one base-background gap and a five-character secondary-colored percentage, and keep the resulting hover Line width equal to the default compact token line.
+
+#### Scenario: Hover progress composition
+- **WHEN** hovered is true with used and positive total token counts
+- **THEN** the line contains the shared progress spans followed by one gap and a fixed-width percentage.
+
+#### Scenario: Width invariant
+- **WHEN** the same token pair is rendered hovered and non-hovered
+- **THEN** both Lines have the same display width, including the minimum-width 0 / 9 case.
+
+#### Scenario: Bar scaling
+- **WHEN** compact token strings have different natural widths
+- **THEN** the progress bar width grows with the default token string length.
+
+#### Scenario: Unavailable or gateway data
+- **WHEN** token inputs are missing/zero or gateway_chat is true
+- **THEN** no context line is produced and progress_bar_spans is not used.
+
+证据：`crates/codegen/pager/src/views/context_bar.rs` — `context_bar_line_for_session`；`crates/codegen/pager/src/views/context_bar.rs` — `progress_bar_spans`；`crates/codegen/pager/src/views/context_bar.rs` — `test_context_bar_hover_shows_bar_and_percentage`；`crates/codegen/pager/src/views/context_bar.rs` — `test_context_bar_hover_width_matches_default`；`crates/codegen/pager/src/views/context_bar.rs` — `test_context_bar_hover_bar_grows_with_token_string`；`crates/codegen/pager/src/views/context_bar.rs` — `test_context_bar_returns_none_without_tokens`；`crates/codegen/pager/src/views/context_bar.rs` — `gateway_chat_suppresses_context_bar_even_with_tokens`。

@@ -1036,3 +1036,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The renderer uses manual Rect arithmetic and direct cell painting for the accent bar and row background while row content uses Line; this split has no render-level regression tests.
 - Pager 审计债务：Theme::current is read inside the renderer rather than passed as an explicit dependency, making deterministic style testing and cross-frame theme ownership less direct.
 - Pager 审计债务：The shared abstraction covers geometry but still leaves caller closures to independently truncate and style content, so visual consistency across jump and rewind remains partly distributed.
+- Pager 审计债务：The regression is ignored, leaving the user-visible pager suspend/restore path outside routine automated coverage.
+- Pager 审计债务：The test depends on a real external `less` binary and fixed wall-clock sleeps, making reproducibility and CI diagnostics sensitive to host installation and scheduler load.
+- Pager 审计债务：The 40 ms frame delay is passed through an environment variable and the test infers the race from final text; there is no explicit writer-drain or frame-order observation seam.
+- Pager 审计债务：Visual correctness is represented by hard-coded substrings, occurrence counts, and a column-zero bracket heuristic rather than a structured live-region or terminal-frame contract.
+- Pager 审计债务：The scenario combines inference setup, minimal startup, paced editing, slash command dispatch, external pager lifecycle, repaint settling, and shutdown in one large end-to-end test, so failures have a broad diagnosis surface.
