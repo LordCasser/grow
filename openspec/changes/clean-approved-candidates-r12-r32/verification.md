@@ -45,3 +45,6 @@ Removed uncalled snapshot_session_log only; snapshot_log and writer/trim paths r
 
 ## R28
 Removed only private uncalled read_optional_json_sync. Fresh Shell JSONL storage regressions 135/135 passed, covering actual load/Timeline and directory-capability paths. No user storage data touched.
+
+## R29
+Removed only unused summary_lock_file/workflows_dir path helpers. Fresh JSONL storage regressions 135/135 passed; writer lease, Workflow paths and rewind_points_file retained.

@@ -860,13 +860,6 @@ impl JsonlStorageAdapter {
     fn summary_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join(super::SUMMARY_FILE)
     }
-    fn summary_lock_file(&self, info: &Info) -> PathBuf {
-        self.session_dir(info)
-            .join(format!("{}.lock", super::SUMMARY_FILE))
-    }
-    fn workflows_dir(&self, info: &Info) -> PathBuf {
-        self.session_dir(info).join("workflows")
-    }
     fn rewind_points_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join("rewind_points.jsonl")
     }

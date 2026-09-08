@@ -268,7 +268,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：全仓 Rust 检索仅见各自定义；真实写锁使用 writer lease，Workflow 恢复通过已固定目录打开相对 run 路径。
 - 删除理由：两个旧路径助手已不参与当前调用链，容易被误用为现有存储权限入口。
 - 拟删除范围：仅这两个方法；保留 writer lease 协议、Workflow 存储和恢复。rewind_points_file 仍有三个测试消费者，不在此候选内。
-- 状态：等待用户确认，尚未删除；不删除任何已有用户锁文件或 Workflow 目录。证据见 audit-unused-jsonl-helpers。
+- 状态：已获批并删除；JSONL 存储 135/135 回归通过；不删除任何已有用户锁文件或 Workflow 目录。证据见 audit-unused-jsonl-helpers。
 
 ## R30 · 未接入的 workspace 文件回退入口及独占响应类型
 
