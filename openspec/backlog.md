@@ -1081,3 +1081,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The test registers AgentTurnExpectation values but never awaits their satisfaction, coupling backend fixture setup to UI substring waits without a terminal barrier.
 - Pager 审计债务：Fixed stream chunk delay and wall-clock waits make the race window and promotion timing sensitive to scheduler/PTY load.
 - Pager 审计债务：One scenario combines slow inference, prompt queue admission, status rendering, slash inspection, snapshot commit, promotion, panic detection, and shutdown, broadening failure diagnosis.
+- Pager 审计债务：The regression test is ignored, leaving minimal read-header and expand behavior outside routine suite coverage.
+- Pager 审计债务：The contract is inferred from hard-coded text substrings and one control byte rather than a structured read-block identity and exact collapsed/expanded state assertion.
+- Pager 审计债务：The test creates a must_use AgentTurnExpectation but does not await or assert it, allowing the UI text path to be the only synchronization barrier for tool-call correctness.
+- Pager 审计债务：The broad scenario couples filesystem fixture creation, inference scripting, permission/trust bootstrap, read-header projection, keyboard expansion, panic detection, and shutdown, so failures have coarse diagnosis boundaries.

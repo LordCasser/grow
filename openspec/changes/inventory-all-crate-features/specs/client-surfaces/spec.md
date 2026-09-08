@@ -31641,3 +31641,246 @@ After the native scrollback and mock receipt assertions pass, the ignored PTY te
 - **THEN** quit_minimal performs the confirmation chord and waits for exit or falls back to killing the harness.
 
 证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs` — `quit_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_exit_code`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`。
+
+
+### Requirement: Read-file fixture and scripted tool turn
+
+The implementation SHALL satisfy the following tested behavior: The test starts ContentController, writes `<content.home()>/haystack.txt` containing `READBODYONLYSENTINEL body line`, registers a named `read_file` tool call with `call_read` and the fixture path as `target_file`, then configures the follow-up mock response as `LOOKUP_TURN_DONE`. The returned AgentTurnExpectation is stored in `_read_turn` and is not awaited or explicitly asserted in this file.
+
+#### Scenario: Isolated fixture
+- **WHEN** ContentController has started and exposes its sandbox home
+- **THEN** haystack.txt is created with the body sentinel followed by one body line.
+
+#### Scenario: Read tool registration
+- **WHEN** the pager later sends a foreground read_file request for the fixture path
+- **THEN** expect_tool_turn supplies the scripted read_file events for both supported inference endpoints under call_read.
+
+#### Scenario: Follow-up completion
+- **WHEN** the scripted tool call has been registered
+- **THEN** subsequent completion requests use the DONE_SENTINEL response text.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_lookup_commits_one_line_summary.rs` — `BODY_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_lookup_commits_one_line_summary.rs` — `DONE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `expect_tool_turn`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `responses_api_tool_call_events`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `chat_completions_tool_call_events_with_id`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::start`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::home`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::expect_agent_turn_with_responses`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/content.rs` — `AgentTurnExpectation`。
+
+
+### Requirement: Minimal trusted read session bootstrap
+
+The implementation SHALL satisfy the following tested behavior: The test launches minimal in the isolated home directory with `DEFAULT_ROWS` by `DEFAULT_COLS`, the shared `--minimal --no-leader` arguments, and extra `--permission-mode always-approve --trust` arguments. It then waits for the shared minimal idle sentinel before submitting input; the spawn helper enables terminal query replies.
+
+#### Scenario: Trusted minimal spawn
+- **WHEN** the content fixture and tool expectation are ready
+- **THEN** spawn_minimal_in_dir starts the pager at 50x120 in content.home() with always-approve and trust options.
+
+#### Scenario: Readiness gate
+- **WHEN** the pager process is running
+- **THEN** wait_minimal_ready waits for `minimal · /help` before prompt interaction.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_ARGS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal_in_dir`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::spawn_with_content_in_dir`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::set_respond_to_queries`。
+
+
+### Requirement: Collapsed read header commits without body text
+
+The implementation SHALL satisfy the following tested behavior: After submitting `PROMPT` plus carriage return, the test waits up to 60 seconds for `LOOKUP_TURN_DONE`, up to 20 seconds for the minimal idle sentinel, and up to 10 seconds for `haystack.txt` in full text. It then asserts that the full scrollback-plus-screen text does not contain `READBODYONLYSENTINEL`, using filename presence plus body absence as the collapsed read-header check.
+
+#### Scenario: Prompt submission
+- **WHEN** minimal is ready at its idle prompt
+- **THEN** the shared `PROMPT` value (`go`) and carriage return are injected.
+
+#### Scenario: Turn settlement
+- **WHEN** the scripted read tool turn and follow-up response complete
+- **THEN** LOOKUP_TURN_DONE appears in full text and the minimal idle sentinel returns.
+
+#### Scenario: Header projection
+- **WHEN** haystack.txt appears in full text
+- **THEN** the body sentinel is absent from full_text, so the committed projection contains the filename without the fixture body.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::full_text`。
+
+
+### Requirement: Ctrl-E expands the committed read content
+
+The implementation SHALL satisfy the following tested behavior: Once the filename header is observed and the body absence assertion passes, the test injects byte `0x05` (Ctrl+E) and waits up to 10 seconds for `READBODYONLYSENTINEL` in full text. A timeout is converted into a panic whose diagnostic includes the current full text.
+
+#### Scenario: Expand command
+- **WHEN** the read header is committed without the body sentinel
+- **THEN** the raw Ctrl+E byte is injected into the minimal PTY.
+
+#### Scenario: Expanded read
+- **WHEN** Ctrl+E is accepted by the focused minimal session
+- **THEN** the previously hidden read body sentinel appears in full text within ten seconds.
+
+证据：`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::full_text`。
+
+
+### Requirement: Panic-free minimal cleanup
+
+The implementation SHALL satisfy the following tested behavior: The ignored Tokio test checks that the visible screen does not contain `panicked`, then invokes quit_minimal. The test function is the only local test entrypoint in this file and is cited exactly once in the requirement sources.
+
+#### Scenario: Panic marker check
+- **WHEN** the expanded body has been observed
+- **THEN** contains_text("panicked") is false; otherwise the assertion reports screen contents.
+
+#### Scenario: Minimal shutdown
+- **WHEN** the panic marker assertion passes
+- **THEN** quit_minimal performs the shared Ctrl+Q confirmation and exit-or-kill cleanup path.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_lookup_commits_one_line_summary.rs` — `minimal_lookup_commits_one_line_summary`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::contains_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: The ignored minimal PTY scenario SHALL start an isolated mock content controller, complete a first turn to create a session directory, seed a 60-line tagged plan.md, register an exit_plan_mode tool response, and submit a plan prompt in a 20x100 minimal terminal.
+
+The implementation SHALL satisfy the following tested behavior: minimal_parked_plan_survives_quit defines PLAN_LINES=60 and TAG=QUIT, starts ContentController with a first response containing MOCK_RESPONSE_SENTINEL, calls spawn_minimal_sized(&content, 20, 100), waits for minimal readiness, submits `go`, waits up to 40 seconds for the first response in full_text, locates the session directory, writes plan_body(TAG, PLAN_LINES) to plan.md, registers expect_tool_turn(&content, "call_plan_quit", "exit_plan_mode", "{}".into()), and submits `present the plan`. The tool expectation is held in `_expectation` but is not explicitly awaited or asserted.
+
+#### Scenario: Minimal session bootstrap
+- **WHEN** the ignored test begins
+- **THEN** a mock-backed minimal pager starts at 20 rows by 100 columns and reaches MINIMAL_IDLE_SENTINEL.
+
+#### Scenario: Session directory discovery
+- **WHEN** the first `go` prompt has rendered MOCK_RESPONSE_SENTINEL
+- **THEN** session_dir locates a session directory under the isolated GROW_HOME sessions root.
+
+#### Scenario: Tall tagged plan
+- **WHEN** plan.md is seeded
+- **THEN** the body contains a QUIT heading and 60 zero-padded QUIT000 through QUIT059 step sentinels.
+
+#### Scenario: Tool approval setup
+- **WHEN** the plan prompt is submitted
+- **THEN** the mock is prepared to produce an exit_plan_mode tool call with call id call_plan_quit and empty JSON arguments.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_survives_quit.rs` — `PLAN_LINES`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_survives_quit.rs` — `TAG`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_survives_quit.rs` — `minimal_parked_plan_survives_quit`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `plan_body`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `session_dir`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `expect_tool_turn`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal_sized`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::start`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_full_text`。
+
+
+### Requirement: After the seeded exit_plan_mode turn is submitted, minimal SHALL reach the parked plan-approval surface and settle briefly before the user quits without answering.
+
+The implementation SHALL satisfy the following tested behavior: The test injects `present the plan` plus carriage return, waits up to 60 seconds for PLAN_PARKED_SENTINEL (`Plan ready for review`), then pumps ten 100 ms updates. It does not press an approval/revision key and does not await the `_expectation` handle; the visible parked sentinel is the only explicit parking gate.
+
+#### Scenario: Plan approval parks
+- **WHEN** the plan prompt is submitted
+- **THEN** PLAN_PARKED_SENTINEL appears within 60 seconds.
+
+#### Scenario: Park settle
+- **WHEN** the approval sentinel is visible
+- **THEN** the harness is pumped for one second in ten 100 ms updates before quit input.
+
+#### Scenario: No answer
+- **WHEN** the plan is parked
+- **THEN** the test sends no approve, reject, or revision action before quitting.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_survives_quit.rs` — `minimal_parked_plan_survives_quit`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PLAN_PARKED_SENTINEL`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::update`。
+
+
+### Requirement: If the user confirms quit while the plan approval is parked, every tagged line of the 60-line plan SHALL remain reachable through the harness full_text after the quit processing window.
+
+The implementation SHALL satisfy the following tested behavior: The test sends Ctrl-Q byte 0x11 once, pumps 300 ms, sends Ctrl-Q again, and pumps forty additional 100 ms updates (four seconds total after confirmation). It then calls plan_lines_missing(&mut harness, TAG, PLAN_LINES), which reads harness.full_text and checks each QUIT000 through QUIT059 substring; the assertion requires the missing vector to be empty. The evidence covers combined native terminal scrollback and visible screen after quit, not the plan file itself.
+
+#### Scenario: Quit confirmation
+- **WHEN** the plan approval is still parked
+- **THEN** the first Ctrl-Q arms quit and the second Ctrl-Q confirms it after a 300 ms update.
+
+#### Scenario: Post-quit settle
+- **WHEN** quit confirmation has been sent
+- **THEN** the PTY is pumped for forty 100 ms intervals before history is inspected.
+
+#### Scenario: All plan lines survive
+- **WHEN** plan_lines_missing scans full_text
+- **THEN** none of QUIT000..QUIT059 is absent from the terminal's combined history/screen projection.
+
+#### Scenario: Permanent-loss regression guard
+- **WHEN** the complete line set is present after quit
+- **THEN** the test rejects a quit path that retained only the live-region tail or lost parked plan output.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_survives_quit.rs` — `minimal_parked_plan_survives_quit`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `plan_lines_missing`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::full_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::update`。
+
+
+### Requirement: After checking plan preservation, the ignored scenario SHALL invoke the PTY harness quit fallback so the child is not left running, while treating the quit result as best effort.
+
+The implementation SHALL satisfy the following tested behavior: The test calls harness.quit() after the missing-line assertion and discards its Result. The earlier Ctrl-Q sequence is the product-path quit attempt; the final direct quit is cleanup only. No process exit status, panic marker, terminal mode restoration, or plan duplication assertion is made.
+
+#### Scenario: Cleanup after preservation
+- **WHEN** all 60 tagged lines are present
+- **THEN** PtyHarness::quit is called to terminate/reap the harness.
+
+#### Scenario: Cleanup failure tolerance
+- **WHEN** the direct quit returns an error
+- **THEN** the result is ignored rather than turning cleanup into a separate assertion.
+
+#### Scenario: Ignored execution gate
+- **WHEN** the default PTY target discovers this test
+- **THEN** the #[ignore] attribute excludes it unless explicitly selected.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_survives_quit.rs` — `minimal_parked_plan_survives_quit`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::quit`。
+
+
+### Requirement: Minimal command-palette PTY fixture and readiness gate
+
+The ignored Tokio PTY test SHALL start an isolated ContentController, spawn the pager through spawn_minimal using the shared --minimal/--no-leader fixture, enable terminal query responses through that helper, and wait for MINIMAL_IDLE_SENTINEL before injecting the slash command.
+
+#### Scenario: Isolated content fixture
+- **WHEN** minimal_help_opens_command_palette starts
+- **THEN** ContentController::start succeeds and supplies the pager's mock content backend.
+
+#### Scenario: Minimal process
+- **WHEN** spawn_minimal is called
+- **THEN** the pager runs with the minimal/no-leader arguments and query responses are enabled.
+
+#### Scenario: Readiness gate
+- **WHEN** the child process has started
+- **THEN** wait_minimal_ready observes the minimal idle status before `/help` input is sent.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `minimal_help_opens_command_palette`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `ContentController::start`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `spawn_minimal`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_ARGS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e_minimal.rs` — `pty_e2e_minimal`。
+
+
+### Requirement: Minimal `/help` opens the inline command palette with registered entries
+
+After minimal readiness, paced `/help` input followed by carriage return SHALL dispatch the help slash command and render the command palette in minimal mode. The visible screen SHALL contain the `New Session` palette entry within ten seconds, demonstrating that the generalized app-modal host exposes a non-settings ActiveModal in the minimal viewport.
+
+#### Scenario: Help slash routing
+- **WHEN** `/help` is injected one byte at a time and submitted
+- **THEN** the slash command is consumed as an OpenCommandPalette action rather than remaining only in the prompt.
+
+#### Scenario: Palette visibility
+- **WHEN** the command-palette action is dispatched in minimal mode
+- **THEN** the `New Session` entry appears on screen within ten seconds.
+
+#### Scenario: Palette entry registration
+- **WHEN** the palette is rendered
+- **THEN** a stable Session entry is visible, proving at least one default palette row is populated.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `inject_keys_paced`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `/help`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `New Session`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `inject_keys_paced`；`crates/codegen/pager/src/slash/commands/help.rs` — `HelpCommand::run`；`crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `dispatch_open_command_palette`；`crates/codegen/pager/src/views/modal.rs` — `ActiveModal::CommandPalette`；`crates/codegen/pager/src/views/modal.rs` — `default_palette_entries`。
+
+
+### Requirement: Command palette Esc dismissal returns minimal input to idle
+
+Because the palette opens in input mode, the test SHALL send at most two Esc keys, allowing the first to leave picker input mode and the second to close the modal. It SHALL then observe MINIMAL_IDLE_SENTINEL within ten seconds and require that `New Session` is absent from the current screen.
+
+#### Scenario: Input-mode backout
+- **WHEN** the command palette is visible and focused for type-to-find input
+- **THEN** the first Esc is sent and the test updates the PTY before deciding whether a second Esc is necessary.
+
+#### Scenario: Palette close
+- **WHEN** New Session remains visible after the first Esc
+- **THEN** a second Esc is sent, after which the palette entry disappears.
+
+#### Scenario: Return to prompt
+- **WHEN** the palette has been dismissed
+- **THEN** MINIMAL_IDLE_SENTINEL reappears within ten seconds, proving focus/control returned to the minimal prompt state.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `keys::ESC`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `for _ in 0..2`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `palette closed, back to the prompt`；`crates/codegen/pager/src/app/agent_view/modal_routing.rs` — `ActiveModal::CommandPalette`；`crates/codegen/pager/src/app/agent_view/modal_routing.rs` — `handle_modal_key`；`crates/codegen/pager/src/views/picker.rs` — `PickerState::input_active`。
+
+
+### Requirement: Minimal command palette liveness, panic absence and cleanup
+
+The ignored PTY test SHALL fail with the current screen if the palette does not close or a visible New Session entry remains, SHALL reject a visible `panicked` marker after dismissal, and SHALL invoke quit_minimal for the shared two-step Ctrl-Q cleanup with its bounded exit fallback.
+
+#### Scenario: Palette close timeout
+- **WHEN** MINIMAL_IDLE_SENTINEL is absent after the dismissal wait
+- **THEN** the test fails with a palette-closure diagnostic rather than accepting an unknown focus state.
+
+#### Scenario: No visible panic
+- **WHEN** the palette has returned to the prompt
+- **THEN** contains_text(`panicked`) is false and the current screen is included if it is not.
+
+#### Scenario: Minimal cleanup
+- **WHEN** all palette assertions pass
+- **THEN** quit_minimal sends the confirmation chords and waits for exit or invokes its harness kill fallback.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `quit_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_exit_code`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`。
