@@ -2,7 +2,7 @@
 - [x] Record user decisions and pause release.
 - [x] R1: inspect and apply decision.
 - [x] R2: inspect and apply decision.
-- [ ] R3: inspect and apply decision.
+- [x] R3: inspect and apply decision.
 - [ ] R4: inspect and apply decision.
 - [ ] R5: inspect and apply decision.
 - [ ] R6: inspect and apply decision.

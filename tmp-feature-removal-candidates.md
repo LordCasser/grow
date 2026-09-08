@@ -31,6 +31,8 @@
 - 限制：这里只判断该开关的调用状态，不据此推断任何实际数据保留政策或外部服务行为。
 - 状态：等待用户确认，尚未删除。证据过程见 OpenSpec `fix-lsp-untrusted-source-precedence` 审计记录。
 
+- 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R3 验证记录。
+
 ## R4 · 未接入生产的问答 ID 格式分支
 
 - 位置：`crates/codegen/tools/src/implementations/grow_build/ask_user_question/mod.rs` 的 `use_id_keyed_format` 及条件分支；`format.rs::format_id_keyed_accepted_tool_result`。

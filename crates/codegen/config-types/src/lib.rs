@@ -649,10 +649,6 @@ pub struct RemoteSettings {
     /// When `Some(false)`, hide the resolved model ID in /session-info.
     #[serde(default)]
     pub show_resolved_model: Option<bool>,
-    /// Whether ZDR (Zero Data Retention) users are allowed to use the product.
-    /// Controlled via remote settings. Default `false` (blocked) during beta.
-    #[serde(default)]
-    pub zdr_access_enabled: Option<bool>,
     /// remote settings tier of the `remember_tool_approvals` gate (whether per-tool
     /// "Always allow …" prompt options are shown). Lowest precedence; typically
     /// targeted per-org. Default `false`.

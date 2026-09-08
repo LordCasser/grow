@@ -6,3 +6,6 @@ R1 retained by user instruction. R7 retained because external initialization con
 
 ## R2
 Cargo metadata --locked --offline --no-deps resolved successfully. Compared declared features with committed pre-deletion manifest: exactly unstable removed, all other feature declarations unchanged. The feature had no runtime implementation, so this manifest regression is the relevant verification.
+
+## R3
+Removed unused resolver, its sole module/exports and RemoteSettings field. Repository source search finds no remaining symbol/env consumer. config-types remote_settings: 27/27 passed; git diff --check passed.
