@@ -79019,6 +79019,36 @@
         "Transient reset",
         "状态初始化、切页或结果提示到期",
         "数据/过滤初值、切页清理范围和绝对截止时间按状态契约生效。"
+      ],
+      [
+        "Inactive surface",
+        "the active view is not an Agent or its agent id is absent",
+        "the modal dispatcher returns no effects and does not create modal state."
+      ],
+      [
+        "Extensions open",
+        "a bound Agent opens a requested extension tab",
+        "agents modal is cleared, extensions modal is installed with the trigger recorded, and all tab data plus marketplace fetches are returned."
+      ],
+      [
+        "Picker-deferred session",
+        "the Agent has no session id",
+        "the modal remains pending and session creation is delegated through skip_picker_and_create_session rather than emitting session-scoped fetches."
+      ],
+      [
+        "Marketplace overlap",
+        "a marketplace request is already inflight",
+        "no duplicate fetch is emitted; marketplace_refetch_queued becomes true."
+      ],
+      [
+        "Marketplace idle",
+        "no marketplace request is inflight",
+        "inflight becomes true and exactly one FetchMarketplaceList effect is appended."
+      ],
+      [
+        "Agents modal",
+        "config agents opens with an optional initial tab and a bound session",
+        "extensions is closed, state is constructed, the tab is selected, and FetchSessionAgentName carries a new metadata revision."
       ]
     ],
     "sources": [
@@ -79161,6 +79191,22 @@
       [
         "crates/codegen/pager/src/views/extensions_modal.rs",
         "result_notice_expires_at_absolute_deadline"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "extensions_modal_tab_fetches"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "push_marketplace_fetch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "dispatch_open_extensions_modal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "dispatch_open_config_agents_modal"
       ]
     ]
   },
@@ -94562,6 +94608,41 @@
         "MCP mutation",
         "an MCP server or tool is upserted, deleted or toggled",
         "the matching grow/mcp method receives session, names and requested enabled/config state."
+      ],
+      [
+        "Missing owner",
+        "a list/toggle result targets an absent agent or modal",
+        "no modal state or unrelated agent is mutated and no effect is emitted."
+      ],
+      [
+        "Hooks result",
+        "hooks load succeeds or fails",
+        "the owning hooks tab becomes Loaded with all source groups collapsed or Error with the supplied message."
+      ],
+      [
+        "Plugins result",
+        "plugins load succeeds or fails",
+        "plugin groups are seeded once on success, data becomes Loaded/Error, and pending action/index are cleared."
+      ],
+      [
+        "MCP toggle",
+        "toggle fails or succeeds for a bound session",
+        "failure stores an Error modal message and clears pending state; success schedules a fresh FetchMcpsList."
+      ],
+      [
+        "Marketplace response",
+        "a response arrives while a refetch is queued",
+        "inflight is cleared, the queued request is reissued when a session exists, and sanitized response state is installed."
+      ],
+      [
+        "Skills toggle",
+        "skills refresh succeeds with fewer items or fails",
+        "loaded data is stored and selection clamps to the last item, or an error message is stored; pending state is cleared in both cases."
+      ],
+      [
+        "Marketplace updates",
+        "the update list is empty or nonempty",
+        "empty input is ignored; nonempty names become a bounded summary notice on the owning agent."
       ]
     ],
     "sources": [
@@ -94652,6 +94733,30 @@
       [
         "crates/codegen/pager/src/app/root/effects/mod.rs",
         "Effect::ToggleMcpTool)"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "handle_hooks_list_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "handle_plugins_list_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "handle_mcp_toggle_done"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "handle_marketplace_updates_available"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "handle_marketplace_list_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "handle_skills_toggle_done"
       ]
     ]
   },
@@ -168722,6 +168827,36 @@
         "Debug",
         "debug action arrives",
         "state toggles and notices/logging update."
+      ],
+      [
+        "Selected block copy",
+        "a selected entry is visible and has copyable content",
+        "the block text is copied in its raw/pretty mode; a background task uses current central stdout."
+      ],
+      [
+        "Hidden or empty block",
+        "no entry is selected, content is group-hidden, or copied text is empty",
+        "the dispatcher returns without clipboard mutation."
+      ],
+      [
+        "Assistant ordinal",
+        "the requested ordinal exceeds available assistant messages or the selected text is empty",
+        "a notice explains the count or empty content and no file/clipboard delivery occurs."
+      ],
+      [
+        "Export file",
+        "Markdown content exists and a file path is supplied",
+        "tilde expansion, parent directory creation, and file writing occur; success or failure is recorded as a notice."
+      ],
+      [
+        "Transcript pager",
+        "minimal mode or a nonminimal mode receives OpenTranscriptPager",
+        "minimal mode arms the incremental minimal request; other modes write a temporary Markdown file and set pending pager path/ANSI state."
+      ],
+      [
+        "Block viewer",
+        "a selected block has normal fullscreen content, image-only content, or unsupported image graphics",
+        "the appropriate BlockViewerPane is installed, native media is opened, or image support is guarded."
       ]
     ],
     "sources": [
@@ -168796,6 +168931,30 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/router.rs",
         "dispatch_toggle_mouse_capture"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "dispatch_copy_block_content"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "dispatch_copy_assistant_message"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "dispatch_export_conversation"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "dispatch_open_transcript_pager"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "dispatch_open_block_viewer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "dispatch_copy_block_meta"
       ]
     ]
   },
@@ -170176,6 +170335,26 @@
         "Failure status",
         "the marketplace outcome status is not Success",
         "the helper returns false."
+      ],
+      [
+        "Reload preservation",
+        "a marketplace response arrives after the first load",
+        "existing marketplace row/source collapse sets remain unchanged while the new sanitized data is loaded."
+      ],
+      [
+        "Initial marketplace load",
+        "marketplace data is still Loading when a successful response arrives",
+        "each source and its plugin rows are inserted into collapsed indices, including an extra slot for empty/error sources."
+      ],
+      [
+        "Pending action release",
+        "a plugins, marketplace, or skills result arrives",
+        "pending_action and pending_entry_index are cleared on the owning modal."
+      ],
+      [
+        "MCP follow-up",
+        "a bound MCP toggle succeeds",
+        "the result handler returns a FetchMcpsList effect tied to the same agent/session."
       ]
     ],
     "sources": [
@@ -170330,6 +170509,22 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
         "cta_e2e::mcps_error_settles_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "handle_plugins_list_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "handle_mcp_toggle_done"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "handle_marketplace_list_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "handle_skills_toggle_done"
       ]
     ]
   },
@@ -183925,6 +184120,1113 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
         "Reverted conversation and file changes"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "local-diagnostics",
+    "requirement": "Input flight recorder dump dispatch",
+    "contract": "dispatch_dump_input_log SHALL operate only for an active Agent with a nonempty input recorder. It SHALL snapshot recorder entries and timing, terminal diagnostics, session id, pager version, active pane, prompt cursor/text length/selection state, and write a pretty JSON InputDump under grow_home()/logs with a UTC timestamped input-debug filename, creating the logs directory best-effort. Empty logs show a toast; serialization and file-write failures show a toast and return no effects; successful writes show an event-count/path toast and emit a unified diagnostic message keyed by session id. The dump includes recorder entries from a snapshot and does not clear the recorder.",
+    "scenarios": [
+      [
+        "No active agent",
+        "the active view is Welcome/Dashboard or its agent id is missing",
+        "the operation returns no effects without creating a dump."
+      ],
+      [
+        "Empty recorder",
+        "an active agent has zero recorded events",
+        "a no-events toast is shown and no file is written."
+      ],
+      [
+        "Successful dump",
+        "an active agent has recorded events and serialization/file I/O succeed",
+        "a timestamped JSON file is written under grow_home/logs, a path/count toast is shown, and unified diagnostics logs the count/span."
+      ],
+      [
+        "Serialization failure",
+        "InputDump cannot serialize",
+        "a failure toast is shown and no file-write path is attempted."
+      ],
+      [
+        "Write failure",
+        "log-directory or dump-file writing fails",
+        "a failure toast is shown; the dispatcher returns an empty effect list without panic."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "dispatch_dump_input_log"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The tool block module SHALL expose a typed ToolCallBlock sum over all supported tool and lifecycle variants, re-export each concrete block and its public helper types, and provide stable shared primitives for header selection ranges and one-based line ranges.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ToolCallBlock covers Execute, Read, Edit, ListDir, Search, WebFetch, IntegrationSearch, UseTool, MemorySearch, Skill, Other, and Lifecycle. The module re-exports concrete block types/helpers from submodules and defines TOOL_HEADER_RANGE as zero for a single logical path/query/url/command selection target. LineRange stores 1-based inclusive start/end values, formats `start:end` for display and `start-end` through Display.",
+    "scenarios": [
+      [
+        "Variant coverage",
+        "a new tool kind is represented in scrollback",
+        "it must be added to the explicit ToolCallBlock enum and module exports before delegation/classification can compile."
+      ],
+      [
+        "Header selection",
+        "a tool header is rendered as one logical copy target",
+        "all tool kinds can share TOOL_HEADER_RANGE zero for the header range."
+      ],
+      [
+        "Line range display",
+        "a one-based range is created",
+        "display returns colon-separated bounds while Display returns hyphen-separated bounds."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "pub use edit/read/search/..."
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "TOOL_HEADER_RANGE"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "LineRange"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "LineRange::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "LineRange::display"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "fmt::Display for LineRange"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "ToolCallBlock SHALL dispatch common BlockContent output, styling, folding, selection, media, and preamble behavior to the matching inner block; it SHALL obtain the tool bullet from appearance, and SHALL keep coordination-bearing Other tools out of dense grouping.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The delegate_tool macro exhaustively dispatches output, accent, bullet, accent_background, background, vpad, raw/fold modes, selectability, image/media/open-button, and preamble to every concrete variant including Lifecycle. has_bullet reads the configured scrollback tool bullet rather than the inner variant. is_groupable returns false only for Other with coordination metadata; all other variants are groupable. The module itself does not prepend the bullet, leaving that to RenderBlock output composition.",
+    "scenarios": [
+      [
+        "Inner projection",
+        "a caller asks a ToolCallBlock for BlockContent behavior",
+        "the same method is invoked on its concrete inner variant."
+      ],
+      [
+        "Configured bullet",
+        "tool bullet appearance has a character",
+        "has_bullet reports true regardless of the specific tool variant."
+      ],
+      [
+        "Coordination tool",
+        "an Other block carries coordination data",
+        "is_groupable is false so it does not merge into a dense run."
+      ],
+      [
+        "Ordinary tool",
+        "an ordinary tool, lifecycle, or Other without coordination is considered",
+        "is_groupable is true and its inner behavior remains available."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "delegate_tool"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "impl BlockContent for ToolCallBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::has_bullet"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::is_groupable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "BlockContent::output"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "ToolCallBlock SHALL preserve timing when a running block is replaced by the same variant, allow cross-variant started_at assignment, start timing only once for runnable variants, leave lifecycle events untimed, and report success from the inner block or true for lifecycle events.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: transfer_timing_from copies started_at only for matching timing-bearing variants and skips mismatches. set_started_at sets Some(instant) for Execute/Read/Edit/Search/ListDir/WebFetch/IntegrationSearch/UseTool/MemorySearch/Skill/Other but is a no-op for Lifecycle. start_timing fills None with Instant::now and never overwrites an existing timestamp; Lifecycle is always a no-op. is_success delegates to all timing-bearing variants including MemorySearch and returns true for Lifecycle.",
+    "scenarios": [
+      [
+        "Completion replacement",
+        "a completed block replaces a running block of the same variant",
+        "started_at is transferred so elapsed time can include the original run."
+      ],
+      [
+        "Variant transition",
+        "a new block is assigned a captured instant from a different variant",
+        "set_started_at stores it on the new timing-bearing variant."
+      ],
+      [
+        "First start",
+        "a runnable block has no started_at",
+        "start_timing records the current instant."
+      ],
+      [
+        "Repeated start",
+        "a runnable block already has started_at",
+        "start_timing preserves the original instant."
+      ],
+      [
+        "Lifecycle event",
+        "the block is Lifecycle",
+        "timing mutators do nothing and is_success is true."
+      ],
+      [
+        "Tool failure/success",
+        "an inner block exposes its success state",
+        "is_success returns that inner result."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::transfer_timing_from"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::set_started_at"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::start_timing"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::is_success"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "started_at"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "LifecycleEventBlock"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "ToolCallBlock::from_name SHALL case-normalize known ACP/tool names into their concrete block variant, preserve the supplied summary, use the Creating prefix for write, and represent unknown names as Other while preserving the original name.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: from_name lowercases the input and recognizes terminal aliases run_terminal_command/run_terminal_cmd/bash/shell/execute; read_file/read; search_replace/edit/apply_patch/strreplace; write; list_dir/ls; grep/search/glob; web_fetch/fetch; search_tool; use_tool; and skill. Known names construct the corresponding inner block, write applies with_prefix(\"Creating \"), skill uses OtherToolCallBlock name Skill, and all unmatched names construct OtherToolCallBlock with the original name and summary.",
+    "scenarios": [
+      [
+        "Shell alias",
+        "the source name is any recognized shell alias",
+        "an Execute block is created with the supplied summary."
+      ],
+      [
+        "Edit/write alias",
+        "the source name is an edit alias or write",
+        "an Edit block is created; write carries the Creating prefix."
+      ],
+      [
+        "Search/fetch/integration alias",
+        "the source name matches the corresponding alias set",
+        "Search, WebFetch, IntegrationSearch, or UseTool is constructed."
+      ],
+      [
+        "Skill",
+        "the source name is skill",
+        "a Skill variant using the Skill label is constructed."
+      ],
+      [
+        "Unknown tool",
+        "the source name is not recognized",
+        "Other preserves that name and the supplied summary."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::from_name"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ExecuteToolCallBlock::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "EditToolCallBlock::with_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "OtherToolCallBlock::new"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "ToolCallBlock::searchable_text SHALL build cheap full-text search input from stored source fields and copy accessors without layout or syntax highlighting, joining non-empty values and returning no fabricated text for empty sources.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: Execute contributes command, description, output, error; Read path/content/error; Edit copy_text/error; ListDir path/output/error; Search pattern, path/glob/file type, file paths, every file match path and matched content, error; WebFetch URL/output/error; IntegrationSearch copy_text/content/error; UseTool copy_text/error; MemorySearch query, every result source/path/snippet, error; Skill/Other name/summary/output/error; Lifecycle name. join_searchable combines the optional fields and the method does not call output or wrap/highlight content.",
+    "scenarios": [
+      [
+        "Command indexing",
+        "an Execute block has command, description, output, or error",
+        "search text contains those stored fields in joined form."
+      ],
+      [
+        "Structured search indexing",
+        "a Search or MemorySearch block has metadata/results",
+        "patterns, file metadata/matches, or result source/path/snippet fields are flattened into the index."
+      ],
+      [
+        "Copy accessor indexing",
+        "an Edit, IntegrationSearch, or UseTool block has source data",
+        "the block-specific copy_text representation is included without rendering the block."
+      ],
+      [
+        "Lifecycle indexing",
+        "a lifecycle event exists",
+        "its name is searchable."
+      ],
+      [
+        "No layout side effects",
+        "search indexing is requested",
+        "the method reads stored fields only and does not perform display wrapping or syntax highlighting."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::searchable_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "join_searchable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "SearchFileMatch"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "SearchLineMatch"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "SearchInputMeta"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::copy_text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "VerbGroupKind SHALL provide tense-aware verbs and singular/plural nouns for every semantic group, while ToolCallBlock::verb_group_kind SHALL return only eagerly foldable non-destructive kinds and label_kind SHALL additionally bucket action tools for aggregate hidden-row labels; lifecycle chrome and coordinated Other tools remain unlabelled where specified.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: VerbGroupKind maps File/Skill to Read/Reading and file/skill nouns; Search/MemorySearch/IntegrationSearch to Searched/Searching; Dir to Listed/Listing; WebFetch to Fetched/Fetching; Subagent/Command/OtherTool to Ran/Running; EditFile to Edited/Editing; McpCall to Called/Calling. noun uses singular only for count==1 and explicit irregular memories/MCP forms. verb_group_kind maps Read (Skill path detection), ListDir, Search, WebFetch, IntegrationSearch, MemorySearch, Skill; excludes Execute/Edit/UseTool/Other/Lifecycle. label_kind extends the map with Command/EditFile/McpCall and non-coordinated OtherTool, while Lifecycle is None.",
+    "scenarios": [
+      [
+        "Running group",
+        "a foldable run is still running",
+        "verb returns its present-tense form such as Reading or Searching."
+      ],
+      [
+        "Finished group",
+        "a foldable run is not running",
+        "verb returns the past form such as Read or Searched."
+      ],
+      [
+        "Plural count",
+        "an aggregate label count is one or greater than one",
+        "noun uses the singular for one and the explicit plural for larger counts."
+      ],
+      [
+        "Skill read",
+        "a Read block path identifies a skills entry",
+        "verb_group_kind and label_kind classify it as Skill rather than File."
+      ],
+      [
+        "Action label",
+        "a hidden-row header describes Execute/Edit/UseTool/ordinary Other",
+        "label_kind supplies Command/EditFile/McpCall/OtherTool even though verb_group_kind is None."
+      ],
+      [
+        "Lifecycle/coordination",
+        "the block is Lifecycle or Other with coordination metadata",
+        "the corresponding group decision is None or non-groupable, so no misleading aggregate label is emitted."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "VerbGroupKind"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "VerbGroupKind::verb"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "VerbGroupKind::noun"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::verb_group_kind"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "ToolCallBlock::label_kind"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "verb_is_tense_aware"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "noun_pluralizes_by_count"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "every_variant_has_a_group_decision"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "label_kind_extends_verb_kinds_to_action_tools"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Turn cancellation preference resolution, cancel panel choices, and wire intent",
+    "contract": "Cancel dispatch SHALL resolve the per-agent cancel_subagents_preference before the global UI preference, interpret canonical always_stop/always_continue values, and default to stopping subagents when no choice exists. A running turn without running subagents SHALL emit CancelTurn immediately; running subagents SHALL open a focused choice panel unless a remembered preference applies. One-shot StopRunning/ContinueToRun choices SHALL only affect the current cancel; AlwaysStop/AlwaysContinue SHALL apply to every agent in memory, update current UI state, and emit PersistSetting only when the canonical value changes. Trigger hints SHALL be forwarded and consumed, the shared queue SHALL remain server-authoritative, idle cancellation SHALL no-op, and a second cancel while the panel is open SHALL fall through to a real cancel.",
+    "scenarios": [
+      [
+        "Immediate cancel",
+        "a running turn has no running subagents",
+        "CancelTurn is emitted with cancel_subagents=true and session enters cancelling."
+      ],
+      [
+        "Trigger propagation",
+        "a cancel trigger hint is present or absent",
+        "the effect carries that one-shot hint or None and the hint is consumed."
+      ],
+      [
+        "Subagent panel",
+        "running subagents exist and no remembered preference applies",
+        "no effect is emitted, panel running_count is set, and turn remains running."
+      ],
+      [
+        "One-shot choice",
+        "StopRunning or ContinueToRun is selected",
+        "CancelTurn carries true or false without changing global preference."
+      ],
+      [
+        "Persistent choice",
+        "AlwaysStop or AlwaysContinue is selected",
+        "all agents and current UI receive canonical preference and PersistSetting records the change."
+      ],
+      [
+        "Queue authority",
+        "shared queue contains prompts",
+        "cancel does not mutate queue or emit QueueRemove; agent/server drains the front next."
+      ],
+      [
+        "Retry/edge",
+        "turn is idle, finished, already cancelling, or panel already open",
+        "idle/finished no-op, cancelling resends idempotent CancelTurn, and second panel dispatch cancels."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_without_subagents_cancels_immediately"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_forwards_trigger_hint_to_effect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_without_trigger_hint_sends_none"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_leaves_shared_queue_for_agent_to_drain"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_with_running_subagents_shows_panel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_choice_stop_running_sends_cancel_true"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_choice_continue_to_run_sends_cancel_false"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_choice_after_turn_finished_is_noop"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_choice_after_subagents_finished_still_cancels"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_double_dispatch_falls_through_when_panel_open"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_when_idle_does_nothing"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_when_already_cancelling_resends_cancel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_turn_retry_honors_subagent_preference"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "always_stop_preference_skips_panel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "always_continue_preference_skips_panel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "always_stop_choice_sets_preference"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "always_continue_choice_sets_preference"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "effective_cancel_subagents_preference"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "cancel_subagents_pref_canonical"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "cancel_subagents_pref_canonical_from_ui"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "apply_cancel_subagents_preference_global"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "dispatch_cancel_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "dispatch_cancel_turn_choice"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "do_cancel_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "Effect::CancelTurn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "Effect::PersistSetting"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "CancelTurnChoice"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "cancel_subagents_preference"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "cancel_turn_view"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "cancel_trigger_hint"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "shared_queue"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "QueueRemove"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Goal interrupt panel and pause/cancel/stop-subagent axis mapping",
+    "contract": "When a Goal is Active, dispatch_cancel_turn SHALL always open a GoalInterruptViewState and ignore the non-Goal cancel preference. With a running turn it SHALL offer PauseGoal and StopTurnOnly, plus StopTurnAndSubagents when non-workflow subagents are running; with no turn it SHALL offer PauseGoal only. Goal choices SHALL record last_interrupt and map PauseGoal with a turn to CancelTurn{pause_goal:true,cancel_subagents:false}, StopTurnOnly to false/false, and StopTurnAndSubagents to false/true. PauseGoal without a turn SHALL execute `/goal pause` while keeping the session idle and subagents alive. A retry while cancelling SHALL replay the saved pause/subagent intent.",
+    "scenarios": [
+      [
+        "Goal active",
+        "Goal is active and a turn is running",
+        "the Goal panel opens regardless of preference and the turn remains untouched."
+      ],
+      [
+        "Choice count",
+        "running non-workflow subagents are absent or present",
+        "panel offers two or three choices respectively; no-turn panel offers one."
+      ],
+      [
+        "Pause with turn",
+        "PauseGoal is selected during a turn",
+        "CancelTurn carries pause_goal true and cancel_subagents false."
+      ],
+      [
+        "Stop choices",
+        "StopTurnOnly or StopTurnAndSubagents is selected",
+        "CancelTurn carries the corresponding subagent flag with pause false."
+      ],
+      [
+        "Pause without turn",
+        "Goal is active but session has no running/compact turn",
+        "ExecuteSlashCommand `/goal pause` is emitted, not fake cancel."
+      ],
+      [
+        "Retry",
+        "a prior Goal choice left session cancelling",
+        "new CancelTurn reuses last_interrupt axes without reopening panel."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "goal_active_cancel_opens_panel_ignoring_pref"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "goal_panel_choice_count_follows_subagents"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "goal_pause_choice_maps_to_cancel_with_pause"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "goal_stop_turn_only_maps_to_cancel_without_pause"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "goal_stop_turn_and_subagents_maps_to_cancel_subagents"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "goal_active_without_turn_pause_routes_command_plane"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "goal_retry_replays_last_interrupt_without_pause"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "dispatch_cancel_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "dispatch_goal_interrupt_choice"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "GoalInterruptChoice"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "GoalInterruptViewState"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "GoalDisplayStatus::Active"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "GoalInterruptChoice::for_active_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "GoalInterruptChoice::pause_only"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "last_interrupt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "Effect::ExecuteSlashCommand"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "/goal pause"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "do_cancel_turn_with_pause"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "pause_goal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "cancel_subagents"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pristine cancel rewind, committed/drafted prompt safety, and task-result panel cleanup",
+    "contract": "do_cancel_turn_with_pause SHALL locally rewind only an eligible pristine in-flight prompt: no shared-queue entries, cancel rewind enabled, in-flight prompt present, no pending prompts, no committed scrollback block, and no newer text or image draft. Eligible rewind SHALL restore text/images/chips, remove every combined and primary scrollback entry, finish the turn immediately, clear timing/current prompt state, and send CancelTurn with rewind_if_pristine=true. Any activity, committed block, queued prompt, or newer draft SHALL use standard cancel, preserve the sent block/draft, and set cancelling. Standard cancel SHALL drain root permissions, cancel stale plan approval, and preserve server queue authority. Cross-dispatch prompt responses SHALL reject queued/non-current RPC errors and clear the cancel panel only for the matching turn finalization.",
+    "scenarios": [
+      [
+        "Committed prompt",
+        "the in-flight scrollback entry is already committed",
+        "standard cancel keeps the block and composer empty, avoiding duplicate native output."
+      ],
+      [
+        "First activity",
+        "activity cleared the in-flight stash",
+        "standard cancel does not restore the prompt and later cancellation response adds its banner."
+      ],
+      [
+        "Combined prompt",
+        "in-flight prompt has primary and combined segment entry ids",
+        "eligible rewind removes all segment entries and restores joined text."
+      ],
+      [
+        "Newer draft",
+        "composer contains newer text or images",
+        "pristine rewind is skipped and the draft survives while CancelTurn is sent."
+      ],
+      [
+        "Queued prompt",
+        "shared queue or pending prompts are nonempty",
+        "queue remains unchanged and no local queued prompt restoration occurs."
+      ],
+      [
+        "RPC routing",
+        "queued prompt error or matching response arrives",
+        "non-running error is discarded; matching final response clears panel/finalizes through task-result path."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "queued_prompt_rpc_error_does_not_kill_running_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "prompt_response_clears_cancel_turn_panel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_after_first_activity_does_not_restore"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_rewind_removes_all_combined_segment_blocks"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "cancel_with_newer_draft_skips_pristine_rewind_and_keeps_draft"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "do_cancel_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "do_cancel_turn_with_pause"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "in_flight_committed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "composer_has_draft"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "rewinding"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "InFlightPrompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "combined_scrollback_entries"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "finish_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "mark_turn_finished"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "rewind_if_pristine"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "drain_root_permission_queue"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "plan_approval_view"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "prompt_status_query_matches"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "cancel_turn_view"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "current_prompt_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "Effect::CancelTurn"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Prompt lifecycle watchdog and authoritative status reconciliation",
+    "contract": "The watchdog SHALL query authoritative prompt status rather than fabricate terminal state. TurnSubmitting prompts SHALL be queried after PROMPT_STATUS_WATCHDOG_DELAY (2s) using exact current prompt id; TurnRunning prompts SHALL be queried after PROMPT_STATUS_RUNNING_WATCHDOG_DELAY (30s) only when turn start and reducer-owned liveness anchors are stale. Recent prompt/status activity, below-threshold turns, or an in-flight query SHALL suppress duplicate queries. Each query SHALL mark one in-flight guard; status responses SHALL clear it and rearm from observation time. Unknown/error/nonterminal responses SHALL preserve running state and prompt identity while rearming; Queued responses SHALL observe without changing a running turn, but SHALL resolve a local TurnSubmitting state to Idle and clear its prompt/in-flight/timing state. Terminal responses SHALL finalize through the same first-wins finalizer exactly once. next_prompt_watchdog_deadline SHALL return the earliest eligible deadline across agents.",
+    "scenarios": [
+      [
+        "Submitting stall",
+        "TurnSubmitting exceeds 2s with no query in flight",
+        "one QueryPromptStatus for the exact prompt id is emitted and marked in flight."
+      ],
+      [
+        "Running stall",
+        "TurnRunning exceeds 30s with no new reducer activity",
+        "one status query is emitted without clearing state or prompt id."
+      ],
+      [
+        "Recent activity",
+        "last prompt/status activity is recent",
+        "no query is emitted even when turn start is old."
+      ],
+      [
+        "Duplicate guard",
+        "a query is already in flight",
+        "the next watchdog tick emits no duplicate."
+      ],
+      [
+        "Running answer",
+        "status reports Running",
+        "the in-flight marker clears, display anchor stays stable, last_status_observed_at re-arms the window, and no immediate re-query occurs."
+      ],
+      [
+        "Nonterminal answer",
+        "status is Unknown or Err",
+        "turn remains running, prompt remains current, and deadline moves forward."
+      ],
+      [
+        "Queued answer",
+        "status is Queued",
+        "idle queued observation does not claim a turn; a locally submitting prompt resolves Idle and clears current/in-flight/timing state."
+      ],
+      [
+        "Terminal answer",
+        "status is Terminal",
+        "turn finalizes once, clears current prompt, and emits one TurnCompleted marker."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "stalled_unacknowledged_submission_queries_exact_prompt_status"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "running_turn_stalled_without_activity_queries_prompt_status"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "running_turn_with_recent_activity_skips_query"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "running_turn_with_stale_activity_queries_prompt_status"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "running_turn_below_threshold_skips_query"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "running_turn_query_in_flight_skips_duplicate"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "running_status_response_rearms_from_observation_time"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "nonterminal_watchdog_answers_never_end_a_running_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "running_watchdog_terminal_response_finalizes_via_first_wins_finalizer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "queued_prompt_status_observes_without_claiming_or_rearming_a_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "queued_prompt_status_resolves_submitting_state"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "terminal_prompt_status_uses_same_first_wins_finalizer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "PROMPT_STATUS_WATCHDOG_DELAY"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "PROMPT_STATUS_RUNNING_WATCHDOG_DELAY"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "poll_stalled_prompt_submissions"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "running_turn_stalled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "next_prompt_watchdog_deadline"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "prompt_status_query_matches"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "begin_prompt_status_query"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "last_prompt_event_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "last_status_observed_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "turn_started_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "Effect::QueryPromptStatus"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "PromptStatusWire::Running"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "PromptStatusWire::Queued"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "PromptStatusWire::Terminal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "PromptStatusWire::Unknown"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "TurnCompleted"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Demote running execute tools and reconcile background-task kill outcomes",
+    "contract": "dispatch_demote_to_background SHALL act only on the active agent with a running turn and a tracked running execute tool call, then emit DemoteToBackground with the session id and tool call id. Scheduled-task cancellation SHALL optimistically remove the local row and emit DeleteScheduledTask. Background-task and subagent kill dispatch SHALL mark matching local state pending_kill with a timestamp before emitting the corresponding kill effect. handle_bg_task_killed SHALL locate agents by session id: Killed keeps pending state for the later completion notification; AlreadyExited or missing/error outcome clears pending state and timestamp while retaining the row; NotFound removes the stale row and finishes its linked running scrollback entry; inactive agents are handled equally and the handler emits no extra effects.",
+    "scenarios": [
+      [
+        "Demote guard",
+        "active agent has no running turn or no execute tool",
+        "dispatch returns no effect."
+      ],
+      [
+        "Demote valid",
+        "running execute tool exists",
+        "DemoteToBackground carries current session and tool call id."
+      ],
+      [
+        "Scheduled task",
+        "task cancellation is requested",
+        "local scheduled row is removed before DeleteScheduledTask."
+      ],
+      [
+        "Kill pending",
+        "bg task or subagent exists",
+        "pending_kill and kill_requested_at are set before KillBgTask/KillSubagent."
+      ],
+      [
+        "Kill outcome",
+        "background task result is Killed, AlreadyExited, NotFound, None, or an error",
+        "pending state is retained, cleared, row removed/scrollback finished, or cleared for retry according to outcome."
+      ],
+      [
+        "Inactive session",
+        "result addresses a non-active agent by session id",
+        "the matching agent state is reconciled without relying on active view."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "demote_dispatch_keeps_turn_session_and_execute_guards"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "bg_task_killed_already_exited_clears_pending_kill_on_inactive_agent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "bg_task_killed_not_found_removes_task_from_inactive_agent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "bg_task_killed_not_found_finishes_scrollback_entry"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "bg_task_killed_missing_outcome_clears_pending_kill"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "bg_task_killed_keeps_pending_kill_on_killed_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "bg_task_kill_failed_clears_pending_kill_on_inactive_agent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "dispatch_demote_to_background"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "dispatch_cancel_scheduled_task"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "dispatch_kill_bg_task"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "dispatch_kill_subagent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "handle_bg_task_killed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "running_execute_tool_call_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "Effect::DemoteToBackground"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "Effect::DeleteScheduledTask"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "Effect::KillBgTask"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "Effect::KillSubagent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "pending_kill"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "kill_requested_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "find_agent_by_session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "KillOutcome::Killed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "KillOutcome::AlreadyExited"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "KillOutcome::NotFound"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "finish_running"
       ]
     ]
   }

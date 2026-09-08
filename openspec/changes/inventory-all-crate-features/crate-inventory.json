@@ -3763,7 +3763,19 @@
       "Rewind points resolution, picker/mode state machine, and inline edit entry",
       "Successful rewind application, inline resubmission, and composer/image preservation",
       "Rewind preview and execute failure recovery",
-      "Rewind success memory release and presentation by screen mode"
+      "Rewind success memory release and presentation by screen mode",
+      "Input flight recorder dump dispatch",
+      "The tool block module SHALL expose a typed ToolCallBlock sum over all supported tool and lifecycle variants, re-export each concrete block and its public helper types, and provide stable shared primitives for header selection ranges and one-based line ranges.",
+      "ToolCallBlock SHALL dispatch common BlockContent output, styling, folding, selection, media, and preamble behavior to the matching inner block; it SHALL obtain the tool bullet from appearance, and SHALL keep coordination-bearing Other tools out of dense grouping.",
+      "ToolCallBlock SHALL preserve timing when a running block is replaced by the same variant, allow cross-variant started_at assignment, start timing only once for runnable variants, leave lifecycle events untimed, and report success from the inner block or true for lifecycle events.",
+      "ToolCallBlock::from_name SHALL case-normalize known ACP/tool names into their concrete block variant, preserve the supplied summary, use the Creating prefix for write, and represent unknown names as Other while preserving the original name.",
+      "ToolCallBlock::searchable_text SHALL build cheap full-text search input from stored source fields and copy accessors without layout or syntax highlighting, joining non-empty values and returning no fabricated text for empty sources.",
+      "VerbGroupKind SHALL provide tense-aware verbs and singular/plural nouns for every semantic group, while ToolCallBlock::verb_group_kind SHALL return only eagerly foldable non-destructive kinds and label_kind SHALL additionally bucket action tools for aggregate hidden-row labels; lifecycle chrome and coordinated Other tools remain unlabelled where specified.",
+      "Turn cancellation preference resolution, cancel panel choices, and wire intent",
+      "Goal interrupt panel and pause/cancel/stop-subagent axis mapping",
+      "Pristine cancel rewind, committed/drafted prompt safety, and task-result panel cleanup",
+      "Prompt lifecycle watchdog and authoritative status reconciliation",
+      "Demote running execute tools and reconcile background-task kill outcomes"
     ],
     "reviewed_files": [
       {
@@ -5877,6 +5889,18 @@
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
         "sha256": "6bd4ec04f9e8e77222c055635fdcc6a8e0360868fcbc18dc81cc7e645efa2649"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
+        "sha256": "6b0d5dbc9206263b96a47d12c4203ad766317675e6ffc66770e7f0a3ba187958"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/mod.rs",
+        "sha256": "1688088ccdb8e09359c1fd1c70aa0ef767befb17e536628f61296eea0e8e10ae"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/turn.rs",
+        "sha256": "9ee73efa954f5f82f948e64df7919fa3cd71fce69b0f86b99f0e48786b7df547"
       }
     ],
     "review": "reviews/pager.md"
