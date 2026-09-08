@@ -329,6 +329,7 @@ pub enum ChatStateCommand {
         memory_reminder: Option<String>,
         active_goal: Option<GoalDirectiveTag>,
         json_output: Option<JsonOutputFormat>,
+        use_image_descriptions: bool,
         reply: oneshot::Sender<Result<ConversationRequest, TimelineWriteError>>,
     },
 
@@ -644,6 +645,7 @@ mod tests {
             memory_reminder: None,
             active_goal: None,
             json_output: None,
+            use_image_descriptions: false,
             reply: tx,
         };
 

@@ -437,6 +437,7 @@ impl SessionActor {
                         image_content.mime_type, image_content.data
                     );
                     inline_images.push(ContentPart::Image {
+                        description: None,
                         url: std::sync::Arc::<str>::from(url),
                     });
                     prompt_text = "Read image file.".to_owned();

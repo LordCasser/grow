@@ -461,7 +461,11 @@ pub enum ContentPart {
     /// Plain text content
     Text { text: Arc<str> },
     /// Image content (URL or base64 data URI)
-    Image { url: Arc<str> },
+    Image {
+        url: Arc<str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<Arc<str>>,
+    },
 }
 
 /// Location and ordered image payloads for one image-bearing conversation item.
@@ -621,7 +625,7 @@ pub fn conversation_image_groups(items: &[ConversationItem]) -> Vec<Conversation
                     .content
                     .iter()
                     .filter_map(|part| match part {
-                        ContentPart::Image { url } => Some(url.clone()),
+                        ContentPart::Image { url, .. } => Some(url.clone()),
                         ContentPart::Text { .. } => None,
                     })
                     .collect::<Vec<_>>();
@@ -646,7 +650,7 @@ pub fn conversation_image_groups(items: &[ConversationItem]) -> Vec<Conversation
                     .images
                     .iter()
                     .filter_map(|part| match part {
-                        ContentPart::Image { url } => Some(url.clone()),
+                        ContentPart::Image { url, .. } => Some(url.clone()),
                         ContentPart::Text { .. } => None,
                     })
                     .collect::<Vec<_>>();
@@ -678,6 +682,54 @@ pub fn conversation_image_groups(items: &[ConversationItem]) -> Vec<Conversation
         });
     }
     groups
+}
+
+/// Attach one ordered group description while retaining the original images.
+pub fn attach_item_image_description(item: &mut ConversationItem, text: &str) -> usize {
+    let parts = match item {
+        ConversationItem::User(user) => &mut user.content,
+        ConversationItem::ToolResult(result) => &mut result.images,
+        _ => return 0,
+    };
+    let shared = Arc::<str>::from(text);
+    let mut count = 0;
+    for part in parts {
+        if let ContentPart::Image { description, .. } = part {
+            *description = Some(shared.clone());
+            count += 1;
+        }
+    }
+    count
+}
+
+/// A description covers the complete ordered image group, never only a subset.
+pub fn item_image_description(item: &ConversationItem) -> Option<&str> {
+    let parts = match item {
+        ConversationItem::User(user) => &user.content,
+        ConversationItem::ToolResult(result) => &result.images,
+        _ => return None,
+    };
+    let mut descriptions = parts.iter().filter_map(|part| match part {
+        ContentPart::Image { description, .. } => Some(description.as_deref()),
+        _ => None,
+    });
+    let first = descriptions.next()??;
+    (!first.trim().is_empty() && descriptions.all(|next| next == Some(first))).then_some(first)
+}
+
+/// Select text on a request copy. Validate all groups before changing any item.
+pub fn select_image_descriptions(items: &mut [ConversationItem]) -> Result<usize, &'static str> {
+    let groups = conversation_image_groups(items);
+    let replacements = groups.iter().map(|group| {
+        item_image_description(&items[group.item_index])
+            .map(|text| (group.item_index, text.to_owned()))
+            .ok_or("image description unavailable")
+    }).collect::<Result<Vec<_>, _>>()?;
+    let mut replaced = 0;
+    for (index, text) in replacements {
+        replaced += replace_item_images_with_text(&mut items[index], &text);
+    }
+    Ok(replaced)
 }
 
 /// Replace every image in one item with a single model-visible text block.
@@ -1042,7 +1094,7 @@ fn projected_image_reference_tokens(source: &ConversationItem) -> Vec<String> {
                 .content
                 .iter()
                 .filter_map(|part| match part {
-                    ContentPart::Image { url } => Some(url.to_string()),
+                    ContentPart::Image { url, .. } => Some(url.to_string()),
                     ContentPart::Text { .. } => None,
                 })
                 .collect::<Vec<_>>();
@@ -1058,7 +1110,7 @@ fn projected_image_reference_tokens(source: &ConversationItem) -> Vec<String> {
             .images
             .iter()
             .filter_map(|part| match part {
-                ContentPart::Image { url } => Some(url.to_string()),
+                ContentPart::Image { url, .. } => Some(url.to_string()),
                 ContentPart::Text { .. } => None,
             })
             .collect(),
@@ -2249,6 +2301,7 @@ impl ConversationItem {
     pub fn add_image(&mut self, url: impl Into<String>) {
         if let Self::User(user) = self {
             user.content.push(ContentPart::Image {
+                description: None,
                 url: Arc::<str>::from(url.into()),
             });
         }
@@ -2354,6 +2407,7 @@ impl UserItem {
     /// Add an image to this user message
     pub fn add_image(&mut self, url: impl Into<String>) {
         self.content.push(ContentPart::Image {
+            description: None,
             url: Arc::<str>::from(url.into()),
         });
     }
@@ -2428,6 +2482,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                             text: Arc::<str>::from(text),
                         },
                         ChatContentBlock::ImageUrl { image_url } => ContentPart::Image {
+                            description: None,
                             url: Arc::<str>::from(image_url.url),
                         },
                     })
@@ -2582,7 +2637,7 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                         ContentPart::Text { text } => ChatContentBlock::Text {
                             text: text.as_ref().to_owned(),
                         },
-                        ContentPart::Image { url } => ChatContentBlock::ImageUrl {
+                        ContentPart::Image { url, .. } => ChatContentBlock::ImageUrl {
                             image_url: ImageUrl {
                                 url: url.as_ref().to_owned(),
                             },
@@ -2630,7 +2685,7 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                     text: t.content.as_ref().to_owned(),
                 }];
                 for img in t.images {
-                    if let ContentPart::Image { url } = img {
+                    if let ContentPart::Image { url, .. } = img {
                         blocks.push(ChatContentBlock::ImageUrl {
                             image_url: ImageUrl {
                                 url: url.as_ref().to_owned(),
@@ -3205,7 +3260,7 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                         text: t.content.as_ref().to_owned(),
                     })];
                 for img in &t.images {
-                    if let ContentPart::Image { url } = img {
+                    if let ContentPart::Image { url, .. } = img {
                         parts.push(rs::InputContent::InputImage(rs::InputImageContent {
                             detail: rs::ImageDetail::Auto,
                             file_id: None,
@@ -3249,7 +3304,7 @@ fn content_parts_to_easy_input_content(parts: &[ContentPart]) -> rs::EasyInputCo
             ContentPart::Text { text } => rs::InputContent::InputText(rs::InputTextContent {
                 text: text.as_ref().to_owned(),
             }),
-            ContentPart::Image { url } => rs::InputContent::InputImage(rs::InputImageContent {
+            ContentPart::Image { url, .. } => rs::InputContent::InputImage(rs::InputImageContent {
                 image_url: Some(url.as_ref().to_owned()),
                 file_id: None,
                 detail: rs::ImageDetail::default(),
@@ -3900,7 +3955,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                     text: text.as_ref().to_owned(),
                     cache_control: None,
                 },
-                ContentPart::Image { url } => {
+                ContentPart::Image { url, .. } => {
                     // Parse data: URI vs HTTP(S) URL
                     if url.starts_with("data:") {
                         // data:image/png;base64,ABC123...
@@ -4028,7 +4083,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                     cache_control: None,
                                 }];
                                 for img in &t.images {
-                                    if let ContentPart::Image { url } = img {
+                                    if let ContentPart::Image { url, .. } = img {
                                         let source = if let Some(rest) = url.strip_prefix("data:") {
                                             if let Some((media_type, data)) =
                                                 rest.split_once(";base64,")
@@ -4525,7 +4580,7 @@ mod tests {
         assert_eq!(u.content.len(), 2);
         assert_matches!(
             &u.content[1],
-            ContentPart::Image { url } if url.as_ref() == "https://example.com/image.png"
+            ContentPart::Image { url, .. } if url.as_ref() == "https://example.com/image.png"
         );
 
         // Convert to chat request and verify
@@ -5351,6 +5406,7 @@ mod tests {
                 "tool result text",
                 vec![
                     ContentPart::Image {
+                        description: None,
                         url: "data:image/png;base64,historical_tool_image_secret".into(),
                     },
                     ContentPart::Text {
@@ -5828,12 +5884,15 @@ mod tests {
                 text: "Compare these images:".into(),
             },
             ContentPart::Image {
+                description: None,
                 url: "https://example.com/img1.png".into(),
             },
             ContentPart::Image {
+                description: None,
                 url: "https://example.com/img2.png".into(),
             },
             ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,iVBORw0KGgo=".into(),
             },
         ];
@@ -5853,6 +5912,7 @@ mod tests {
     #[test]
     fn test_user_with_only_image() {
         let parts = vec![ContentPart::Image {
+            description: None,
             url: "https://example.com/image.png".into(),
         }];
 
@@ -6296,6 +6356,7 @@ mod tests {
                         text: "what is in this screenshot".into(),
                     },
                     ContentPart::Image {
+                        description: None,
                         url: "data:image/png;base64,iVBOR".into(),
                     },
                 ],
@@ -7282,6 +7343,7 @@ mod tests {
                 text: "Look at /old/path/image.png".into(),
             },
             ContentPart::Image {
+                description: None,
                 url: "https://example.com/img.png".into(),
             },
         ])];
@@ -7293,7 +7355,7 @@ mod tests {
                 assert_eq!(text.as_ref(), "Look at /new/path/image.png");
             }
             // Image URL should not be transformed
-            if let ContentPart::Image { url } = &u.content[1] {
+            if let ContentPart::Image { url, .. } = &u.content[1] {
                 assert_eq!(url.as_ref(), "https://example.com/img.png");
             }
         }
@@ -8557,9 +8619,11 @@ mod tests {
             "Read image file: photo.png",
             vec![
                 ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,bbb".into(),
                 },
                 ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,ccc".into(),
                 },
             ],
@@ -8585,9 +8649,11 @@ mod tests {
                     text: "metadata retained".into(),
                 },
                 ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,aaa".into(),
                 },
                 ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,bbb".into(),
                 },
             ],
@@ -8745,6 +8811,7 @@ mod tests {
                 "call_1",
                 "Read image file: photo.png",
                 vec![ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,iVBOR".into(),
                 }],
             ),
@@ -8821,6 +8888,7 @@ mod tests {
             "call_1",
             "Read image file: photo.png",
             vec![ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,iVBOR".into(),
             }],
         );
@@ -8864,6 +8932,7 @@ mod tests {
                 "call_1",
                 "Read image file: photo.png",
                 vec![ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,iVBOR".into(),
                 }],
             ),
@@ -8920,6 +8989,7 @@ mod tests {
             "call_1",
             "Read image file: photo.png",
             vec![ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,iVBOR".into(),
             }],
         );
@@ -8928,7 +8998,7 @@ mod tests {
 
         if let ConversationItem::ToolResult(t) = &back {
             assert_eq!(t.images.len(), 1);
-            assert!(matches!(&t.images[0], ContentPart::Image { url } if url.contains("iVBOR")));
+            assert!(matches!(&t.images[0], ContentPart::Image { url, .. } if url.contains("iVBOR")));
         } else {
             panic!("Expected ToolResult");
         }
@@ -10095,5 +10165,39 @@ mod tests {
             0,
             "durable reasoning must be omitted"
         );
+    }
+}
+
+#[cfg(test)]
+mod paired_image_description_tests {
+    use super::*;
+    fn image_item(text: &str, url: &str) -> ConversationItem {
+        let mut item = ConversationItem::user(text);
+        if let ConversationItem::User(user) = &mut item { user.add_image(url); }
+        item
+    }
+
+    #[test]
+    fn description_selection_retains_original_for_another_model_and_replay() {
+        let mut original = image_item("inspect", "data:image/png;base64,a");
+        assert_eq!(attach_item_image_description(&mut original, "diagram text"), 1);
+        let restored: ConversationItem = serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+        assert_eq!(item_image_description(&restored), Some("diagram text"));
+        let mut text_request = vec![restored.clone()];
+        assert_eq!(select_image_descriptions(&mut text_request), Ok(1));
+        assert!(conversation_image_groups(&text_request).is_empty());
+        assert!(text_request[0].text_content().contains("diagram text"));
+        assert_eq!(conversation_image_groups(&[restored])[0].image_urls[0].as_ref(), "data:image/png;base64,a");
+    }
+
+    #[test]
+    fn missing_group_description_never_partially_changes_a_request() {
+        let mut described = image_item("first", "data:image/png;base64,a");
+        attach_item_image_description(&mut described, "first text");
+        let unknown = image_item("second", "data:image/png;base64,b");
+        let mut items = vec![described, unknown];
+        let before = serde_json::to_value(&items).unwrap();
+        assert!(select_image_descriptions(&mut items).is_err());
+        assert_eq!(serde_json::to_value(&items).unwrap(), before);
     }
 }

@@ -510,7 +510,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use crate::types::resources::{
-        ModelImageInputKey, ModelImageInputState, Resources, State, WebCitationCounter,
+        ModelImageInputState, Resources, State, WebCitationCounter,
     };
 
     #[tokio::test]
@@ -545,11 +545,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_image_input_state_roundtrips_per_runtime_identity() {
+    async fn model_image_input_state_roundtrips_per_provider_model_pair() {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("resources_state.json");
         let persistence = ResourcesPersistence::local(state_path).unwrap();
-        let rejected = ModelImageInputKey::new("text-model", "messages", "endpoint-a");
+        let rejected = "provider-a/text-model".to_owned();
 
         let mut resources = Resources::new();
         resources.register_state::<ModelImageInputState>();
@@ -566,21 +566,8 @@ mod tests {
         assert!(persistence.load(&mut restored));
         let state = restored.get::<State<ModelImageInputState>>().unwrap();
         assert!(state.is_unsupported(&rejected));
-        assert!(!state.is_unsupported(&ModelImageInputKey::new(
-            "vision-model",
-            "messages",
-            "endpoint-a",
-        )));
-        assert!(!state.is_unsupported(&ModelImageInputKey::new(
-            "text-model",
-            "responses",
-            "endpoint-a",
-        )));
-        assert!(!state.is_unsupported(&ModelImageInputKey::new(
-            "text-model",
-            "messages",
-            "endpoint-b",
-        )));
+        assert!(!state.is_unsupported("provider-a/vision-model"));
+        assert!(!state.is_unsupported("provider-b/text-model"));
     }
 
     #[tokio::test]

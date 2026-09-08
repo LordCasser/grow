@@ -1185,17 +1185,22 @@ impl SessionActor {
             let build_req_start = std::time::Instant::now();
             let mut request = self
                 .chat_state_handle
-                .build_request(
+                .build_request_for_image_mode(
                     self.session_info.id.0.as_ref(),
                     effective_tools,
                     memory_reminder,
                     active_goal,
                     request_json_output,
+                    self.unsupported_current_model_for_images().await.is_some(),
                 )
                 .await
                 .map_err(|error| {
-                    acp::Error::internal_error()
-                        .data(format!("failed to durably prepare model context: {error}"))
+                    let message = if matches!(error, chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)) {
+                        Self::image_projection_failure_message(&error)
+                    } else {
+                        format!("failed to durably prepare model context: {error}")
+                    };
+                    acp::Error::internal_error().data(message)
                 })?;
             ::diagnostics::unified_log::debug(
                 "shell.turn.build_request_done",

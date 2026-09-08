@@ -599,6 +599,7 @@ mod tests {
                         .into(),
                 },
                 ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,user".into(),
                 },
             ],
@@ -617,6 +618,7 @@ mod tests {
                 "call-image",
                 "loaded image",
                 vec![ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,tool".into(),
                 }],
             ),

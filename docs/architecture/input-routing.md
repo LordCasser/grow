@@ -122,55 +122,34 @@ idle admission. If no queued user/manual work claims the slot, an Active Goal
 is woken immediately; Stop Turn Only cannot leave it dormant until the next
 unrelated user message.
 
-Image-input capability recovery is session state, persisted with the existing
-tool resources in `resources_state.json`. The negative cache key is the model
-name, API backend, and endpoint fingerprint; absence means unknown and permits
-an image attempt. A cache entry is written only when an image-bearing request
-receives an API HTTP 400 that explicitly rejects `image_url`, `input_image`, or
-another image content type in favor of text. Decode errors, size/dimension
-limits, content-policy failures, and generic 400s remain terminal errors and do
-not teach model capability.
+Image-input capability recovery uses the session's canonical provider/model ID in
+`resources_state.json`. Unknown pairs send original images. Only an explicit
+unsupported-image response marks a pair; size, decoding, policy and unrelated
+request failures do not teach capability. Transport `ModelImageInputKey` remains
+separate provenance for the rejected request and Workflow routing.
 
-After an explicit rejection, the shell groups all canonical `User` and
-`ToolResult` images by message. Within one bounded recovery operation, a
-configured auxiliary runtime that is distinct from the rejected runtime gets
-one description request per group, with attachment count and order in its
-prompt. Each successful description is completed in an `image-description`
-Sideband; failed groups, or every group when no auxiliary runtime is usable,
-abort the projection without changing the model-facing Surface. Only the
-auxiliary runtime's own explicit image HTTP 400 enters its negative cache;
-resolution, transport, timeout, and empty-response failures do not teach
-capability.
+Grow retains each image URL/data URI together with its optional description.
+After rejection, an available configured visual auxiliary model describes each
+ordered User/ToolResult image group through the existing durable Sideband. The
+TUI shows “当前模型不支持多模态，调用视觉辅助LLM处理中...”. If that route is absent or fails,
+it shows “视觉辅助模型未配置或者调用失败，使用OCR处理中...” and tries local `tesseract`.
+OCR needs a locally installed executable and supports the languages installed
+with it; it is text extraction, not full visual understanding. Inline inputs,
+subprocess output and runtime are bounded. Remote image URLs are not fetched by
+OCR. Cancellation terminates the child. Empty or failed results are not used.
 
-The chat-state actor atomically records one log-only `ImageProjection` fact.
-The negative cache and trigger provenance use one `ModelImageInputKey`; no
-consumer computes a parallel route identity. The fact binds the triggering
-model/backend/endpoint route, source Surface revision, stable Surface IDs,
-image-group fingerprints, paired assistant tool-call identities, the exact
-ordered `Reasoning`/`BackendToolCall` carriers from the same response, and
-Sideband result provenance. For an image-bearing tool result, the projection
-consumes the result content, every paired assistant argument set, and every
-provider-native carrier by replacing them with protocol-neutral text; source
-paths are never sent to the description Sideband and cannot survive in the
-later model-facing Surface. It never rewrites the immutable source message.
-Request assembly applies every live `ImageShadow`
-regardless of the later model route and then enforces the independent 50 MB
-transport budget on that request copy. A known text-only route that still
-produces an image-bearing request retries projection from a fresh Surface at
-most twice and then fails; it never silently strips an unaccounted request.
+One acknowledged `ImageProjection` attaches complete descriptions while retaining
+original images and advancing the existing causal Surface identities. Visual
+results retain Sideband provenance; OCR identifies its local engine. Existing
+image-associated tool/native-carrier sanitization remains. Failed groups prevent
+a lossy projection or retry. Resume and rewind retain both representations.
 
-The first accepted shadow is a causal one-way boundary: model switching,
-resume, recall, fork and rewind cannot expose those image bytes to a model
-again. Selected-branch and rewind materializations apply the same shadows
-before creating new Surface identities. The original bytes remain available
-only as immutable Timeline evidence for audit and the already-recorded
-image-description Sideband. Ordinary appends preserve old shadows and project
-only newly appended image groups. The resubmission does not consume ordinary
-retry budget or emit a failed turn. A shadow is accepted only when every image
-group has a completed, source-bound ImageDescription Sideband result; missing,
-failed, or image-incompatible auxiliary routes fail the turn without changing
-the Surface. `ImageProjected` therefore reports described groups only;
-`ImageDropped` remains reserved for images actually discarded during input
-normalization. No OCR backend participates in this recovery path.
+Request assembly chooses descriptions for marked pairs before byte budgeting and
+native continuation reconciliation. Compaction uses the same choice. A new pair
+tries original images first; returning to a marked pair reuses descriptions.
+Already described groups do not invoke the auxiliary model again. Image-body
+budgeting and normal compaction still apply independently. See the authoritative
+[model sampling contract](../../openspec/specs/model-sampling/spec.md) and
+[Timeline contract](../../openspec/specs/session-timeline/spec.md).
 
 An Active Goal reload restores the v9 objective, definition revision, lifecycle status, budget, settled usage, and elapsed time from the same Timeline Control snapshot as Behavior, then re-arms idle continuation. Goal owns no persisted plan, board, planner phase, or stage lease. Older Goal architectures and invalid v9 snapshots are rejected without migration instead of reviving a second lifecycle model.

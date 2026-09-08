@@ -521,6 +521,7 @@ fn token_estimation_accounts_for_images() {
                     text: "describe this".into(),
                 },
                 ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,abc".into(),
                 },
             ],
@@ -536,9 +537,9 @@ fn token_estimation_accounts_for_images() {
         );
     let multi_image = vec![ConversationItem::User(UserItem {
             content: vec![
-                ContentPart::Image { url: "img1".into() },
-                ContentPart::Image { url: "img2".into() },
-                ContentPart::Image { url: "img3".into() },
+                ContentPart::Image { description: None, url: "img1".into() },
+                ContentPart::Image { description: None, url: "img2".into() },
+                ContentPart::Image { description: None, url: "img3".into() },
             ],
             synthetic_reason: None,
             permission_evidence: None,

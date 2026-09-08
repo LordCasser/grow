@@ -50,9 +50,8 @@ async fn run_image_result(actor: &SessionActor) -> sampling_types::conversation:
 }
 
 async fn mark_current_model_as_text_only(actor: &SessionActor) {
-    let key = actor.current_model_image_input_key().await.unwrap();
     actor
-        .record_unsupported_model_image_input(key)
+        .record_unsupported_model_image_input(actor.current_catalog_model_id())
         .await
         .unwrap();
 }
@@ -99,7 +98,8 @@ async fn known_text_only_model_degrades_read_file_image_before_sampling() {
                 .project_images_for_known_text_model()
                 .await
                 .expect_err("a permanent shadow requires a durable description");
-            assert!(format!("{error:?}").contains("untranslated"));
+            assert!(format!("{error:?}").contains("当前模型不支持多模态"));
+            assert!(!crate::session::commands::is_fatal_turn_boundary_error(&error));
             let conversation = actor.chat_state_handle.get_conversation().await;
             assert_eq!(
                 sampling_types::conversation::conversation_image_groups(&conversation).len(),
@@ -141,7 +141,8 @@ async fn compaction_refuses_to_erase_images_when_text_projection_is_unavailable(
                 .await
                 .expect_err("compaction must fail before replacing an untranslated image");
 
-            assert!(format!("{error:?}").contains("untranslated"));
+            assert!(format!("{error:?}").contains("当前模型不支持多模态"));
+            assert!(!crate::session::commands::is_fatal_turn_boundary_error(&error));
             let timeline_events = actor.chat_state_handle.timeline_events().await.unwrap();
             assert!(
                 !timeline_events.iter().any(|event| matches!(

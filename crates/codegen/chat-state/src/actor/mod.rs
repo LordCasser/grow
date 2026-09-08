@@ -620,6 +620,7 @@ impl ChatStateActor {
                 memory_reminder,
                 active_goal,
                 json_output,
+                use_image_descriptions,
                 reply,
             } => {
                 let result = self
@@ -629,6 +630,7 @@ impl ChatStateActor {
                         memory_reminder,
                         active_goal,
                         json_output,
+                        use_image_descriptions,
                     )
                     .await;
                 let _ = reply.send(result);

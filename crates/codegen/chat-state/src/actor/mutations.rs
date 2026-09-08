@@ -676,9 +676,8 @@ impl ChatStateActor {
         self.send_event(ChatStateEvent::ContextPressureUpdated { projected_tokens });
     }
 
-    /// Commit irreversible model-facing ImageShadows as one Timeline Surface
-    /// mutation. Source message events remain immutable evidence, while every
-    /// Surface consumer observes only the replacement text after this point.
+    /// Commit paired image descriptions as one acknowledged Surface mutation.
+    /// Original images remain available; request assembly selects their form.
     pub(super) async fn record_image_projection(
         &mut self,
         projection: crate::ImageProjectionEvent,
@@ -707,7 +706,6 @@ impl ChatStateActor {
         }
         let mut report = crate::commands::ImageProjectionReport::default();
         for shadow in projection.shadows {
-            let crate::ImageShadowSource::Description { .. } = shadow.provenance;
             report.described_images += shadow.image_count;
         }
         Ok(report)

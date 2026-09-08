@@ -29,3 +29,7 @@ For unsupported image input, Grow SHALL use an available configured visual auxil
 #### Scenario: Both fallbacks fail
 - **WHEN** neither visual description nor local OCR can provide text
 - **THEN** the original image remains intact and the request fails with actionable feedback rather than a lossy retry.
+
+#### Scenario: Image fallback fails without damaging the session
+- **WHEN** both auxiliary description and OCR fail
+- **THEN** only the current request fails recoverably, the user is told the current model does not support multimodal input and may switch models or rewind, no automatic rewind or incomplete image projection occurs, and Timeline replay and manual rewind remain usable.

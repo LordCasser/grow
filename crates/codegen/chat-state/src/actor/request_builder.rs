@@ -29,6 +29,7 @@ impl ChatStateActor {
         memory_reminder: Option<String>,
         active_goal: Option<GoalDirectiveTag>,
         json_output: Option<JsonOutputFormat>,
+        use_image_descriptions: bool,
     ) -> Result<ConversationRequest, crate::commands::TimelineWriteError> {
         self.ensure_conversation_integrity_durably(
             sampling_types::DanglingToolCallReason::UserCancelled,
@@ -65,6 +66,10 @@ impl ChatStateActor {
         }
         let mut items = self.state.timeline.surface().to_vec();
         items = sampling_types::project_conversation_for_goal_scope(items, active_goal.as_ref());
+        if use_image_descriptions {
+            sampling_types::conversation::select_image_descriptions(&mut items)
+                .map_err(|error| crate::TimelineWriteError::ImageDescriptionUnavailable(error.into()))?;
+        }
 
         // Measure the internal conversation body and evict as it approaches
         // the 50 MB ceiling. The transport checks the final wire body after
@@ -365,7 +370,7 @@ fn conversation_body_bytes(conversation: &[ConversationItem]) -> usize {
     let mut image_url_bytes = 0usize;
     for item in &mut blanked {
         for part in image_content_mut(item) {
-            if let ContentPart::Image { url } = part {
+            if let ContentPart::Image { url, .. } = part {
                 image_url_bytes += url.len();
                 *url = std::sync::Arc::<str>::from("");
             }
@@ -432,7 +437,7 @@ pub(crate) fn compact_images_to_byte_budget(
     let mut images: Vec<(usize, usize, usize)> = Vec::new();
     for (i, item) in conversation.iter().enumerate() {
         for (j, part) in image_content(item).iter().enumerate() {
-            if let ContentPart::Image { url } = part {
+            if let ContentPart::Image { url, .. } = part {
                 images.push((i, j, image_part_bytes(url)));
             }
         }
@@ -476,6 +481,7 @@ mod tests {
             "call",
             "read image",
             vec![ContentPart::Image {
+                description: None,
                 url: format!("data:image/png;base64,{}", "A".repeat(TEST_IMG_BYTES)).into(),
             }],
         );

@@ -735,10 +735,12 @@ impl SessionActor {
     ) -> Result<(), acp::Error> {
         let mut image_recovery_attempted = false;
         loop {
+            let attempted_model = self.current_catalog_model_id();
             let result = self
                 .run_compact_transaction(user_context.clone(), trigger)
                 .await;
             if !image_recovery_attempted
+                && attempted_model == self.current_catalog_model_id()
                 && result
                     .as_ref()
                     .is_err_and(is_compact_image_input_unsupported)
@@ -758,7 +760,7 @@ impl SessionActor {
             acp::Error::internal_error()
                 .data("compaction image rejection had no model capability identity")
         })?;
-        self.record_unsupported_model_image_input(key.clone())
+        let first_rejection = self.record_unsupported_model_image_input(self.current_catalog_model_id())
             .await
             .map_err(|error| {
                 crate::session::commands::fatal_turn_boundary_error(
@@ -770,12 +772,14 @@ impl SessionActor {
             .project_conversation_images_for_text_model(&key)
             .await
             .map_err(|error| {
-                crate::session::commands::fatal_turn_boundary_error(
-                    "compaction image projection",
-                    error.to_string(),
-                )
+                if matches!(error, chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)) {
+                    acp::Error::internal_error().data(Self::image_projection_failure_message(&error))
+                } else {
+                    crate::session::commands::fatal_turn_boundary_error(
+                        "compaction image projection", error.to_string())
+                }
             })?;
-        Ok(projected.total_images() > 0)
+        Ok(first_rejection || projected.total_images() > 0)
     }
 
     /// One durable compaction transaction. Capability recovery starts a fresh
@@ -1034,6 +1038,12 @@ impl SessionActor {
                 .data("Compaction failed: no system message in conversation history")
         })?];
         summary_source.extend(target_source);
+        if self.model_image_input_is_unsupported(&model_id).await {
+            sampling_types::conversation::select_image_descriptions(&mut summary_source)
+                .map_err(|error| acp::Error::internal_error().data(Self::image_projection_failure_message(
+                    &chat_state::TimelineWriteError::ImageDescriptionUnavailable(error.into()))))?;
+        }
+
         let simplified_messages = if verbatim_input_enabled {
             chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
                 summary_source.clone(),
@@ -2294,6 +2304,7 @@ impl SessionActor {
             && result
                 .as_ref()
                 .is_err_and(is_compact_image_input_unsupported)
+            && self.background_compaction_source_is_current(&pending).await?
             && self.recover_compaction_image_input().await?
         {
             // ImageShadows invalidate the old target, so the existing recovery

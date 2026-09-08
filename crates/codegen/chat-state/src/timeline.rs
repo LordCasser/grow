@@ -105,12 +105,11 @@ pub struct SurfaceRange {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ImageShadowSource {
     Description { result_ref: crate::TimelineRangeRef },
+    LocalOcr { engine: String },
 }
 
-/// One irreversible replacement for an image-bearing Surface item. Acceptance
-/// consumes `source` and creates a new text-only Surface identity owned by the
-/// enclosing `ImageProjection` event. The immutable source event remains raw
-/// causal evidence, but no later Surface view can recover its image bytes.
+/// A durable description paired with an image-bearing Surface item. Acceptance
+/// advances the Surface identity while retaining both image and description.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageShadow {
@@ -2960,7 +2959,7 @@ impl Timeline {
                     let Some(index) = surface_index_by_leaf.get(&shadow.source).copied() else {
                         continue;
                     };
-                    let projected = sampling_types::conversation::replace_item_images_with_text(
+                    let projected = sampling_types::conversation::attach_item_image_description(
                         &mut self.surface[index],
                         &shadow.replacement,
                     );
@@ -3324,8 +3323,8 @@ impl Timeline {
                 {
                     return Err(TimelineError::InvalidImageProjection);
                 }
-                let ImageShadowSource::Description { result_ref } = &shadow.provenance;
-                let valid_ref = result_ref.validate().is_ok()
+                let valid_ref = match &shadow.provenance {
+                    ImageShadowSource::Description { result_ref } => result_ref.validate().is_ok()
                     && result_ref.first_seq == result_ref.last_seq
                     && self.events.iter().any(|event| {
                         matches!(
@@ -3338,7 +3337,9 @@ impl Timeline {
                                             && shadow.source.event.get() <= source.last_seq
                                     })
                         )
-                    });
+                    }),
+                    ImageShadowSource::LocalOcr { engine } => engine == "tesseract",
+                };
                 if !valid_ref {
                     return Err(TimelineError::InvalidImageProjection);
                 }
@@ -5958,7 +5959,7 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
                         continue;
                     };
                     let mut projected_leaf = source_leaf.clone();
-                    let removed = sampling_types::conversation::replace_item_images_with_text(
+                    let removed = sampling_types::conversation::attach_item_image_description(
                         &mut projected_leaf,
                         &shadow.replacement,
                     );
@@ -5986,7 +5987,7 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
                                 *leaf = replacement_id;
                             }
                         }
-                        let projected = sampling_types::conversation::replace_item_images_with_text(
+                        let projected = sampling_types::conversation::attach_item_image_description(
                             &mut entry.value,
                             &shadow.replacement,
                         );
@@ -10321,11 +10322,47 @@ mod tests {
     }
 
     #[test]
-    fn image_shadow_is_irreversible_and_bound_to_a_live_surface_item() {
+    fn local_ocr_description_replays_with_original_images_and_valid_engine() {
+        let original = ConversationItem::user_with_parts(vec![sampling_types::ContentPart::Image {
+            url: "data:image/png;base64,original".into(), description: None,
+        }]);
+        let mut timeline = Timeline::from_seed(vec![original]).unwrap();
+        let group = sampling_types::conversation::conversation_image_groups(timeline.surface()).remove(0);
+        let mut projection = ImageProjectionEvent {
+            trigger_runtime: sampling_types::ModelImageInputKey::new("model", "messages", "endpoint"),
+            source_revision: timeline.surface_revision(),
+            shadows: vec![ImageShadow {
+                source: timeline.surface_ids()[0], fingerprint: group.fingerprint,
+                image_count: 1, replacement: "local OCR text".into(),
+                provenance: ImageShadowSource::LocalOcr { engine: "invalid".into() },
+            }], tool_calls: vec![],
+        };
+        assert!(timeline.record(TimelineEventKind::ImageProjection(projection.clone())).is_err());
+        projection.shadows[0].provenance = ImageShadowSource::LocalOcr { engine: "tesseract".into() };
+        timeline.record(TimelineEventKind::ImageProjection(projection)).unwrap();
+        let replay = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(sampling_types::conversation::item_image_description(&replay.surface()[0]), Some("local OCR text"));
+        assert_eq!(sampling_types::conversation::conversation_image_groups(replay.surface())[0].image_urls[0].as_ref(),
+            "data:image/png;base64,original");
+        assert_eq!(serde_json::to_value(replay.surface()).unwrap(), serde_json::to_value(timeline.surface()).unwrap());
+    }
+
+    fn image_text_request(items: &[ConversationItem]) -> Vec<ConversationItem> {
+        let groups = sampling_types::conversation::conversation_image_groups(items);
+        assert!(!groups.is_empty(), "original images must remain available");
+        let mut request = items.to_vec();
+        sampling_types::conversation::select_image_descriptions(&mut request).unwrap();
+        assert!(sampling_types::conversation::conversation_image_groups(&request).is_empty());
+        request
+    }
+
+    #[test]
+    fn image_description_retains_images_and_is_bound_to_a_live_surface_item() {
         use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
 
         let image = ConversationItem::User(UserItem {
             content: vec![ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,original".into(),
             }],
             ..Default::default()
@@ -10353,7 +10390,7 @@ mod tests {
             }))
             .unwrap();
 
-        assert!(conversation_image_groups(timeline.surface()).is_empty());
+        image_text_request(timeline.surface());
         assert_eq!(timeline.surface_revision(), before_revision + 1);
         assert!(matches!(
             timeline.replace_all(vec![image.clone()], MessageCause::ContextRebuild),
@@ -10366,7 +10403,7 @@ mod tests {
             serde_json::to_vec(&raw_source.items).unwrap(),
             serde_json::to_vec(std::slice::from_ref(&image)).unwrap(),
         );
-        assert!(conversation_image_groups(&timeline.branch_transcript()).is_empty());
+        image_text_request(&timeline.branch_transcript());
         record_prompt(&mut timeline, 9, 1, "next");
         assert!(matches!(
             timeline.replace_all(vec![image.clone()], MessageCause::Rewind),
@@ -10377,17 +10414,16 @@ mod tests {
             Err(TimelineError::InvalidMessageShape)
         ));
         let rewound = timeline.rewind_surface(1).unwrap();
-        assert!(conversation_image_groups(&rewound).is_empty());
+        image_text_request(&rewound);
         assert!(
-            rewound[0]
-                .text_content()
+            sampling_types::conversation::item_image_description(&rewound[0]).unwrap()
                 .contains("durable image description")
         );
         assert!(matches!(
             timeline.replace_all(rewound, MessageCause::Rewind),
             Err(TimelineError::InvalidMessageShape)
         ));
-        assert!(conversation_image_groups(timeline.surface()).is_empty());
+        image_text_request(timeline.surface());
 
         let source = timeline.surface_ids()[0];
         assert!(matches!(
@@ -10463,6 +10499,7 @@ mod tests {
                 "call_a",
                 "Read /secret/a.png",
                 vec![ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,a".into(),
                 }],
             ),
@@ -10470,6 +10507,7 @@ mod tests {
                 "call_b",
                 "Read /secret/b.png",
                 vec![ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,b".into(),
                 }],
             ),
@@ -10588,6 +10626,7 @@ mod tests {
                 "call_image",
                 "image loaded",
                 vec![ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,tool".into(),
                 }],
             ),
@@ -10652,8 +10691,7 @@ mod tests {
         assert!(!summary.contains("/secret/tool-image.png"));
         assert!(summary.contains("Image tool source projected to durable text"));
         assert!(
-            timeline
-                .branch_transcript()
+            image_text_request(&timeline.branch_transcript())
                 .iter()
                 .all(|item| !item.text_content().contains("/secret/tool-image.png"))
         );
@@ -10676,6 +10714,7 @@ mod tests {
                                 .into(),
                         },
                         ContentPart::Image {
+                            description: None,
                             url: format!("data:image/png;base64,{asset}").into(),
                         },
                     ],
@@ -10746,9 +10785,9 @@ mod tests {
             assert!(!surface.contains(asset));
             assert!(surface.contains(&format!("durable description {index}")));
         }
-        let branch = serde_json::to_string(&timeline.branch_transcript()).unwrap();
+        let branch = serde_json::to_string(&image_text_request(&timeline.branch_transcript())).unwrap();
         assert!(assets.iter().all(|asset| !branch.contains(asset)));
-        assert!(conversation_image_groups(&timeline.branch_transcript()).is_empty());
+        image_text_request(&timeline.branch_transcript());
 
         let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
         assert_eq!(
@@ -10780,6 +10819,7 @@ mod tests {
                 "call_image",
                 "image loaded",
                 vec![ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,tool".into(),
                 }],
             ),
@@ -10845,7 +10885,7 @@ mod tests {
         assert!(!surface.contains(carrier_path));
         assert!(!surface.contains(tool_path));
         assert!(surface.contains("response carrier projected to durable text"));
-        let branch = serde_json::to_string(&timeline.branch_transcript()).unwrap();
+        let branch = serde_json::to_string(&image_text_request(&timeline.branch_transcript())).unwrap();
         assert!(!branch.contains(carrier_path));
         assert!(!branch.contains(tool_path));
 
@@ -10884,6 +10924,7 @@ mod tests {
                     text: "inspect".into(),
                 },
                 ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,original".into(),
                 },
             ],
@@ -10932,12 +10973,11 @@ mod tests {
             }))
             .unwrap();
 
-        assert!(conversation_image_groups(&timeline.branch_transcript()).is_empty());
+        image_text_request(&timeline.branch_transcript());
         let rewound = timeline.rewind_surface(1).unwrap();
-        assert!(conversation_image_groups(&rewound).is_empty());
+        image_text_request(&rewound);
         assert!(
-            rewound[0]
-                .text_content()
+            sampling_types::conversation::item_image_description(&rewound[0]).unwrap()
                 .contains("durable image description")
         );
     }
@@ -10948,6 +10988,7 @@ mod tests {
 
         let image = ConversationItem::User(UserItem {
             content: vec![ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,original".into(),
             }],
             ..Default::default()
@@ -11002,10 +11043,9 @@ mod tests {
         let (branch_ids, branch) = timeline.branch_transcript_with_ids();
         assert_eq!(branch_ids.len(), 1);
         assert_ne!(branch_ids[0], original_source);
-        assert!(conversation_image_groups(&branch).is_empty());
+        image_text_request(&branch);
         assert!(
-            branch[0]
-                .text_content()
+            sampling_types::conversation::item_image_description(&branch[0]).unwrap()
                 .contains("durable image description")
         );
         assert_eq!(
@@ -11029,6 +11069,7 @@ mod tests {
                     .into(),
                 },
                 ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,original".into(),
                 },
             ],
@@ -11090,8 +11131,7 @@ mod tests {
         assert!(summary.contains("a diagram of the architecture"));
         assert!(!summary.contains(asset));
         assert!(
-            timeline
-                .branch_transcript()
+            image_text_request(&timeline.branch_transcript())
                 .iter()
                 .all(|item| !item.text_content().contains(asset))
         );

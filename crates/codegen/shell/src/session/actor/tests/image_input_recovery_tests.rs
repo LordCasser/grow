@@ -215,7 +215,13 @@ fn explicit_image_400_without_description_fails_without_lossy_resubmission() {
             .await
             .expect("recovery must not loop");
             let error = result.expect_err("missing description route must fail closed");
-            assert!(format!("{error:?}").contains("untranslated"), "{error:?}");
+            assert!(format!("{error:?}").contains("当前模型不支持多模态"), "{error:?}");
+            assert!(format!("{error:?}").contains("rewind"));
+            assert!(!crate::session::commands::is_fatal_turn_boundary_error(&error));
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(!events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::ImageProjection(_))));
+            let replay = chat_state::Timeline::from_events(events).expect("failed image turn must remain replayable");
+            assert_eq!(sampling_types::conversation::conversation_image_groups(replay.surface()).len(), 1);
 
             let requests: Vec<_> = server
                 .requests()
@@ -258,6 +264,9 @@ fn explicit_image_400_without_description_fails_without_lossy_resubmission() {
             assert_eq!(image_projected_count, 0);
             assert!(image_projected_notes.is_empty());
             assert!(terminal_retry_failure);
+            actor.chat_state_handle.rewind_durably(0).await.expect("manual rewind remains usable after image failure");
+            chat_state::Timeline::from_events(actor.chat_state_handle.timeline_events().await.unwrap())
+                .expect("manual rewind keeps the Timeline replayable");
         }));
     });
 }
@@ -356,14 +365,32 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
             );
 
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert!(
-                sampling_types::conversation::conversation_image_groups(&conversation).is_empty()
-            );
+            assert_eq!(sampling_types::conversation::conversation_image_groups(&conversation).len(), 1);
             assert!(
                 conversation
                     .iter()
-                    .any(|item| item.text_content().contains("code E42"))
+                    .any(|item| sampling_types::conversation::item_image_description(item).is_some_and(|text| text.contains("code E42")))
             );
+            let replay = chat_state::Timeline::from_events(actor.chat_state_handle.timeline_events().await.unwrap()).unwrap();
+            assert_eq!(sampling_types::conversation::conversation_image_groups(replay.surface()).len(), 1);
+            let original_id = actor.current_catalog_model_id();
+            let config = actor.model_route.snapshot().sampling_config;
+            actor.model_route.replace(crate::agent::models::ModelId::new("other-provider/test-model"), config.clone());
+            assert!(actor.unsupported_current_model_for_images().await.is_none());
+            let unknown = actor.chat_state_handle.build_request_for_image_mode(
+                &actor.session_id_string(), vec![], None, None, None,
+                actor.unsupported_current_model_for_images().await.is_some()).await.unwrap();
+            assert_eq!(unknown.image_count(), 1, "another provider first receives the original image");
+            actor.record_unsupported_model_image_input(actor.current_catalog_model_id()).await.unwrap();
+            assert_eq!(actor.project_images_for_known_text_model().await.unwrap().total_images(), 0,
+                "existing description is reused without another auxiliary request");
+            let known = actor.chat_state_handle.build_request_for_image_mode(
+                &actor.session_id_string(), vec![], None, None, None,
+                actor.unsupported_current_model_for_images().await.is_some()).await.unwrap();
+            assert_eq!(known.image_count(), 0);
+            actor.model_route.replace(crate::agent::models::ModelId::new(original_id.clone()), config);
+            assert_eq!(actor.unsupported_current_model_for_images().await, Some(original_id));
+            assert_eq!(server.requests().iter().filter(|r| r.path == "/v1/messages").count(), 3);
             let goal = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 goal.status,
@@ -393,7 +420,7 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
             assert!(
                 notes
                     .iter()
-                    .any(|note| note.contains("用辅助描述永久替代模型上下文中的 1 张图片"))
+                    .any(|note| note.contains("已生成 1 张图片的文字描述"))
             );
             assert!(!terminal_retry_failure);
         }));
@@ -473,6 +500,7 @@ fn auxiliary_image_400_fails_without_installing_a_lossy_shadow() {
 
             let mut auxiliary_config = actor.chat_state_handle.get_sampling_config().await.unwrap();
             auxiliary_config.model = "vision-model".to_owned();
+            actor.model_route.replace(crate::agent::models::ModelId::new("vision"), actor.model_route.snapshot().sampling_config);
             actor
                 .chat_state_handle
                 .replace_sampling_route(auxiliary_config);
@@ -481,7 +509,7 @@ fn auxiliary_image_400_fails_without_installing_a_lossy_shadow() {
                     .unsupported_current_model_for_images()
                     .await
                     .as_deref(),
-                Some("vision-model")
+                Some("vision")
             );
 
             let mut notes = Vec::new();

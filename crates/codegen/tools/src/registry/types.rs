@@ -1913,7 +1913,7 @@ impl FinalizedToolset {
     /// copy the rejected key.
     pub async fn mark_model_image_input_unsupported_and_flush(
         &self,
-        key: crate::types::resources::ModelImageInputKey,
+        key: String,
     ) -> std::io::Result<bool> {
         use crate::types::resources::{ModelImageInputState, State};
 

@@ -388,7 +388,7 @@ pub fn build_describe_request(
     });
     if let ConversationItem::User(u) = &mut user_item {
         for url in image_urls {
-            u.content.push(ContentPart::Image { url: url.clone() });
+            u.content.push(ContentPart::Image { description: None, url: url.clone() });
         }
     }
     ConversationRequest::from_items(vec![user_item]).with_model(model)
@@ -793,5 +793,134 @@ mod tests {
         let out = persist_user_images(&test_session(dir.path()), &[]).unwrap();
         assert!(out.is_empty());
         assert!(!dir.path().join("assets").exists());
+    }
+}
+
+/// Local fallback is bounded and never resolves remote URLs or invokes a shell.
+pub(crate) async fn describe_images_with_local_ocr(
+    urls: &[std::sync::Arc<str>],
+    deadline: tokio::time::Instant,
+) -> Result<String, String> {
+    let mut descriptions = Vec::with_capacity(urls.len());
+    for (index, url) in urls.iter().enumerate() {
+        let bytes = decode_ocr_image(url)?;
+        let text = tokio::time::timeout_at(
+            deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(30)),
+            run_local_ocr(Path::new("tesseract"), bytes),
+        ).await.map_err(|_| "local OCR timed out".to_owned())??;
+        descriptions.push(format!("Image {} (local OCR text):\n{text}", index + 1));
+        if descriptions.iter().map(String::len).sum::<usize>() > 256 * 1024 {
+            return Err("local OCR group output exceeds limit".into());
+        }
+    }
+    Ok(descriptions.join("\n\n"))
+}
+
+fn decode_ocr_image(url: &str) -> Result<Vec<u8>, String> {
+    if url.len() > 8 * 1024 * 1024 {
+        return Err("local OCR image exceeds input limit".into());
+    }
+    let (header, data) = url.split_once(',').ok_or("local OCR requires an inline image")?;
+    if !header.starts_with("data:image/") || !header.ends_with(";base64") {
+        return Err("local OCR requires a base64 inline image".into());
+    }
+    base64::engine::general_purpose::STANDARD.decode(data)
+        .map_err(|_| "invalid local OCR image encoding".to_owned())
+}
+
+async fn run_local_ocr(program: &Path, bytes: Vec<u8>) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use std::process::Stdio;
+    const OUTPUT_LIMIT: u64 = 64 * 1024;
+    let mut child = tokio::process::Command::new(program)
+        .args(["stdin", "stdout"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .kill_on_drop(true).spawn().map_err(|error| format!("local OCR unavailable: {error}"))?;
+    let mut input = child.stdin.take().ok_or("local OCR stdin unavailable")?;
+    let output = child.stdout.take().ok_or("local OCR stdout unavailable")?;
+    let errors = child.stderr.take().ok_or("local OCR stderr unavailable")?;
+    async fn read_bounded(reader: impl tokio::io::AsyncRead + Unpin, limit: u64) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        reader.take(limit + 1).read_to_end(&mut bytes).await.map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > limit { return Err("local OCR output exceeds limit".into()); }
+        Ok(bytes)
+    }
+    let (_, output, _, status) = tokio::try_join!(
+        async move {
+            input.write_all(&bytes).await.map_err(|e| e.to_string())?;
+            // Dropping the pipe delivers EOF. shutdown alone only flushes it.
+            drop(input);
+            Ok::<(), String>(())
+        },
+        read_bounded(output, OUTPUT_LIMIT),
+        read_bounded(errors, 4096),
+        async { child.wait().await.map_err(|e| e.to_string()) },
+    )?;
+    if !status.success() { return Err(format!("local OCR exited with {status}")); }
+    let text = String::from_utf8(output).map_err(|_| "local OCR returned invalid UTF-8")?;
+    let text = text.trim();
+    if text.is_empty() { return Err("local OCR found no text".into()); }
+    Ok(text.to_owned())
+}
+
+#[cfg(all(test, unix))]
+mod local_ocr_tests {
+    use super::*;
+    fn executable(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("ocr-test");
+        std::fs::write(&path, format!("#!/bin/sh\ncat >/dev/null\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+    #[test]
+    fn input_rejects_remote_invalid_and_oversized_data() {
+        assert!(decode_ocr_image("https://example.com/image.png").is_err());
+        assert!(decode_ocr_image("data:image/png;base64,***").is_err());
+        assert!(decode_ocr_image(&"x".repeat(8 * 1024 * 1024 + 1)).is_err());
+        assert_eq!(decode_ocr_image("data:image/png;base64,YWJj").unwrap(), b"abc");
+    }
+    async fn bounded_ocr(program: &Path, bytes: Vec<u8>) -> Result<String, String> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), run_local_ocr(program, bytes))
+            .await.expect("OCR pipe protocol must not hang")
+    }
+    #[tokio::test]
+    async fn cancellation_terminates_the_local_ocr_process() {
+        use std::process::Stdio;
+        let dir = tempfile::tempdir().unwrap();
+        let path = executable(dir.path(), "echo $$ > \"$0.pid\"; exec sleep 30");
+        let pid_path = path.with_extension("pid");
+        let task = tokio::spawn(async move { run_local_ocr(&path, vec![1]).await });
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&pid_path).await {
+                    if let Ok(pid) = text.trim().parse::<u32>() { break pid; }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("OCR fixture must start");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let alive = tokio::process::Command::new("kill").args(["-0", &pid.to_string()])
+                    .stdout(Stdio::null()).stderr(Stdio::null()).status().await.unwrap().success();
+                if !alive { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("cancelled OCR must not leave a running process");
+    }
+
+    #[tokio::test]
+    async fn local_process_retains_text_and_rejects_empty_or_failed_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = executable(dir.path(), "printf 'recognized text\\n'");
+        assert_eq!(bounded_ocr(&path, b"image".to_vec()).await.unwrap(), "recognized text");
+        let path = executable(dir.path(), "exit 0");
+        assert!(bounded_ocr(&path, vec![]).await.unwrap_err().contains("no text"));
+        let path = executable(dir.path(), "printf partial; exit 1");
+        assert!(bounded_ocr(&path, vec![]).await.unwrap_err().contains("exited"));
+        let path = executable(dir.path(), "head -c 65537 /dev/zero");
+        assert!(bounded_ocr(&path, vec![]).await.unwrap_err().contains("exceeds limit"));
     }
 }

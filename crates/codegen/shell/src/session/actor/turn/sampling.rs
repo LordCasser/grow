@@ -111,9 +111,9 @@ impl SessionActor {
             .map(sampling_types::model_image_input_key)
     }
 
-    async fn model_image_input_is_unsupported(
+    pub(in crate::session::actor) async fn model_image_input_is_unsupported(
         &self,
-        key: &sampling_types::ModelImageInputKey,
+        key: &str,
     ) -> bool {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let resources = bridge.shared_resources().await;
@@ -125,7 +125,7 @@ impl SessionActor {
 
     pub(in crate::session::actor) async fn record_unsupported_model_image_input(
         &self,
-        key: sampling_types::ModelImageInputKey,
+        key: String,
     ) -> std::io::Result<bool> {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge
@@ -136,10 +136,10 @@ impl SessionActor {
     pub(in crate::session::actor) async fn unsupported_current_model_for_images(
         &self,
     ) -> Option<String> {
-        let key = self.current_model_image_input_key().await?;
+        let key = self.current_catalog_model_id();
         self.model_image_input_is_unsupported(&key)
             .await
-            .then(|| key.model().to_string())
+            .then_some(key)
     }
 
     async fn resolve_image_description_route(
@@ -148,7 +148,7 @@ impl SessionActor {
     ) -> Option<(
         sampler::SamplingClient,
         String,
-        sampling_types::ModelImageInputKey,
+        String,
     )> {
         let configured_model = self.image_description_model.read().clone()?;
         let mut sampler_config = match self.resolve_aux_sampler_config(&configured_model).await {
@@ -175,7 +175,7 @@ impl SessionActor {
             );
             return None;
         }
-        if self.model_image_input_is_unsupported(&auxiliary_key).await {
+        if self.model_image_input_is_unsupported(&configured_model).await {
             tracing::info!(
                 model = auxiliary_key.model(),
                 "skipping known text-only image description runtime"
@@ -190,21 +190,30 @@ impl SessionActor {
                 return None;
             }
         };
-        Some((client, model, auxiliary_key))
+        Some((client, model, configured_model))
+    }
+
+    pub(in crate::session::actor) fn image_projection_failure_message(
+        error: &chat_state::TimelineWriteError,
+    ) -> String {
+        match error {
+            chat_state::TimelineWriteError::ImageDescriptionUnavailable(_) =>
+                "当前模型不支持多模态，图片描述生成失败。原图和会话历史已保留，可切换模型或自行 rewind。".into(),
+            _ => format!("failed to persist text-only image projection: {error}; sampling was not resumed"),
+        }
     }
 
     fn image_recovery_notification(report: chat_state::ImageProjectionReport) -> Option<String> {
         match report.described_images {
             0 => None,
             described => Some(format!(
-                "当前模型不支持图片输入；已用辅助描述永久替代模型上下文中的 {described} 张图片，原图仅保留为 Timeline 证据。"
+                "已生成 {described} 张图片的文字描述；当前模型使用描述发送，原图保留供其他模型尝试。"
             )),
         }
     }
 
-    /// Build and durably bind irreversible ImageShadows after one text-only
-    /// runtime rejects image input. Canonical images remain as immutable
-    /// Timeline evidence; every later model request consumes the text shadow.
+    /// Bind descriptions to original images; each provider/model selects its
+    /// representation independently when building a request.
     async fn project_conversation_images_for_text_model_once(
         &self,
         rejected_key: &sampling_types::ModelImageInputKey,
@@ -219,16 +228,21 @@ impl SessionActor {
         let conversation = &materialized.transcript;
         let groups = conversation_image_groups(conversation)
             .into_iter()
+            .filter(|group| sampling_types::conversation::item_image_description(
+                &conversation[group.item_index]).is_none())
             .collect::<Vec<_>>();
         if groups.is_empty() {
             return Ok(chat_state::ImageProjectionReport::default());
         }
         let mut shadows = Vec::with_capacity(groups.len());
+        let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
 
         if let Some((client, model, auxiliary_key)) =
             self.resolve_image_description_route(rejected_key).await
         {
-            let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
+            self.send_grow_notification(GrowSessionUpdate::ImageProcessing {
+                message: "当前模型不支持多模态，调用视觉辅助LLM处理中...".into(),
+            }).await;
             let prepared = groups.iter().map(|group| {
                 let source_kind = match group.source {
                     ConversationImageSource::User => "User",
@@ -496,6 +510,29 @@ impl SessionActor {
             }
         }
 
+        let missing = groups.iter().filter(|group| {
+            let source = materialized.transcript_ids[group.item_index];
+            !shadows.iter().any(|shadow| shadow.source == source)
+        }).collect::<Vec<_>>();
+        if !missing.is_empty() {
+            self.send_grow_notification(GrowSessionUpdate::ImageProcessing {
+                message: "视觉辅助模型未配置或者调用失败，使用OCR处理中...".into(),
+            }).await;
+            for group in missing {
+                match crate::session::image_describe::describe_images_with_local_ocr(
+                    &group.image_urls, deadline).await {
+                    Ok(description) => shadows.push(chat_state::ImageShadow {
+                        source: materialized.transcript_ids[group.item_index],
+                        fingerprint: group.fingerprint.clone(),
+                        image_count: group.image_count(),
+                        replacement: crate::session::image_describe::render_image_description_block(&description),
+                        provenance: chat_state::ImageShadowSource::LocalOcr { engine: "tesseract".into() },
+                    }),
+                    Err(error) => tracing::warn!(%error, "local OCR image fallback failed"),
+                }
+            }
+        }
+
         let unresolved = groups
             .iter()
             .map(|group| group.image_count())
@@ -504,7 +541,7 @@ impl SessionActor {
         if unresolved > 0 {
             return Err(chat_state::TimelineWriteError::ImageDescriptionUnavailable(
                 format!(
-                    "{unresolved} image(s) remain untranslated; refusing a lossy permanent shadow"
+                    "{unresolved} image(s) remain untranslated; refusing a lossy image fallback"
                 ),
             ));
         }
@@ -602,15 +639,13 @@ impl SessionActor {
         let Some(key) = self.current_model_image_input_key().await else {
             return Ok(chat_state::ImageProjectionReport::default());
         };
-        if !self.model_image_input_is_unsupported(&key).await {
+        if !self.model_image_input_is_unsupported(&self.current_catalog_model_id()).await {
             return Ok(chat_state::ImageProjectionReport::default());
         }
         self.project_conversation_images_for_text_model(&key)
             .await
             .map_err(|error| {
-                acp::Error::internal_error().data(format!(
-                    "failed to persist text-only image projection: {error}; sampling was not resumed"
-                ))
+                acp::Error::internal_error().data(Self::image_projection_failure_message(&error))
             })
     }
 
@@ -1542,7 +1577,7 @@ impl SessionActor {
     /// refreshed BYOK credentials. The previous client cache inside
     /// the sampler actor is invalidated automatically by
     /// `update_config`.
-    pub(crate) async fn prepare_sampler_for_turn(&self) -> sampling_types::ModelImageInputKey {
+    pub(crate) async fn prepare_sampler_for_turn(&self) -> (String, sampling_types::ModelImageInputKey) {
         self.refresh_byok_credential().await;
         let mut sampler_config = self.reconstruct_full_config().await;
         if self.tool_context.task_output_token_budget.is_some()
@@ -1553,7 +1588,7 @@ impl SessionActor {
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.get().as_secs());
         let image_input_key = sampler_model_image_input_key(&sampler_config);
         self.sampler_handle.update_config(sampler_config);
-        image_input_key
+        (self.current_catalog_model_id(), image_input_key)
     }
     fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, message: &str) {
         ::diagnostics::unified_log::warn(
@@ -1570,7 +1605,7 @@ impl SessionActor {
         self: &Arc<Self>,
         error: sampler::SamplingErrorInfo,
         request_image_count: usize,
-        request_image_input_key: Option<sampling_types::ModelImageInputKey>,
+        request_image_input_key: Option<(String, sampling_types::ModelImageInputKey)>,
         request_had_native_continuation: bool,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use sampler::SamplingErrorKind;
@@ -1582,10 +1617,10 @@ impl SessionActor {
             return Ok(SamplerFailureRecovery::GoalSpendingStopped);
         }
         if is_image_input_unsupported(&error, request_image_count)
-            && let Some(key) = request_image_input_key
+            && let Some((model_id, key)) = request_image_input_key
         {
             let model = key.model().to_string();
-            let first_rejection = match self.record_unsupported_model_image_input(key.clone()).await
+            let first_rejection = match self.record_unsupported_model_image_input(model_id).await
             {
                 Ok(first_rejection) => first_rejection,
                 Err(persist_error) => {
@@ -1611,14 +1646,12 @@ impl SessionActor {
                 model,
                 request_image_count,
                 first_rejection,
-                "model explicitly rejected image input; installing irreversible ImageShadows"
+                "model explicitly rejected image input; attaching durable image descriptions"
             );
             if let Err(projection_error) =
                 self.project_conversation_images_for_text_model(&key).await
             {
-                let message = format!(
-                    "failed to persist text-only image projection: {projection_error}; sampling was not resumed"
-                );
+                let message = Self::image_projection_failure_message(&projection_error);
                 self.log_terminal_failure("image_projection_failed", error.status_code, &message);
                 self.send_grow_notification(GrowSessionUpdate::RetryState(
                     crate::extensions::notification::RetryState::Failed {

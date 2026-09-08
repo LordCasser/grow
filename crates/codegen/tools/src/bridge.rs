@@ -580,7 +580,7 @@ impl ToolBridge {
     /// Atomically expose and durably queue a model image-input rejection.
     pub async fn mark_model_image_input_unsupported_and_flush(
         &self,
-        key: crate::types::resources::ModelImageInputKey,
+        key: String,
     ) -> std::io::Result<bool> {
         self.registry
             .mark_model_image_input_unsupported_and_flush(key)

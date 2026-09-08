@@ -1064,6 +1064,7 @@ pub(crate) mod tests {
                 text: "image".into(),
             },
             sampling_types::ContentPart::Image {
+                description: None,
                 url: format!("data:{};base64,{}", image.mime_type, image.data).into(),
             },
         ]);

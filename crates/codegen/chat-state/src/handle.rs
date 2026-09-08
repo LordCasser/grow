@@ -499,6 +499,19 @@ impl ChatStateHandle {
         active_goal: Option<GoalDirectiveTag>,
         json_output: Option<JsonOutputFormat>,
     ) -> Result<ConversationRequest, TimelineWriteError> {
+        self.build_request_for_image_mode(timeline_id, tool_definitions,
+            memory_reminder, active_goal, json_output, false).await
+    }
+
+    pub async fn build_request_for_image_mode(
+        &self,
+        timeline_id: &str,
+        tool_definitions: Vec<ToolSpec>,
+        memory_reminder: Option<String>,
+        active_goal: Option<GoalDirectiveTag>,
+        json_output: Option<JsonOutputFormat>,
+        use_image_descriptions: bool,
+    ) -> Result<ConversationRequest, TimelineWriteError> {
         self.query("BuildConversationRequest", |reply| {
             ChatStateCommand::BuildConversationRequest {
                 timeline_id: timeline_id.to_owned(),
@@ -506,6 +519,7 @@ impl ChatStateHandle {
                 memory_reminder,
                 active_goal,
                 json_output,
+                use_image_descriptions,
                 reply,
             }
         })

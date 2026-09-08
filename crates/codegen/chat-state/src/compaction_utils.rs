@@ -1602,6 +1602,7 @@ actual user question";
     #[test]
     fn is_real_user_turn_true_for_image_only_user() {
         let item = ConversationItem::user_with_parts(vec![ContentPart::Image {
+            description: None,
             url: "data:image/png;base64,abc".into(),
         }]);
         assert!(
@@ -1616,6 +1617,7 @@ actual user question";
                 text: "<user_query>\nwhat is this?\n</user_query>".into(),
             },
             ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,abc".into(),
             },
         ]);
@@ -2651,7 +2653,7 @@ actual user question";
         match &result[1] {
             ConversationItem::User(u) => {
                 assert!(u.content.iter().any(
-                    |part| matches!(part, ContentPart::Image { url } if url.as_ref() == "data:image/jpeg;base64,/9j/4AAQ")
+                    |part| matches!(part, ContentPart::Image { url, .. } if url.as_ref() == "data:image/jpeg;base64,/9j/4AAQ")
                 ));
             }
             _ => panic!("expected User item"),

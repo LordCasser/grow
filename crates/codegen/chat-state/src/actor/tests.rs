@@ -1264,7 +1264,7 @@ async fn replace_conversation_persists_and_emits_reset() {
 }
 
 #[tokio::test]
-async fn image_projection_preserves_raw_events_and_never_restores_images_to_surface() {
+async fn image_projection_pairs_descriptions_and_selects_images_per_request() {
     use sampling_types::conversation::{
         ContentPart, ToolCall, UserItem, conversation_image_groups,
     };
@@ -1275,6 +1275,7 @@ async fn image_projection_preserves_raw_events_and_never_restores_images_to_surf
                 text: "inspect these".into(),
             },
             ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,user".into(),
             },
         ],
@@ -1291,9 +1292,11 @@ async fn image_projection_preserves_raw_events_and_never_restores_images_to_surf
                 text: "keep-me".into(),
             },
             ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,tool-a".into(),
             },
             ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,tool-b".into(),
             },
         ],
@@ -1369,8 +1372,7 @@ async fn image_projection_preserves_raw_events_and_never_restores_images_to_surf
 
     let conversation = h.handle.get_conversation().await;
     assert!(
-        conversation[0]
-            .text_content()
+        sampling_types::conversation::item_image_description(&conversation[0]).unwrap()
             .contains("converted user image")
     );
     let ConversationItem::User(user) = &conversation[0] else {
@@ -1381,7 +1383,7 @@ async fn image_projection_preserves_raw_events_and_never_restores_images_to_surf
     assert!(
         user.content
             .iter()
-            .all(|part| !matches!(part, ContentPart::Image { .. }))
+            .any(|part| matches!(part, ContentPart::Image { description: Some(_), .. }))
     );
     let ConversationItem::Assistant(assistant) = &conversation[1] else {
         panic!("expected assistant item");
@@ -1396,19 +1398,17 @@ async fn image_projection_preserves_raw_events_and_never_restores_images_to_surf
         panic!("expected tool result");
     };
     assert_eq!(result.tool_call_id, "call_7");
-    assert!(matches!(
-        result.images.as_slice(),
-        [ContentPart::Text { text }] if text.as_ref() == "keep-me"
-    ));
-    assert!(result.content.contains("converted tool images"));
+    assert_eq!(result.images.len(), 3);
+    assert!(matches!(&result.images[0], ContentPart::Text { text } if text.as_ref() == "keep-me"));
+    assert_eq!(sampling_types::conversation::item_image_description(&conversation[2]), Some("converted tool images"));
     assert!(result.content.contains("Read image file"));
     let capture = h.handle.take_turn_messages().await.unwrap();
     assert_eq!(capture.messages.len(), conversation.len());
-    assert!(conversation_image_groups(&capture.messages).is_empty());
+    assert_eq!(conversation_image_groups(&capture.messages).len(), 2);
 
     let projected = h
         .handle
-        .build_request("test-timeline", vec![], None, None, None)
+        .build_request_for_image_mode("test-timeline", vec![], None, None, None, true)
         .await
         .unwrap();
     assert!(conversation_image_groups(&projected.items).is_empty());
@@ -1439,10 +1439,9 @@ async fn image_projection_preserves_raw_events_and_never_restores_images_to_surf
         .build_request("test-timeline", vec![], None, None, None)
         .await
         .unwrap();
-    assert!(conversation_image_groups(&after_model_change.items).is_empty());
+    assert_eq!(conversation_image_groups(&after_model_change.items).len(), 2);
     assert!(
-        after_model_change.items[0]
-            .text_content()
+        sampling_types::conversation::item_image_description(&after_model_change.items[0]).unwrap()
             .contains("converted user image")
     );
     let records = h.drain_persistence();
@@ -1468,6 +1467,7 @@ async fn image_projection_retries_an_uncertain_persistence_failure() {
 
     let user = ConversationItem::User(UserItem {
         content: vec![ContentPart::Image {
+            description: None,
             url: "data:image/png;base64,original".into(),
         }],
         ..Default::default()
@@ -1514,13 +1514,14 @@ async fn image_projection_retries_an_uncertain_persistence_failure() {
     let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
     let (report, ()) = tokio::join!(projection_future, retry);
     assert_eq!(report.unwrap().described_images, 1);
-    assert!(conversation_image_groups(&h.handle.get_conversation().await).is_empty());
+    assert_eq!(conversation_image_groups(&h.handle.get_conversation().await).len(), 1);
     let materialized = h
         .handle
         .materialize_timeline("test-timeline".into())
         .await
         .unwrap();
-    assert!(conversation_image_groups(&materialized.surface).is_empty());
+    assert_eq!(conversation_image_groups(&materialized.surface).len(), 1);
+    assert_eq!(sampling_types::conversation::item_image_description(&materialized.surface[0]), Some("durable description"));
 }
 
 #[tokio::test]
@@ -4163,6 +4164,7 @@ async fn get_first_user_text_image_first_returns_none() {
     // First message: image-only user message (no text part)
     h.handle.push_user_message(ConversationItem::User(UserItem {
         content: vec![ContentPart::Image {
+            description: None,
             url: "data:image/png;base64,abc".into(),
         }],
         synthetic_reason: None,
@@ -4184,6 +4186,7 @@ async fn get_first_user_text_image_then_text_returns_none() {
     h.handle.push_user_message(ConversationItem::User(UserItem {
         content: vec![
             ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,abc".into(),
             },
             ContentPart::Text {
@@ -4211,6 +4214,7 @@ async fn get_first_user_text_text_then_image_returns_text() {
                 text: "look at this".into(),
             },
             ContentPart::Image {
+                description: None,
                 url: "data:image/png;base64,abc".into(),
             },
         ],
@@ -5517,6 +5521,7 @@ async fn prefix_stable_after_image_pruning() {
                     text: "look at this image".into(),
                 },
                 ContentPart::Image {
+                    description: None,
                     url: big_image_url.into(),
                 },
             ],
@@ -5543,6 +5548,7 @@ async fn prefix_stable_after_image_pruning() {
                     text: "new image".into(),
                 },
                 ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,newImageData".into(),
                 },
             ],
@@ -5619,6 +5625,7 @@ async fn build_request_preserves_small_old_images() {
                     text: "look at this".into(),
                 },
                 ContentPart::Image {
+                    description: None,
                     url: "data:image/png;base64,iVBORw0KGgo=".into(),
                 },
             ],
@@ -6416,6 +6423,7 @@ async fn assert_live_tool_image_budget(backend: sampling_types::ApiBackend) {
             id,
             "Read image.",
             vec![ContentPart::Image {
+                description: None,
                 url: format!("{url}{marker}").into(),
             }],
         ));

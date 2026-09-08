@@ -2337,7 +2337,11 @@ pub(crate) fn validate_sideband_ledgers(
             continue;
         };
         for shadow in &projection.shadows {
-            let chat_state::ImageShadowSource::Description { result_ref } = &shadow.provenance;
+            let chat_state::ImageShadowSource::Description { result_ref } = &shadow.provenance else {
+                // Local OCR has no provider Sideband; Timeline validates its
+                // engine, source identity, image fingerprint and description.
+                continue;
+            };
             let owner = "image projection";
             let result = completed_sideband_result(
                 ledgers,

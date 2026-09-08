@@ -787,25 +787,25 @@ impl ModelImageInputKey {
 /// Session-local negative capability cache for model image input.
 ///
 /// Missing entries remain optimistic: Grow tries image input until an API 400
-/// explicitly proves that this exact model/backend/endpoint only accepts text.
+/// explicitly proves that this canonical provider/model pair only accepts text.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelImageInputState {
     #[serde(default)]
-    unsupported: BTreeSet<ModelImageInputKey>,
+    unsupported: BTreeSet<String>,
 }
 impl ModelImageInputState {
-    pub fn is_unsupported(&self, key: &ModelImageInputKey) -> bool {
+    pub fn is_unsupported(&self, key: &str) -> bool {
         self.unsupported.contains(key)
     }
 
     /// Returns `true` only when this is the first rejection recorded for `key`.
-    pub fn mark_unsupported(&mut self, key: ModelImageInputKey) -> bool {
+    pub fn mark_unsupported(&mut self, key: String) -> bool {
         self.unsupported.insert(key)
     }
 
     /// Roll back a negative-capability observation that could not be made
     /// durable. Absence means unknown, never proven support.
-    pub fn forget_unsupported(&mut self, key: &ModelImageInputKey) -> bool {
+    pub fn forget_unsupported(&mut self, key: &str) -> bool {
         self.unsupported.remove(key)
     }
 }

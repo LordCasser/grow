@@ -965,6 +965,8 @@ pub enum SessionUpdate {
     /// Canonical images retained while a text-only model route consumes
     /// durable ImageShadows in its request projection.
     ImageProjected { notes: Vec<String> },
+    /// Progress while preparing a recoverable image description.
+    ImageProcessing { message: String },
     /// Memory file listing for the pager's /memory modal.
     MemoryFiles {
         invocation_id: String,
