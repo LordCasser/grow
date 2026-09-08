@@ -30964,3 +30964,243 @@ The relaunch test SHALL fail with current screen and full-text diagnostics when 
 - **THEN** PtyHarness::quit is invoked and its result must be successful.
 
 证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `deadline`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `panic!`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::update`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::quit`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::quit`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`。
+
+
+### Requirement: Minimal transcript pager fixture uses non-interactive cat
+
+The implementation SHALL satisfy the following tested behavior: The ignored test starts ContentController, configures its response as MOCK_RESPONSE_SENTINEL followed by ` transcript body.`, builds a PAGER=cat environment override, resolves the pager binary, spawns DEFAULT_ROWS by DEFAULT_COLS with MINIMAL_ARGS through PtyHarness::spawn_with_content_env, enables query-response forwarding, and waits for the minimal idle sentinel. cat is selected so the transcript child dumps its input and exits without an interactive pager protocol.
+
+#### Scenario: Transcript fixture
+- **WHEN** the test starts with the mock controller and PAGER=cat override
+- **THEN** the minimal pager runs against a deterministic transcript response and non-interactive child pager.
+
+#### Scenario: Inline viewport probe
+- **WHEN** the spawned harness receives query forwarding
+- **THEN** minimal startup can answer the inline cursor-position query before the transcript flow.
+
+#### Scenario: Ready prompt
+- **WHEN** wait_minimal_ready observes the idle sentinel
+- **THEN** the test proceeds from an idle minimal prompt.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_transcript_opens_in_pager.rs` — `minimal_transcript_opens_in_pager`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_ARGS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::start`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::spawn_with_content_env`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::set_respond_to_queries`。
+
+
+### Requirement: Transcript command submits after a committed turn
+
+The implementation SHALL satisfy the following tested behavior: After readiness, the test submits PROMPT with carriage return and waits up to 30 seconds for MOCK_RESPONSE_SENTINEL in full_text. It then injects `/transcript` one byte at a time with inject_keys_paced and submits carriage return, requesting the transcript pager after a live turn exists.
+
+#### Scenario: Source conversation
+- **WHEN** the initial prompt is submitted and the mock sentinel appears in full_text
+- **THEN** the live conversation has content available for transcript export.
+
+#### Scenario: Transcript request
+- **WHEN** paced `/transcript` input is followed by carriage return
+- **THEN** the minimal command path is asked to open the configured PAGER.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `inject_keys_paced`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_full_text`。
+
+
+### Requirement: Transcript dump is observable through repeated content
+
+The implementation SHALL satisfy the following tested behavior: After submitting /transcript, the test pumps 100 ms updates until a 15-second deadline and requires full_text().matches(MOCK_RESPONSE_SENTINEL).count() to reach at least two. The intended interpretation is one sentinel from the live turn plus one re-emitted by cat from the rendered transcript; the assertion accepts any count of two or greater.
+
+#### Scenario: Pager output
+- **WHEN** the transcript command has been submitted and the full-text count is initially below two
+- **THEN** the harness continues pumping until the sentinel count reaches two or the deadline expires.
+
+#### Scenario: Dump evidence
+- **WHEN** the count reaches at least two
+- **THEN** the assertion treats repeated sentinel text across scrollback and screen as evidence that the configured pager received transcript content.
+
+#### Scenario: No dump
+- **WHEN** the count remains below two at the deadline
+- **THEN** the test fails with the full combined text.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`。
+
+
+### Requirement: Pager suspend restore and minimal health cleanup
+
+The implementation SHALL satisfy the following tested behavior: The test waits up to ten seconds for MINIMAL_IDLE_SENTINEL on the visible screen after the configured pager exits, rejects `panicked` from screen_contents, and calls quit_minimal. The test is marked #[ignore], so these restoration and cleanup checks are not default-suite verification.
+
+#### Scenario: Inline restore
+- **WHEN** cat has exited after dumping the transcript
+- **THEN** the minimal idle sentinel reappears within ten seconds.
+
+#### Scenario: No panic marker
+- **WHEN** the idle sentinel is observed
+- **THEN** the visible screen does not contain `panicked`.
+
+#### Scenario: Shutdown
+- **WHEN** the health assertion passes
+- **THEN** quit_minimal performs the shared minimal shutdown procedure.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::contains_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: The ignored minimal PTY test SHALL start an isolated mock content controller, create a temporary non-interactive editor script for the host platform, configure VISUAL to invoke that script, spawn the pager at the default minimal geometry, and enable terminal query replies before readiness assertions.
+
+The implementation SHALL satisfy the following tested behavior: minimal_external_editor_round_trip starts ContentController and configures a response containing MOCK_RESPONSE_SENTINEL plus `edited prompt received.`. It creates a tempfile directory; on Windows it writes local-editor.cmd that overwrites the argument file with `edited draft from external editor` and sets VISUAL to `cmd /C '<script>'`; on non-Windows it writes local-editor.sh with a printf redirect to `$1`, sets Unix mode 0700 under cfg(unix), and sets VISUAL to the quoted script path. It resolves pager_binary, calls PtyHarness::spawn_with_content_env_ops with DEFAULT_ROWS, DEFAULT_COLS, MINIMAL_ARGS, and EnvOp::set("VISUAL", &editor), then enables query responses.
+
+#### Scenario: Windows editor script
+- **WHEN** the test runs with cfg!(windows)
+- **THEN** a .cmd script writes the exact edited draft to the file path supplied by the editor protocol and VISUAL invokes it through cmd /C.
+
+#### Scenario: Unix editor script
+- **WHEN** the test runs outside Windows
+- **THEN** a .sh script writes the exact edited draft to its first argument and receives executable permissions on Unix.
+
+#### Scenario: Minimal fixture
+- **WHEN** the editor command is configured
+- **THEN** the pager runs with MINIMAL_ARGS at the shared default 50x120 geometry and query forwarding is enabled.
+
+#### Scenario: Isolated response
+- **WHEN** the pager later submits the draft
+- **THEN** the mock response contains MOCK_RESPONSE_SENTINEL and the edited-prompt confirmation text.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_external_editor_round_trip.rs` — `minimal_external_editor_round_trip`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_external_editor_round_trip.rs` — `editor script setup`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_ARGS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager-pty-harness/src/lib.rs` — `EnvOp::set`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::spawn_with_content_env_ops`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::set_respond_to_queries`。
+
+
+### Requirement: In minimal mode, Ctrl-G SHALL hand the focused draft to the configured external editor, restore the editor's exact file text into the composer, and leave the turn unsent until the user explicitly submits it.
+
+The implementation SHALL satisfy the following tested behavior: After wait_minimal_ready, the test types `original draft` with inject_keys_paced, injects byte 0x07 as Ctrl-G, and waits up to 10 seconds for `edited draft from external editor` on screen. Before explicit Enter it asserts full_text does not contain MOCK_RESPONSE_SENTINEL, proving editor exit did not submit the draft. The test does not inspect the temporary file, editor exit code, composer cursor, or stale-draft handling.
+
+#### Scenario: Open external editor
+- **WHEN** minimal is ready and the composer contains `original draft`
+- **THEN** Ctrl-G launches the configured local editor with the draft file.
+
+#### Scenario: Apply editor text
+- **WHEN** the editor returns and writes its argument file
+- **THEN** the exact text `edited draft from external editor` is visible in the restored composer within ten seconds.
+
+#### Scenario: No implicit submit
+- **WHEN** the edited text has returned but Enter has not been sent
+- **THEN** full_text contains no MOCK_RESPONSE_SENTINEL response.
+
+#### Scenario: Explicit ownership boundary
+- **WHEN** the user then sends carriage return
+- **THEN** submission occurs only after the explicit key event.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_external_editor_round_trip.rs` — `minimal_external_editor_round_trip`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `inject_keys_paced`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::full_text`。
+
+
+### Requirement: After the external editor restores the draft, explicit submission SHALL produce the configured response and send a user message containing the edited text while no recorded user message contains the original pre-editor draft.
+
+The implementation SHALL satisfy the following tested behavior: The test injects carriage return after the no-submit assertion, waits up to 30 seconds for MOCK_RESPONSE_SENTINEL in full_text, then calls all_user_message_blobs(&content). It requires at least one serialized user message blob to contain `edited draft from external editor` and requires every collected user message blob to exclude `original draft`. all_user_message_blobs accepts Chat Completions messages or Responses input and serializes multimodal content when necessary; this test only uses contains predicates.
+
+#### Scenario: Submit edited draft
+- **WHEN** the edited text is visible and carriage return is injected
+- **THEN** the mock response sentinel appears in full_text within 30 seconds.
+
+#### Scenario: Edited wire payload
+- **WHEN** all recorded user message blobs are collected
+- **THEN** at least one user blob contains the exact editor-produced draft.
+
+#### Scenario: Original draft excluded
+- **WHEN** the same collection is inspected
+- **THEN** no user blob contains `original draft`.
+
+#### Scenario: Serialized request scope
+- **WHEN** the helper reads recorded request bodies
+- **THEN** the assertion covers user content in either Chat Completions messages or Responses input, without requiring a specific API backend.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_external_editor_round_trip.rs` — `minimal_external_editor_round_trip`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `all_user_message_blobs`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::full_text`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::request_bodies`。
+
+
+### Requirement: After the edited turn completes, minimal SHALL return to its idle live-region sentinel without a visible panic marker, and the ignored PTY test SHALL request clean shutdown.
+
+The implementation SHALL satisfy the following tested behavior: Following wire assertions, the test waits up to 10 seconds for MINIMAL_IDLE_SENTINEL, asserts !harness.contains_text("panicked") with the current screen in the diagnostic, and calls quit_minimal(&mut harness). quit_minimal owns Ctrl-Q confirmation and exit polling; this source does not assert an exit code or temporary-file deletion.
+
+#### Scenario: Idle restoration
+- **WHEN** the edited response has rendered
+- **THEN** MINIMAL_IDLE_SENTINEL returns within ten seconds.
+
+#### Scenario: No panic
+- **WHEN** idle restoration is observed
+- **THEN** the visible screen contains no `panicked` substring.
+
+#### Scenario: Clean shutdown
+- **WHEN** all editor and wire assertions pass
+- **THEN** quit_minimal is invoked to confirm and wait for pager exit.
+
+#### Scenario: Ignored execution gate
+- **WHEN** the default PTY target discovers this test
+- **THEN** the #[ignore] attribute excludes it unless explicitly selected.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_external_editor_round_trip.rs` — `minimal_external_editor_round_trip`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::contains_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: Tall minimal fixture commits a response head into native scrollback
+
+The ignored Tokio PTY test SHALL start an isolated ContentController, set a deterministic tall_response(MOCK_RESPONSE_SENTINEL, 80), spawn the default minimal fixture at DEFAULT_ROWS by DEFAULT_COLS, wait for MINIMAL_IDLE_SENTINEL, submit PROMPT, and require the response head sentinel to appear in native scrollback within 40 seconds before overlay interaction.
+
+#### Scenario: Tall code-block response
+- **WHEN** the test starts and configures the mock response
+- **THEN** tall_response places MOCK_RESPONSE_SENTINEL on the first rendered code-block row and supplies 80 explicit payload rows so the block overflows the minimal viewport.
+
+#### Scenario: Minimal readiness
+- **WHEN** the default minimal pager is spawned
+- **THEN** spawn_minimal enables the shared minimal/no-leader fixture and wait_minimal_ready observes the idle minimal status before prompt input.
+
+#### Scenario: Native scrollback precondition
+- **WHEN** PROMPT is submitted and the response is being rendered
+- **THEN** scrollback_text contains MOCK_RESPONSE_SENTINEL before the 40-second deadline, proving the committed block head has moved above the visible viewport.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `minimal_committed_content_survives_overlay_grow`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `ContentController::start`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `ContentController::set_response`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `tall_response`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `spawn_minimal`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `PtyHarness::scrollback_text`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `tall_response`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e_minimal.rs` — `pty_e2e_minimal`。
+
+
+### Requirement: Minimal slash overlay opens while committed scrollback fills the viewport
+
+After the committed response head is in native scrollback, paced `/mod` input SHALL open the minimal slash dropdown and the visible screen SHALL contain `Switch the active model` within ten seconds even while committed content occupies the viewport, exercising the overlay viewport-growth path.
+
+#### Scenario: Paced slash input
+- **WHEN** the committed sentinel is already in scrollback
+- **THEN** inject_keys_paced delivers `/mod` byte by byte with update intervals so the prompt receives discrete slash-command events.
+
+#### Scenario: Overlay visibility
+- **WHEN** the slash prefix has been entered
+- **THEN** the dropdown displays the `Switch the active model` item before the ten-second deadline.
+
+#### Scenario: Content-filled viewport
+- **WHEN** the dropdown is requested while the tall committed block fills the screen
+- **THEN** the dropdown still renders, providing the end-to-end observation for growing the live viewport over committed rows.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `inject_keys_paced`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `Switch the active model`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `dropdown_deadline`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `inject_keys_paced`；`crates/codegen/pager-minimal/src/overlay.rs` — `active`；`crates/codegen/pager-minimal/src/overlay.rs` — `compute_target`；`crates/codegen/pager-minimal/src/lib.rs` — `sync_viewport`。
+
+
+### Requirement: Closing the minimal overlay preserves committed native scrollback across viewport shrink
+
+When the `/mod` dropdown is visible, Esc SHALL close it, a 400 ms update SHALL settle the reduced viewport and re-anchor, and the original MOCK_RESPONSE_SENTINEL SHALL remain in PtyHarness::scrollback_text, proving the overlay grow/shrink cycle did not clobber the committed block head.
+
+#### Scenario: Overlay dismissal
+- **WHEN** the model dropdown is visible
+- **THEN** keys::ESC is injected and the harness receives a settling update.
+
+#### Scenario: Native history preservation
+- **WHEN** the viewport has shrunk back after dismissal
+- **THEN** scrollback_text still contains MOCK_RESPONSE_SENTINEL.
+
+#### Scenario: Shrink re-anchor
+- **WHEN** the overlay closes after having grown the live viewport
+- **THEN** the test accepts the settled re-anchored state only after the explicit 400 ms update, so the preservation assertion is made after the close transition.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `keys::ESC`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `PtyHarness::update`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `PtyHarness::scrollback_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `committed block must survive the overlay grow/shrink cycle`；`crates/codegen/ratatui-inline/src/terminal.rs` — `Terminal::set_viewport_height`；`crates/codegen/pager-minimal/src/overlay.rs` — `compute_target`；`crates/codegen/pager-minimal/src/mod.rs` — `sync_viewport`。
+
+
+### Requirement: Overlay growth test liveness, panic absence and minimal cleanup
+
+The ignored PTY test SHALL fail with captured scrollback or screen diagnostics when the precondition or dropdown deadline expires, SHALL reject a visible `panicked` marker after the overlay closes, and SHALL invoke quit_minimal after preservation assertions to perform the shared two-step Ctrl-Q cleanup with its bounded exit fallback.
+
+#### Scenario: Scrollback precondition timeout
+- **WHEN** the sentinel does not reach native scrollback within 40 seconds
+- **THEN** the test fails with the current scrollback contents instead of exercising the overlay against an unproven state.
+
+#### Scenario: Dropdown timeout
+- **WHEN** the model suggestion is absent at the ten-second deadline
+- **THEN** the test fails with both screen and scrollback diagnostics.
+
+#### Scenario: No panic and cleanup
+- **WHEN** the dropdown has been closed and the committed sentinel remains
+- **THEN** the visible screen contains no `panicked` marker and quit_minimal is invoked.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `deadline`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `dropdown_deadline`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `quit_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_exit_code`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`。

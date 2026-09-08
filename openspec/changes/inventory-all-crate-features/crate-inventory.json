@@ -4192,7 +4192,19 @@
       "Minimal-to-fullscreen PTY fixture and seeded session history",
       "Pager minimal-to-fullscreen slash relaunch preserves session history",
       "Slash fullscreen relaunch remains session-scoped and does not persist screen mode",
-      "Minimal-to-fullscreen switch liveness, panic absence and cleanup"
+      "Minimal-to-fullscreen switch liveness, panic absence and cleanup",
+      "Minimal transcript pager fixture uses non-interactive cat",
+      "Transcript command submits after a committed turn",
+      "Transcript dump is observable through repeated content",
+      "Pager suspend restore and minimal health cleanup",
+      "The ignored minimal PTY test SHALL start an isolated mock content controller, create a temporary non-interactive editor script for the host platform, configure VISUAL to invoke that script, spawn the pager at the default minimal geometry, and enable terminal query replies before readiness assertions.",
+      "In minimal mode, Ctrl-G SHALL hand the focused draft to the configured external editor, restore the editor's exact file text into the composer, and leave the turn unsent until the user explicitly submits it.",
+      "After the external editor restores the draft, explicit submission SHALL produce the configured response and send a user message containing the edited text while no recorded user message contains the original pre-editor draft.",
+      "After the edited turn completes, minimal SHALL return to its idle live-region sentinel without a visible panic marker, and the ignored PTY test SHALL request clean shutdown.",
+      "Tall minimal fixture commits a response head into native scrollback",
+      "Minimal slash overlay opens while committed scrollback fills the viewport",
+      "Closing the minimal overlay preserves committed native scrollback across viewport shrink",
+      "Overlay growth test liveness, panic absence and minimal cleanup"
     ],
     "reviewed_files": [
       {
@@ -6702,6 +6714,18 @@
       {
         "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs",
         "sha256": "8f4eb34594f46c2e345572db6a02def97228203b9da03d5179ccb7b581466a23"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_transcript_opens_in_pager.rs",
+        "sha256": "6b754abe9756273a51372c7eceee0b45ee54ea9b59da2393a6f3ef38f22ed59f"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_external_editor_round_trip.rs",
+        "sha256": "1d393fe2851f35e632a0badca109cc55b4f7017c81844e10d206a691b43dc5e2"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs",
+        "sha256": "305e67c264b792895df829e56d8e68839a334c07acc4212aaa0a3bbd41481c9b"
       }
     ],
     "review": "reviews/pager.md"
