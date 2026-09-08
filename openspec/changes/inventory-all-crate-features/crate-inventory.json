@@ -4019,7 +4019,21 @@
       "Subagent lifecycle blocks preserve kind, identity, and running state",
       "Subagent lifecycle rows render state-specific labels and bounded descriptions",
       "Subagent accents and bullets communicate live, success, failure, and cancellation states",
-      "Subagent blocks remain compact selectable groupable lifecycle entries"
+      "Subagent blocks remain compact selectable groupable lifecycle entries",
+      "Fixed-height layout cache provides O(1) item geometry",
+      "Variable-height cache stores width and prefix geometry",
+      "Variable hit testing uses prefix binary search and clamps to valid items",
+      "Incremental height extension preserves prefix sums",
+      "FpsHud SHALL enable release-shaped FPS diagnostics from the configured GROW_FPS truthiness rule, support a live /debug fps toggle, clear stale measurements on every toggle, and expose deterministic enabled/height state.",
+      "FpsHud::record SHALL be a pure enabled-gated bounded ring-buffer append for supplied draw-frame wall durations.",
+      "format_stats SHALL derive a stable stats line from a duration deque, using mean duration for render throughput and linear interpolation over sorted milliseconds for p50 and p95.",
+      "FpsHud::overlay SHALL return owned per-frame render parameters only while enabled and refresh the formatted body at most when the cache is cold or 250ms old, while always carrying the caller-provided top offset.",
+      "FpsOverlay::render SHALL delegate a fixed-width two-line FPS panel to the shared debug-style renderer, positioned by the caller area and top offset.",
+      "The FPS HUD SHALL observe supplied frame durations and paint diagnostic cells without mutating application settings, measuring paint frequency, or claiming pipeline profiling outside the whole draw-frame duration.",
+      "Workflow block state model and run identity are stable across lifecycle updates",
+      "Workflow block output renders status, objective, phase trail, and active agents",
+      "Workflow block accents and bullets distinguish run status",
+      "Workflow blocks remain compact selectable groupable lifecycle entries with an objective preamble"
     ],
     "reviewed_files": [
       {
@@ -6373,6 +6387,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/blocks/subagent.rs",
         "sha256": "a75a07e0bff4463c5a6f5f3128fb05003fbb7f31f83a7cdbaf3b43803b48f6a0"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/list_pane/layout.rs",
+        "sha256": "0727f51652544f843eca8d5bdc66d79a169427762ec5a81c94d1408cf18b882e"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/fps_hud.rs",
+        "sha256": "845323a4aae36eb7405ed6cd355260b6f5f150a4c37f53b542d7a97c93f1fa35"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/workflow.rs",
+        "sha256": "baa73648ffed392c0af3dd54c4bda04f344e41f314169ac7776e77c4da1e4c0a"
       }
     ],
     "review": "reviews/pager.md"

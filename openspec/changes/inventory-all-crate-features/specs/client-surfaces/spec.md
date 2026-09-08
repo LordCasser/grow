@@ -27018,3 +27018,345 @@ SubagentBlock SHALL disable vertical padding and raw mode, remain non-foldable w
 - **THEN** the collapsed group header claims the subagent row and expansion reveals the immutable Started member.
 
 证据：`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::is_selectable`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::has_bullet`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::is_groupable`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `verb_group_header_label`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `SubagentBlockKind::Failed`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `buckets_in_first_appearance_order_with_plurality`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `subagent_completion_burst_counts_each_subagent`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `subagent_failed_feeds_suffix_cancelled_does_not`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `running_subagent_flips_group_tense`；`crates/codegen/pager/src/scrollback/render.rs` — `rendered_verb_group_folds_subagent_start_row`。
+
+
+### Requirement: Fixed-height layout cache provides O(1) item geometry
+
+The implementation SHALL satisfy the following tested behavior: ListLayoutCache::fixed creates FixedHeight with the requested count. FixedHeight total_height and item_count equal count, virtual_y equals the item index, item_height is always 1, and item_at_y returns None for count zero or the y value clamped to count minus one for a nonempty cache. cached_width returns None for FixedHeight.
+
+#### Scenario: Fixed geometry
+- **WHEN** a FixedHeight cache is created with count five
+- **THEN** total height and item count are five, item positions equal their indices, and every item height is one.
+
+#### Scenario: Fixed hit-test clamp
+- **WHEN** item_at_y is queried beyond the final fixed row
+- **THEN** the final item index is returned.
+
+#### Scenario: Empty fixed cache
+- **WHEN** a FixedHeight cache is created with count zero
+- **THEN** total/item count are zero and item_at_y returns None.
+
+证据：`crates/codegen/pager/src/views/list_pane/layout.rs` — `WrapMode::NoWrap`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::fixed`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::total_height`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::item_count`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::virtual_y`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::item_height`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::item_at_y`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `tests::fixed_height_basics`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `tests::fixed_height_empty`。
+
+
+### Requirement: Variable-height cache stores width and prefix geometry
+
+The implementation SHALL satisfy the following tested behavior: ListLayoutCache::from_heights collects the supplied u16 heights, stores the computation width, and builds a prefix_sums vector beginning with zero whose successive values add each height. Variable total_height is the final prefix sum, item_count is the heights length, virtual_y returns the prefix at an index or zero when absent, item_height returns the cached height or one when absent, and cached_width returns the stored width. Empty and single-item inputs retain these rules.
+
+#### Scenario: Variable geometry
+- **WHEN** heights [3, 1, 2, 4] are built at width 80
+- **THEN** total height is 10, item count is four, virtual positions are 0, 3, 4, 6, and item heights match the input.
+
+#### Scenario: Empty variable cache
+- **WHEN** from_heights receives an empty iterator
+- **THEN** total height and item count are zero and item_at_y returns None.
+
+#### Scenario: Single variable item
+- **WHEN** from_heights receives one item of height five
+- **THEN** the only item starts at virtual y zero, has height five, and y at or beyond its last row maps to item zero.
+
+#### Scenario: Width identity
+- **WHEN** a variable cache is built at width 120
+- **THEN** cached_width returns Some(120), while a fixed cache returns None.
+
+证据：`crates/codegen/pager/src/views/list_pane/layout.rs` — `WrapMode::Wrap`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::from_heights`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::total_height`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::item_count`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::virtual_y`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::item_height`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::cached_width`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `tests::variable_height_basics`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `tests::variable_height_empty`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `tests::variable_height_single_item`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `tests::cached_width`。
+
+
+### Requirement: Variable hit testing uses prefix binary search and clamps to valid items
+
+The implementation SHALL satisfy the following tested behavior: For a nonempty Variable cache, item_at_y uses the prefix sums to select the item whose half-open virtual range contains y, then clamps y at or beyond the total height to the final item. The tested heights [3, 1, 2, 4] map y 0..2 to item 0, y 3 to item 1, y 4..5 to item 2, and y 6..9 and larger values to item 3. Empty variable caches return None.
+
+#### Scenario: Interior hit
+- **WHEN** a y value falls inside a variable-height item's prefix range
+- **THEN** the corresponding item index is returned.
+
+#### Scenario: Boundary hit
+- **WHEN** y equals a prefix boundary between two items
+- **THEN** the item beginning at that boundary is returned.
+
+#### Scenario: Beyond content
+- **WHEN** y is equal to or greater than the total variable height
+- **THEN** the last valid item index is returned.
+
+证据：`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::item_at_y`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::from_heights`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `tests::variable_height_item_at_y`。
+
+
+### Requirement: Incremental height extension preserves prefix sums
+
+The implementation SHALL satisfy the following tested behavior: ListLayoutCache::extend_heights appends each new height to a Variable cache and appends a cumulative prefix sum based on the prior final sum. The resulting item count, total height, virtual positions, and item heights include the appended items. Extending with an empty iterator changes nothing. Calling extend_heights on FixedHeight panics by design according to the source branch.
+
+#### Scenario: Append heights
+- **WHEN** a variable cache with heights [3, 1] receives [2, 4]
+- **THEN** the cache has four items, total height 10, prefix positions 0, 3, 4, 6, and appended heights 2 and 4.
+
+#### Scenario: Empty append
+- **WHEN** a variable cache receives an empty iterator
+- **THEN** item count and total height remain unchanged.
+
+#### Scenario: Wrong cache variant
+- **WHEN** extend_heights is called on FixedHeight
+- **THEN** the source enters its explicit panic branch.
+
+证据：`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::extend_heights`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `ListLayoutCache::from_heights`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `tests::extend_heights_appends`；`crates/codegen/pager/src/views/list_pane/layout.rs` — `tests::extend_heights_empty_iter_is_noop`。
+
+
+### Requirement: FpsHud SHALL enable release-shaped FPS diagnostics from the configured GROW_FPS truthiness rule, support a live /debug fps toggle, clear stale measurements on every toggle, and expose deterministic enabled/height state.
+
+FpsHud::new SHALL read GROW_FPS and delegate to with_env. with_env SHALL enable only when HONORS_GROW_FPS_ENV is true and the optional value is nonempty and not exactly "0"; None, empty, and "0" disable it. enabled SHALL expose the flag; overlay_height SHALL be 2 when enabled and 0 otherwise. toggle SHALL invert enabled and clear samples, cached body, and last_refresh on both enable and disable, so a newly enabled HUD starts with fresh placeholders. The HUD is deliberately diagnostic/runtime state and is not a persisted settings-registry preference.
+
+#### Scenario: Disabled default
+- **WHEN** HUD is built with no env
+- **THEN** enabled is false, overlay_height is zero, and overlay returns None.
+
+#### Scenario: Env truthiness
+- **WHEN** GROW_FPS is 1, full, whitespace, empty, 0, or absent
+- **THEN** only nonempty values other than 0 enable when the env gate owner is true.
+
+#### Scenario: Toggle on
+- **WHEN** disabled HUD receives /debug fps toggle
+- **THEN** enabled becomes true, height becomes two rows, and overlay becomes available.
+
+#### Scenario: Toggle off
+- **WHEN** enabled HUD is toggled again
+- **THEN** enabled becomes false and overlay state is unavailable.
+
+#### Scenario: Fresh enable
+- **WHEN** samples/body existed before a disable-enable cycle
+- **THEN** all stale samples and cached text are cleared and placeholder stats are rebuilt.
+
+证据：`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::new`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::with_env`；`crates/codegen/pager/src/views/fps_hud.rs` — `HONORS_GROW_FPS_ENV`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::enabled`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::toggle`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::overlay_height`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::overlay`；`crates/codegen/pager/src/views/fps_hud.rs` — `disabled_by_default_and_toggle_round_trips`；`crates/codegen/pager/src/views/fps_hud.rs` — `grow_fps_env_enables_hud_where_dev_overlay_absent`。
+
+
+### Requirement: FpsHud::record SHALL be a pure enabled-gated bounded ring-buffer append for supplied draw-frame wall durations.
+
+record SHALL return immediately while disabled. When enabled and samples.len() reaches SAMPLE_CAP (120), it SHALL pop_front before pushing the new Duration, preserving the newest 120 measurements in order. toggle SHALL clear this ring. The file records caller-supplied whole draw_frame durations; it does not measure or schedule frames itself.
+
+#### Scenario: Disabled sample
+- **WHEN** record is called while disabled
+- **THEN** samples remain empty and no work is recorded.
+
+#### Scenario: Initial sample
+- **WHEN** enabled HUD receives a frame Duration
+- **THEN** the duration is appended to the ring.
+
+#### Scenario: Capacity
+- **WHEN** more than SAMPLE_CAP durations are recorded
+- **THEN** the oldest entries are discarded and length remains exactly 120.
+
+#### Scenario: Reset
+- **WHEN** toggle is used after recording
+- **THEN** the ring is cleared and the next overlay starts from no samples.
+
+#### Scenario: Whole-frame ownership
+- **WHEN** AppView passes draw_frame wall duration
+- **THEN** the HUD reports that supplied duration without changing the render pipeline.
+
+证据：`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::record`；`crates/codegen/pager/src/views/fps_hud.rs` — `SAMPLE_CAP`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::toggle`；`crates/codegen/pager/src/views/fps_hud.rs` — `record_is_a_noop_while_disabled`；`crates/codegen/pager/src/views/fps_hud.rs` — `record_caps_ring_buffer_and_toggle_clears_stale_samples`。
+
+
+### Requirement: format_stats SHALL derive a stable stats line from a duration deque, using mean duration for render throughput and linear interpolation over sorted milliseconds for p50 and p95.
+
+format_stats SHALL return `fps:- p50:- p95:-` for empty samples. Otherwise it SHALL convert durations to milliseconds, sort them, compute mean_ms, set fps to 1000/mean_ms when mean_ms>1e-6 and 0 otherwise, and render `fps:{fps:.0} p50:{p50:.1}ms p95:{p95:.1}ms`. percentile SHALL return 0 for an empty slice, use rank=(pct/100)*(len-1), return the endpoint when the lower index is last, and linearly interpolate adjacent sorted values otherwise.
+
+#### Scenario: Empty stats
+- **WHEN** no frame samples exist
+- **THEN** placeholder fps/p50/p95 dashes are returned.
+
+#### Scenario: Uniform frames
+- **WHEN** 100 samples each take 10ms
+- **THEN** stats report fps 100 and p50/p95 10.0ms.
+
+#### Scenario: Mixed frames
+- **WHEN** sorted durations have fractional percentile rank
+- **THEN** p50/p95 interpolate between neighboring millisecond values.
+
+#### Scenario: Near-zero frames
+- **WHEN** mean_ms is at or below 1e-6
+- **THEN** fps is reported as 0 rather than dividing by a near-zero duration.
+
+#### Scenario: Endpoint percentile
+- **WHEN** requested rank lands on the final sorted index
+- **THEN** that value is returned without reading past the slice.
+
+证据：`crates/codegen/pager/src/views/fps_hud.rs` — `format_stats`；`crates/codegen/pager/src/views/fps_hud.rs` — `percentile`；`crates/codegen/pager/src/views/fps_hud.rs` — `Duration::as_secs_f64`；`crates/codegen/pager/src/views/fps_hud.rs` — `stats_line_reports_mean_fps_and_percentiles`；`crates/codegen/pager/src/views/fps_hud.rs` — `fps:- p50:- p95:-`。
+
+
+### Requirement: FpsHud::overlay SHALL return owned per-frame render parameters only while enabled and refresh the formatted body at most when the cache is cold or 250ms old, while always carrying the caller-provided top offset.
+
+overlay SHALL return None when disabled. When enabled, it SHALL recompute body with format_stats and set last_refresh=Instant::now if last_refresh is None or elapsed >= REFRESH (250ms); otherwise it SHALL reuse the cached body. Each returned FpsOverlay SHALL clone the cached body and preserve top_offset, allowing AppView to assemble parameters before the frame closure without borrowing HUD state. The overlay has two rows: title plus stats body.
+
+#### Scenario: Disabled overlay
+- **WHEN** HUD is disabled
+- **THEN** no FpsOverlay is returned.
+
+#### Scenario: Cold cache
+- **WHEN** HUD is enabled with no last_refresh
+- **THEN** body is formatted from current samples and last_refresh is initialized.
+
+#### Scenario: Warm cache
+- **WHEN** overlay is requested before REFRESH elapsed
+- **THEN** the prior body is reused while the new top offset is still carried.
+
+#### Scenario: Expired cache
+- **WHEN** at least 250ms elapsed
+- **THEN** body is regenerated from current ring samples.
+
+#### Scenario: Stacked overlay
+- **WHEN** caller supplies a nonzero top_offset
+- **THEN** returned FpsOverlay preserves that offset for overlay stacking.
+
+证据：`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::overlay`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsOverlay`；`crates/codegen/pager/src/views/fps_hud.rs` — `REFRESH`；`crates/codegen/pager/src/views/fps_hud.rs` — `last_refresh`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsOverlay::top_offset`；`crates/codegen/pager/src/views/fps_hud.rs` — `overlay_height`。
+
+
+### Requirement: FpsOverlay::render SHALL delegate a fixed-width two-line FPS panel to the shared debug-style renderer, positioned by the caller area and top offset.
+
+render SHALL call debug_style::render_panel with the supplied Rect and Buffer, top_offset, PANEL_WIDTH=32, and exactly two lines: `fps debug  (/debug fps)` and the cached body. The overlay itself does not calculate coordinates, paint cells directly, or consult the application theme; shared debug_style owns right alignment, clipping, explicit colors, padding, and modifier reset. The inline Buffer test verifies that panel cells use black background, white/yellow debug foreground, and no inherited modifiers while outside cells retain their prior style.
+
+#### Scenario: Panel render
+- **WHEN** an enabled overlay is rendered into a Buffer
+- **THEN** the two-line title/body panel is handed to debug_style at the supplied offset and width.
+
+#### Scenario: Theme reset
+- **WHEN** the destination area already has a themed italic style
+- **THEN** panel cells replace it with explicit debug colors and empty modifiers.
+
+#### Scenario: Panel bounds
+- **WHEN** panel area is 60 columns wide and top_offset is 1
+- **THEN** only the top-right 32-column rows are painted; unrelated cells retain original style.
+
+#### Scenario: Overlay source
+- **WHEN** caller wants FPS diagnostics
+- **THEN** title advertises `/debug fps` and body contains cached fps/p50/p95 text.
+
+证据：`crates/codegen/pager/src/views/fps_hud.rs` — `FpsOverlay::render`；`crates/codegen/pager/src/views/fps_hud.rs` — `debug_style::render_panel`；`crates/codegen/pager/src/views/fps_hud.rs` — `PANEL_WIDTH`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsOverlay`；`crates/codegen/pager/src/views/fps_hud.rs` — `render_paints_theme_agnostic_style_over_every_panel_cell`。
+
+
+### Requirement: The FPS HUD SHALL observe supplied frame durations and paint diagnostic cells without mutating application settings, measuring paint frequency, or claiming pipeline profiling outside the whole draw-frame duration.
+
+The implementation SHALL satisfy the following tested behavior: The module documents that its FPS value is render throughput (1/mean draw_frame cost), not idle paint frequency; disabled cost is a boolean check per frame and rendering only paints buffer cells. GROW_FPS ownership is represented by HONORS_GROW_FPS_ENV so release-shaped builds can honor the environment while dev FrameMetrics owns it; this file does not create a duplicate dev overlay. It exposes no persistence, input routing, network, or frame scheduling APIs.
+
+#### Scenario: Idle UI
+- **WHEN** no draw_frame duration is recorded
+- **THEN** the HUD remains a diagnostic overlay with placeholders rather than inventing paint frequency.
+
+#### Scenario: Observation only
+- **WHEN** record/overlay/render are called
+- **THEN** only ring/cache state and Buffer cells change; settings registry and model state are untouched.
+
+#### Scenario: Build ownership
+- **WHEN** dev or release overlay ownership differs
+- **THEN** HONORS_GROW_FPS_ENV determines whether this HUD consumes the env gate, avoiding a double overlay in dev and a silent no-op in release.
+
+#### Scenario: Scope boundary
+- **WHEN** a caller needs full per-phase profiler timings
+- **THEN** this file supplies only whole-frame wall duration; phase instrumentation remains elsewhere.
+
+证据：`crates/codegen/pager/src/views/fps_hud.rs` — `HONORS_GROW_FPS_ENV`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::with_env`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::record`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsHud::overlay`；`crates/codegen/pager/src/views/fps_hud.rs` — `FpsOverlay::render`。
+
+
+### Requirement: Workflow block state model and run identity are stable across lifecycle updates
+
+WorkflowBlock SHALL retain run_id, name, objective, status, phase snapshots, optional current phase, active-agent count, and elapsed duration. started SHALL initialize Running status, empty phases/current phase, zero active agents, and zero elapsed. The status model SHALL distinguish Running, Done, Failed, Cancelled, and Paused with terminal elapsed durations where applicable. Workflow ingestion SHALL map active/complete/failed/interrupted/cancelled/cleared/unknown wire statuses to the corresponding block status, update the existing run row by run_id, and remove a cleared/terminal mapping as specified by the ingest path.
+
+#### Scenario: Fresh run
+- **WHEN** a workflow run is first observed
+- **THEN** WorkflowBlock::started retains run identity/name/objective and starts with Running and empty progress fields.
+
+#### Scenario: Status mapping
+- **WHEN** workflow_ingest receives active, complete, failed/interrupted, cancelled, cleared, or another status
+- **THEN** the block status becomes Running, Done, Failed, Cancelled, is removed/finished for cleared, or Paused for unknown statuses.
+
+#### Scenario: Progress update
+- **WHEN** a known run_id receives new phases/current phase/agent count/elapsed
+- **THEN** the existing scrollback block is updated and its cache invalidated; no duplicate run row is required.
+
+#### Scenario: Run identity interaction
+- **WHEN** a workflow block is double-clicked while multiple snapshots share a display name
+- **THEN** selection uses run_id to open workflows, close goal detail, and select the matching run/detail entry.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlockStatus`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlockPhase`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::started`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `upsert_workflow_block`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `build_workflow_run_snapshot`；`crates/codegen/pager/src/app/agent_view/selection.rs` — `workflow_double_click_opens_matching_run_id_and_closes_goal_detail`；`crates/codegen/pager/src/app/agent_view/selection.rs` — `double_click_gesture`。
+
+
+### Requirement: Workflow block output renders status, objective, phase trail, and active agents
+
+BlockContent::output SHALL emit one line beginning with a bold Workflow label and a status-specific verb: `<name>:`, `<name> done in <duration>:`, `<name> failed in <duration>:`, `<name> ◌ cancelled after <duration>:`, or `<name> paused at <duration>:`. It SHALL replace objective newlines with spaces, append a phase trail when phases exist (done=✓, active=●, other=○ joined by ` · `), use current_phase only when phases are empty, and append `(N agents)` only for Running status with a positive active-agent count. Cancelled detail text SHALL be dimmed; other details SHALL use muted styling, while only the Workflow label changes bold color on selection.
+
+#### Scenario: Running progress
+- **WHEN** status is Running with phases and active_agents > 0
+- **THEN** the line contains name, objective, marked phase trail, and the agent count.
+
+#### Scenario: Completed run
+- **WHEN** status is Done with elapsed duration and active_agents set
+- **THEN** the line reports duration and omits the agent count.
+
+#### Scenario: Failed run
+- **WHEN** status is Failed
+- **THEN** the line reports failed duration and does not use the cancelled/no-result wording.
+
+#### Scenario: Cancelled run
+- **WHEN** status is Cancelled
+- **THEN** the line includes `◌ cancelled after`, omits active-agent count, and uses dim detail styling.
+
+#### Scenario: Paused run
+- **WHEN** status is Paused
+- **THEN** the line reports paused duration and uses ordinary muted detail styling.
+
+#### Scenario: Phase trail fallback
+- **WHEN** phases is empty or non-empty
+- **THEN** an empty phase list can show current_phase without marks; a populated list renders each phase title with the state glyph.
+
+#### Scenario: Multiline objective
+- **WHEN** objective contains newline characters
+- **THEN** output collapses line breaks to spaces so the lifecycle row stays single-line.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::output`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::phase_trail`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `format_duration`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `running_line_shows_phase_trail_and_agents`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `done_line_shows_duration_and_drops_agents`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `cancelled_line_shows_dim_glyph_not_failure`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `multiline_objective_collapses`。
+
+
+### Requirement: Workflow block accents and bullets distinguish run status
+
+A Running workflow entry marked running SHALL expose a static running accent and an animated, dimmed running bullet; a Running entry no longer marked running SHALL have no bullet accent. Done SHALL use a static success bullet, Failed a static error bullet, Cancelled a static gray-dim bullet, and Paused a static warning bullet. Only Running while ctx.is_running supplies an accent.
+
+#### Scenario: Active run
+- **WHEN** status is Running and ctx.is_running is true
+- **THEN** accent is static accent_running and bullet is animated using the configured dim blend.
+
+#### Scenario: Stopped running row
+- **WHEN** status is Running but ctx.is_running is false
+- **THEN** accent and bullet are absent for the running row.
+
+#### Scenario: Done/Failed terminal state
+- **WHEN** status is Done or Failed
+- **THEN** the bullet is static success or static error respectively, with no accent line.
+
+#### Scenario: Cancelled state
+- **WHEN** status is Cancelled
+- **THEN** the bullet is static gray_dim and no accent line is emitted.
+
+#### Scenario: Paused state
+- **WHEN** status is Paused
+- **THEN** the bullet is static warning and no accent line is emitted.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::bullet`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `blend_color`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `AccentStyle::static_color`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `AccentStyle::animated`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `theme.accent_running`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `theme.accent_success`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `theme.accent_error`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `theme.gray_dim`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `theme.warning`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `cancelled_bullet_is_static_gray`。
+
+
+### Requirement: Workflow blocks remain compact selectable groupable lifecycle entries with an objective preamble
+
+WorkflowBlock SHALL disable vertical padding, raw mode, and folding, default to Collapsed, remain selectable, always expose a bullet, and participate in grouping. Its preamble SHALL show the full objective in primary style, a blank line, and each phase with the same done/active/other glyph mapping in muted style. Grouping and task surfaces SHALL preserve workflow rows as one run entry, exclude workflow-owned child agents from ordinary subagent counts, and expose the run as a Workflow item.
+
+#### Scenario: Interaction metadata
+- **WHEN** the renderer queries padding/raw/fold/default/selectable/bullet/groupable properties
+- **THEN** the block returns false for padding/raw/foldability, Collapsed as default, and true for selectable/bullet/groupable.
+
+#### Scenario: Preamble
+- **WHEN** a workflow block has an objective and phases
+- **THEN** the full objective and phase list are shown in a separate detail preamble with primary objective and muted marked phases.
+
+#### Scenario: Group behavior
+- **WHEN** workflow rows are included in scrollback grouping
+- **THEN** the row can be grouped without becoming foldable itself.
+
+#### Scenario: Task surface
+- **WHEN** a workflow snapshot is active with a live phase and running agent
+- **THEN** the tasks surface labels it Workflow, includes the current phase and active-agent count, and counts the run once.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::is_selectable`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::has_bullet`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::is_groupable`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::preamble`；`crates/codegen/pager/src/app/status_blocks.rs` — `tasks_block_text`；`crates/codegen/pager/src/app/status_blocks.rs` — `tasks_block_text_labels_workflow_runs`；`crates/codegen/pager/src/views/tasks_pane.rs` — `TaskEntry::from_workflow_run`；`crates/codegen/pager/src/views/tasks_pane.rs` — `workflows_section_lists_runs`；`crates/codegen/pager/src/views/tasks_pane.rs` — `workflow_children_are_excluded_and_run_counts_once`。

@@ -1004,3 +1004,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Extension fetch coalescing is represented by mutable modal flags and effect counting; there is no typed request generation or observable correlation in these tests.
 - Pager 审计债务：Close cleanup mixes view switching, session unregister effect construction, map removal, fork-reference repair, and memory release in one dispatcher path.
 - Pager 审计债务：The tests depend on global or shared test-support state for memory-release counting and filesystem/git fixture assumptions, which can make isolation and failure diagnosis harder.
+- Pager 审计债务：ListLayoutCache::virtual_y and item_height silently return zero/one for out-of-range indices, which can mask stale visible-index callers instead of exposing an explicit invalid-state result.
+- Pager 审计债务：The FixedHeight/Variable mode contract is enforced by a runtime panic in extend_heights rather than a type-level API that makes invalid incremental updates impossible.
+- Pager 审计债务：Prefix sums use usize while source heights are u16 without checked accumulation, leaving extreme aggregate-height behavior implicit.
+- Pager 审计债务：The cached width is metadata only in this module; correctness depends on ListPaneState to invalidate the cache whenever width or wrapping inputs change.
