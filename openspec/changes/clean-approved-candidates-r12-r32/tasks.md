@@ -13,7 +13,7 @@
 - [x] R24: review, remove within approved boundary, run relevant regression and commit.
 - [x] R25: review, remove within approved boundary, run relevant regression and commit.
 - [x] R26: review, remove within approved boundary, run relevant regression and commit.
-- [ ] R28: review, remove within approved boundary, run relevant regression and commit.
+- [x] R28: review, remove within approved boundary, run relevant regression and commit.
 - [ ] R29: review, remove within approved boundary, run relevant regression and commit.
 - [ ] R30: review, remove within approved boundary, run relevant regression and commit.
 - [ ] R31: review, remove within approved boundary, run relevant regression and commit.

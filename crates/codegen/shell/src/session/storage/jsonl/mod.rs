@@ -2530,30 +2530,6 @@ impl JsonlStorageAdapter {
         }
         crate::session::persistence::decode_summary(&bytes)
     }
-    fn read_optional_json_sync<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &Path,
-    ) -> io::Result<Option<T>> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        match std::fs::read_to_string(path) {
-            Ok(s) if s.trim().is_empty() => Ok(None),
-            Ok(s) => match serde_json::from_str::<T>(&s) {
-                Ok(v) => Ok(Some(v)),
-                Err(e) => {
-                    tracing::warn!(?e, "failed parsing json; returning None");
-                    Ok(None)
-                }
-            },
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(?e, "failed reading json; returning None");
-                }
-                Ok(None)
-            }
-        }
-    }
 
     fn load_workflow_runs_sync(
         &self,

@@ -260,7 +260,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：全仓 Rust 符号检索仅见定义；实际控制、signals 和公告状态由 Timeline 恢复，Workflow manifest 使用目录 capability 的有界读取。
 - 删除理由：未启用的 exists/read_to_string/错误转 None 路径增加维护表面。无界读取和吞错仅是闲置实现的属性，未认定为当前运行故障。
 - 拟删除范围：仅该私有方法；保留实际可选状态恢复、Timeline 校验、有界文件读取及相关功能。
-- 状态：等待用户确认，尚未删除或接线。证据见 audit-unused-jsonl-helpers。
+- 状态：已获批并删除；JSONL 存储回归 135/135 通过。证据见 audit-unused-jsonl-helpers。
 
 ## R29 · 无调用方的旧摘要锁及 Workflow 路径构造器
 

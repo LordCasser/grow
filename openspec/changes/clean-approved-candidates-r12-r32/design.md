@@ -47,3 +47,9 @@ snapshot_session_log has no callers, while snapshot_log and writer/trimming are 
 
 ## R28/R29 reviewed boundary
 read_optional_json_sync, summary_lock_file and workflows_dir are private and uncalled across Rust sources. Remove R28 reader in its own commit, then R29 path helpers in another. Retain actual directory-capability reads, Timeline/control restoration, writer lease and rewind_points_file (test consumers). Run relevant JSONL storage regressions for each deletion; never delete user files or directories.
+
+## R30/R31 reviewed boundary
+R30 standalone rewind_files and its three response/conflict types have no callers; remove only that region, preserving tracker/ToolContext, snapshots and Shell transaction rewind. R31 removes only merge_and_remove_from/max_prompt_index. Migrate historical merge assertions to get_rewind_points + pure merge_rewind_points_from; retain lazy-load failure/retry checks and max-index assertion derived from complete points. Do not remove truncate_from, replace_rewind_points or get_rewind_points. Run workspace file_state tests after each independent deletion.
+
+## R32 reviewed boundary
+Only CountingCallback implements the optional attribution hook; all production config paths use None or forward it. Remove callback trait/alias/consumer enum, config/client fields, six optional calls and propagation. Keep SentRequest.sent_bearer capture, auth_rejected/SentCredential, auth_info method classification and auth retry budget. Keep bearer_tail_fragment/constant because active auth capture still consumes them; do not fold a credential-presence redesign into removal. Convert useful sent-fragment assertions in the callback test to direct post() assertions; remove callback-only/no-op test. Regress sampler auth/request handling and compile Shell/workflow forwarding consumers.

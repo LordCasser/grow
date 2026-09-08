@@ -42,3 +42,6 @@ Removed unused diagnostics device-ID module/export, mid and exclusive UUID-v5 fe
 
 ## R26
 Removed uncalled snapshot_session_log only; snapshot_log and writer/trim paths retained. Fresh isolated unified_log regressions 21/21 passed.
+
+## R28
+Removed only private uncalled read_optional_json_sync. Fresh Shell JSONL storage regressions 135/135 passed, covering actual load/Timeline and directory-capability paths. No user storage data touched.
