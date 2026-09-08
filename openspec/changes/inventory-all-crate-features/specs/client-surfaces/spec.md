@@ -32077,3 +32077,54 @@ The implementation SHALL satisfy the following tested behavior:
 #### Scenario: Minimal cleanup
 - **WHEN** all settings open/close assertions pass
 - **THEN** quit_minimal sends confirmation chords and waits for exit or uses its harness kill fallback.
+
+
+### Requirement: Idle minimal prompt bootstrap
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Start content controller
+- **WHEN** the async PTY test begins
+- **THEN** ContentController::start creates the mock content fixture or the test fails at startup.
+
+#### Scenario: Spawn minimal
+- **WHEN** the content controller is available
+- **THEN** spawn_minimal launches the default standalone minimal pager harness.
+
+#### Scenario: Gate on idle prompt
+- **WHEN** the pager process has started
+- **THEN** wait_minimal_ready waits for the shared `minimal · /help` idle sentinel before key injection.
+
+
+### Requirement: First Ctrl-C arms idle quit confirmation
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: First Ctrl-C
+- **WHEN** wait_minimal_ready has returned and the prompt is empty and idle
+- **THEN** the test injects the raw ETX byte `0x03` and treats it as the first Ctrl+C.
+
+#### Scenario: Quit hint
+- **WHEN** the first Ctrl+C is processed
+- **THEN** the visible screen contains `again to quit` within five seconds.
+
+#### Scenario: Diagnostic on missing hint
+- **WHEN** the hint does not appear before the timeout
+- **THEN** the test panics and includes the current screen contents in the failure message.
+
+
+### Requirement: Second Ctrl-C exits minimal pager
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Second Ctrl-C
+- **WHEN** the first-press confirmation hint has appeared
+- **THEN** the test injects the raw ETX byte `0x03` again without an intervening delay beyond harness processing.
+
+#### Scenario: Exit observation
+- **WHEN** the second Ctrl+C has been injected
+- **THEN** wait_exit_code waits up to five seconds and accepts Exited(_) or PendingStatus.
+
+#### Scenario: Failure diagnostic
+- **WHEN** wait_exit_code returns Running or another unsupported state
+- **THEN** the assertion fails and reports the state plus current screen contents.

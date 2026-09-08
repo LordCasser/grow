@@ -1090,3 +1090,5 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The regression is #[ignore], so minimal Escape cancellation is outside default automated coverage.
 - Pager 审计债务：Timing and literal text assertions leave the cancellation contract indirectly specified and diagnosis coarse.
 - Pager 审计债务：端到端设置 modal 流程仍依赖 UI 文案 sentinel，且打开、关闭、健康检查和清理集中在一个 PTY 场景中；可补充结构化 modal/focus probe 和更细粒度测试。
+- Pager 审计债务：The regression is #[ignore], so minimal idle Ctrl+C quit confirmation is outside default automated coverage.
+- Pager 审计债务：Literal text matching and acceptance of PendingStatus leave the command-state and clean-exit contracts indirect.

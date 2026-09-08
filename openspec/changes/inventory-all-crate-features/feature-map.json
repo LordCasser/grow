@@ -217610,5 +217610,132 @@
       }
     ],
     "sources": []
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Idle minimal prompt bootstrap",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ",
+    "scenarios": [
+      {
+        "name": "Start content controller",
+        "when": "the async PTY test begins",
+        "then": "ContentController::start creates the mock content fixture or the test fails at startup."
+      },
+      {
+        "name": "Spawn minimal",
+        "when": "the content controller is available",
+        "then": "spawn_minimal launches the default standalone minimal pager harness."
+      },
+      {
+        "name": "Gate on idle prompt",
+        "when": "the pager process has started",
+        "then": "wait_minimal_ready waits for the shared `minimal · /help` idle sentinel before key injection."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_ctrl_c_arms_and_quits.rs",
+        "minimal_ctrl_c_arms_and_quits"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::start"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "spawn_minimal"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "wait_minimal_ready"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "MINIMAL_IDLE_SENTINEL"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "First Ctrl-C arms idle quit confirmation",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ",
+    "scenarios": [
+      {
+        "name": "First Ctrl-C",
+        "when": "wait_minimal_ready has returned and the prompt is empty and idle",
+        "then": "the test injects the raw ETX byte `0x03` and treats it as the first Ctrl+C."
+      },
+      {
+        "name": "Quit hint",
+        "when": "the first Ctrl+C is processed",
+        "then": "the visible screen contains `again to quit` within five seconds."
+      },
+      {
+        "name": "Diagnostic on missing hint",
+        "when": "the hint does not appear before the timeout",
+        "then": "the test panics and includes the current screen contents in the failure message."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::inject_keys"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::wait_for_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::screen_contents"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Second Ctrl-C exits minimal pager",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ",
+    "scenarios": [
+      {
+        "name": "Second Ctrl-C",
+        "when": "the first-press confirmation hint has appeared",
+        "then": "the test injects the raw ETX byte `0x03` again without an intervening delay beyond harness processing."
+      },
+      {
+        "name": "Exit observation",
+        "when": "the second Ctrl+C has been injected",
+        "then": "wait_exit_code waits up to five seconds and accepts Exited(_) or PendingStatus."
+      },
+      {
+        "name": "Failure diagnostic",
+        "when": "wait_exit_code returns Running or another unsupported state",
+        "then": "the assertion fails and reports the state plus current screen contents."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::inject_keys"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::wait_exit_code"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyExitPoll::Exited"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyExitPoll::PendingStatus"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::screen_contents"
+      ]
+    ]
   }
 ]

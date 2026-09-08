@@ -4251,7 +4251,10 @@
       "Minimal settings modal PTY fixture and readiness gate",
       "Minimal `/settings` opens the full settings editor inline",
       "Esc closes the minimal settings editor and restores idle prompt state",
-      "Minimal settings modal liveness, panic absence and cleanup"
+      "Minimal settings modal liveness, panic absence and cleanup",
+      "Idle minimal prompt bootstrap",
+      "First Ctrl-C arms idle quit confirmation",
+      "Second Ctrl-C exits minimal pager"
     ],
     "reviewed_files": [
       {
@@ -6821,6 +6824,10 @@
       {
         "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_settings_modal_opens_and_closes.rs",
         "sha256": "851bfa4f568e1185cc3ccec1d51626aa791dc86076a98d45a1a50139413a7a66"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_ctrl_c_arms_and_quits.rs",
+        "sha256": "81245de217d4863ac03bf5ffd1d32c0459f497410ac840b04c91012a0757f450"
       }
     ],
     "review": "reviews/pager.md"
