@@ -215972,5 +215972,578 @@
         "PtyHarness::quit"
       ]
     ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Slow minimal turn and queued-promotion fixture",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The test starts ContentController, sets a 150 ms chunk delay, registers one expected foreground turn with slow_turn_text(\"STEPONE\") and a second expected turn with `STEPTWO queued prompt handled.`, spawns minimal, and waits for minimal readiness. The two AgentTurnExpectation handles are retained in underscore bindings but no expectation wait or satisfaction assertion is performed in this file.",
+    "scenarios": [
+      [
+        "Running-turn window",
+        "the first prompt is submitted after the 150 ms chunk delay is configured",
+        "STEPONE remains observable while the test injects a second prompt."
+      ],
+      [
+        "Promoted queued turn fixture",
+        "a queued request is eventually promoted",
+        "the scripted second response contains STEPTWO and the queued prompt wording."
+      ],
+      [
+        "Minimal readiness",
+        "spawn_minimal completes",
+        "wait_minimal_ready gates prompt interaction on the minimal idle sentinel."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "slow_turn_text"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "spawn_minimal"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "wait_minimal_ready"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::start"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::set_chunk_delay"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::expect_agent_turn"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "AgentTurnExpectation"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Queued prompt count and /queue inspection hint",
+    "contract": "The implementation SHALL satisfy the following tested behavior: After submitting PROMPT and waiting up to 30 seconds for STEPONE in the live screen, the test injects `second queued prompt` plus carriage return while the first turn is running. It then requires the visible info-row string `1 queued · /queue` within ten seconds, asserting one pending prompt count and the slash-command inspection hint in minimal status UI.",
+    "scenarios": [
+      [
+        "First turn streaming",
+        "STEPONE appears on the visible screen",
+        "the test proceeds to enter a second prompt during the running turn."
+      ],
+      [
+        "Queue admission",
+        "the second prompt is submitted while the first response is still streaming",
+        "the status info row reports exactly `1 queued · /queue`."
+      ],
+      [
+        "Indicator timeout",
+        "the exact count/hint string is not visible before ten seconds",
+        "the test fails with the harness wait error."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "PROMPT"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::inject_keys"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::wait_for_text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Read-only queue snapshot commits queued text",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The test paces `/queue` input, submits carriage return, and waits up to ten seconds for `Queued prompt` and `#1  second queued prompt` in full_text. These assertions require the read-only queue snapshot block to be committed and to include the queued prompt text.",
+    "scenarios": [
+      [
+        "Queue inspection command",
+        "the running turn has reported one queued prompt",
+        "paced `/queue` is submitted as an immediate slash command."
+      ],
+      [
+        "Snapshot block",
+        "the queue command has been submitted",
+        "full_text contains `Queued prompt` within ten seconds."
+      ],
+      [
+        "Queued text projection",
+        "the snapshot block is present",
+        "full_text contains the numbered queued text `#1  second queued prompt`."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "inject_keys_paced"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::inject_keys"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::wait_for_full_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::full_text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Queued prompt promotion and minimal health cleanup",
+    "contract": "The implementation SHALL satisfy the following tested behavior: After the queue snapshot assertions, the test waits up to 40 seconds for STEPTWO in full_text, treating the second scripted response as evidence that the queued prompt promoted and ran after the first turn. It rejects a visible `panicked` marker and calls quit_minimal. The single Tokio test is marked #[ignore], so these are explicit-selection assertions rather than default-suite verification.",
+    "scenarios": [
+      [
+        "Queued promotion",
+        "the first turn and queue snapshot have been observed",
+        "STEPTWO appears in full_text within 40 seconds."
+      ],
+      [
+        "No panic marker",
+        "the promoted response is visible",
+        "the visible screen does not contain `panicked`."
+      ],
+      [
+        "Cleanup",
+        "the health assertion passes",
+        "quit_minimal performs the shared minimal shutdown routine."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_queue_indicator_shows_while_running.rs",
+        "minimal_queue_indicator_shows_while_running"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "quit_minimal"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::wait_for_full_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::contains_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::screen_contents"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "The ignored PTY test SHALL start an isolated ContentController, create a temporary project cwd containing .git, configure a deterministic mock response, launch a minimal pager there with the shared default geometry, and wait for minimal readiness before inspecting config persistence.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: minimal_cli_screen_mode_does_not_persist starts ContentController and sets a turn_sentinel(1) response, creates a tempfile project and project/.git, then calls spawn_minimal_in_dir with DEFAULT_ROWS, DEFAULT_COLS, no extra args, and that path. It waits for wait_minimal_ready. The response is configured but no prompt is submitted; the first run exists to exercise CLI mode startup and persistence side effects.",
+    "scenarios": [
+      [
+        "Isolated project",
+        "the test creates its fixture",
+        "both launches use the same temporary cwd containing a .git directory."
+      ],
+      [
+        "Minimal CLI startup",
+        "the first pager is spawned",
+        "spawn_minimal_in_dir uses the minimal/no-leader fixture at the shared 50x120 geometry."
+      ],
+      [
+        "Readiness gate",
+        "the first process starts",
+        "wait_minimal_ready observes the minimal idle sentinel before the config check."
+      ],
+      [
+        "Mock setup without turn",
+        "the first fixture is ready",
+        "the deterministic response is available, but no inference request is required for this mode-persistence scenario."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_cli_screen_mode_does_not_persist.rs",
+        "minimal_cli_screen_mode_does_not_persist"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "DEFAULT_ROWS"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "DEFAULT_COLS"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "spawn_minimal_in_dir"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "wait_minimal_ready"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "turn_sentinel"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::start"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::set_response"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Launching the pager with the explicit --minimal CLI mode SHALL open minimal for that session without writing a screen_mode key into the isolated .grow/config.toml.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: After the first minimal readiness gate, the test resolves content.home()/.grow/config.toml, pumps the first PTY for three seconds in 100 ms updates to allow any fire-and-forget persistence path to run, reads the file or uses an empty string when it does not exist, and requires that the body does not contain the substring `screen_mode`. It then calls quit_minimal. The assertion covers key text presence only and does not parse TOML or require the file to exist.",
+    "scenarios": [
+      [
+        "Allow persistence window",
+        "the explicit minimal pager is idle",
+        "the harness is pumped for three seconds in 100 ms steps while the config path is allowed to materialize."
+      ],
+      [
+        "No screen mode key",
+        "config.toml is read after the settle window",
+        "the body contains no `screen_mode` text."
+      ],
+      [
+        "Missing config tolerated",
+        "config.toml does not exist or cannot be read",
+        "read_to_string falls back to an empty body, which still satisfies no-mode-persistence."
+      ],
+      [
+        "Session cleanup",
+        "the persistence assertion passes",
+        "the first minimal process is shut down through quit_minimal before the plain launch."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_cli_screen_mode_does_not_persist.rs",
+        "minimal_cli_screen_mode_does_not_persist"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::home"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::update"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "quit_minimal"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "After an explicit --minimal run has ended without a persisted config preference, a second launch from the same project with no screen-mode flag SHALL present the fullscreen welcome surface and SHALL not present the minimal idle sentinel.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The second run resolves pager_binary and calls PtyHarness::spawn_with_content_in_dir with DEFAULT_ROWS, DEFAULT_COLS, the shared content controller, args [\"--no-leader\"], and the same project path. It enables query responses, waits for WELCOME_SCREEN_SENTINEL within WELCOME_TIMEOUT, and asserts that MINIMAL_IDLE_SENTINEL is absent. The welcome sentinel and absence of minimal idle are screen proxies for fullscreen/default mode; the test does not inspect an internal ScreenMode value or use an explicit --fullscreen flag.",
+    "scenarios": [
+      [
+        "Plain relaunch",
+        "the first minimal process has quit and no screen_mode key was written",
+        "a second pager starts from the same cwd with only --no-leader."
+      ],
+      [
+        "Fullscreen welcome",
+        "the second process starts",
+        "WELCOME_SCREEN_SENTINEL appears within WELCOME_TIMEOUT."
+      ],
+      [
+        "No sticky minimal mode",
+        "the second screen is sampled",
+        "MINIMAL_IDLE_SENTINEL is absent without a manual config preference."
+      ],
+      [
+        "Mode scope",
+        "the observed default surface is evaluated",
+        "the test treats CLI --minimal as session-scoped rather than a persistent UI setting."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_cli_screen_mode_does_not_persist.rs",
+        "minimal_cli_screen_mode_does_not_persist"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "DEFAULT_ROWS"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "DEFAULT_COLS"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "WELCOME_SCREEN_SENTINEL"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "MINIMAL_IDLE_SENTINEL"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "WELCOME_TIMEOUT"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::spawn_with_content_in_dir"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::set_respond_to_queries"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::wait_for_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::contains_text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "The plain second launch SHALL show no visible panic marker, and the ignored mode-persistence scenario SHALL shut down the second pager cleanly after its screen assertions.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The test asserts !second.contains_text(\"panicked\") with second.screen_contents() in the failure diagnostic, then calls second.quit(). Unlike the first launch, the second launch does not use quit_minimal because it is expected to be fullscreen/default. The source does not assert second's exit code or config contents again after shutdown.",
+    "scenarios": [
+      [
+        "No panic on default launch",
+        "WELCOME_SCREEN_SENTINEL is visible and minimal idle is absent",
+        "the second screen contains no `panicked` marker."
+      ],
+      [
+        "Clean second shutdown",
+        "all mode assertions pass",
+        "PtyHarness::quit is invoked on the plain launch."
+      ],
+      [
+        "Ignored execution gate",
+        "the default PTY target discovers this test",
+        "the #[ignore] attribute excludes it unless explicitly selected."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_cli_screen_mode_does_not_persist.rs",
+        "minimal_cli_screen_mode_does_not_persist"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::contains_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::screen_contents"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::quit"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Tall minimal response fixture reaches native scrollback",
+    "contract": "The ignored Tokio PTY test SHALL start ContentController, configure a fenced-code tall_response containing MOCK_RESPONSE_SENTINEL and 80 payload rows, spawn the default minimal fixture, wait for MINIMAL_IDLE_SENTINEL, submit PROMPT, and pump 100 ms updates for at most 40 seconds until scrollback_text contains the response sentinel. The test SHALL proceed only after the sentinel is present in native scrollback, above the pinned minimal viewport.",
+    "scenarios": [
+      [
+        "Tall first response",
+        "the mock response is configured with tall_response(MOCK_RESPONSE_SENTINEL, 80)",
+        "the fenced code block places the sentinel on its first rendered row and emits enough explicit rows to overflow the default terminal."
+      ],
+      [
+        "Minimal readiness",
+        "spawn_minimal completes",
+        "wait_minimal_ready observes the minimal idle sentinel before the prompt is submitted."
+      ],
+      [
+        "Native scrollback frontier",
+        "the polling loop observes MOCK_RESPONSE_SENTINEL in scrollback_text",
+        "the assistant response head is known to have reached native scrollback rather than only the live screen."
+      ],
+      [
+        "Scrollback timeout",
+        "the sentinel is absent when the 40-second deadline expires",
+        "the assertion fails and reports the captured native scrollback and current screen."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "minimal_commits_response_to_scrollback"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "ContentController::start"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "ContentController::set_response"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "tall_response"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "spawn_minimal"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "wait_minimal_ready"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "PtyHarness::scrollback_text"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "PtyHarness::update"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "tall_response"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "MOCK_RESPONSE_SENTINEL"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "DEFAULT_ROWS"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "DEFAULT_COLS"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "spawn_minimal"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "wait_minimal_ready"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e_minimal.rs",
+        "pty_e2e_minimal"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Minimal committed response reaches the mock inference service",
+    "contract": "Once MOCK_RESPONSE_SENTINEL is observed in native scrollback, the test SHALL require ContentController::has_chat_completion to be true; if the mock reports no chat-completion or Responses request, the test SHALL fail with the recorded request diagnostics instead of treating terminal text alone as sufficient response evidence.",
+    "scenarios": [
+      [
+        "Mock inference receipt",
+        "the tall response sentinel has reached native scrollback",
+        "the controller helper reports at least one supported inference request was received."
+      ],
+      [
+        "Missing backend request",
+        "the response sentinel is present but has_chat_completion is false",
+        "the assertion fails and includes ContentController::requests in its diagnostic."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "ContentController::has_chat_completion"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "ContentController::requests"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "mock inference server never received a chat completion"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::has_chat_completion"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::requests"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::has_chat_completion"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Minimal response scrollback test health and cleanup",
+    "contract": "After the native scrollback and mock receipt assertions pass, the ignored PTY test SHALL reject a visible `panicked` marker in the current screen and SHALL invoke quit_minimal for the shared two-step Ctrl-Q cleanup with its bounded exit wait and harness-kill fallback.",
+    "scenarios": [
+      [
+        "No visible panic",
+        "the response sentinel and chat completion have been validated",
+        "PtyHarness::contains_text(`panicked`) is false and a panic diagnostic includes the current screen if it fails."
+      ],
+      [
+        "Minimal cleanup",
+        "all assertions pass",
+        "quit_minimal performs the confirmation chord and waits for exit or falls back to killing the harness."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "PtyHarness::contains_text"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "PtyHarness::screen_contents"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "quit_minimal"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "quit_minimal"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::wait_exit_code"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::quit"
+      ]
+    ]
   }
 ]

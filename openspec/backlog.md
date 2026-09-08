@@ -1076,3 +1076,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The source comments specify forbidden production mechanisms, but the test has no instrumentation or static guard proving those paths are absent.
 - Pager 审计债务：Fixed 40-second/30-second waits and an 800 ms settle interval make the scenario timing-sensitive while providing no explicit frame or resize completion barrier.
 - Pager 审计债务：The test combines tall markdown rendering, native scrollback entry, a two-dimensional resize, screen health, post-resize streaming, and shutdown in one scenario, broadening failure diagnosis.
+- Pager 审计债务：The queue regression is ignored, leaving minimal queue UX and promotion outside routine automated coverage.
+- Pager 审计债务：Queue correctness is inferred from hard-coded status and snapshot substrings rather than structured queue state or turn identity assertions.
+- Pager 审计债务：The test registers AgentTurnExpectation values but never awaits their satisfaction, coupling backend fixture setup to UI substring waits without a terminal barrier.
+- Pager 审计债务：Fixed stream chunk delay and wall-clock waits make the race window and promotion timing sensitive to scheduler/PTY load.
+- Pager 审计债务：One scenario combines slow inference, prompt queue admission, status rendering, slash inspection, snapshot commit, promotion, panic detection, and shutdown, broadening failure diagnosis.

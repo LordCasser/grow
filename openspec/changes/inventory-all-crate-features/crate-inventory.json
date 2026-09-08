@@ -4216,7 +4216,18 @@
       "Minimal Responses reasoning fixture enables persisted thinking blocks",
       "Minimal reasoning and answer both commit to the full transcript",
       "Enabled minimal reasoning body remains available in the committed transcript",
-      "Minimal reasoning PTY liveness, panic absence and cleanup"
+      "Minimal reasoning PTY liveness, panic absence and cleanup",
+      "Slow minimal turn and queued-promotion fixture",
+      "Queued prompt count and /queue inspection hint",
+      "Read-only queue snapshot commits queued text",
+      "Queued prompt promotion and minimal health cleanup",
+      "The ignored PTY test SHALL start an isolated ContentController, create a temporary project cwd containing .git, configure a deterministic mock response, launch a minimal pager there with the shared default geometry, and wait for minimal readiness before inspecting config persistence.",
+      "Launching the pager with the explicit --minimal CLI mode SHALL open minimal for that session without writing a screen_mode key into the isolated .grow/config.toml.",
+      "After an explicit --minimal run has ended without a persisted config preference, a second launch from the same project with no screen-mode flag SHALL present the fullscreen welcome surface and SHALL not present the minimal idle sentinel.",
+      "The plain second launch SHALL show no visible panic marker, and the ignored mode-persistence scenario SHALL shut down the second pager cleanly after its screen assertions.",
+      "Tall minimal response fixture reaches native scrollback",
+      "Minimal committed response reaches the mock inference service",
+      "Minimal response scrollback test health and cleanup"
     ],
     "reviewed_files": [
       {
@@ -6750,6 +6761,18 @@
       {
         "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs",
         "sha256": "8bba308c2b27394590e9e97d813120375aad634090e02d88d29591c4ab027a29"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_queue_indicator_shows_while_running.rs",
+        "sha256": "1f58d3fdc2d02505e6a894f77c8058212f634541c08801dd7f369b794aeda950"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_cli_screen_mode_does_not_persist.rs",
+        "sha256": "fc24e4f4da42832fd316b3d8d59da8ff5a7a64bea698a9e375e205cecd7be9d5"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs",
+        "sha256": "e0bc544a3df4c1317c0639d3823bcc3ec3c5cd596f75bd03912bf5be48faca77"
       }
     ],
     "review": "reviews/pager.md"
