@@ -3889,7 +3889,17 @@
       "Todo pane initialization, updates, counts, and badge flash lifecycle",
       "Todo visibility filter, stable entry rebuild, and bounded desired height",
       "Todo pane keyboard, paste, scroll, and mouse delegation",
-      "Todo pane theme-aware rendering and padded layout projection"
+      "Todo pane theme-aware rendering and padded layout projection",
+      "The timeline rail SHALL reserve exactly RAIL_WIDTH columns only when the setting is enabled, the view is not a subagent view, the terminal width meets MIN_TERMINAL_WIDTH, and the conversation has at least MIN_TURNS; otherwise it SHALL reserve zero columns.",
+      "compute_rail SHALL fail closed for fewer than MIN_TURNS or fewer than three available rows, otherwise compute a centered chevron-plus-tick stack and a turn-index window that shows every turn when possible or slides around the active/bottom viewport without hiding the active turn.",
+      "TimelineRail::hit SHALL use the full rail rectangle as the hit target, map chevron rows to Up/Down and tick rows to absolute turn indices, and return None outside the rail or in unused rows. chevron_target SHALL return tick identity or the rail’s up/down target verbatim, with None as a no-op end stop.",
+      "render_rail SHALL draw two chevrons and one tick per visible turn directly on the supplied buffer, derive enabled/dim chevron appearance from chevron_target, highlight active and hovered ticks, and leave ordinary ticks dim in the rightmost rail cell.",
+      "render_tick_hover_popup SHALL draw a rounded, cleared popup only for a hovered turn inside the rail window, trim and wrap the preview to at most two display-width-bounded lines, ellipsize the second line, anchor the card left of the rail, and clamp it inside the scrollback and buffer bounds; empty or too-tall content SHALL render nothing.",
+      "Runtime logo assets, per-slot overrides, validation, and normalization",
+      "Measured logo geometry, tiers, and layout gate constants",
+      "Logo shine sweep, pulse, and bounded opacity",
+      "Logo rendering, centering, padding, and frame-driven colors",
+      "Process-scoped asset cache and deterministic test assets"
     ],
     "reviewed_files": [
       {
@@ -6123,6 +6133,18 @@
       {
         "path": "crates/codegen/pager/src/views/todo_pane.rs",
         "sha256": "9e5b49f07dec6d4953723b0936336d8984a98bfeb35b117479fc378a6e8b12cc"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/agent.rs",
+        "sha256": "594f665dfd46a9cd104accc70d23fd039dfee4c5cf7a25d5c3402e999148d018"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/timeline.rs",
+        "sha256": "f537f9df19ed02bda47e2bf147076464a14e8f9015e35d247cb9969e0304390e"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/welcome/logo.rs",
+        "sha256": "3944e4fa75c58249214a34ea7977dd5b232ae041b731d29a00e59b640013f50c"
       }
     ],
     "review": "reviews/pager.md"

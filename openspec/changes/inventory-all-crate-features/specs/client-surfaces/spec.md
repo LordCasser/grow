@@ -23849,3 +23849,269 @@ render SHALL detect theme-kind changes and recreate both TodoPaneStyle and ListP
 - **THEN** ListPaneState prepares layout and ListPane renders with focus and list style in the padded inner area.
 
 证据：`crates/codegen/pager/src/views/todo_pane.rs` — `render`；`crates/codegen/pager/src/views/todo_pane.rs` — `content_area`；`crates/codegen/pager/src/views/todo_pane.rs` — `Theme::current_kind`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoPaneStyle::default`；`crates/codegen/pager/src/views/todo_pane.rs` — `ListPaneStyle::default`；`crates/codegen/pager/src/views/todo_pane.rs` — `rebuild_entries`；`crates/codegen/pager/src/views/todo_pane.rs` — `empty_placeholder_message`；`crates/codegen/pager/src/views/todo_pane.rs` — `Buffer::set_span`；`crates/codegen/pager/src/views/todo_pane.rs` — `ListPaneState::prepare_layout`；`crates/codegen/pager/src/views/todo_pane.rs` — `ListPane::new`；`crates/codegen/pager/src/views/todo_pane.rs` — `focused`；`crates/codegen/pager/src/views/todo_pane.rs` — `style`；`crates/codegen/pager/src/views/todo_pane.rs` — `HorizontalLayout::ACCENT`；`crates/codegen/pager/src/views/todo_pane.rs` — `block_pad_left`；`crates/codegen/pager/src/views/todo_pane.rs` — `block_pad_right`；`crates/codegen/pager/src/views/todo_pane.rs` — `inner`。
+
+
+### Requirement: The timeline rail SHALL reserve exactly RAIL_WIDTH columns only when the setting is enabled, the view is not a subagent view, the terminal width meets MIN_TERMINAL_WIDTH, and the conversation has at least MIN_TURNS; otherwise it SHALL reserve zero columns.
+
+The implementation SHALL satisfy the following tested behavior: rail_width is the single policy gate: show_timeline && !is_subagent_view && area_width >= 60 && turn_count >= 2 yields 2, all other combinations yield 0. Geometry feasibility such as available rows is intentionally deferred to compute_rail.
+
+#### Scenario: Eligible rail
+- **WHEN** timeline enabled, root agent view, width 80, and five turns
+- **THEN** two rail columns are reserved.
+
+#### Scenario: Setting off
+- **WHEN** show_timeline is false
+- **THEN** zero columns are reserved.
+
+#### Scenario: Subagent exclusion
+- **WHEN** timeline is enabled but is_subagent_view is true
+- **THEN** zero columns are reserved.
+
+#### Scenario: Narrow terminal
+- **WHEN** width is MIN_TERMINAL_WIDTH - 1
+- **THEN** zero columns are reserved.
+
+#### Scenario: Too few turns
+- **WHEN** turn_count is 1
+- **THEN** zero columns are reserved.
+
+证据：`crates/codegen/pager/src/views/timeline.rs` — `RAIL_WIDTH`；`crates/codegen/pager/src/views/timeline.rs` — `MIN_TERMINAL_WIDTH`；`crates/codegen/pager/src/views/timeline.rs` — `MIN_TURNS`；`crates/codegen/pager/src/views/timeline.rs` — `rail_width`；`crates/codegen/pager/src/views/timeline.rs` — `rail_width_gates_eligibility`。
+
+
+### Requirement: compute_rail SHALL fail closed for fewer than MIN_TURNS or fewer than three available rows, otherwise compute a centered chevron-plus-tick stack and a turn-index window that shows every turn when possible or slides around the active/bottom viewport without hiding the active turn.
+
+The implementation SHALL satisfy the following tested behavior: turn_count < 2 returns None. The rail requires height.checked_sub(2) tick rows and returns None when no tick fits. If all turns fit, window is 0..turn_count; otherwise max_ticks rows are selected around active (or newest when active is None), clamped to the tail. At bottom, the tail is preferred but the start is min(active, tail_start), guaranteeing active visibility. The full stack of two chevrons plus ticks is centered within scrollback_area; rect spans the entire scrollback height at rail_x with width 2, and ticks_y/up_y/down_y are derived from the stack.
+
+#### Scenario: Too few turns
+- **WHEN** turn_count is 1
+- **THEN** compute_rail returns None.
+
+#### Scenario: No tick room
+- **WHEN** scrollback height is 2
+- **THEN** compute_rail returns None because two chevrons consume all rows.
+
+#### Scenario: Small conversation
+- **WHEN** four turns fit in the available 18 tick rows
+- **THEN** window is 0..4 and six rows are vertically centered.
+
+#### Scenario: Overflow around active
+- **WHEN** 50 turns, active turn 25, not at bottom
+- **THEN** 18 ticks are shown in window 16..34 and include active 25.
+
+#### Scenario: Tail clamp
+- **WHEN** 50 turns with active last or active None
+- **THEN** window is 32..50.
+
+#### Scenario: Bottom before tail
+- **WHEN** 50 turns at bottom with active 25
+- **THEN** window begins at 25 so active remains visible even though tail is preferred.
+
+#### Scenario: Bottom inside tail
+- **WHEN** 50 turns at bottom with active 40
+- **THEN** window pins to tail 32..50 and includes active.
+
+证据：`crates/codegen/pager/src/views/timeline.rs` — `TimelineRail`；`crates/codegen/pager/src/views/timeline.rs` — `RailViewport`；`crates/codegen/pager/src/views/timeline.rs` — `compute_rail`；`crates/codegen/pager/src/views/timeline.rs` — `rail_hidden_below_min_turns_or_tiny_area`；`crates/codegen/pager/src/views/timeline.rs` — `small_conversation_shows_all_ticks_centered`；`crates/codegen/pager/src/views/timeline.rs` — `overflow_windows_around_active`。
+
+
+### Requirement: TimelineRail::hit SHALL use the full rail rectangle as the hit target, map chevron rows to Up/Down and tick rows to absolute turn indices, and return None outside the rail or in unused rows. chevron_target SHALL return tick identity or the rail’s up/down target verbatim, with None as a no-op end stop.
+
+The implementation SHALL satisfy the following tested behavior: hit first checks Rect::contains, then gives exact up_y/down_y rows chevron precedence, then maps rows from ticks_y through window.len() to window.start + relative index. chevron_target never computes active±1 itself: it uses up_target/down_target supplied by RailViewport, allowing pre-turn and over-scroll semantics; render_rail derives chevron dim/enabled styles from the same function.
+
+#### Scenario: Rail bounds
+- **WHEN** pointer is outside the two reserved columns or outside the rail rect
+- **THEN** hit returns None.
+
+#### Scenario: Chevron rows
+- **WHEN** pointer lands at up_y or down_y inside the rail
+- **THEN** hit returns Up or Down.
+
+#### Scenario: Tick row
+- **WHEN** pointer lands at ticks_y plus relative row
+- **THEN** hit returns the absolute turn index from the window.
+
+#### Scenario: Unused row
+- **WHEN** pointer lands above the tick stack but inside rail rect
+- **THEN** hit returns None.
+
+#### Scenario: Middle chevrons
+- **WHEN** active turn 3 has up_target 2 and down_target 4
+- **THEN** chevron_target returns 2 and 4.
+
+#### Scenario: End stops
+- **WHEN** first turn has no up target or last turn has no down target
+- **THEN** corresponding chevron target is None.
+
+#### Scenario: Pre-turn content
+- **WHEN** active is 0 and down_target is 0
+- **THEN** Down targets the first turn rather than skipping it.
+
+#### Scenario: Bottom over-scroll
+- **WHEN** bottom viewport has active 4 and down_target 5
+- **THEN** Down still returns 5; only last turn with down_target None dims/no-ops.
+
+证据：`crates/codegen/pager/src/views/timeline.rs` — `TimelineRail::hit`；`crates/codegen/pager/src/views/timeline.rs` — `TimelineHit`；`crates/codegen/pager/src/views/timeline.rs` — `chevron_target`；`crates/codegen/pager/src/views/timeline.rs` — `hit_maps_chevrons_and_ticks`；`crates/codegen/pager/src/views/timeline.rs` — `chevron_targets_follow_the_rail_state`。
+
+
+### Requirement: render_rail SHALL draw two chevrons and one tick per visible turn directly on the supplied buffer, derive enabled/dim chevron appearance from chevron_target, highlight active and hovered ticks, and leave ordinary ticks dim in the rightmost rail cell.
+
+The implementation SHALL satisfy the following tested behavior: Chevron x is rail.rect.x + RAIL_WIDTH - 1. Enabled chevrons use gray, disabled targets use gray_dim, and a hovered enabled chevron uses text_primary. Active ticks use the active glyph and bright style, hovered non-active ticks use hover glyph and bright style, and other ticks use a padded horizontal line in gray_dim. Rendering iterates a cloned window and writes each row with the rail width; no track background strip is painted.
+
+#### Scenario: Enabled navigation
+- **WHEN** up_target or down_target is Some
+- **THEN** chevron is normal gray, or bright when hovered.
+
+#### Scenario: Disabled navigation
+- **WHEN** corresponding target is None
+- **THEN** chevron is dim and the matching click is a no-op.
+
+#### Scenario: Active tick
+- **WHEN** turn index equals rail.active
+- **THEN** active tick glyph is bright.
+
+#### Scenario: Hovered tick
+- **WHEN** turn index is hovered but not active
+- **THEN** hover tick glyph is bright.
+
+#### Scenario: Ordinary tick
+- **WHEN** turn is neither active nor hovered
+- **THEN** short dim tick is drawn in the rightmost cell.
+
+证据：`crates/codegen/pager/src/views/timeline.rs` — `render_rail`；`crates/codegen/pager/src/views/timeline.rs` — `TimelineRail::hit`；`crates/codegen/pager/src/views/timeline.rs` — `chevron_target`；`crates/codegen/pager/src/views/timeline.rs` — `timeline_chevron_up`；`crates/codegen/pager/src/views/timeline.rs` — `timeline_chevron_down`；`crates/codegen/pager/src/views/timeline.rs` — `timeline_tick_active`；`crates/codegen/pager/src/views/timeline.rs` — `timeline_tick_hover`。
+
+
+### Requirement: render_tick_hover_popup SHALL draw a rounded, cleared popup only for a hovered turn inside the rail window, trim and wrap the preview to at most two display-width-bounded lines, ellipsize the second line, anchor the card left of the rail, and clamp it inside the scrollback and buffer bounds; empty or too-tall content SHALL render nothing.
+
+The implementation SHALL satisfy the following tested behavior: A turn outside rail.window returns immediately. max_text is (scrollback_area.width/2).clamp(16,32); the trimmed preview is split at display width for the first line and truncated with truncate_str for the second, with empty preview producing no card. Card width is max line display width + 4 and height line count + 2. Cards taller than scrollback_area are skipped; x is rail left minus card width plus one with lower-bound scrollback x, y is vertically centered on tick_y and clamped to scrollback bottom and buffer height. The card is cleared, filled with bg_base, bordered with rounded gray/bg_base chrome, and text is painted in primary color.
+
+#### Scenario: Outside window
+- **WHEN** hovered turn is not in the currently visible window
+- **THEN** popup function returns without painting.
+
+#### Scenario: Empty preview
+- **WHEN** trimmed preview is empty
+- **THEN** no card is rendered.
+
+#### Scenario: Long preview
+- **WHEN** preview exceeds two display-width-bounded lines
+- **THEN** first line is width-sliced, second is ellipsized, and no third line is added.
+
+#### Scenario: Short terminal
+- **WHEN** card height exceeds scrollback area height
+- **THEN** popup is skipped to avoid painting over adjacent panes.
+
+#### Scenario: Normal placement
+- **WHEN** valid tick and preview fit
+- **THEN** rounded popup is left of the rail, vertically centered near tick, and clamped to visible bounds.
+
+证据：`crates/codegen/pager/src/views/timeline.rs` — `render_tick_hover_popup`；`crates/codegen/pager/src/views/timeline.rs` — `TimelineRail::window`；`crates/codegen/pager/src/views/timeline.rs` — `byte_offset_at_width`；`crates/codegen/pager/src/views/timeline.rs` — `truncate_str`；`crates/codegen/pager/src/views/timeline.rs` — `BorderType::Rounded`。
+
+
+### Requirement: Runtime logo assets, per-slot overrides, validation, and normalization
+
+The logo asset loader SHALL keep compiled LOGO and LOGO_SMALL as independent per-slot fallbacks, load user `big.txt`/`small.txt` once per process from the logo directory in non-test builds, and avoid render-path filesystem I/O after OnceLock initialization. Each slot SHALL read at most MAX_LOGO_BYTES, reject invalid UTF-8, empty/whitespace/control-containing content, and fall back independently. Valid CRLF/CR input SHALL normalize to LF, remove only boundary blank lines, and preserve interior blank rows and visible-width content.
+
+#### Scenario: No overrides
+- **WHEN** the logo directory lacks one or both files
+- **THEN** each missing slot uses its compiled asset independently.
+
+#### Scenario: Valid override
+- **WHEN** one or both files contain visible non-control art
+- **THEN** only those slots use normalized user text.
+
+#### Scenario: Invalid/oversized
+- **WHEN** a slot is empty, whitespace-only, invalid UTF-8, contains non-newline control characters, or exceeds 1 MiB
+- **THEN** that slot falls back without affecting the other slot.
+
+#### Scenario: Line normalization
+- **WHEN** valid input contains CRLF/CR and boundary/interior blank rows
+- **THEN** CR characters become LF, leading/trailing empty lines are removed, and interior blank rows remain.
+
+证据：`crates/codegen/pager/src/views/welcome/logo.rs` — `LogoAssets`；`crates/codegen/pager/src/views/welcome/logo.rs` — `LogoAssets::art`；`crates/codegen/pager/src/views/welcome/logo.rs` — `USER_LOGOS`；`crates/codegen/pager/src/views/welcome/logo.rs` — `assets`；`crates/codegen/pager/src/views/welcome/logo.rs` — `load_logo_assets_from_dir`；`crates/codegen/pager/src/views/welcome/logo.rs` — `load_logo_slot`；`crates/codegen/pager/src/views/welcome/logo.rs` — `MAX_LOGO_BYTES`；`crates/codegen/pager/src/views/welcome/logo.rs` — `normalize_logo`；`crates/codegen/pager/src/views/welcome/logo.rs` — `include_str!`；`crates/codegen/pager/src/views/welcome/logo.rs` — `File::open`；`crates/codegen/pager/src/views/welcome/logo.rs` — `take`；`crates/codegen/pager/src/views/welcome/logo.rs` — `read_to_end`；`crates/codegen/pager/src/views/welcome/logo.rs` — `String::from_utf8`；`crates/codegen/pager/src/views/welcome/logo.rs` — `replace`；`crates/codegen/pager/src/views/welcome/logo.rs` — `split`；`crates/codegen/pager/src/views/welcome/logo.rs` — `lines.remove`；`crates/codegen/pager/src/views/welcome/logo.rs` — `lines.join`。
+
+
+### Requirement: Measured logo geometry, tiers, and layout gate constants
+
+LogoSize SHALL expose Big/Small art and measured visual width/line height. visual_width SHALL use maximum terminal display width of non-empty trimmed lines with a fallback of 24 and u16 saturation; count_lines SHALL count retained lines. pick_logo SHALL choose Big only when both width and height meet its measured extents plus horizontal/vertical padding and STACKED_CHROME, otherwise choose Small under its gates, otherwise None. logo_line_count SHALL return the picked line count or zero.
+
+#### Scenario: Asset extents
+- **WHEN** the compiled Braille assets are inspected
+- **THEN** all glyphs are Braille, Big measures 80x35, and Small measures 50x22.
+
+#### Scenario: Big gate
+- **WHEN** area meets Big width and height thresholds
+- **THEN** pick_logo returns LOGO; if either dimension misses, it may fall back to Small.
+
+#### Scenario: Small gate
+- **WHEN** area meets Small but not Big thresholds
+- **THEN** pick_logo returns LOGO_SMALL.
+
+#### Scenario: Too small
+- **WHEN** area misses Small width or height
+- **THEN** pick_logo returns None and logo_line_count is zero.
+
+#### Scenario: Hero constants
+- **WHEN** asset extents and layout constants are combined
+- **THEN** side-by-side and stacked gate totals match the calibrated values.
+
+证据：`crates/codegen/pager/src/views/welcome/logo.rs` — `LogoSize`；`crates/codegen/pager/src/views/welcome/logo.rs` — `LogoSize::art`；`crates/codegen/pager/src/views/welcome/logo.rs` — `LogoSize::width`；`crates/codegen/pager/src/views/welcome/logo.rs` — `LogoSize::height`；`crates/codegen/pager/src/views/welcome/logo.rs` — `visual_width`；`crates/codegen/pager/src/views/welcome/logo.rs` — `count_lines`；`crates/codegen/pager/src/views/welcome/logo.rs` — `pick_logo`；`crates/codegen/pager/src/views/welcome/logo.rs` — `logo_line_count`；`crates/codegen/pager/src/views/welcome/logo.rs` — `H_PAD`；`crates/codegen/pager/src/views/welcome/logo.rs` — `V_PAD`；`crates/codegen/pager/src/views/welcome/logo.rs` — `RIGHT_COL_MIN`；`crates/codegen/pager/src/views/welcome/logo.rs` — `STACKED_CHROME`；`crates/codegen/pager/src/views/welcome/logo.rs` — `LOGO`；`crates/codegen/pager/src/views/welcome/logo.rs` — `LOGO_SMALL`。
+
+
+### Requirement: Logo shine sweep, pulse, and bounded opacity
+
+shine_opacity SHALL return a clamped [0,1] blend factor composed of a raised-cosine band that sweeps bottom-left to top-right during the active SWEEP_FRAC of each CYCLE and parks off-screen during the rest, plus a low-amplitude periodic global pulse. The sweep position SHALL advance with elapsed seconds and the resting phase SHALL remain dim.
+
+#### Scenario: Range
+- **WHEN** diagonal positions and times are sampled
+- **THEN** opacity remains in the closed unit interval.
+
+#### Scenario: Sweep
+- **WHEN** early, middle, and late active times are compared
+- **THEN** the brightest diagonal position advances left to right.
+
+#### Scenario: Rest
+- **WHEN** time falls after the active sweep fraction
+- **THEN** an interior point receives only the gentle pulse and remains below full brightness.
+
+证据：`crates/codegen/pager/src/views/welcome/logo.rs` — `shine_opacity`；`crates/codegen/pager/src/views/welcome/logo.rs` — `BAND`；`crates/codegen/pager/src/views/welcome/logo.rs` — `CYCLE`；`crates/codegen/pager/src/views/welcome/logo.rs` — `SWEEP_FRAC`；`crates/codegen/pager/src/views/welcome/logo.rs` — `SHINE`；`crates/codegen/pager/src/views/welcome/logo.rs` — `PULSE`；`crates/codegen/pager/src/views/welcome/logo.rs` — `PULSE_SECS`；`crates/codegen/pager/src/views/welcome/logo.rs` — `band_pos`；`crates/codegen/pager/src/views/welcome/logo.rs` — `pulse`；`crates/codegen/pager/src/views/welcome/logo.rs` — `blend`；`crates/codegen/pager/src/views/welcome/logo.rs` — `clamp`；`crates/codegen/pager/src/views/welcome/logo.rs` — `std::f32::consts::TAU`。
+
+
+### Requirement: Logo rendering, centering, padding, and frame-driven colors
+
+render_into SHALL trim only boundary line endings, pad each art row to the maximum display width, compute a bottom-left to top-right diagonal per glyph using frame elapsed seconds, blend resting gray toward primary text color, coalesce adjacent glyphs with identical blended colors into spans, center each Line, and render a Paragraph into the supplied area. render_logo SHALL render only when pick_logo selects a tier; render_logo_into SHALL render a caller-selected static asset for hero/empty-state consumers.
+
+#### Scenario: Picked render
+- **WHEN** render_logo receives an area satisfying a logo gate
+- **THEN** the selected art is rendered centered with animated per-glyph color spans.
+
+#### Scenario: Too small
+- **WHEN** pick_logo returns None
+- **THEN** render_logo performs no drawing.
+
+#### Scenario: Specific tier
+- **WHEN** render_logo_into is called by a consumer with a chosen asset
+- **THEN** that exact art is rendered without re-running stacked selection.
+
+#### Scenario: Wide glyph/padding
+- **WHEN** art rows have differing display widths or wide Unicode glyphs
+- **THEN** rows are padded by display width and diagonal display columns advance by Unicode width.
+
+证据：`crates/codegen/pager/src/views/welcome/logo.rs` — `render_into`；`crates/codegen/pager/src/views/welcome/logo.rs` — `render_logo`；`crates/codegen/pager/src/views/welcome/logo.rs` — `render_logo_into`；`crates/codegen/pager/src/views/welcome/logo.rs` — `logo_lines`；`crates/codegen/pager/src/views/welcome/logo.rs` — `FrameStamp::elapsed`；`crates/codegen/pager/src/views/welcome/logo.rs` — `blend_color`；`crates/codegen/pager/src/views/welcome/logo.rs` — `Paragraph::new`；`crates/codegen/pager/src/views/welcome/logo.rs` — `Paragraph::render`；`crates/codegen/pager/src/views/welcome/logo.rs` — `Line::alignment`；`crates/codegen/pager/src/views/welcome/logo.rs` — `Alignment::Center`；`crates/codegen/pager/src/views/welcome/logo.rs` — `UnicodeWidthStr::width`；`crates/codegen/pager/src/views/welcome/logo.rs` — `UnicodeWidthChar::width`；`crates/codegen/pager/src/views/welcome/logo.rs` — `gray`；`crates/codegen/pager/src/views/welcome/logo.rs` — `text_primary`；`crates/codegen/pager/src/views/welcome/logo.rs` — `pick_logo`。
+
+
+### Requirement: Process-scoped asset cache and deterministic test assets
+
+assets SHALL use OnceLock so the selected built-in or user-overridden pair is stable for the lifetime of the process. Under cfg(test), assets SHALL deterministically use the compiled constants even when a developer has personal overrides under GROW_HOME; filesystem loader behavior SHALL remain testable through the explicit directory boundary without mutating global state.
+
+#### Scenario: First access
+- **WHEN** assets is requested for the first time
+- **THEN** the pair is initialized exactly once.
+
+#### Scenario: Later access
+- **WHEN** LogoSize art/width/height or pick_logo requests assets again
+- **THEN** the same cached pair is reused without another lookup.
+
+#### Scenario: Unit-test process
+- **WHEN** tests run with local user logo files present
+- **THEN** LogoSize and geometry use compiled LOGO/LOGO_SMALL; explicit loader tests still exercise overrides.
+
+证据：`crates/codegen/pager/src/views/welcome/logo.rs` — `assets`；`crates/codegen/pager/src/views/welcome/logo.rs` — `USER_LOGOS`；`crates/codegen/pager/src/views/welcome/logo.rs` — `OnceLock::get_or_init`；`crates/codegen/pager/src/views/welcome/logo.rs` — `cfg(test)`；`crates/codegen/pager/src/views/welcome/logo.rs` — `cfg(not(test))`；`crates/codegen/pager/src/views/welcome/logo.rs` — `LogoSize::art`；`crates/codegen/pager/src/views/welcome/logo.rs` — `load_logo_assets_from_dir`。

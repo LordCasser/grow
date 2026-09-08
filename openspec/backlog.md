@@ -965,3 +965,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Description normalization differs by surface: compact rows replace newlines with spaces while preambles preserve lines and collapse blanks, leaving cross-surface text consistency to duplicated local rules.
 - Pager 审计债务：Preamble rendering reuses permission_view::render_bash_command_display_lines, creating a cross-block dependency for shell wrapping and making viewer layout behavior sensitive to permission-panel changes.
 - Pager 审计债务：The `has_bullet` contract always returns true while bullet returns None for a finished Started block after running; the outer renderer must supply the intended default gray bullet without a single explicit state representation.
+- Pager 审计债务：Mermaid detection and image-reference extraction are duplicated lifecycle caches that remain stale for streaming chunks until finish; callers must respect that finalization boundary.
+- Pager 审计债务：output() and diagram_affordances() independently rebuild rendered_output for diagram messages, trading deterministic consistency for repeated work on each frame.
+- Pager 审计债务：The block couples presentation to process-global appearance and terminal-image flags, making pure rendering isolation and test parallelism harder.
+- Pager 审计债务：The Mermaid affordance row carries source text but no render state or path; action/render lifecycle remains split across block, renderer, worker, and input layers.
