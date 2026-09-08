@@ -413,7 +413,10 @@ fn messages_turn(blocks: &[(&str, &str)], stop_reason: &str) -> ScriptedResponse
 /// async state-machine chain needs 2–4MB; see `truncation_recovery_tests.rs`).
 fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        // Unoptimized async polling frames are substantially larger than the
+        // future state (the turn loop alone uses ~2.3 MiB with Rust 1.93.1).
+        // Match the heavy session/image test harnesses; production stays 8 MiB.
+        .stack_size(32 * 1024 * 1024)
         .spawn(body)
         .unwrap()
         .join()

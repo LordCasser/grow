@@ -8,3 +8,5 @@ Before shell aborted, completed groups reported 464, 302, 7160 (10 ignored), 86,
 R32 local default-parallel Sampler regression: 217/218 passed; sampling_auth_logs_omit_credentials failed because captured logs omitted sampling_request while client_post was present. Unmodified log test passed in the serial full run (218/218). Investigate tracing callsite/subscriber interactions separately; do not weaken credential assertions or attribute this to callback removal without evidence.
 
 Builtin root cause reproduced on Ubuntu noble arm64 with cap-std 4.0.2 and unchanged transaction code: O_PATH descriptor fsync fails with EBADF. Fix and regressions are tracked separately in fix-builtin-directory-sync.
+
+Overflow reproduced locally with only async_compaction_authority_transition_cancels_before_publication running on its unchanged 8 MiB thread. LLDB catches the production process_conversation_turn poll stack probe (0x24b6f0-byte frame) beneath embedded recovery/admission futures. Allocation experiments did not solve it and were reverted. Unoptimized test-frame capacity correction is tracked in fix-unoptimized-session-test-stack.

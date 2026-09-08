@@ -20,7 +20,8 @@ const END_TURN: &str = "end_turn";
 /// async state-machine chain needs 2–4MB; see `truncation_recovery_tests.rs`).
 fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        // Match heavy session tests: unoptimized async poll frames exceed 8 MiB.
+        .stack_size(32 * 1024 * 1024)
         .spawn(body)
         .unwrap()
         .join()
