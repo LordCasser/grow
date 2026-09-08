@@ -1000,3 +1000,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Selection dispatch combines queue mutation, sticky cursor persistence, MCP/bash metadata projection, and AlwaysApprove mode transition, making the per-request response path carry several policy concerns.
 - Pager 审计债务：Root/child ownership is inferred from session-id strings in a shared queue; the queue does not expose a dedicated ownership abstraction to this module.
 - Pager 审计债务：The no-prefix MCP server fallback and bash highlight slicing are defensive assumptions embedded in dispatch rather than validated request types.
+- Pager 审计债务：This test module combines extension modal fetch admission, new-session questions, session close cleanup, project-picker creation, and marketplace request coalescing, making ownership boundaries broad for a single fixture module.
+- Pager 审计债务：Extension fetch coalescing is represented by mutable modal flags and effect counting; there is no typed request generation or observable correlation in these tests.
+- Pager 审计债务：Close cleanup mixes view switching, session unregister effect construction, map removal, fork-reference repair, and memory release in one dispatcher path.
+- Pager 审计债务：The tests depend on global or shared test-support state for memory-release counting and filesystem/git fixture assumptions, which can make isolation and failure diagnosis harder.

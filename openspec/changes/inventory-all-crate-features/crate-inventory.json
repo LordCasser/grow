@@ -4004,7 +4004,22 @@
       "Use-tool block identity, state, copy text, and completion timing",
       "Use-tool headers split qualified names and fit the action to available width",
       "Use-tool output renders arguments and bounded inline result panels",
-      "Use-tool visual status, foldability, and viewer metadata follow block state"
+      "Use-tool visual status, foldability, and viewer metadata follow block state",
+      "Extensions modal opening and deferred fetch flags",
+      "New-session worktree question and repository gate",
+      "Session close cleanup and surviving-agent protection",
+      "Sessionless extension modal starts deferred creation",
+      "Marketplace fetch coalescing and queued refetch",
+      "NoticeTone SHALL map semantic progress/info/success/warning/error states to theme colors, while UiFeedback SHALL retain a typed tone and message with borrowed-string, deref, and display projections.",
+      "NoticeBlock SHALL distinguish durable terminal notices from local typed/UI notices, retain category and causal identity fields, and expose explicit detail presence and full detail text projections.",
+      "NoticeBlock::output SHALL render a tone-colored bold category label, muted notice text, optional indented detail lines, wrapped to the requested width, with every emitted line selectable from its first span.",
+      "NoticeBlock::output SHALL honor a positive BlockContext max_lines budget after wrapping, retain at most the budget rows, append a dim ellipsis marker for omitted rows, and exclude that marker from selection.",
+      "NoticeBlock SHALL expose details-driven fold/select/default-mode behavior while remaining neutral for accent, padding, raw mode, and durable-event grouping.",
+      "NoticeBlock and UiFeedback SHALL serve as immutable presentation projections: durable identity/cause metadata is retained for surrounding replay/grouping logic, while persistence, model-context projection, live progress, and mutation remain outside this module.",
+      "Subagent lifecycle blocks preserve kind, identity, and running state",
+      "Subagent lifecycle rows render state-specific labels and bounded descriptions",
+      "Subagent accents and bullets communicate live, success, failure, and cancellation states",
+      "Subagent blocks remain compact selectable groupable lifecycle entries"
     ],
     "reviewed_files": [
       {
@@ -6346,6 +6361,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs",
         "sha256": "2621128c25ad5794c25084dc0db19ad3e3249fff172238d4fb85edf677b9f813"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs",
+        "sha256": "17f2db673bcdbe56f7b50a8288f94edb664e8cfddd30c638f4ef1331f7a100a0"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/notice.rs",
+        "sha256": "7bf2d3144ee8a7e484eadd882640cd86ac827c253f62220ee36b4294de97d484"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/subagent.rs",
+        "sha256": "a75a07e0bff4463c5a6f5f3128fb05003fbb7f31f83a7cdbaf3b43803b48f6a0"
       }
     ],
     "review": "reviews/pager.md"

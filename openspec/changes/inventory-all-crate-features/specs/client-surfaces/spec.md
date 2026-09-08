@@ -26649,3 +26649,372 @@ UseToolCallBlock SHALL have no vertical padding, background, or raw mode. Errors
 - **THEN** label_kind returns McpCall and the viewer uses ViewerKind::UseTool.
 
 证据：`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::bullet`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::background`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::preamble`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `ToolCallBlock::UseTool`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `ToolCallBlock::label_kind`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `VerbGroupKind::McpCall`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `label_kind_extends_verb_kinds_to_action_tools`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_use_tool`；`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `dispatch_open_block_viewer`。
+
+
+### Requirement: Extensions modal opening and deferred fetch flags
+
+The implementation SHALL satisfy the following tested behavior: dispatch_open_extensions_modal creates the selected ExtensionsModalState on the active agent. With no session id it sets pending_extensions_fetch and returns without extension-list fetch effects; with a session id it clears the flag and returns the five extension-list fetches. handle_session_created consumes a pending flag even when no extensions modal remains, so the closed-modal case clears the flag and emits no extension fetches.
+
+#### Scenario: Sessionless modal
+- **WHEN** an active agent has no session id and an extensions tab is opened
+- **THEN** the modal exists, pending_extensions_fetch is set, and the extension fetch count is zero.
+
+#### Scenario: Bound modal
+- **WHEN** an active agent has a session id and an extensions tab is opened
+- **THEN** five tab fetch effects are emitted and pending_extensions_fetch is false.
+
+#### Scenario: Stale flag
+- **WHEN** a bound agent has pending_extensions_fetch set before opening the modal
+- **THEN** the same five fetches are emitted and the stale flag is cleared.
+
+#### Scenario: Closed modal at session creation
+- **WHEN** SessionCreated arrives with pending_extensions_fetch set but extensions_modal is None
+- **THEN** the flag is consumed and no extension fetch effect is emitted.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `dispatch_open_extensions_modal`；`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `extensions_modal_tab_fetches`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `handle_session_created`；`crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs` — `count_extension_fetches`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::open_extensions_modal_no_session_sets_flag_no_fetches`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::open_extensions_modal_with_session_emits_fetches_no_flag`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::open_extensions_modal_with_session_resets_stale_flag`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::session_created_with_flag_but_modal_closed_clears_flag_no_fetches`。
+
+
+### Requirement: New-session worktree question and repository gate
+
+The implementation SHALL satisfy the following tested behavior: dispatch_new_session checks session startup readiness, detects git context from the active agent or app cwd fallback, and under Ask opens a local NewSession question only in an active Agent view. In the tested git/Ask path it returns no effects, keeps one agent, and presents exactly four options labelled Yes, No, Always worktree, and Never worktree. In the tested non-git path it bypasses the question and emits CreateSession with no question view.
+
+#### Scenario: Git Ask mode
+- **WHEN** an active Agent is in a git repository and new_session_worktree_mode is Ask
+- **THEN** a LocalQuestionKind::NewSession view opens with four options and no creation effect.
+
+#### Scenario: Non-git cwd
+- **WHEN** NewSession is dispatched while the active test agent has no current git branch
+- **THEN** CreateSession is emitted and no agent question view is opened.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_new_session`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `open_new_session_question`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_new_session_inner`；`crates/codegen/pager/src/views/question_view.rs` — `LocalQuestionKind::NewSession`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::dispatch_new_session_opens_question_modal_in_git_repo`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::dispatch_new_session_skips_modal_in_non_git_repo`。
+
+
+### Requirement: Session close cleanup and surviving-agent protection
+
+The implementation SHALL satisfy the following tested behavior: dispatch_sessions_confirm_close ignores an unknown agent id, refuses to remove the sole agent, and otherwise unregisters the closing session, removes the agent, clears surviving direct forked_from references to that id, and releases retained memory when an entry was removed. For an active closing agent the helper chooses a surviving fork parent or first peer before removal, with Welcome as a defensive fallback. The tested close paths preserve an active sole agent, clear only references to the closed parent, and leave unrelated forked_from pointers unchanged.
+
+#### Scenario: Inactive close
+- **WHEN** an existing non-active agent is closed in a multi-agent app
+- **THEN** the agent is removed and returned effects are all UnregisterActiveSession effects.
+
+#### Scenario: Memory release
+- **WHEN** an existing agent is closed and then an unknown id is requested
+- **THEN** retained-memory release is called once for the real removal and not for the no-op close.
+
+#### Scenario: Fork cleanup
+- **WHEN** a surviving child points forked_from at the closed agent
+- **THEN** the surviving pointer is cleared; a pointer to an unrelated parent remains unchanged.
+
+#### Scenario: Only-agent guard
+- **WHEN** the agents map contains exactly one entry and that entry is requested for close
+- **THEN** the agent remains and the active Agent view does not fall through to Welcome.
+
+#### Scenario: Unknown close
+- **WHEN** the requested agent id is absent
+- **THEN** agent state is unchanged and no close effects are emitted.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/modal.rs` — `dispatch_sessions_confirm_close`；`crates/codegen/pager/src/app/root/dispatch/session/modal.rs` — `remove_agent_and_cleanup`；`crates/codegen/pager/src/app/root/dispatch/session/modal.rs` — `unregister_session_effect`；`crates/codegen/pager/src/app/root/dispatch/ctx.rs` — `switch_to_agent`；`crates/codegen/pager/src/app/root/dispatch/ctx.rs` — `show_welcome`；`crates/codegen/pager/src/memory_release.rs` — `release_retained_memory_with`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::close_inactive_agent_drops_it`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::close_agent_releases_retained_memory`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::close_clears_forked_from_on_surviving_children`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::close_only_agent_is_refused_with_toast`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::close_unknown_agent_is_silent_noop`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::close_only_agent_short_circuits_before_reaching_welcome_fallback`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::close_does_not_disturb_unrelated_forked_from_pointers`。
+
+
+### Requirement: Sessionless extension modal starts deferred creation
+
+The implementation SHALL satisfy the following tested behavior: When OpenExtensionsModal is dispatched from a project-picker app without a bound session, dispatch_open_extensions_modal keeps the selected extensions modal, marks pending_extensions_fetch, and routes through skip_picker_and_create_session so a CreateSession effect is available for the deferred session.
+
+#### Scenario: Project-picker backing input
+- **WHEN** an extensions modal is opened in a sessionless non-project directory
+- **THEN** CreateSession is emitted and the active agent retains pending_extensions_fetch.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `dispatch_open_extensions_modal`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `skip_picker_and_create_session`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::extensions_modal_in_non_project_dir_creates_session`。
+
+
+### Requirement: Marketplace fetch coalescing and queued refetch
+
+The implementation SHALL satisfy the following tested behavior: push_marketplace_fetch emits one FetchMarketplaceList and marks the request inflight when idle; while inflight it emits no marketplace effect and sets marketplace_refetch_queued. handle_marketplace_list_loaded clears inflight, emits one queued refetch when a session id exists, and consumes the queued flag so the refetch response does not schedule another request. The tested PluginsActionResult also refreshes non-marketplace lists while the marketplace request is coalesced.
+
+#### Scenario: In-flight coalescing
+- **WHEN** Marketplace is open with one request in flight and a successful plugin action arrives
+- **THEN** no second marketplace fetch is emitted while other extension refetches still occur.
+
+#### Scenario: Queued refetch
+- **WHEN** the in-flight marketplace response arrives after the action-triggered refetch was queued
+- **THEN** exactly one marketplace fetch is emitted, and its later response emits no additional marketplace fetch.
+
+#### Scenario: Idle refetch
+- **WHEN** the initial marketplace response has landed and a plugin action arrives
+- **THEN** one marketplace fetch is emitted immediately.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `push_marketplace_fetch`；`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `handle_marketplace_list_loaded`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `TaskResult::PluginsActionResult`；`crates/codegen/pager/src/views/extensions_modal.rs` — `ExtensionsModalState::marketplace_fetch_inflight`；`crates/codegen/pager/src/views/extensions_modal.rs` — `ExtensionsModalState::marketplace_refetch_queued`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `count_marketplace_fetches`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::marketplace_fetch_coalesces_while_inflight`；`crates/codegen/pager/src/app/root/dispatch/tests/session/modal.rs` — `tests::marketplace_fetch_fires_immediately_when_idle`。
+
+
+### Requirement: NoticeTone SHALL map semantic progress/info/success/warning/error states to theme colors, while UiFeedback SHALL retain a typed tone and message with borrowed-string, deref, and display projections.
+
+NoticeTone::color SHALL map Progress to theme.accent_running, Info to theme.accent_system, Success to theme.accent_success, Warning to theme.warning, and Error to theme.accent_error. UiFeedback::new SHALL store the supplied tone and owned message; as_str, Deref<Target=str>, and Display SHALL expose exactly the message without decoration or trimming.
+
+#### Scenario: Tone mapping
+- **WHEN** a notice tone is rendered against a Theme
+- **THEN** the corresponding semantic theme color is returned.
+
+#### Scenario: Feedback creation
+- **WHEN** a tone and message are supplied
+- **THEN** UiFeedback owns both values and preserves message bytes.
+
+#### Scenario: String projection
+- **WHEN** a caller borrows, dereferences, or formats UiFeedback
+- **THEN** all projections return the same message text.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeTone`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeTone::color`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeTone::Progress`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeTone::Info`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeTone::Success`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeTone::Warning`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeTone::Error`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `UiFeedback`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `UiFeedback::new`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `UiFeedback::as_str`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `Deref<Target = str>`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `fmt::Display for UiFeedback`。
+
+
+### Requirement: NoticeBlock SHALL distinguish durable terminal notices from local typed/UI notices, retain category and causal identity fields, and expose explicit detail presence and full detail text projections.
+
+NoticeCategory::label SHALL map Command/Coordination/Lifecycle/Control/Subagent/Ui to COMMAND/COORDINATION/LIFECYCLE/CONTROL/SUBAGENT/NOTICE. has_details SHALL be true only for nonempty details on Command or Coordination categories. detail_text SHALL return text, two newlines, and details or an empty suffix. new SHALL create an identity-less Info/Ui notice with no details; typed SHALL create an identity-less notice with caller tone/category/text/details; terminal SHALL set event_id from the supplied id while leaving command_invocation_id None and retaining the other fields. event_id is durable identity; command_invocation_id is causal metadata and not a dedup key.
+
+#### Scenario: Local notice
+- **WHEN** NoticeBlock::new is used for compact UI text
+- **THEN** the result is an identity-less Info/Ui notice without details.
+
+#### Scenario: Typed local event
+- **WHEN** NoticeBlock::typed is given tone/category/text/details
+- **THEN** the values are retained without durable event or command identity.
+
+#### Scenario: Terminal event
+- **WHEN** NoticeBlock::terminal is given an event id
+- **THEN** event_id is Some and category/tone/text/details are preserved.
+
+#### Scenario: Actionable details
+- **WHEN** Command or Coordination has nonempty details
+- **THEN** has_details is true and detail_text includes the details.
+
+#### Scenario: Non-actionable details
+- **WHEN** another category has details or details are empty
+- **THEN** has_details is false even though detail_text still exposes the optional text suffix.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeCategory`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeCategory::label`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::has_details`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::detail_text`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::new`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::typed`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::terminal`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `event_id`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `command_invocation_id`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `tone`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `category`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `text`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `details`。
+
+
+### Requirement: NoticeBlock::output SHALL render a tone-colored bold category label, muted notice text, optional indented detail lines, wrapped to the requested width, with every emitted line selectable from its first span.
+
+output SHALL obtain the current Theme, style the category label with tone.color plus BOLD, prefix the first text line with `<CATEGORY>  `, render subsequent text lines muted without repeating the label, and append detail lines as muted `  `-indented lines when details are present and not hidden by collapsed actionable-detail policy. Command/Coordination details with has_details true SHALL be omitted in Collapsed mode but shown in Expanded mode; other categories do not receive that hiding rule. The combined styled lines SHALL pass through word_wrap_lines(width), map each result to BlockLine::styled(...).with_selection_range(Some(0)), and synthesize one empty selectable line if wrapping yields none.
+
+#### Scenario: Category header
+- **WHEN** a notice has a category and text
+- **THEN** the first line begins with the uppercase category label, two spaces, and the first source line.
+
+#### Scenario: Multiline body
+- **WHEN** notice text contains newlines
+- **THEN** the first line owns the label and later lines retain muted body text without duplicate labels.
+
+#### Scenario: Collapsed actionable details
+- **WHEN** Command/Coordination details are nonempty and mode is Collapsed
+- **THEN** cause/recovery details are hidden from inline output.
+
+#### Scenario: Expanded actionable details
+- **WHEN** Command/Coordination details are nonempty and mode is Expanded
+- **THEN** each detail line is appended with two-space indentation.
+
+#### Scenario: Other category details
+- **WHEN** a nonempty detail belongs to Lifecycle/Control/Subagent/Ui
+- **THEN** details are not hidden by has_details gating and are rendered when supplied.
+
+#### Scenario: Wrapping
+- **WHEN** styled notice lines exceed context width
+- **THEN** word_wrap_lines produces the visible wrapped lines, each with selection range Some(0).
+
+#### Scenario: Empty result
+- **WHEN** wrapping yields no lines
+- **THEN** one empty selectable BlockLine is returned.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `BlockContent for NoticeBlock`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::output`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeCategory::label`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeTone::color`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `word_wrap_lines`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `BlockLine::styled`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `BlockLine::with_selection_range`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `Selectable::Spans`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `DisplayMode::Collapsed`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `DisplayMode::Expanded`。
+
+
+### Requirement: NoticeBlock::output SHALL honor a positive BlockContext max_lines budget after wrapping, retain at most the budget rows, append a dim ellipsis marker for omitted rows, and exclude that marker from selection.
+
+When all_lines.len() exceeds max and max>0, output SHALL take max-1 rows for max>1 or one row for max==1, append ` …` to the final retained line using muted body style, and set that line selectable to the original span range 0..content_end so the marker itself is not selectable. max==0 SHALL bypass this truncation branch; max absent or large enough SHALL return all wrapped lines. The budget is applied after detail visibility and wrapping, and it limits rendered rows rather than mutating text/details.
+
+#### Scenario: Positive budget
+- **WHEN** wrapped output exceeds max_lines and max_lines is greater than one
+- **THEN** max-1 source rows remain and the final row carries a dim ellipsis marker.
+
+#### Scenario: Single-row budget
+- **WHEN** wrapped output exceeds max_lines=1
+- **THEN** one retained row is marked with an ellipsis without producing a second row.
+
+#### Scenario: Zero budget
+- **WHEN** max_lines is zero
+- **THEN** the positive-budget truncation branch is skipped.
+
+#### Scenario: No truncation
+- **WHEN** max_lines is absent or at least the wrapped row count
+- **THEN** all wrapped lines remain unchanged and selectable.
+
+#### Scenario: Selection boundary
+- **WHEN** a truncated line is copied/selected
+- **THEN** the original spans remain selectable while the appended ellipsis span is excluded.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::output`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `BlockContext::max_lines`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `Selectable::Spans`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `content_end`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `Modifier::BOLD`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeTone::color`。
+
+
+### Requirement: NoticeBlock SHALL expose details-driven fold/select/default-mode behavior while remaining neutral for accent, padding, raw mode, and durable-event grouping.
+
+accent SHALL always return None; has_vpad_for and has_raw_mode SHALL return false. is_foldable and is_selectable SHALL equal has_details. default_display_mode SHALL be Collapsed when actionable details exist and Expanded otherwise. is_groupable SHALL be true only when event_id is None, keeping durable terminal notices out of local grouping while permitting identity-less local notices. The block does not define a next-fold override, so higher-level BlockContent defaults govern transitions.
+
+#### Scenario: Actionable notice
+- **WHEN** Command or Coordination carries nonempty details
+- **THEN** the block is foldable/selectable and starts Collapsed.
+
+#### Scenario: Ordinary notice
+- **WHEN** a UI/lifecycle notice lacks actionable details
+- **THEN** the block is not foldable/selectable and starts Expanded.
+
+#### Scenario: Durable event
+- **WHEN** event_id is Some
+- **THEN** is_groupable is false even if text is identical to another event.
+
+#### Scenario: Local event
+- **WHEN** event_id is None
+- **THEN** is_groupable is true.
+
+#### Scenario: Neutral protocol
+- **WHEN** renderer queries accent, padding, or raw mode
+- **THEN** no accent is returned, vertical padding is disabled, and raw mode is false.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::is_selectable`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::is_groupable`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeCategory::Command`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeCategory::Coordination`。
+
+
+### Requirement: NoticeBlock and UiFeedback SHALL serve as immutable presentation projections: durable identity/cause metadata is retained for surrounding replay/grouping logic, while persistence, model-context projection, live progress, and mutation remain outside this module.
+
+The implementation SHALL satisfy the following tested behavior: The source documents NoticeBlock as an immutable presentation event that never participates in model context projection; transient progress belongs in the live status layer. UiFeedback is a shared transient payload whose persistence and model-context projection are owned elsewhere. Constructors only assemble values, output only formats them, and grouping uses event_id presence without deduplicating command_invocation_id. The three inline tests verify command/coordination detail visibility, default mode/selectability, and collapsed error text, but do not prove replay, click routing, persistence, or live status integration.
+
+#### Scenario: Presentation projection
+- **WHEN** a notice is created from a caller-owned event or local UI result
+- **THEN** the module stores and renders fields without persistence or model-context effects.
+
+#### Scenario: Causal identity
+- **WHEN** two durable facts share command_invocation_id
+- **THEN** that field does not determine is_groupable or event identity.
+
+#### Scenario: Live progress
+- **WHEN** progress needs ongoing updates
+- **THEN** the comment-defined live status layer, not this immutable block, owns transient progress.
+
+#### Scenario: Audit boundary
+- **WHEN** the source is checked with its three inline tests
+- **THEN** Buffer/output and protocol behavior are covered locally; replay, click, persistence, and context projection remain unproven.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `UiFeedback`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::terminal`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::typed`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::new`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `NoticeBlock::is_groupable`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `command_invocation_id`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `tests module`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `command_metadata_is_foldable_without_hiding_actionable_errors`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `coordination_details_are_selectable_and_compact_by_default`；`crates/codegen/pager/src/scrollback/blocks/notice.rs` — `collapsed_command_error_keeps_cause_and_recovery_visible`。
+
+
+### Requirement: Subagent lifecycle blocks preserve kind, identity, and running state
+
+SubagentBlock SHALL represent exactly one lifecycle kind: Started, Completed{elapsed}, Failed{elapsed,error}, or Cancelled{elapsed}. started SHALL retain description, child session id, type, optional model, and background flag; terminal constructors SHALL retain description/child id, default background=true and empty type/model, with identity enrichment available through with_identity. with_event_id SHALL attach the durable lifecycle identity without altering content. is_running SHALL be true only for Started, regardless of background flag or terminal metadata.
+
+#### Scenario: Started construction
+- **WHEN** a subagent is spawned
+- **THEN** a Started block retains task description, child session id, type/model, background mode, and has no terminal elapsed/error.
+
+#### Scenario: Completed construction
+- **WHEN** a subagent finishes successfully
+- **THEN** a Completed block retains description/child id and elapsed duration, defaults to background mode, and can receive type/model identity.
+
+#### Scenario: Failed construction
+- **WHEN** a subagent finishes with failure
+- **THEN** a Failed block retains elapsed duration and optional error; error detail is represented separately from the lifecycle kind.
+
+#### Scenario: Cancelled construction
+- **WHEN** a subagent is cancelled
+- **THEN** a Cancelled block retains elapsed duration and has no error payload.
+
+#### Scenario: Identity and running projection
+- **WHEN** with_identity, with_event_id, or is_running is called
+- **THEN** identity fields/event id are updated immutably through builders and only Started reports running.
+
+#### Scenario: Replay/live materialization
+- **WHEN** spawn and finish notifications are replayed or delivered live
+- **THEN** parent scrollback contains a Started row plus a separate terminal row, and the child status/duration remain associated with the child session.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlockKind`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::started`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::completed`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::failed`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::cancelled`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::with_identity`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::with_event_id`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::is_running`；`crates/codegen/pager/src/app/acp_handler/session_notification.rs` — `GrowSessionUpdate::SubagentSpawned`；`crates/codegen/pager/src/app/acp_handler/session_notification.rs` — `GrowSessionUpdate::SubagentFinished`；`crates/codegen/pager/src/app/acp_handler/tests/subagents.rs` — `ext_session_update_replay_handles_subagent_spawned_and_finished`；`crates/codegen/pager/src/app/acp_handler/tests/subagents.rs` — `ext_session_notification_and_update_equivalent_for_subagent_spawned`；`crates/codegen/pager/src/app/acp_handler/tests/subagents.rs` — `ext_session_update_for_inactive_agent_registers_subagent_without_redraw`。
+
+
+### Requirement: Subagent lifecycle rows render state-specific labels and bounded descriptions
+
+BlockContent::output SHALL emit one line. Started rows SHALL render a bold `Subagent` label, `started:` verb, quoted/truncated description, and optional model metadata. Completed rows SHALL render `SUBAGENT  <type> completed · result delivered · <duration> · <description>`; Failed rows SHALL render `failed` with `error delivered` when error exists or `no error detail` otherwise; Cancelled rows SHALL render `cancelled · no result delivered`. Terminal rows SHALL use the stored type or the `subagent` fallback, format elapsed duration, and truncate descriptions to the remaining terminal width. Selected state SHALL brighten only the bold label while detail text remains muted.
+
+#### Scenario: Started display
+- **WHEN** kind is Started
+- **THEN** the output identifies a running/started subagent and includes model metadata when available.
+
+#### Scenario: Successful completion
+- **WHEN** kind is Completed
+- **THEN** the output identifies completion, delivered result, elapsed duration, type/fallback identity, and quoted description.
+
+#### Scenario: Failure
+- **WHEN** kind is Failed with or without error
+- **THEN** the output distinguishes `error delivered` from `no error detail` without printing the error body in the lifecycle line.
+
+#### Scenario: Cancellation
+- **WHEN** kind is Cancelled
+- **THEN** the output identifies cancellation and explicitly states that no result was delivered.
+
+#### Scenario: Narrow width
+- **WHEN** available width leaves two or fewer display cells for the description
+- **THEN** quoted_desc returns the fixed curly-quote ellipsis form; otherwise truncate_str limits the inner description before quotes.
+
+#### Scenario: Selection styling
+- **WHEN** ctx.is_selected is true or false
+- **THEN** only the bold Subagent/SUBAGENT label switches to primary when selected; verbs, descriptions, metadata and terminal status remain muted.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::output`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `quoted_desc`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `format_subagent_meta`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `format_duration`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `truncate_str`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `UnicodeWidthStr::width`；`crates/codegen/pager/src/app/subagent.rs` — `format_subagent_meta`；`crates/codegen/pager/src/app/subagent.rs` — `subagent_meta_empty`；`crates/codegen/pager/src/app/subagent.rs` — `subagent_meta_model`。
+
+
+### Requirement: Subagent accents and bullets communicate live, success, failure, and cancellation states
+
+A Started block in a running entry SHALL expose a static running accent and an animated, background-dimmed running bullet; a Started block that is no longer running SHALL have no bullet accent. Completed SHALL use a static success bullet, while Failed and Cancelled SHALL use static error bullets. Accent is absent for terminal blocks and for non-running Started blocks.
+
+#### Scenario: Running Started
+- **WHEN** kind is Started and ctx.is_running is true
+- **THEN** accent is static accent_running and bullet is animated with the configured dim blend.
+
+#### Scenario: Finished Started row
+- **WHEN** kind is Started but ctx.is_running is false
+- **THEN** the start row stops its bullet animation and exposes no bullet accent.
+
+#### Scenario: Completed
+- **WHEN** kind is Completed
+- **THEN** the bullet is static accent_success.
+
+#### Scenario: Failed or Cancelled
+- **WHEN** kind is Failed or Cancelled
+- **THEN** the bullet is static accent_error.
+
+#### Scenario: Accent column
+- **WHEN** accent is queried for terminal or collapsed states
+- **THEN** only a running Started row supplies an accent; all other states return None.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::bullet`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `blend_color`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `AccentStyle::static_color`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `AccentStyle::animated`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `theme.accent_running`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `theme.accent_success`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `theme.accent_error`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `dim_accent`。
+
+
+### Requirement: Subagent blocks remain compact selectable groupable lifecycle entries
+
+SubagentBlock SHALL disable vertical padding and raw mode, remain non-foldable with Collapsed as its default display mode, remain selectable, always expose a bullet, and participate in verb grouping. Its grouping SHALL count distinct child session sources, use running/past tense, and count Failed rows in the failure suffix while treating Cancelled rows as deliberate non-failures. The immutable Started row SHALL fold into a group header and reappear when the group is expanded.
+
+#### Scenario: Block interaction metadata
+- **WHEN** the renderer queries padding, raw, fold, default mode, selectable, bullet, or groupable properties
+- **THEN** the block returns false for vertical padding/raw/foldability, Collapsed as default, and true for selectable/bullet/groupable.
+
+#### Scenario: Group plurality
+- **WHEN** multiple Started/Completed rows are grouped
+- **THEN** the header uses subagent count/pluralization and distinct child ids according to the group state.
+
+#### Scenario: Running group
+- **WHEN** a grouped Started entry is marked running
+- **THEN** the group header uses running tense and reports running state.
+
+#### Scenario: Failure suffix
+- **WHEN** a group contains Failed and Cancelled terminal rows
+- **THEN** only Failed increments the failure suffix; Cancelled remains a non-error terminal status.
+
+#### Scenario: Collapsed/expanded group
+- **WHEN** a subagent row is adjacent to groupable tool rows and group verbs are enabled
+- **THEN** the collapsed group header claims the subagent row and expansion reveals the immutable Started member.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::is_selectable`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::has_bullet`；`crates/codegen/pager/src/scrollback/blocks/subagent.rs` — `SubagentBlock::is_groupable`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `verb_group_header_label`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `SubagentBlockKind::Failed`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `buckets_in_first_appearance_order_with_plurality`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `subagent_completion_burst_counts_each_subagent`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `subagent_failed_feeds_suffix_cancelled_does_not`；`crates/codegen/pager/src/scrollback/state/verb_group.rs` — `running_subagent_flips_group_tense`；`crates/codegen/pager/src/scrollback/render.rs` — `rendered_verb_group_folds_subagent_start_row`。
