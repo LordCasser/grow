@@ -124,6 +124,7 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
     });
 
     vec![Effect::FetchRewindPoints {
+        request_id: begin_rewind_read(agent),
         agent_id: id,
         session_id,
     }]
@@ -163,6 +164,7 @@ pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
     });
 
     vec![Effect::FetchRewindPoints {
+        request_id: begin_rewind_read(agent),
         agent_id: id,
         session_id,
     }]
@@ -176,12 +178,11 @@ pub(super) fn dispatch_rewind_picker_select(app: &mut AppView, prompt_index: usi
         return vec![];
     };
 
-    let point = agent.rewind_points.as_ref().and_then(
-        |pts: &Vec<crate::views::rewind::RewindPointInfo>| {
-            pts.iter().find(|p| p.prompt_index == prompt_index)
-        },
-    );
-    let has_file_changes = point.map(|p| p.has_file_changes).unwrap_or(false);
+    let has_file_changes = agent.rewind_points.as_ref().is_some_and(|points| {
+        points
+            .iter()
+            .any(|point| point.prompt_index >= prompt_index && point.has_file_changes)
+    });
 
     let anchor = find_user_prompt_entry_for_shell_index(&agent.scrollback, prompt_index);
     if let Some(entry_idx) = anchor {
@@ -242,6 +243,7 @@ pub(super) fn dispatch_rewind_cancel_offer(app: &mut AppView) -> Vec<Effect> {
         rewind_if_pristine: false,
     }];
     effects.push(Effect::FetchRewindPoints {
+        request_id: begin_rewind_read(agent),
         agent_id: id,
         session_id,
     });
@@ -361,6 +363,7 @@ pub(super) fn dispatch_rewind_select_mode(
                     selected_prompt_index: None,
                 });
                 vec![Effect::RewindPreview {
+                    request_id: begin_rewind_read(agent),
                     agent_id: id,
                     session_id,
                     target_prompt_index: target,
@@ -427,6 +430,7 @@ pub(super) fn dispatch_rewind_dismiss(app: &mut AppView) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
+    agent.rewind_read = None;
     let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
     if let Some(d) = draft {
         agent.prompt.restore(d);
@@ -443,20 +447,52 @@ pub(super) fn dispatch_rewind_back_to_mode_select(app: &mut AppView) -> Vec<Effe
         return vec![];
     };
     if let Some(ref state) = agent.rewind_state {
+        use crate::views::rewind::RewindPhase;
+        let phase_target = match &state.phase {
+            RewindPhase::ModeSelect {
+                target_prompt_index,
+                ..
+            }
+            | RewindPhase::Previewing {
+                target_prompt_index,
+                ..
+            }
+            | RewindPhase::Confirm {
+                target_prompt_index,
+                ..
+            }
+            | RewindPhase::ConversationOnlyConfirm {
+                target_prompt_index,
+                ..
+            }
+            | RewindPhase::Executing {
+                target_prompt_index,
+                ..
+            } => Some(*target_prompt_index),
+            _ => None,
+        };
         let anchor = state.anchor_entry_idx;
         let sel_pi = state.selected_prompt_index;
         let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
 
-        let (target, has_file_changes) = agent
-            .rewind_points
-            .as_ref()
-            .and_then(|pts| {
-                sel_pi
-                    .and_then(|pi| pts.iter().find(|p| p.prompt_index == pi))
-                    .or_else(|| pts.iter().max_by_key(|p| p.prompt_index))
+        let target = phase_target
+            .or_else(|| {
+                agent
+                    .rewind_points
+                    .as_ref()
+                    .and_then(|pts| {
+                        sel_pi
+                            .and_then(|pi| pts.iter().find(|p| p.prompt_index == pi))
+                            .or_else(|| pts.iter().max_by_key(|p| p.prompt_index))
+                    })
+                    .map(|p| p.prompt_index)
             })
-            .map(|p| (p.prompt_index, p.has_file_changes))
-            .unwrap_or((0, false));
+            .unwrap_or(0);
+        let has_file_changes = agent.rewind_points.as_ref().is_some_and(|points| {
+            points
+                .iter()
+                .any(|point| point.prompt_index >= target && point.has_file_changes)
+        });
 
         agent.rewind_state = Some(crate::views::rewind::RewindState {
             phase: crate::views::rewind::RewindPhase::ModeSelect {
@@ -469,7 +505,7 @@ pub(super) fn dispatch_rewind_back_to_mode_select(app: &mut AppView) -> Vec<Effe
             },
             anchor_entry_idx: anchor,
             stashed_draft: draft,
-            selected_prompt_index: sel_pi,
+            selected_prompt_index: Some(target),
         });
     }
     vec![]
@@ -548,6 +584,7 @@ pub(super) fn dispatch_inline_edit_submit(app: &mut AppView) -> Vec<Effect> {
     });
 
     vec![Effect::FetchRewindPoints {
+        request_id: begin_rewind_read(agent),
         agent_id: id,
         session_id,
     }]
@@ -720,7 +757,9 @@ pub(super) fn handle_rewind_points_loaded(
 
         if let Some(point) = resolved {
             let target = point.prompt_index;
-            let has_file_changes = point.has_file_changes;
+            let has_file_changes = points
+                .iter()
+                .any(|point| point.prompt_index >= target && point.has_file_changes);
             let anchor = find_user_prompt_entry_for_shell_index(&agent.scrollback, target);
             let draft = stashed.or_else(|| stash_prompt(&mut agent.prompt));
             if let Some(entry_idx) = anchor {
@@ -867,4 +906,61 @@ pub(super) fn handle_rewind_execute_failed(
         selected_prompt_index: None,
     });
     vec![]
+}
+
+/// Read-only requests may outlive their overlay; execution results must still
+/// reconcile committed effects and deliberately do not pass through this gate.
+fn begin_rewind_read(agent: &mut crate::app::agent_view::AgentView) -> uuid::Uuid {
+    let id = uuid::Uuid::new_v4();
+    agent.rewind_read = Some((id, agent.session_binding_epoch));
+    id
+}
+
+pub(super) fn accept_rewind_read(
+    app: &mut AppView,
+    result: &crate::app::actions::TaskResult,
+) -> bool {
+    use crate::app::actions::TaskResult;
+    use crate::views::rewind::RewindPhase;
+    let (agent_id, request_id, preview) = match result {
+        TaskResult::RewindPointsLoaded {
+            agent_id,
+            request_id,
+            ..
+        }
+        | TaskResult::RewindPointsFailed {
+            agent_id,
+            request_id,
+            ..
+        } => (agent_id, request_id, false),
+        TaskResult::RewindPreviewComplete {
+            agent_id,
+            request_id,
+            ..
+        }
+        | TaskResult::RewindPreviewFailed {
+            agent_id,
+            request_id,
+            ..
+        } => (agent_id, request_id, true),
+        _ => return true,
+    };
+    let Some(agent) = app.agents.get_mut(agent_id) else {
+        return false;
+    };
+    let owns_request = agent
+        .rewind_read
+        .as_ref()
+        .is_some_and(|(id, epoch)| id == request_id && agent.session_binding_epoch == *epoch);
+    let owns_phase = agent.rewind_state.as_ref().is_some_and(|state| {
+        matches!(
+            (&state.phase, preview),
+            (RewindPhase::Loading, false) | (RewindPhase::Previewing { .. }, true)
+        )
+    });
+    if !owns_request || !owns_phase {
+        return false;
+    }
+    agent.rewind_read = None;
+    true
 }

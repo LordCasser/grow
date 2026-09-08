@@ -1354,7 +1354,8 @@ impl SessionActor {
                     match storage.list_memory_files() {
                         Ok(files) => files
                             .into_iter()
-                            .map(|path| {
+                            .filter_map(|path| {
+                                let source = storage.classify_source(&path)?;
                                 let meta = match std::fs::metadata(&path) {
                                     Ok(m) => Some(m),
                                     Err(e) => {
@@ -1366,15 +1367,15 @@ impl SessionActor {
                                         None
                                     }
                                 };
-                                crate::extensions::notification::MemoryFileInfo {
-                                    source: storage.classify_source(&path).to_string(),
+                                Some(crate::extensions::notification::MemoryFileInfo {
+                                    source: source.to_string(),
                                     path: path.display().to_string(),
                                     size_bytes: meta.as_ref().map(|m| m.len()).unwrap_or(0),
                                     modified_epoch_secs: meta
                                         .and_then(|m| m.modified().ok())
                                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                                         .map(|d| d.as_secs()),
-                                }
+                                })
                             })
                             .collect(),
                         Err(e) => {

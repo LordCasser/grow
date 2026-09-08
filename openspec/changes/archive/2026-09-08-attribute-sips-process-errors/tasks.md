@@ -1,0 +1,3 @@
+- [x] Preserve stage and original error information in converter failures.
+- [x] Verify injected startup errors and existing runner behavior.
+- [x] Record bounded investigation evidence, validate and archive.

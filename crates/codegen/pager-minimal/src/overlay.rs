@@ -221,6 +221,17 @@ fn compute_target(
     width: u16,
     frame: pager::motion::FrameStamp,
 ) -> u16 {
+    let rows = minimal_api::minimal_fps_rows(app, term_h.saturating_sub(1));
+    let content = compute_content_target(app, term_h.saturating_sub(rows), width, frame);
+    if rows == 0 { content } else { content.max(3).saturating_add(rows) }
+}
+
+fn compute_content_target(
+    app: &mut AppView,
+    term_h: u16,
+    width: u16,
+    frame: pager::motion::FrameStamp,
+) -> u16 {
     let minimal_live_rows = minimal_api::app_appearance(app).minimal_live_rows;
     let ceiling = term_h.saturating_sub(1).max(3);
     let base = minimal_live_rows.clamp(3, ceiling);

@@ -283,16 +283,16 @@ impl ChatStateActor {
     pub(super) async fn push_user_message_durably(
         &mut self,
         item: ConversationItem,
-    ) -> Result<(), crate::commands::TimelineWriteError> {
+    ) -> Result<crate::TimelineEvent, crate::commands::TimelineWriteError> {
         self.ensure_conversation_integrity_durably(DanglingToolCallReason::UserCancelled)
             .await?;
         let item_tokens = super::state::estimate_item_tokens(&item);
         let cause = message_cause(&item)?;
         let mut candidate = self.state.timeline.clone();
         let event = candidate.append(item, cause)?;
-        self.commit_timeline_event(event).await?;
+        let event = self.commit_timeline_event(event).await?;
         self.apply_projected_token_delta(0, item_tokens);
-        Ok(())
+        Ok(event)
     }
 
     /// Like [`Self::push_user_message`] but takes an explicit repair reason.

@@ -496,9 +496,9 @@ fn suspend_wait_sink(screen_mode: crate::app::ScreenMode) -> SuspendWaitSink {
     }
 }
 
-/// Report a handoff wait through the sink visible in the current screen mode.
-/// The caller deduplicates reports across retries per handoff request.
-fn report_suspend_wait(app: &mut AppView, message: &str) {
+/// Report external-child feedback through the sink visible in the current screen mode.
+/// The caller deduplicates handoff waits across retries per request.
+fn report_child_notice(app: &mut AppView, message: &str) {
     match suspend_wait_sink(app.screen_mode) {
         SuspendWaitSink::Toast => app.show_toast(message),
         SuspendWaitSink::SystemBlock => {
@@ -515,6 +515,65 @@ fn report_suspend_wait(app: &mut AppView, message: &str) {
                 }
             }
         }
+    }
+}
+
+/// Hidden/stale origins need a visible notice without mutating another transcript.
+fn report_pager_notice(
+    app: &mut AppView,
+    terminal: &mut PagerTerminal,
+    request: &crate::app::external_pager::PendingPager,
+    message: &str,
+) -> std::io::Result<()> {
+    if !request.report(app, message) {
+        if app.screen_mode.is_minimal() {
+            terminal.insert_before(1, |buf| {
+                let area = buf.area;
+                buf.set_stringn(area.x, area.y, message, usize::from(area.width), ratatui::style::Style::default());
+            })?;
+        } else {
+            app.show_toast(message);
+        }
+    }
+    Ok(())
+}
+
+fn transcript_pager_command(
+    pager: &str,
+    ansi: bool,
+    path: &std::path::Path,
+) -> std::io::Result<std::process::Command> {
+    let argv = shlex::split(pager)
+        .filter(|argv| argv.first().is_some_and(|program| !program.is_empty()))
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid PAGER command: check quotes and executable name",
+        ))?;
+    let mut args = argv[1..].to_vec();
+    let is_less = std::path::Path::new(&argv[0])
+        .file_name().and_then(|name| name.to_str()) == Some("less");
+    // Keep ANSI interpretation and start-at-end behavior specific to less.
+    if ansi && is_less {
+        if !args.iter().any(|arg| matches!(arg.as_str(),
+            "-R" | "-r" | "--RAW-CONTROL-CHARS" | "--raw-control-chars")) {
+            args.push("-R".to_string());
+        }
+        if !args.iter().any(|arg| arg == "+G") {
+            args.push("+G".to_string());
+        }
+    }
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(args).arg(path);
+    Ok(command)
+}
+
+fn transcript_pager_failure(
+    result: std::io::Result<std::process::ExitStatus>,
+) -> Option<String> {
+    match result {
+        Ok(status) if status.success() => None,
+        Ok(status) => Some(format!("Transcript pager failed: {status}")),
+        Err(error) => Some(format!("Failed to start transcript pager: {error}")),
     }
 }
 
@@ -572,7 +631,7 @@ fn run_pending_suspends(
     suspend_wait_reports: &mut SuspendWaitReports,
 ) -> anyhow::Result<()> {
     let editor_pending = app.pending_editor.is_some();
-    let pager_pending = app.pending_pager_path.is_some();
+    let pager_pending = app.pending_pager.is_some();
     suspend_wait_reports.reset_missing(editor_pending, pager_pending);
     if !suspend_retry_ready(*suspend_retry_after, Instant::now()) {
         return Ok(());
@@ -620,7 +679,7 @@ fn run_pending_suspends(
                             Instant::now(),
                         );
                         if first_timeout {
-                            report_suspend_wait(app, EDITOR_SUSPEND_WAIT);
+                            report_child_notice(app, EDITOR_SUSPEND_WAIT);
                             presenter.request_presentation(app, terminal, false);
                         }
                         return Ok(());
@@ -650,12 +709,16 @@ fn run_pending_suspends(
     // /transcript suspend: open the rendered transcript in $PAGER,
     // then restore and delete the temp file. Shares the editor's
     // suspend/restore dance (reader park, raw mode, alt screen).
-    if let Some(path) = app.pending_pager_path.take() {
-        let ansi = std::mem::take(&mut app.pending_pager_ansi);
+    if let Some(request) = app.pending_pager.take() {
+        let ansi = request.ansi;
         let pager = std::env::var("PAGER")
             .ok()
             .filter(|p| !p.trim().is_empty())
             .unwrap_or_else(|| "less".to_string());
+        let mut pager_result = Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid pager command",
+        ));
         let moved_cursor = match suspend_for_child(
             app.screen_mode,
             terminal,
@@ -663,66 +726,33 @@ fn run_pending_suspends(
             reader_parked,
             input_rx,
             || {
-                // $PAGER may carry flags (e.g. "less -R"); split on
-                // whitespace so program + args are both honored.
-                let mut parts = pager.split_whitespace();
-                if let Some(prog) = parts.next() {
-                    let mut args: Vec<String> = parts.map(str::to_string).collect();
-                    // An ANSI transcript (minimal full view) needs
-                    // `less` to interpret raw control codes, else the
-                    // colors show as literal escapes. Add `-R` when
-                    // using less and it isn't already requested.
-                    let is_less = std::path::Path::new(prog)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        == Some("less");
-                    if ansi
-                        && is_less
-                        && !args.iter().any(|a| {
-                            matches!(
-                                a.as_str(),
-                                "-R" | "-r" | "--RAW-CONTROL-CHARS" | "--raw-control-chars"
-                            )
-                        })
-                    {
-                        args.push("-R".to_string());
-                    }
-                    // Open the transcript at its END: minimal's prompt sits at
-                    // the bottom of the conversation, so the pager starts where
-                    // the user already is (`g` jumps back to the top). less-only
-                    // like `-R` — other $PAGERs may not understand `+G`.
-                    if ansi && is_less && !args.iter().any(|a| a == "+G") {
-                        args.push("+G".to_string());
-                    }
-                    let _ = std::process::Command::new(prog)
-                        .args(&args)
-                        .arg(&path)
-                        .status();
-                }
+                pager_result = transcript_pager_command(&pager, ansi, &request.path)
+                    .and_then(|mut command| command.status());
             },
         ) {
             Ok(moved_cursor) => moved_cursor,
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-                app.pending_pager_ansi = ansi;
-                requeue_after_suspend_timeout(&mut app.pending_pager_path, path);
                 let first_timeout = defer_suspend_retry(
                     suspend_retry_after,
                     &mut suspend_wait_reports.pager_reported,
                     Instant::now(),
                 );
                 if first_timeout {
-                    report_suspend_wait(app, TRANSCRIPT_SUSPEND_WAIT);
+                    report_pager_notice(app, terminal, &request, TRANSCRIPT_SUSPEND_WAIT)?;
                     presenter.request_presentation(app, terminal, false);
                 }
+                requeue_after_suspend_timeout(&mut app.pending_pager, request);
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
         };
-        let _ = std::fs::remove_file(&path);
         // The pager owned the screen; re-anchor if it printed inline (cat) and
         // repaint the full viewport rather than diffing against a screen state
         // we can no longer vouch for.
         restore_after_child(terminal, app.screen_mode, moved_cursor);
+        if let Some(message) = transcript_pager_failure(pager_result) {
+            report_pager_notice(app, terminal, &request, &message)?;
+        }
         presenter.request_presentation(app, terminal, true);
         suspend_wait_reports.pager_reported = false;
     }
@@ -1596,7 +1626,7 @@ pub(crate) async fn run(
         };
 
         // Wake a deferred suspend retry without requiring unrelated input.
-        let suspend_retry_at = if app.pending_editor.is_some() || app.pending_pager_path.is_some() {
+        let suspend_retry_at = if app.pending_editor.is_some() || app.pending_pager.is_some() {
             suspend_retry_after
         } else {
             None
@@ -2115,6 +2145,9 @@ pub(crate) async fn run(
                             reload_agent_ids.push(id);
                             load_plans.push((id, plan));
                         }
+                        crate::minimal_api::restart_minimal_transcript_after_reload(
+                            &mut app, &reload_agent_ids,
+                        );
                         let any_reload = !reload_agent_ids.is_empty();
                         // Per-agent mode was re-seeded from reload metadata; keep
                         // `/auto` feature-gate slash visibility in sync.
@@ -2502,13 +2535,18 @@ fn apply_session_recap_available(app: &mut AppView, available: bool) {
     }
 }
 
-fn should_pregenerate_away_recap(app: &AppView) -> bool {
-    if !(app.session_recap_available
-        && app.notification_service.focus_tracker.recap_due()
-        && app.notification_service.config().session_recap)
-    {
+fn active_session_recap_due(app: &AppView) -> bool {
+    if !app.session_recap_available || !app.notification_service.config().session_recap {
         return false;
     }
+    let ActiveView::Agent(id) = app.active_view else { return false; };
+    app.agents.get(&id)
+        .and_then(|agent| agent.session.session_id.as_ref())
+        .is_some_and(|sid| app.notification_service.focus_tracker.recap_due(&sid.0))
+}
+
+fn should_pregenerate_away_recap(app: &AppView) -> bool {
+    if !active_session_recap_due(app) { return false; }
     let ActiveView::Agent(id) = app.active_view else {
         return false;
     };
@@ -2634,7 +2672,7 @@ struct RoutedInputEvent {
 }
 
 fn tty_suspend_armed(app: &AppView) -> bool {
-    app.pending_editor.is_some() || app.pending_pager_path.is_some()
+    app.pending_editor.is_some() || app.pending_pager.is_some()
 }
 
 fn normalize_input_event(timed: TimedInputEvent) -> RoutedInputEvent {
@@ -2744,9 +2782,7 @@ async fn drain_and_process(
                 // Capture recap eligibility BEFORE on_focus_gained() clears the
                 // away timer. Auto recap requires the shell rollout flag plus
                 // the notifications opt-in; manual `/recap` only needs the flag.
-                let recap_due = app.session_recap_available
-                    && app.notification_service.focus_tracker.recap_due()
-                    && app.notification_service.config().session_recap;
+                let recap_due = active_session_recap_due(app);
                 app.notification_service.focus_tracker.on_focus_gained();
                 // Pre-warm AppKit's lazy dlopen off the UI thread (once) so the
                 // first changeCount poll after returning is just the cheap
@@ -3683,6 +3719,94 @@ mod tests {
     }
 
     #[test]
+    fn pager_transcript_suspend_retry_retains_file_until_request_ends() {
+        let mut app = crate::app::root::tests::test_app();
+        let id = crate::app::session::AgentId(0);
+        app.agents.insert(id, crate::test_util::make_agent_view(Some("retry-owner"), "/tmp"));
+        app.screen_mode = crate::app::ScreenMode::Minimal;
+        app.active_view = ActiveView::Agent(id);
+        crate::minimal_api::app_set_pending_pager(&mut app, id, "retry body", true).unwrap();
+        let owner = app.pending_pager.take().unwrap();
+        let path = owner.path.to_path_buf();
+        let mut pending = None;
+        requeue_after_suspend_timeout(&mut pending, owner);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "retry body");
+        let active = pending.take().unwrap();
+        assert!(active.ansi);
+        assert!(active.report(&mut app, "retry retains source"));
+        assert!(matches!(&app.agents[&id].scrollback.last().unwrap().block,
+            crate::scrollback::block::RenderBlock::Notice(block) if block.text == "retry retains source"));
+        assert!(path.exists());
+        drop(active); // Both normal completion and non-retry error release this owner.
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn transcript_pager_command_preserves_argument_boundaries_and_less_defaults() {
+        let path = std::path::Path::new("/tmp/transcript with spaces.md");
+        for (input, ansi, program, expected) in [
+            (r#""/app/my pager" "two words" '' escaped\ space"#, false,
+             "/app/my pager", vec!["two words", "", "escaped space"]),
+            ("less", true, "less", vec!["-R", "+G"]),
+            ("'/app with spaces/less' -r +G", true, "/app with spaces/less", vec!["-r", "+G"]),
+            ("less --RAW-CONTROL-CHARS", true, "less", vec!["--RAW-CONTROL-CHARS", "+G"]),
+            ("less", false, "less", vec![]),
+            ("cat", true, "cat", vec![]),
+        ] {
+            let command = transcript_pager_command(input, ansi, path).unwrap();
+            assert_eq!(command.get_program(), program);
+            let mut expected: Vec<std::ffi::OsString> = expected.into_iter().map(Into::into).collect();
+            expected.push(path.as_os_str().to_owned());
+            assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{input}");
+        }
+        for input in ["", "   ", "''", "'' argument", "less 'unterminated", "less \\"] {
+            let error = transcript_pager_command(input, false, path).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{input}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn transcript_pager_quoted_executable_receives_literal_arguments() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("pager with spaces");
+        std::fs::write(&program, "#!/bin/sh\nprintf '%s\\0' \"$@\"\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let input = format!("'{}' '$HOME' '$(echo expanded)' ';' ''", program.display());
+        let transcript = directory.path().join("private transcript.md");
+        let output = transcript_pager_command(&input, true, &transcript).unwrap().output().unwrap();
+        assert!(output.status.success());
+        let expected = format!("$HOME\0$(echo expanded)\0;\0\0{}\0", transcript.display());
+        assert_eq!(output.stdout, expected.as_bytes());
+    }
+
+    #[test]
+    fn transcript_pager_missing_program_reports_start_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = std::process::Command::new(directory.path().join("missing-pager")).status();
+        assert_eq!(result.as_ref().unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        let message = transcript_pager_failure(result).unwrap();
+        assert!(message.starts_with("Failed to start transcript pager: "));
+        assert!(message.len() > "Failed to start transcript pager: ".len());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn transcript_pager_exit_status_preserves_success_failure_and_signal() {
+        use std::os::unix::process::ExitStatusExt;
+        let success = std::process::Command::new("/bin/sh").args(["-c", "exit 0"]).status();
+        assert!(transcript_pager_failure(success).is_none());
+        let failure = std::process::Command::new("/bin/sh").args(["-c", "exit 7"]).status();
+        let message = transcript_pager_failure(failure).unwrap();
+        assert!(message.starts_with("Transcript pager failed: "));
+        assert!(message.contains('7'));
+        let signal = std::process::ExitStatus::from_raw(15);
+        let message = transcript_pager_failure(Ok(signal)).unwrap();
+        assert!(message.contains(&signal.to_string()));
+    }
+
+    #[test]
     fn suspend_timeout_requeues_request() {
         let mut pending = None;
 
@@ -3764,6 +3888,24 @@ mod tests {
     }
 
     #[test]
+    fn pager_feedback_stays_with_origin_after_view_switch() {
+        let mut app = crate::app::root::tests::test_app();
+        let origin = crate::app::session::AgentId(0);
+        let other = crate::app::session::AgentId(1);
+        app.agents.insert(origin, crate::test_util::make_agent_view(Some("origin"), "/tmp"));
+        app.agents.insert(other, crate::test_util::make_agent_view(Some("other"), "/tmp"));
+        app.active_view = ActiveView::Agent(origin);
+        app.screen_mode = crate::app::ScreenMode::Minimal;
+        crate::minimal_api::app_set_pending_pager(&mut app, origin, "origin transcript", true).unwrap();
+        app.active_view = ActiveView::Agent(other);
+        let request = app.pending_pager.take().unwrap();
+        assert!(!request.report(&mut app, "pager-origin-failure"));
+        assert!(app.agents[&other].scrollback.is_empty(), "another session received old pager feedback");
+        assert!(matches!(&app.agents[&origin].scrollback.last().unwrap().block,
+            crate::scrollback::block::RenderBlock::Notice(block) if block.text == "pager-origin-failure"));
+    }
+
+    #[test]
     fn suspend_wait_report_uses_system_block_in_minimal_mode() {
         use crate::scrollback::block::RenderBlock;
 
@@ -3774,7 +3916,7 @@ mod tests {
         app.active_view = ActiveView::Agent(id);
         app.screen_mode = crate::app::ScreenMode::Minimal;
 
-        report_suspend_wait(&mut app, EDITOR_SUSPEND_WAIT);
+        report_child_notice(&mut app, EDITOR_SUSPEND_WAIT);
 
         let agent = app.agents.get(&id).expect("active agent");
         let entry = agent.scrollback.last().expect("system block");
@@ -3794,7 +3936,7 @@ mod tests {
         app.active_view = ActiveView::Agent(id);
         app.screen_mode = crate::app::ScreenMode::Inline;
 
-        report_suspend_wait(&mut app, EDITOR_SUSPEND_WAIT);
+        report_child_notice(&mut app, EDITOR_SUSPEND_WAIT);
 
         let agent = app.agents.get(&id).expect("active agent");
         assert_eq!(
@@ -4726,5 +4868,34 @@ mod tests {
             app.active_view = view;
             assert!(make_run_result(&app).exit_info.is_none());
         }
+    }
+}
+
+
+#[cfg(test)]
+mod recap_session_tests {
+    use super::*;
+    use crate::app::session::AgentId;
+    #[test]
+    fn recap_eligibility_resolves_active_session_at_each_check() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        app.session_recap_available = true;
+        let mut second_app = crate::app::root::tests::test_app_with_agent();
+        let mut second = second_app.agents.shift_remove(&AgentId(0)).unwrap();
+        second.session.id = AgentId(1);
+        second.session.session_id = Some(acp::SessionId::new("second"));
+        app.agents.insert(AgentId(1), second);
+        let first_sid = app.agents[&AgentId(0)].session.session_id.clone().unwrap();
+        app.notification_service.focus_tracker = crate::notifications::focus::FocusTracker::new(0, 0);
+        app.notification_service.focus_tracker.on_focus_lost();
+        app.notification_service.focus_tracker.note_auto_recap_attempt(&first_sid.0);
+        assert!(!active_session_recap_due(&app));
+        app.active_view = ActiveView::Agent(AgentId(1));
+        assert!(active_session_recap_due(&app));
+        assert!(should_pregenerate_away_recap(&app));
+        app.notification_service.focus_tracker.mark_recap_shown("second");
+        assert!(!active_session_recap_due(&app));
+        app.active_view = ActiveView::Welcome;
+        assert!(!active_session_recap_due(&app));
     }
 }

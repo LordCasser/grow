@@ -96,6 +96,7 @@ impl crate::types::tool_metadata::ToolMetadata for WebFetchTool {
 IMPORTANT: ${{ tools.by_kind.web_fetch }} WILL FAIL for authenticated or private URLs (e.g. Google Docs, Confluence, Jira, GitHub private repos). Use specialized MCP tools for those instead.
 
 Usage notes:
+  - Redirects return a target URL; make a new call to fetch it through normal authorization
   - HTTP URLs will be automatically upgraded to HTTPS
   - Long pages will be truncated to fit your context window"#
     }

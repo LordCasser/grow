@@ -12,7 +12,7 @@ use sqlite_journal::JournalMode;
 
 static HEAL_LOCK: Mutex<()> = Mutex::new(());
 
-/// Bumped each time the cache is quarantined and recreated, so callers can tell
+/// Bumped when quarantine or recreation changes the cache namespace, so callers can tell
 /// they are now looking at a different incarnation of the on-disk index.
 static CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
 
@@ -65,46 +65,38 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-pub(super) fn quarantine_db_files(db_path: &Path) -> Option<PathBuf> {
+pub(super) fn quarantine_db_files(db_path: &Path) -> std::io::Result<Option<PathBuf>> {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let corrupt_suffix = format!(".corrupt.{ts}");
-
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let side = with_suffix(db_path, suffix);
-        if !side.exists() {
-            continue;
-        }
-        let dest = with_suffix(&side, &corrupt_suffix);
-        if let Err(e) = std::fs::rename(&side, &dest) {
-            tracing::debug!(
-                error = %e,
-                path = %side.display(),
-                "could not quarantine sqlite sidecar; left in place"
-            );
-        }
-    }
-
-    let main_quarantine = with_suffix(db_path, &corrupt_suffix);
-    let renamed = if db_path.exists() {
-        match std::fs::rename(db_path, &main_quarantine) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    path = %db_path.display(),
-                    "failed to quarantine corrupt session search db; left in place"
-                );
-                false
+    let mut changed = false;
+    let result = (|| {
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let side = with_suffix(db_path, suffix);
+            let dest = with_suffix(&side, &corrupt_suffix);
+            match std::fs::rename(&side, &dest) {
+                Ok(()) => changed = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
         }
-    } else {
-        false
-    };
-
-    renamed.then_some(main_quarantine)
+        let main_quarantine = with_suffix(db_path, &corrupt_suffix);
+        match std::fs::rename(db_path, &main_quarantine) {
+            Ok(()) => {
+                changed = true;
+                Ok(Some(main_quarantine))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    })();
+    // A later rename failure does not undo earlier namespace changes.
+    if changed {
+        CACHE_EPOCH.fetch_add(1, Ordering::Release);
+    }
+    result
 }
 
 pub(super) fn heal_unusable(
@@ -112,7 +104,7 @@ pub(super) fn heal_unusable(
     cause: &rusqlite::Error,
     reprobe: impl FnOnce(&Path) -> Result<bool, rusqlite::Error>,
     recreate: impl FnOnce(&Path) -> Result<(), rusqlite::Error>,
-) {
+) -> bool {
     use fs2::FileExt as _;
 
     let _guard = HEAL_LOCK
@@ -131,46 +123,41 @@ pub(super) fn heal_unusable(
         Ok(f) => f,
         Err(e) => {
             tracing::debug!(error = %e, path = %lock_path.display(), "could not open heal lock; skipping quarantine");
-            return;
+            return false;
         }
     };
     if let Err(e) = _lock_file.lock_exclusive() {
         tracing::debug!(error = %e, "could not acquire cross-process heal lock; skipping quarantine");
-        return;
+        return false;
     }
 
     match reprobe(&effective) {
-        Ok(true) => return,
+        Ok(true) => return true,
         Ok(false) => {}
         Err(e) if is_unusable_db_error(&e) => {}
-        Err(_) => return,
+        Err(_) => return false,
     }
 
-    let quarantine = quarantine_db_files(&effective);
-    let recreated = recreate(&effective);
-    if let Err(e) = &recreated {
-        tracing::warn!(error = %e, "failed to recreate session search index after quarantine");
-    }
-
-    if quarantine.is_none() && recreated.is_err() {
-        tracing::warn!(
-            db_path = %effective.display(),
-            error = %cause,
-            "session search index unusable but could not be quarantined or recreated; left in place"
-        );
-        return;
+    let quarantine = match quarantine_db_files(&effective) {
+        Ok(quarantine) => quarantine,
+        Err(error) => {
+            tracing::warn!(%error, path = %effective.display(), "session search quarantine failed; skipping recreation");
+            return false;
+        }
+    };
+    if let Err(error) = recreate(&effective) {
+        tracing::warn!(%error, path = %effective.display(), ?quarantine, "session search recreation failed after isolation");
+        return false;
     }
 
     CACHE_EPOCH.fetch_add(1, Ordering::Release);
     tracing::warn!(
         db_path = %effective.display(),
-        quarantine = %quarantine
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(removed or missing)".into()),
+        ?quarantine,
         error = %cause,
-        "session search index unusable; quarantined and recreated empty cache"
+        "session search index recreated after confirmed unusability"
     );
+    true
 }
 
 #[cfg(test)]
@@ -186,19 +173,100 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_failure_does_not_recreate() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("x".repeat(240));
+        std::fs::write(&db, b"corrupt fixture").unwrap();
+        let wal = with_suffix(&db, "-wal");
+        std::fs::write(&wal, b"wal fixture").unwrap();
+        let recreated = std::cell::Cell::new(false);
+        heal_unusable(
+            &db,
+            &rusqlite::Error::QueryReturnedNoRows,
+            |_| Ok(false),
+            |_| {
+                recreated.set(true);
+                Ok(())
+            },
+        );
+        assert!(
+            !recreated.get(),
+            "failed isolation must stop before recreate"
+        );
+        assert_eq!(std::fs::read(db).unwrap(), b"corrupt fixture");
+        assert_eq!(std::fs::read(wal).unwrap(), b"wal fixture");
+    }
+
+    #[test]
     fn quarantine_moves_main_and_sidecars() {
+        let _guard = HEAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("session_search.sqlite");
         std::fs::write(&db, b"main").unwrap();
         std::fs::write(tmp.path().join("session_search.sqlite-wal"), b"wal").unwrap();
         std::fs::write(tmp.path().join("session_search.sqlite-shm"), b"shm").unwrap();
 
-        let moved = quarantine_db_files(&db).expect("main db should be quarantined");
+        let moved = quarantine_db_files(&db)
+            .unwrap()
+            .expect("main db should be quarantined");
 
         assert!(!db.exists());
         assert!(moved.exists());
         assert!(!tmp.path().join("session_search.sqlite-wal").exists());
         assert!(!tmp.path().join("session_search.sqlite-shm").exists());
+    }
+
+    #[test]
+    fn partial_quarantine_failure_invalidates_without_moving_main() {
+        let _guard = HEAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("x".repeat(220));
+        std::fs::write(&db, b"main").unwrap();
+        let wal = with_suffix(&db, "-wal");
+        let journal = with_suffix(&db, "-journal");
+        std::fs::write(&wal, b"wal").unwrap();
+        std::fs::write(&journal, b"journal").unwrap();
+        let epoch = CacheEpoch::now();
+        assert!(quarantine_db_files(&db).is_err());
+        assert!(epoch.changed());
+        assert!(!wal.exists());
+        assert!(has_corrupt_sibling(tmp.path()));
+        assert_eq!(std::fs::read(db).unwrap(), b"main");
+        assert_eq!(std::fs::read(journal).unwrap(), b"journal");
+    }
+
+    #[test]
+    fn recreation_failure_denies_reopen_and_keeps_quarantine() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("failed-recreate.sqlite");
+        std::fs::write(&db, b"bad").unwrap();
+        let reopen = heal_unusable(
+            &db,
+            &rusqlite::Error::InvalidQuery,
+            |_| Ok(false),
+            |_| Err(rusqlite::Error::InvalidQuery),
+        );
+        assert!(!reopen);
+        assert!(!db.exists());
+        assert!(has_corrupt_sibling(tmp.path()));
+    }
+
+    #[test]
+    fn absent_files_allow_recreation() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("absent.sqlite");
+        let recreated = std::cell::Cell::new(false);
+        assert!(heal_unusable(
+            &db,
+            &rusqlite::Error::InvalidQuery,
+            |_| Ok(false),
+            |_| {
+                recreated.set(true);
+                Ok(())
+            }
+        ));
+        assert!(recreated.get());
+        assert!(!has_corrupt_sibling(tmp.path()));
     }
 
     fn quarantined_after(reprobe: impl FnOnce(&Path) -> Result<bool, rusqlite::Error>) -> bool {

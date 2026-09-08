@@ -1,0 +1,4 @@
+# Design
+Daemon在UI提交时分配递增编号，pending保存(编号,Msg)，合并保留新编号。worker将该编号写入Snapshot，取消自行计数。UI保存requested_generation，提交后清空snapshot及hover但保留导航索引供同查询刷新完成后夹取；重开重置索引。poll拒绝不匹配请求或已应用的编号。关闭清空结果，重开必有新编号。编号使用checked_add防止回绕别名。
+
+测试直接构造晚到快照注入shared，以确定性验证重开/查询/刷新拒绝旧结果，再配合实际后台匹配回归。

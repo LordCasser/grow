@@ -1,0 +1,6 @@
+# Design
+私有MruWriter将容量1的SyncSender<()>与Arc<Mutex<Option<MruSnapshot>>>放在一起。submit在短锁内替换pending，再try_send唤醒：成功或Full都表示已接收，Disconnected则清空并返回false。worker每收到一个通知，取走pending并在锁外write。写入期间后续submit最多留一个最新快照和一个通知；多余通知最多空消费一次，不丢失最终pending。
+
+锁内不做文件IO，发送不等待队列空间。这里不承诺完全无锁或调度延迟上限。后台spawn失败保存None；无法提交时返回false，控制器mark_dirty维持现有下次record重试。后台实际write失败仍best effort，下次command的完整快照包含此前内存历史。进程退出不保证flush，和原实现一致。
+
+生产路径唯一调用者为SlashController::record_command_use，各控制器共享AppView的MRU store，快照使用固定GROW_HOME路径。不是多目标持久化队列。不引入跨进程合并。

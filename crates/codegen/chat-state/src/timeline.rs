@@ -1541,7 +1541,7 @@ pub struct Timeline {
     /// Branch-local coordinates derived incrementally from accepted events.
     prompt_indices: BTreeSet<usize>,
     next_prompt_index: usize,
-    pending_control_contexts: BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
+    pending_control_contexts: BTreeMap<ControlContextLayer, (SurfaceId, ConversationItem)>,
     pending_notifications: BTreeMap<String, PendingNotification>,
     received_notification_ids: BTreeSet<String>,
     received_notifications:
@@ -3063,16 +3063,20 @@ impl Timeline {
                 for layer in &control.retired_context_layers {
                     self.pending_control_contexts.remove(layer);
                 }
-                for context in &control.model_contexts {
+                for (item, context) in control.model_contexts.iter().enumerate() {
+                    let source = SurfaceId {
+                        event: event.seq,
+                        item: item as u32,
+                    };
                     if control_transition_waits_for_boundary(
                         self.lifecycle.active_turn.is_some(),
                         self.lifecycle.active_step.is_some(),
                         context,
                     ) {
                         self.pending_control_contexts
-                            .insert(context.layer, (event.seq, context.item.clone()));
+                            .insert(context.layer, (source, context.item.clone()));
                     } else {
-                        self.append_surface_items(event.seq, std::slice::from_ref(&context.item));
+                        self.append_surface_item(source, context.item.clone());
                     }
                 }
             }
@@ -3080,14 +3084,14 @@ impl Timeline {
                 for (source, item) in
                     take_pending_step_control_contexts(&mut self.pending_control_contexts)
                 {
-                    self.append_surface_items(source, std::slice::from_ref(&item));
+                    self.append_surface_item(source, item);
                 }
             }
             TimelineEventKind::Turn(TurnEvent::Ended { .. }) => {
                 for (source, item) in
                     take_pending_control_contexts(&mut self.pending_control_contexts)
                 {
-                    self.append_surface_items(source, std::slice::from_ref(&item));
+                    self.append_surface_item(source, item);
                 }
             }
             _ => {}
@@ -4133,6 +4137,14 @@ impl Timeline {
         if matches!(&messages.surface, SurfaceOp::Replace { .. }) {
             self.surface_revision = self.surface_revision.saturating_add(1);
         }
+    }
+
+    /// Control activation preserves the source event's original item offset,
+    /// even when a boundary activates only a subset of its contexts.
+    fn append_surface_item(&mut self, source: SurfaceId, item: ConversationItem) {
+        self.surface.push(item);
+        self.surface_ids.push(source);
+        self.surface_revision = self.surface_revision.saturating_add(1);
     }
 
     fn append_surface_items(&mut self, event_seq: EventSeq, items: &[ConversationItem]) {
@@ -5760,9 +5772,9 @@ fn is_valid_control_context(context: &ControlContext) -> bool {
 fn fold_control_context_activation(
     active_turn: &mut bool,
     active_step: &mut bool,
-    pending: &mut BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
+    pending: &mut BTreeMap<ControlContextLayer, (SurfaceId, ConversationItem)>,
     event: &TimelineEvent,
-) -> Vec<(EventSeq, ConversationItem)> {
+) -> Vec<(SurfaceId, ConversationItem)> {
     match &event.kind {
         TimelineEventKind::Turn(TurnEvent::Started { .. }) => {
             *active_turn = true;
@@ -5777,11 +5789,15 @@ fn fold_control_context_activation(
                 pending.remove(layer);
             }
             let mut projected = Vec::new();
-            for context in &control.model_contexts {
+            for (item, context) in control.model_contexts.iter().enumerate() {
+                let source = SurfaceId {
+                    event: event.seq,
+                    item: item as u32,
+                };
                 if control_transition_waits_for_boundary(*active_turn, *active_step, context) {
-                    pending.insert(context.layer, (event.seq, context.item.clone()));
+                    pending.insert(context.layer, (source, context.item.clone()));
                 } else {
-                    projected.push((event.seq, context.item.clone()));
+                    projected.push((source, context.item.clone()));
                 }
             }
             projected
@@ -5816,8 +5832,8 @@ pub(crate) fn control_transition_waits_for_boundary(
 }
 
 fn take_pending_step_control_contexts(
-    pending: &mut BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
-) -> Vec<(EventSeq, ConversationItem)> {
+    pending: &mut BTreeMap<ControlContextLayer, (SurfaceId, ConversationItem)>,
+) -> Vec<(SurfaceId, ConversationItem)> {
     let mut contexts = [
         ControlContextLayer::AgentRole,
         ControlContextLayer::GoalDefinition,
@@ -5831,8 +5847,8 @@ fn take_pending_step_control_contexts(
 }
 
 fn take_pending_control_contexts(
-    pending: &mut BTreeMap<ControlContextLayer, (EventSeq, ConversationItem)>,
-) -> Vec<(EventSeq, ConversationItem)> {
+    pending: &mut BTreeMap<ControlContextLayer, (SurfaceId, ConversationItem)>,
+) -> Vec<(SurfaceId, ConversationItem)> {
     let mut contexts = std::mem::take(pending).into_values().collect::<Vec<_>>();
     contexts.sort_by_key(|(source, _)| *source);
     contexts
@@ -5883,7 +5899,7 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
             event,
         );
         for (source, value) in activated {
-            append_branch_leaves(&mut fold, source, std::slice::from_ref(&value), false);
+            append_branch_leaf(&mut fold, source, value, false);
         }
         match &event.kind {
             TimelineEventKind::Messages(messages) => match &messages.surface {
@@ -6155,16 +6171,25 @@ fn append_branch_leaves(
             event,
             item: item as u32,
         };
-        fold.surface.push(BranchProvenance {
-            id,
-            value: value.clone(),
-            leaves: vec![id],
-        });
-        fold.leaf_order.push(id);
-        fold.leaf_values.insert(id, value);
-        fold.leaf_birth.insert(id, event);
-        fold.leaf_is_message.insert(id, is_message);
+        append_branch_leaf(fold, id, value, is_message);
     }
+}
+
+fn append_branch_leaf(
+    fold: &mut BranchFold,
+    id: SurfaceId,
+    value: ConversationItem,
+    is_message: bool,
+) {
+    fold.surface.push(BranchProvenance {
+        id,
+        value: value.clone(),
+        leaves: vec![id],
+    });
+    fold.leaf_order.push(id);
+    fold.leaf_values.insert(id, value);
+    fold.leaf_birth.insert(id, id.event);
+    fold.leaf_is_message.insert(id, is_message);
 }
 
 fn reset_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationItem]) {
@@ -8400,6 +8425,148 @@ mod tests {
                 actual: 7
             })
         ));
+    }
+
+    #[test]
+    fn multi_context_control_keeps_source_offsets_across_boundaries() {
+        for supersede in [false, true] {
+            let mut timeline =
+                Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+            record_started_turn_and_step(&mut timeline, 1, 0);
+            let control = timeline
+                .record(TimelineEventKind::Control(ControlEvent {
+                    revision: 1,
+                    snapshot: serde_json::json!({"behavior": "goal"}),
+                    retired_context_layers: vec![],
+                    model_contexts: [
+                        ControlContextLayer::AgentRole,
+                        ControlContextLayer::Behavior,
+                        ControlContextLayer::PlanPhase,
+                    ]
+                    .into_iter()
+                    .map(|layer| ControlContext {
+                        layer,
+                        activation: ControlContextActivation::Transition,
+                        item: ConversationItem::system_reminder(format!("{layer:?}")),
+                    })
+                    .collect(),
+                }))
+                .unwrap();
+            if supersede {
+                timeline
+                    .record(TimelineEventKind::Control(ControlEvent {
+                        revision: 2,
+                        snapshot: serde_json::json!({"agent": "new"}),
+                        retired_context_layers: vec![],
+                        model_contexts: vec![ControlContext {
+                            layer: ControlContextLayer::AgentRole,
+                            activation: ControlContextActivation::Transition,
+                            item: ConversationItem::system_reminder("new-role"),
+                        }],
+                    }))
+                    .unwrap();
+            }
+            timeline
+                .record(TimelineEventKind::Step(StepEvent::Ended {
+                    id: StepId {
+                        turn: TurnId(1),
+                        index: 0,
+                    },
+                    outcome: "continued".into(),
+                    duration_ms: 1,
+                }))
+                .unwrap();
+            assert!(timeline.surface_ids().contains(&SurfaceId {
+                event: control.seq,
+                item: 2
+            }));
+            assert!(!timeline.surface_ids().contains(&SurfaceId {
+                event: control.seq,
+                item: 1
+            }));
+            assert_eq!(
+                timeline.surface_ids().contains(&SurfaceId {
+                    event: control.seq,
+                    item: 0
+                }),
+                !supersede
+            );
+            timeline
+                .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                    id: TurnId(1),
+                    outcome: "completed".into(),
+                    duration_ms: 1,
+                    tool_count: 0,
+                    terminal: completed_terminal(),
+                    cancellation_category: None,
+                    details: None,
+                }))
+                .unwrap();
+            assert!(timeline.surface_ids().contains(&SurfaceId {
+                event: control.seq,
+                item: 1
+            }));
+            let branch = fold_branch_provenance(&timeline);
+            assert_eq!(
+                branch
+                    .surface
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>(),
+                timeline.surface_ids()
+            );
+            assert_eq!(
+                serde_json::to_value(timeline.branch_transcript()).unwrap(),
+                serde_json::to_value(timeline.surface()).unwrap()
+            );
+            let replay = Timeline::from_events(timeline.events().to_vec()).unwrap();
+            assert_eq!(replay.surface_ids(), timeline.surface_ids());
+        }
+    }
+
+    #[test]
+    fn multi_context_control_can_rebuild_after_replay() {
+        let mut timeline = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+        timeline
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({"behavior": "normal"}),
+                retired_context_layers: vec![],
+                model_contexts: [
+                    ControlContextLayer::AgentRole,
+                    ControlContextLayer::Behavior,
+                ]
+                .into_iter()
+                .map(|layer| ControlContext {
+                    layer,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder(format!("{layer:?}")),
+                })
+                .collect(),
+            }))
+            .unwrap();
+        let mut replay = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        let mut context = replay.surface().to_vec();
+        context.insert(
+            1,
+            ConversationItem::project_instructions("project instructions"),
+        );
+        replay
+            .replace_all(context, MessageCause::ContextRebuild)
+            .unwrap();
+        let resumed = Timeline::from_events(replay.events().to_vec()).unwrap();
+        assert_eq!(
+            serde_json::to_value(resumed.surface()).unwrap(),
+            serde_json::to_value(replay.surface()).unwrap()
+        );
+        assert_eq!(
+            timeline.surface_ids().iter().collect::<BTreeSet<_>>().len(),
+            timeline.surface().len()
+        );
+        assert_eq!(
+            serde_json::to_value(timeline.branch_transcript()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
     }
 
     #[test]

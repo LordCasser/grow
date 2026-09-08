@@ -1122,3 +1122,76 @@ async fn pure_cache_hit_with_zero_uncached_still_emits_usage() {
     assert_eq!(usage.cached_prompt_tokens, 2500);
     assert_eq!(usage.total_tokens, 2501);
 }
+
+#[tokio::test]
+async fn proxy_thinking_signature_can_arrive_late_or_remain_absent() {
+    for signed in [true, false] {
+        let start = serde_json::from_value::<MessageStreamEvent>(serde_json::json!({
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "thinking", "thinking": "visible thought"}
+        }))
+        .expect("initial thinking signature may arrive in a delta");
+        let mut events = vec![Ok(message_start()), Ok(start)];
+        if signed {
+            events.push(Ok(MessageStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: StreamDelta::SignatureDelta {
+                    signature: "late-signature".into(),
+                },
+            }));
+        }
+        events.extend([
+            Ok(block_stop(0)),
+            Ok(text_block_start(1)),
+            Ok(text_delta(1, "answer")),
+            Ok(block_stop(1)),
+            Ok(MessageStreamEvent::ContentBlockStart {
+                index: 2,
+                content_block: ContentBlock::ToolUse {
+                    id: "tool-1".into(),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path":"fixture.txt"}),
+                    cache_control: None,
+                },
+            }),
+            Ok(block_stop(2)),
+            Ok(message_delta_with_stop(messages::StopReason::ToolUse)),
+            Ok(MessageStreamEvent::MessageStop),
+        ]);
+        let evs = collect(stream_messages(
+            stream::iter(events).boxed(),
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+        let SamplingEvent::Completed { response, .. } = evs.last().unwrap() else {
+            panic!("complete response expected: {:?}", evs.last());
+        };
+        assert_eq!(
+            response.reasoning_items().next().unwrap().text.as_ref(),
+            "visible thought"
+        );
+        assert_eq!(response.assistant().unwrap().content.as_ref(), "answer");
+        assert_eq!(response.tool_calls().len(), 1);
+        assert_eq!(response.native_continuation.is_some(), signed);
+        if signed {
+            assert_eq!(
+                response
+                    .native_continuation
+                    .as_ref()
+                    .unwrap()
+                    .signature()
+                    .as_deref(),
+                Some("late-signature")
+            );
+        }
+    }
+    assert!(
+        serde_json::from_value::<MessageStreamEvent>(serde_json::json!({
+            "type":"content_block_delta", "index":0,"delta":{"type":"signature_delta"}
+        }))
+        .is_err(),
+        "a signature delta must actually supply its signature"
+    );
+}

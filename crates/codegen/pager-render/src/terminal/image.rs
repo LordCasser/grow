@@ -234,6 +234,9 @@ pub fn prepare_kitty_overlay_image_bytes(image_data: &[u8]) -> Option<Vec<u8>> {
     if kitty_format_from_bytes(image_data).is_some() {
         return Some(image_data.to_vec());
     }
+    if !overlay_conversion_within_pixel_budget(image_data) {
+        return None;
+    }
 
     // On macOS, convert via `sips` through a temp file. CoreGraphics
     // handles ICC colour profiles correctly, avoiding the artifacts
@@ -271,18 +274,39 @@ pub fn prepare_kitty_overlay_image_bytes(image_data: &[u8]) -> Option<Vec<u8>> {
     Some(png)
 }
 
-/// Convert image bytes to PNG via macOS `sips` using temp files.
-fn convert_via_sips(image_data: &[u8]) -> Option<Vec<u8>> {
-    use std::io::Write;
+/// Admit source dimensions before either conversion backend allocates pixels.
+fn overlay_conversion_within_pixel_budget(image_data: &[u8]) -> bool {
+    const MAX_SOURCE_PIXELS: u64 = 16_000_000;
+    tools::util::image_validate::validate_image_bytes_unrestricted(image_data, false)
+        .is_ok_and(|(width, height, _)| {
+            width != 0 && height != 0 && u64::from(width) * u64::from(height) <= MAX_SOURCE_PIXELS
+        })
+}
 
-    let tmp_dir = std::env::temp_dir();
-    let id = std::process::id();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let src = tmp_dir.join(format!("grow-sips-{id}-{ts}.dat"));
-    let dst = tmp_dir.join(format!("grow-sips-{id}-{ts}.png"));
+fn sips_temp_directory() -> Option<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("grow-sips-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir().ok()
+}
+
+/// Convert image bytes to PNG via macOS `sips` using owned temporary files.
+fn convert_via_sips(image_data: &[u8]) -> Option<Vec<u8>> {
+    convert_via_sips_in(image_data, sips_temp_directory()?, std::process::Command::new("sips"))
+}
+
+fn convert_via_sips_in(
+    image_data: &[u8],
+    directory: tempfile::TempDir,
+    mut sips_cmd: std::process::Command,
+) -> Option<Vec<u8>> {
+    use std::io::Write;
+    let src = directory.path().join("source.dat");
+    let dst = directory.path().join("output.png");
 
     // Write source bytes to temp file.
     let mut f = std::fs::File::create(&src).ok()?;
@@ -290,7 +314,6 @@ fn convert_via_sips(image_data: &[u8]) -> Option<Vec<u8>> {
     f.sync_all().ok()?;
     drop(f);
 
-    let mut sips_cmd = std::process::Command::new("sips");
     sips_cmd
         .args(["-s", "format", "png"])
         .arg(&src)
@@ -299,19 +322,96 @@ fn convert_via_sips(image_data: &[u8]) -> Option<Vec<u8>> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    tty_utils::detach_std_command(&mut sips_cmd);
-    let status = sips_cmd.status().ok()?;
+    let status = match run_sips_command(sips_cmd, std::time::Duration::from_secs(10)) {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::warn!(%error, "sips conversion process failed");
+            return None;
+        }
+    };
 
-    let _ = std::fs::remove_file(&src);
-
-    if !status.success() || !dst.is_file() {
-        let _ = std::fs::remove_file(&dst);
+    if !status.success() {
         return None;
     }
 
-    let png = std::fs::read(&dst).ok()?;
-    let _ = std::fs::remove_file(&dst);
-    Some(png)
+    read_sips_output(&dst)
+}
+
+const MAX_SIPS_OUTPUT_BYTES: usize = 100_000_000;
+
+fn read_sips_output(path: &std::path::Path) -> Option<Vec<u8>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_SIPS_OUTPUT_BYTES as u64 {
+        return None;
+    }
+    read_sips_output_bytes(file, MAX_SIPS_OUTPUT_BYTES)
+}
+
+fn read_sips_output_bytes(reader: impl std::io::Read, limit: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    reader.take((limit as u64).saturating_add(1)).read_to_end(&mut bytes).ok()?;
+    (!bytes.is_empty() && bytes.len() <= limit).then_some(bytes)
+}
+
+fn run_sips_command(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    use std::io::{Error, ErrorKind};
+    use std::time::{Duration, Instant};
+    command.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    tty_utils::detach_std_command(&mut command);
+    #[allow(clippy::disallowed_methods)] // owned, deadline-bound converter
+    let mut child = command.spawn().map_err(|e| Error::new(e.kind(), format!("sips process startup failed: {e}")))?;
+    let group = match tty_utils::ProcessGroup::new().and_then(|mut group| {
+        group.attach_std(&child)?;
+        Ok(group)
+    }) {
+        Ok(group) => group,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::new(error.kind(), format!("sips process-group attachment failed: {error}")));
+        }
+    };
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Err(error) => break Err(Error::new(error.kind(), format!("sips process wait failed: {error}"))),
+            Ok(None) if started.elapsed() >= timeout => {
+                break Err(Error::new(ErrorKind::TimedOut, "sips conversion timed out"));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(15)),
+        }
+    };
+    let cleanup = group.kill();
+    if status.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if let Err(error) = cleanup {
+        #[cfg(unix)]
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return status;
+        }
+        return Err(match status {
+            Err(primary) => Error::new(primary.kind(), format!("{primary}; process-group cleanup failed: {error}")),
+            Ok(_) => Error::new(error.kind(), format!("sips process-group cleanup failed: {error}")),
+        });
+    }
+    status
 }
 
 /// Prepare encoded image bytes for the currently detected overlay protocol.

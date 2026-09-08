@@ -1,0 +1,4 @@
+# Design
+OpenOptions write/create配合Unix O_NONBLOCK，不在open时truncate。File.metadata检查regular，再同句柄set_len(0)，最后BufWriter。无reader的FIFO打开立即出错，有reader的FIFO打开成功但metadata拒绝；目录同样不可作为目标。record已有open错误路径警告并Sink::Disabled，scroll_log_active按Sink报告关闭，下一toggle能新建默认记录器。
+
+测试真实UnixFIFO无reader与有reader两种情况、目录拒绝、失败后record禁用不再尝试；普通已有文件截断写入和symlink目标保留。仅控制FIFO等待，不宣称普通网络文件系统/写入flush墙钟超时。

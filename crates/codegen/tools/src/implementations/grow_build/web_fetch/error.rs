@@ -39,9 +39,6 @@ pub enum WebFetchError {
     #[error("invalid redirect URL: {0}")]
     InvalidRedirect(String),
 
-    #[error("too many redirects (max {max})")]
-    TooManyRedirects { max: usize },
-
     #[error("response body exceeds maximum size of {max} bytes")]
     ResponseTooLarge { max: usize },
 

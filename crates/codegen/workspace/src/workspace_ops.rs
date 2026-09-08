@@ -871,15 +871,12 @@ fn hook_registry_to_wire(
     serde_json::from_value(value).map_err(|e| WorkspaceError::Operation(e.to_string()))
 }
 /// Inverse of [`hook_registry_to_wire`]. Matchers are recompiled fail-closed
-/// after the hop.
+/// by HookRegistry deserialization.
 fn wire_to_hook_registry(
     wire: &HookRegistryWire,
 ) -> WorkspaceResult<hooks::discovery::HookRegistry> {
     let value = serde_json::to_value(wire).map_err(|e| WorkspaceError::Operation(e.to_string()))?;
-    let mut registry: hooks::discovery::HookRegistry =
-        serde_json::from_value(value).map_err(|e| WorkspaceError::Operation(e.to_string()))?;
-    registry.recompile_matchers();
-    Ok(registry)
+    serde_json::from_value(value).map_err(|e| WorkspaceError::Operation(e.to_string()))
 }
 #[async_trait]
 impl WorkspaceOp for HookRegistryReq {
@@ -1609,6 +1606,10 @@ mod tests {
             serde_json::to_value(&wire).unwrap()
         );
         let back = wire_to_hook_registry(&wire).expect("wire → heavy");
+        let matcher = back.hooks_for(hooks::event::HookEventName::PreToolUse)[0]
+            .matcher.as_ref().expect("wire restore must rebuild matcher");
+        assert!(matcher.is_match("Bash"));
+        assert!(!matcher.is_match("Read"));
         assert_eq!(
             serde_json::to_value(&back).unwrap(),
             serde_json::to_value(&registry).unwrap()

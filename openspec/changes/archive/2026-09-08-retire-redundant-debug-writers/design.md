@@ -1,0 +1,4 @@
+# Design
+Split appender creation and guard parking into private helpers; existing non_blocking_file_writer composes both for other callers. Routing session and fallback paths create unparked pairs, queue their first line, select writer under map lock, then park only winner guard. Loser guard drops outside lock, flushing its line and retiring its thread. No per-key initialization lock or new state type. Concurrent creation remains possible; only redundant lifetime retention is fixed. Guard drop may wait for bounded tracing-appender flush, as at normal shutdown.
+
+Test exact isolated subprocess to inspect global registry counts without unrelated test writers. Barrier-start parallel first writes to both sinks; require only one parked guard per sink and all lines after flush. Existing routing/filter tests remain. No global GROW_HOME mutation or real debug paths. Distinct session count/retention and shutdown concurrent with installation remain separate.

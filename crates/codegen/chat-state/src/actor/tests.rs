@@ -647,16 +647,26 @@ async fn push_user_message_durably_waits_for_timeline_commit() {
         .push_user_message_durably(ConversationItem::user("hello"))
         .await;
 
-    assert!(ack.is_ok());
+    let committed = ack.unwrap();
 
     let conv = h.handle.get_conversation().await;
     assert_eq!(conv.len(), 1);
 
     let records = h.drain_persistence();
-    assert!(matches!(
-        records.as_slice(),
-        [PersistenceRecord::Timeline(_)]
-    ));
+    assert!(
+        matches!(records.as_slice(), [PersistenceRecord::Timeline(event)] if serde_json::to_value(event).unwrap() == serde_json::to_value(&committed).unwrap())
+    );
+    h.handle
+        .push_user_message_durably(ConversationItem::user("later"))
+        .await
+        .unwrap();
+    let snapshot = h
+        .handle
+        .materialize_timeline("session".into())
+        .await
+        .unwrap();
+    assert_ne!(snapshot.input_ref.last_seq, committed.seq.get());
+    assert_eq!(snapshot.surface_ids[0].event, committed.seq);
 }
 #[tokio::test]
 async fn push_assistant_response_appends_and_persists() {
@@ -4308,6 +4318,67 @@ async fn fresh_timeline_can_be_seeded_with_a_system_message() {
     assert!(
         matches!(&sys, ConversationItem::System(s) if s.content.as_ref() == system_prompt),
         "expected system prompt after replace_conversation, got {sys:?}"
+    );
+}
+
+#[tokio::test]
+async fn resumed_multi_context_control_accepts_durable_initial_context() {
+    let mut timeline =
+        crate::Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+    timeline
+        .record(crate::TimelineEventKind::Control(crate::ControlEvent {
+            revision: 1,
+            snapshot: serde_json::json!({"behavior": "normal"}),
+            retired_context_layers: vec![],
+            model_contexts: [
+                crate::ControlContextLayer::AgentRole,
+                crate::ControlContextLayer::Behavior,
+            ]
+            .into_iter()
+            .map(|layer| crate::ControlContext {
+                layer,
+                activation: crate::ControlContextActivation::Transition,
+                item: ConversationItem::system_reminder(format!("{layer:?}")),
+            })
+            .collect(),
+        }))
+        .unwrap();
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn_from_timeline(
+        timeline.events().to_vec(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(persistence_rx.drain().is_empty());
+    let (mut context, revision) = handle.get_conversation_with_revision().await.unwrap();
+    context.insert(
+        1,
+        ConversationItem::project_instructions("project instructions"),
+    );
+    handle
+        .replace_context_durably(context.clone(), revision)
+        .await
+        .unwrap();
+    let records = persistence_rx.drain();
+    assert_eq!(records.len(), 1);
+    let PersistenceRecord::Timeline(event) = &records[0] else {
+        panic!("expected durable context");
+    };
+    assert_eq!(event.seq, timeline.next_seq());
+    timeline.accept(event.clone()).unwrap();
+    let replay = crate::Timeline::from_events(timeline.events().to_vec()).unwrap();
+    assert_eq!(
+        serde_json::to_value(replay.surface()).unwrap(),
+        serde_json::to_value(&context).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(handle.get_conversation().await).unwrap(),
+        serde_json::to_value(context).unwrap()
     );
 }
 

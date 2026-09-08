@@ -3,6 +3,8 @@ use crate::terminal::tmux_probe;
 pub type TmuxProbeResult<T> = tmux_probe::TmuxQueryResult<T>;
 
 pub trait TmuxOptionQuery {
+    fn config_files(&self) -> TmuxProbeResult<String> { TmuxProbeResult::Unavailable }
+
     fn show_option(&self, option: &str) -> TmuxProbeResult<String>;
 
     fn option_support(&self, option: &str) -> TmuxProbeResult<()>;
@@ -13,6 +15,8 @@ pub trait TmuxOptionQuery {
 pub struct LiveTmuxProbe;
 
 impl TmuxOptionQuery for LiveTmuxProbe {
+    fn config_files(&self) -> TmuxProbeResult<String> { tmux_probe::query_config_files() }
+
     fn show_option(&self, option: &str) -> TmuxProbeResult<String> {
         tmux_probe::query_option(option)
     }

@@ -110,7 +110,7 @@ fn missing_empty_normal_no_final_newline_and_crlf_are_preserved() {
 }
 
 #[test]
-fn typed_inspection_and_item_updates_share_one_validated_parse() {
+fn typed_inspection_and_item_updates_preserve_unmanaged_content() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("config.rc");
     fs::write(
@@ -468,15 +468,21 @@ fn post_publish_failures_rollback_existing_and_remove_new_target() {
 }
 
 #[test]
-fn verification_failure_rolls_back_exact_original() {
+fn verification_failure_preserves_conflicting_bytes_and_backup() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("config.rc");
     fs::write(&path, "original\n").unwrap();
     let plan = ManagedConfig::plan(request(&path, &[("item", "body")])).unwrap();
     let error = ManagedConfig::apply_with_observer(plan, &CorruptTemp).unwrap_err();
-    assert!(matches!(error, ManagedConfigError::Verification { .. }));
-    assert_eq!(fs::read_to_string(&path).unwrap(), "original\n");
-    assert!(artifacts(temp.path()).is_empty());
+    let ManagedConfigError::Recovery {
+        backup_path: Some(backup),
+        ..
+    } = error
+    else {
+        panic!("expected a retained recovery backup: {error:?}");
+    };
+    assert_eq!(fs::read_to_string(backup).unwrap(), "original\n");
+    assert_ne!(fs::read_to_string(&path).unwrap(), "original\n");
 }
 
 #[test]
@@ -629,4 +635,335 @@ fn validator_timeout_is_bounded() {
     assert!(ManagedConfig::apply(ManagedConfig::plan(request).unwrap()).is_err());
     assert!(started.elapsed() < Duration::from_secs(1));
     assert_eq!(fs::read_to_string(&path).unwrap(), "original\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn rollback_preserves_changes_after_publication() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    struct EditAt {
+        phase: TransactionPhase,
+        edit: &'static str,
+    }
+    impl TransactionObserver for EditAt {
+        fn phase(&self, phase: TransactionPhase, plan: &ManagedConfigPlan) -> io::Result<()> {
+            if phase == self.phase {
+                let path = plan.target_path();
+                match self.edit {
+                    "write" => fs::write(path, "external\n")?,
+                    "grow" => fs::write(path, vec![b'x'; plan.updated_bytes().len() + 1024])?,
+                    "replace" | "identical" => {
+                        let replacement = path.with_extension("replacement");
+                        let bytes = if self.edit == "identical" {
+                            plan.updated_bytes()
+                        } else {
+                            b"external\n"
+                        };
+                        fs::write(&replacement, bytes)?;
+                        fs::rename(replacement, path)?;
+                    }
+                    "remove" => fs::remove_file(path)?,
+                    "symlink" => {
+                        let moved = path.with_extension("moved");
+                        fs::rename(path, &moved)?;
+                        symlink(&moved, path)?;
+                    }
+                    "mode" => fs::set_permissions(path, fs::Permissions::from_mode(0o600))?,
+                    _ => unreachable!(),
+                }
+            }
+            if phase == TransactionPhase::AfterPublish
+                && self.phase != TransactionPhase::BeforeVerify
+            {
+                Err(io::Error::other("injected post-publication failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    for existing in [false, true] {
+        for phase in [
+            TransactionPhase::AfterPublish,
+            TransactionPhase::BeforeRollback,
+            TransactionPhase::BeforeVerify,
+        ] {
+            for edit in [
+                "write",
+                "grow",
+                "replace",
+                "identical",
+                "remove",
+                "symlink",
+                "mode",
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let path = temp.path().join("config.rc");
+                if existing {
+                    fs::write(&path, "original\n").unwrap();
+                }
+                let plan = ManagedConfig::plan(request(&path, &[("item", "body")])).unwrap();
+                let updated = plan.updated_bytes().to_vec();
+                let reserved_backup = plan.backup_path_hint().map(Path::to_path_buf);
+                if let Some(reserved) = &reserved_backup {
+                    fs::write(reserved, "another transaction").unwrap();
+                }
+                let error =
+                    ManagedConfig::apply_with_observer(plan, &EditAt { phase, edit }).unwrap_err();
+                match edit {
+                    "remove" => assert!(!path.exists()),
+                    "grow" => {
+                        assert_eq!(fs::read(&path).unwrap(), vec![b'x'; updated.len() + 1024])
+                    }
+                    "write" | "replace" => assert_eq!(
+                        fs::read(&path).unwrap(),
+                        b"external\n",
+                        "{existing} {phase:?} {edit}"
+                    ),
+                    "identical" => assert_eq!(fs::read(&path).unwrap(), updated),
+                    "symlink" => assert!(
+                        fs::symlink_metadata(&path)
+                            .unwrap()
+                            .file_type()
+                            .is_symlink()
+                    ),
+                    "mode" => assert_eq!(
+                        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                        0o600
+                    ),
+                    _ => unreachable!(),
+                }
+                let display = error.to_string();
+                let ManagedConfigError::Recovery { backup_path, .. } = error else {
+                    panic!("expected recovery conflict: {error:?}");
+                };
+                assert_eq!(backup_path.is_some(), existing);
+                if let Some(backup) = backup_path {
+                    assert_eq!(fs::read_to_string(&backup).unwrap(), "original\n");
+                    assert!(display.contains(&backup.display().to_string()));
+                }
+                if let Some(reserved) = reserved_backup {
+                    assert_eq!(fs::read_to_string(reserved).unwrap(), "another transaction");
+                }
+                assert_eq!(artifacts(temp.path()).len(), 2 * usize::from(existing));
+            }
+        }
+    }
+}
+
+#[test]
+fn bounded_reads_enforce_actual_consumption() {
+    use std::io::{Cursor, Read as _};
+    for size in [0, 16, 128] {
+        let mut reader = Cursor::new(vec![b'x'; size]);
+        let result = source::read_bounded(&mut reader, Path::new("fixture"), 16);
+        assert!(reader.position() <= 17, "read beyond the probe budget");
+        if size <= 16 {
+            assert_eq!(result.unwrap(), vec![b'x'; size]);
+        } else {
+            assert!(matches!(result, Err(ManagedConfigError::UnsafePath { .. })));
+            let mut rest = Vec::new();
+            reader.read_to_end(&mut rest).unwrap();
+            assert_eq!(rest.len(), size - 17);
+        }
+    }
+}
+
+#[test]
+fn rollback_verification_rejects_grown_content() {
+    struct GrowAfterRollback;
+    impl TransactionObserver for GrowAfterRollback {
+        fn phase(&self, phase: TransactionPhase, plan: &ManagedConfigPlan) -> io::Result<()> {
+            if phase == TransactionPhase::AfterPublish {
+                return Err(io::Error::other("trigger rollback"));
+            }
+            if phase == TransactionPhase::BeforeRollbackSync {
+                fs::write(plan.target_path(), vec![b'x'; 1024])?;
+            }
+            Ok(())
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.rc");
+    fs::write(&path, "original\n").unwrap();
+    let plan = ManagedConfig::plan(request(&path, &[("item", "body")])).unwrap();
+    let error = ManagedConfig::apply_with_observer(plan, &GrowAfterRollback).unwrap_err();
+    let ManagedConfigError::Recovery {
+        recovery,
+        backup_path: Some(backup),
+        ..
+    } = error
+    else {
+        panic!("expected retained recovery evidence: {error:?}");
+    };
+    assert!(matches!(*recovery, ManagedConfigError::UnsafePath { .. }));
+    assert_eq!(fs::read(backup).unwrap(), b"original\n");
+    assert_eq!(fs::read(path).unwrap(), vec![b'x'; 1024]);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_snapshot_uses_opened_file_after_path_replacement() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.rc");
+    fs::write(&path, "original\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let original = source::read_source(&path).unwrap();
+    let opened = fs::File::open(&path).unwrap();
+    let replacement = temp.path().join("replacement");
+    fs::write(&replacement, "replacement\n").unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::rename(replacement, &path).unwrap();
+    assert_eq!(source::read_source_file(&path, opened).unwrap(), original);
+    let current = source::read_source(&path).unwrap();
+    assert_eq!(current.bytes.as_deref(), Some(b"replacement\n".as_slice()));
+    assert_eq!(current.mode, Some(0o644));
+    assert_ne!(current.identity, original.identity);
+    let directory = fs::File::open(temp.path()).unwrap();
+    assert!(matches!(
+        source::read_source_file(&path, directory),
+        Err(ManagedConfigError::UnsafePath { .. })
+    ));
+}
+
+#[test]
+fn planned_output_obeys_source_readability_limits() {
+    let limit = source::MAX_CONFIG_BYTES as usize;
+    for extra in [0, 1] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.rc");
+        let baseline = ManagedConfig::plan(request(&path, &[("item", "x")])).unwrap();
+        let body = "x".repeat(limit + extra - baseline.updated_bytes().len() + 1);
+        let result = ManagedConfig::plan(request(&path, &[("item", &body)]));
+        if extra == 0 {
+            let plan = result.unwrap();
+            assert_eq!(plan.updated_bytes().len(), limit);
+            ManagedConfig::apply(plan).unwrap();
+            assert!(
+                !ManagedConfig::plan(request(&path, &[("item", &body)]))
+                    .unwrap()
+                    .changes_file()
+            );
+        } else {
+            assert!(matches!(result, Err(ManagedConfigError::UnsafePath { .. })));
+            assert!(!path.exists());
+            assert!(artifacts(temp.path()).is_empty());
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("full.rc");
+    let original = "x".repeat(limit);
+    fs::write(&path, &original).unwrap();
+    assert!(ManagedConfig::plan(request(&path, &[("item", "body")])).is_err());
+    assert_eq!(fs::read_to_string(path).unwrap(), original);
+    assert!(artifacts(temp.path()).is_empty());
+}
+
+#[test]
+fn nul_item_body_is_rejected_without_touching_source() {
+    for prefix in ["\0", "#\0"] {
+        assert!(matches!(
+            CommentSyntax::new(prefix),
+            Err(ManagedConfigError::InvalidRequest(_))
+        ));
+    }
+    for existing in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.rc");
+        if existing {
+            fs::write(&path, "original\n").unwrap();
+        }
+        let result = ManagedConfig::plan(request(&path, &[("item", "a\0b")]));
+        assert!(matches!(result, Err(ManagedConfigError::InvalidRequest(_))));
+        if existing {
+            assert_eq!(fs::read_to_string(path).unwrap(), "original\n");
+        } else {
+            assert!(!path.exists());
+        }
+        assert!(artifacts(temp.path()).is_empty());
+    }
+}
+
+#[test]
+fn batch_updates_preserve_order_unknown_items_and_line_endings() {
+    let original = "before\n# >>> grow doctor >>>\n# >>> terminal.a >>>\nA\n# <<< terminal.a <<<\n# >>> terminal.b >>>\nB\n# <<< terminal.b <<<\n# >>> terminal.keep >>>\nKEEP\n# <<< terminal.keep <<<\n# <<< grow doctor <<<\nafter";
+    let expected = "before\n# >>> grow doctor >>>\n# >>> terminal.a >>>\nA\n# <<< terminal.a <<<\n# >>> terminal.b >>>\nchanged\nsecond line\n# <<< terminal.b <<<\n# >>> terminal.keep >>>\nKEEP\n# <<< terminal.keep <<<\n# >>> terminal.new1 >>>\nN1\n# <<< terminal.new1 <<<\n# >>> terminal.new2 >>>\nN2\n# <<< terminal.new2 <<<\n# <<< grow doctor <<<\nafter";
+    for newline in ["\n", "\r\n"] {
+        for final_newline in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("config.rc");
+            let suffix = if final_newline { newline } else { "" };
+            fs::write(&path, original.replace('\n', newline) + suffix).unwrap();
+            let input = request(
+                &path,
+                &[
+                    ("b", "changed\nsecond line\n"),
+                    ("new1", "N1"),
+                    ("a", "A"),
+                    ("new2", "N2"),
+                ],
+            );
+            let plan = ManagedConfig::plan(input.clone()).unwrap();
+            assert_eq!(
+                plan.updated_bytes(),
+                (expected.replace('\n', newline) + suffix).as_bytes()
+            );
+            for (index, state) in [
+                ManagedItemState::NeedsUpdate,
+                ManagedItemState::Absent,
+                ManagedItemState::Exact,
+                ManagedItemState::Absent,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert_eq!(plan.inspection().requested_item_state(index), Some(state));
+            }
+            ManagedConfig::apply(plan).unwrap();
+            assert!(!ManagedConfig::plan(input).unwrap().changes_file());
+        }
+    }
+}
+
+#[test]
+fn batch_creation_preserves_source_prefix_and_request_order() {
+    let block = "# >>> grow doctor >>>\n# >>> terminal.b >>>\nB\n# <<< terminal.b <<<\n# >>> terminal.a >>>\nA\n# <<< terminal.a <<<\n# <<< grow doctor <<<";
+    for (original, newline, final_newline) in [
+        ("", "\n", false),
+        ("before", "\n", false),
+        ("before\n", "\n", true),
+        ("before\r\n", "\r\n", true),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.rc");
+        fs::write(&path, original).unwrap();
+        let input = request(&path, &[("b", "B"), ("a", "A")]);
+        let plan = ManagedConfig::plan(input.clone()).unwrap();
+        let prefix = if original.is_empty() || final_newline {
+            original.to_owned()
+        } else {
+            format!("{original}{newline}")
+        };
+        let expected =
+            prefix + &block.replace('\n', newline) + if final_newline { newline } else { "" };
+        assert_eq!(plan.updated_bytes(), expected.as_bytes());
+        ManagedConfig::apply(plan).unwrap();
+        assert!(!ManagedConfig::plan(input).unwrap().changes_file());
+    }
+}
+
+#[test]
+fn batch_render_still_rejects_invalid_final_item_markers() {
+    for invalid_name in ["foreign.item", "grow doctor"] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.rc");
+        let mut input = request(&path, &[("valid", "body")]);
+        input.items.push(ManagedItem::new(invalid_name, "body"));
+        assert!(matches!(
+            ManagedConfig::plan(input),
+            Err(ManagedConfigError::InvalidMarkers { .. })
+        ));
+        assert!(!path.exists());
+        assert!(artifacts(temp.path()).is_empty());
+    }
 }

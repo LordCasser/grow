@@ -53,12 +53,17 @@ pub struct TurnMetadata {
     pub request_id: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
-    /// ISO 8601 timestamp emitted by the trace serializer at turn
-    /// start (e.g. `"2026-05-21T03:29:30.605351+00:00"`). Used to
-    /// compute a lower bound on per-turn wall-clock duration —
-    /// see [`compute_turn_elapsed_seconds`].
+    /// Original start timestamp, retained as trace metadata only. The gap to
+    /// another turn includes user idle time and is not a duration measurement.
     #[serde(default)]
     pub turn_started_at: Option<String>,
+    /// Measured duration from this turn's terminal event, when captured.
+    #[serde(default)]
+    pub turn_duration_ms: Option<u64>,
+    /// Live terminal-task count captured at this turn's classifier boundary.
+    /// Missing means unknown; tool results cannot reconstruct task completion.
+    #[serde(default)]
+    pub outstanding_background_tasks: Option<usize>,
 }
 
 // Output schema. Borrowed slices throughout so we serialize once
@@ -112,21 +117,13 @@ pub struct TurnLine<'a> {
     /// Backgrounded terminal tasks only (excludes subagents) — what
     /// the Layer-3 classifier `[runtime_state]` line carries
     /// (production: `snapshot_backing_task_count_for_debug_log`).
-    pub classifier_backing_task_count: usize,
+    pub classifier_backing_task_count: Option<usize>,
     pub laziness_classifier: LazinessOut<'a>,
     /// The resolved `include_reasoning` value used to render the
     /// classifier transcript for this turn. Lives next to
     /// `laziness_classifier` so log-diffs of two A/B runs are obvious.
     pub include_reasoning: bool,
-    /// Wall-clock seconds from this turn's `turn_started_at` to the
-    /// NEXT turn's `turn_started_at`. Includes agent compute, harness
-    /// latency, AND post-turn user think-time — a LOWER bound on the
-    /// actual turn cost the classifier needs to evaluate "minutes vs
-    /// hours" claims. `None` for the last turn (no follow-up to delta
-    /// against) and for turns whose metadata lacks `turn_started_at`.
-    /// Mirrors what the classifier saw in its `[runtime_state]` line
-    /// for the same turn. See `compute_turn_elapsed_seconds` for the
-    /// computation details.
+    /// Measured turn duration in seconds, or unknown when the trace omitted it.
     pub turn_elapsed_seconds: Option<u64>,
 }
 
@@ -156,99 +153,9 @@ impl Summary {
     }
 }
 
-// Backing-task counts used by the LazinessDetector runtime-state line.
+// The replay input may contain a measured runtime snapshot. Conversation
+// tool results acknowledge calls, not the lifetimes of background processes.
 
-/// Background-dispatching tool kinds. The `Option<BackgroundDispatchKind>`
-/// returned by [`background_kind`] makes "not a background dispatch"
-/// a compile-time-tracked absence rather than a sentinel variant. (N14)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackgroundDispatchKind {
-    Terminal,
-    Subagent,
-}
-
-/// Categorise an assistant tool call as background-dispatching from the
-/// canonical terminal-tool input contract. (F26)
-fn background_kind(name: &str, arguments: &str) -> Option<BackgroundDispatchKind> {
-    match name {
-        "spawn_subagent" => Some(BackgroundDispatchKind::Subagent),
-        "monitor" => Some(BackgroundDispatchKind::Terminal),
-        "run_terminal_command" => {
-            let v: serde_json::Value = serde_json::from_str(arguments).ok()?;
-            let truthy = v.get("is_background").and_then(serde_json::Value::as_bool) == Some(true);
-            truthy.then_some(BackgroundDispatchKind::Terminal)
-        }
-        _ => None,
-    }
-}
-
-/// Per-turn outstanding-dispatch counts. Walks the history in a
-/// single forward pass so a `tool_result` only counts as completing
-/// a dispatch that appeared *earlier* in the same history; orphan
-/// results (result before its call) are logged as a trace-integrity
-/// anomaly but do not satisfy the dispatch. (F3)
-///
-/// Locality note: this counts dispatches *within the current turn's
-/// `afterStateHistory` only*. A subagent dispatched in turn N that is
-/// still outstanding at turn N+1 will not appear in turn N+1's
-/// history (the production trace serializer drops it). Production's
-/// `ToolBridge` tracks live state across turns; the replay can't
-/// reconstruct that without an additional cross-turn correlator,
-/// which is out of scope. (F10)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct BackingCounts {
-    /// Outstanding `monitor` + `run_terminal_command{background:true}`.
-    pub terminal_only: usize,
-    /// `terminal_only` + outstanding `spawn_subagent`.
-    pub terminal_plus_subagents: usize,
-}
-
-pub fn count_outstanding_dispatches(items: &[ConversationItem]) -> BackingCounts {
-    use std::collections::HashMap;
-
-    let mut unresolved: HashMap<&str, BackgroundDispatchKind> = HashMap::new();
-    for item in items {
-        match item {
-            ConversationItem::Assistant(asst) => {
-                for tc in &asst.tool_calls {
-                    if let Some(kind) = background_kind(&tc.name, &tc.arguments) {
-                        unresolved.insert(tc.id.as_ref(), kind);
-                    }
-                }
-            }
-            ConversationItem::ToolResult(tr) => {
-                if unresolved.remove(tr.tool_call_id.as_str()).is_none() {
-                    // Either this result is for a non-background tool
-                    // call (the common case) or it precedes its
-                    // dispatch (trace integrity issue). The latter is
-                    // worth surfacing.
-                    tracing::trace!(
-                        tool_call_id = %tr.tool_call_id,
-                        "trace_classifier: tool_result without matching prior dispatch (expected for non-background calls)",
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut counts = BackingCounts::default();
-    for kind in unresolved.values() {
-        match kind {
-            BackgroundDispatchKind::Terminal => {
-                counts.terminal_only += 1;
-                counts.terminal_plus_subagents += 1;
-            }
-            BackgroundDispatchKind::Subagent => {
-                counts.terminal_plus_subagents += 1;
-            }
-        }
-    }
-    counts
-}
-
-// Laziness classifier.
-
-/// Trait so tests can mock the sampler call.
 #[async_trait::async_trait]
 pub trait ClassifierClient: Send + Sync {
     async fn run(&self, request: ConversationRequest) -> Result<String, String>;
@@ -286,11 +193,11 @@ impl ClassifierClient for SamplerClassifierClient {
 /// `maybe_fire_laziness_check` exactly: same prompt, same wrapper
 /// text ([`LAZINESS_USER_PREAMBLE`]) and same omitted sampling preferences.
 ///
-/// `classifier_backing_task_count` is the *Layer-3* count (terminal
-/// tasks only — no subagents); see [`BackingCounts`] and F1.
+/// `classifier_backing_task_count` is a measured terminal-task count; missing
+/// measurements stay unknown rather than becoming a fabricated zero.
 pub fn build_classifier_request(
     items: &[ConversationItem],
-    classifier_backing_task_count: usize,
+    classifier_backing_task_count: Option<usize>,
     model_id: &str,
     include_reasoning: bool,
     turn_elapsed_seconds: Option<u64>,
@@ -377,7 +284,7 @@ pub struct ParsedClassifierOwned {
 /// race that can't happen offline.
 async fn classify_turn(
     items: &[ConversationItem],
-    classifier_backing_task_count: usize,
+    classifier_backing_task_count: Option<usize>,
     model_id: &str,
     min_confidence: f32,
     include_reasoning: bool,
@@ -468,7 +375,7 @@ pub struct TurnData<'a> {
     pub request_id: Option<&'a str>,
     pub items_in_history: usize,
     pub items_after_window_trim: usize,
-    pub classifier_backing_task_count: usize,
+    pub classifier_backing_task_count: Option<usize>,
     pub laziness: LazinessOwned,
     /// Resolved `include_reasoning` value the classifier ran with —
     /// CLI override winning over `LAZINESS_INCLUDE_REASONING`. Surfaced
@@ -514,10 +421,8 @@ impl<'a> TurnData<'a> {
 /// over `client`; the binary uses the sampler-backed implementation,
 /// tests use a recorded-response double.
 ///
-/// `turn_elapsed_seconds` is the wall-clock duration the *current*
-/// turn took, derived by the caller from the delta between this
-/// turn's `turn_started_at` and the next turn's. `None` for the last
-/// turn (no follow-up) or when the metadata lacks the timestamp.
+/// `turn_elapsed_seconds` is a measured duration for this turn. It remains
+/// unknown when the trace contains no measurement, including the last turn.
 pub async fn process_turn<'a>(
     record: &'a TurnRecord,
     model_id: &str,
@@ -529,13 +434,7 @@ pub async fn process_turn<'a>(
     let history = record.trace.after_state_history.as_slice();
     let items_in_history = history.len();
 
-    // Audit note (N13): outstanding-dispatch counts are computed over
-    // the FULL un-windowed history. Production's
-    // `snapshot_backing_task_count_for_debug_log` reads the live
-    // `ToolBridge` (current-instant truth, NOT the classifier
-    // window). Counting over the windowed slice would silently miss
-    // outstanding dispatches older than the window — which is wrong.
-    let counts = count_outstanding_dispatches(history);
+    let backing_task_count = record.trace.metadata.outstanding_background_tasks;
 
     // Trim to the classifier window without cloning the history —
     // the slice borrows directly out of the record. (F12)
@@ -550,7 +449,7 @@ pub async fn process_turn<'a>(
 
     let laziness = classify_turn(
         trimmed,
-        counts.terminal_only,
+        backing_task_count,
         model_id,
         min_confidence,
         include_reasoning,
@@ -565,57 +464,20 @@ pub async fn process_turn<'a>(
         request_id: record.trace.metadata.request_id.as_deref(),
         items_in_history,
         items_after_window_trim,
-        classifier_backing_task_count: counts.terminal_only,
+        classifier_backing_task_count: backing_task_count,
         laziness,
         include_reasoning,
         turn_elapsed_seconds,
     }
 }
 
-/// Compute per-turn `turn_elapsed_seconds` from the `turn_started_at`
-/// timestamps in the trace metadata. For turn N where N < last, the
-/// elapsed value is `turn_{N+1}.turn_started_at - turn_N.turn_started_at`
-/// — a LOWER bound on the wall-clock duration of turn N (the user
-/// may have spent additional time after the agent finished before
-/// re-engaging, but at minimum N seconds must have elapsed). The
-/// last turn has no follow-up, so its slot is `None`.
-///
-/// Timestamps are parsed as RFC3339 with timezone offset via
-/// `chrono::DateTime<chrono::FixedOffset>` (already a workspace dep,
-/// no new dep introduced). A malformed timestamp on either end
-/// yields `None` for that pair.
+/// Read measured durations from each turn independently. Never infer execution
+/// time from the next user input: that interval also includes user idle time.
 pub fn compute_turn_elapsed_seconds(trace: &[TurnRecord]) -> Vec<Option<u64>> {
-    fn parse(ts: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-        chrono::DateTime::parse_from_rfc3339(ts).ok()
-    }
-    let mut out = Vec::with_capacity(trace.len());
-    for (i, rec) in trace.iter().enumerate() {
-        let elapsed = if i + 1 == trace.len() {
-            None
-        } else {
-            let cur = rec
-                .trace
-                .metadata
-                .turn_started_at
-                .as_deref()
-                .and_then(parse);
-            let next = trace[i + 1]
-                .trace
-                .metadata
-                .turn_started_at
-                .as_deref()
-                .and_then(parse);
-            match (cur, next) {
-                (Some(a), Some(b)) => {
-                    let delta = (b - a).num_seconds();
-                    u64::try_from(delta).ok()
-                }
-                _ => None,
-            }
-        };
-        out.push(elapsed);
-    }
-    out
+    trace
+        .iter()
+        .map(|record| record.trace.metadata.turn_duration_ms.map(|ms| ms / 1_000))
+        .collect()
 }
 
 // CLI plumbing
@@ -1027,52 +889,6 @@ mod tests {
         );
     }
 
-    /// F1: gate count includes subagents; classifier count does not.
-    #[test]
-    fn outstanding_dispatches_split_terminal_vs_subagents() {
-        let items = vec![
-            assistant_with_tool_calls(vec![
-                tc("s1", "spawn_subagent", "{}"),
-                tc("b1", "run_terminal_command", r#"{"is_background":true}"#),
-                tc("b2", "run_terminal_command", r#"{"is_background":false}"#),
-                tc("m1", "monitor", "{}"),
-                tc("s2", "spawn_subagent", "{}"),
-            ]),
-            ConversationItem::ToolResult(ToolResultItem {
-                tool_call_id: "s1".into(),
-                content: "done".into(),
-                images: vec![],
-            }),
-            ConversationItem::ToolResult(ToolResultItem {
-                tool_call_id: "b1".into(),
-                content: "done".into(),
-                images: vec![],
-            }),
-        ];
-        let counts = count_outstanding_dispatches(&items);
-        assert_eq!(counts.terminal_only, 1, "terminal: m1");
-        assert_eq!(
-            counts.terminal_plus_subagents, 2,
-            "terminal + subagent (s2)"
-        );
-    }
-
-    /// F3: orphan tool_result (result before call) does NOT satisfy
-    /// the later dispatch.
-    #[test]
-    fn orphan_tool_result_before_call_does_not_satisfy() {
-        let items = vec![
-            ConversationItem::ToolResult(ToolResultItem {
-                tool_call_id: "later".into(),
-                content: "preemptive".into(),
-                images: vec![],
-            }),
-            assistant_with_tool_calls(vec![tc("later", "spawn_subagent", "{}")]),
-        ];
-        let counts = count_outstanding_dispatches(&items);
-        assert_eq!(counts.terminal_plus_subagents, 1);
-    }
-
     /// 4. End-to-end with stubbed classifier.
     struct StubClient(String);
 
@@ -1298,7 +1114,7 @@ mod tests {
             "user text starts with the shared preamble const",
         );
         assert!(
-            user_text.contains("=== BEGIN TRANSCRIPT ===\n[runtime_state] outstanding_background_tasks_and_subagents="),
+            user_text.contains("=== BEGIN TRANSCRIPT ===\n[runtime_state]"),
             "user text contains runtime_state line right after BEGIN sentinel",
         );
         assert!(user_text.ends_with("=== END TRANSCRIPT ===\n"));
@@ -1356,6 +1172,8 @@ mod tests {
                     request_id: Some("r".into()),
                     session_id: Some("s".into()),
                     turn_started_at: None,
+                    turn_duration_ms: None,
+                    outstanding_background_tasks: None,
                 },
                 after_state_history: hist,
             },
@@ -1636,6 +1454,8 @@ mod tests {
                     request_id: Some("r".into()),
                     session_id: Some("s".into()),
                     turn_started_at: None,
+                    turn_duration_ms: None,
+                    outstanding_background_tasks: None,
                 },
                 after_state_history: hist,
             },
@@ -1679,7 +1499,7 @@ mod tests {
                 request_id: None,
                 items_in_history: 0,
                 items_after_window_trim: 0,
-                classifier_backing_task_count: 0,
+                classifier_backing_task_count: None,
                 laziness_classifier: LazinessOut {
                     model_id: "m",
                     elapsed_ms: 0,
@@ -1797,6 +1617,8 @@ mod tests {
                     request_id: None,
                     session_id: None,
                     turn_started_at: turn_started_at.map(str::to_owned),
+                    turn_duration_ms: None,
+                    outstanding_background_tasks: None,
                 },
                 after_state_history: vec![],
             },
@@ -1804,91 +1626,64 @@ mod tests {
     }
 
     #[test]
-    fn compute_turn_elapsed_seconds_uses_next_turn_timestamp_for_lower_bound() {
-        let trace = vec![
-            make_record("turn_0", Some("2026-05-21T03:18:51.618550+00:00")),
-            make_record("turn_1", Some("2026-05-21T03:29:30.605351+00:00")),
-            make_record("turn_2", Some("2026-05-21T03:40:00.292197+00:00")),
-            make_record("turn_3", Some("2026-05-21T13:45:15.889765+00:00")),
+    fn replay_uses_only_measured_turn_duration() {
+        let mut trace = vec![
+            make_record("first", Some("2026-09-06T00:00:00Z")),
+            make_record("last", Some("2026-09-07T00:00:00Z")),
         ];
-        let elapsed = compute_turn_elapsed_seconds(&trace);
-        assert_eq!(elapsed.len(), 4);
-        // turn_0: 03:18:51 → 03:29:30 = 638 s
-        assert_eq!(elapsed[0], Some(638));
-        // turn_1: 03:29:30 → 03:40:00 = 629 s (~10.5 min)
-        assert_eq!(elapsed[1], Some(629));
-        // turn_2: 03:40:00 → 13:45:15 ≈ 36315 s
-        assert_eq!(elapsed[2], Some(36315));
-        // Last turn has no follow-up.
-        assert_eq!(elapsed[3], None);
-    }
-
-    #[test]
-    fn compute_turn_elapsed_seconds_returns_none_when_timestamp_missing() {
-        let trace = vec![
-            make_record("turn_0", None),
-            make_record("turn_1", Some("2026-05-21T03:29:30.605351+00:00")),
-        ];
-        let elapsed = compute_turn_elapsed_seconds(&trace);
-        // Missing on either end → None.
-        assert_eq!(elapsed[0], None);
-        // Last turn is always None.
-        assert_eq!(elapsed[1], None);
-    }
-
-    #[test]
-    fn compute_turn_elapsed_seconds_returns_none_when_next_timestamp_missing() {
-        // Symmetric counterpart of the previous test: `(Some, None)`.
-        let trace = vec![
-            make_record("turn_0", Some("2026-05-21T03:29:30+00:00")),
-            make_record("turn_1", None),
-        ];
-        let elapsed = compute_turn_elapsed_seconds(&trace);
-        assert_eq!(elapsed[0], None, "next is missing ⇒ no delta available");
-        assert_eq!(elapsed[1], None);
-    }
-
-    #[test]
-    fn compute_turn_elapsed_seconds_returns_none_on_malformed_timestamp() {
-        // Malformed on either end ⇒ parse fails ⇒ `None`. Two
-        // assertions to cover both positions.
-        let trace_bad_cur = vec![
-            make_record("turn_0", Some("not-a-timestamp")),
-            make_record("turn_1", Some("2026-05-21T03:29:30+00:00")),
-        ];
-        assert_eq!(compute_turn_elapsed_seconds(&trace_bad_cur)[0], None);
-
-        let trace_bad_next = vec![
-            make_record("turn_0", Some("2026-05-21T03:29:30+00:00")),
-            make_record("turn_1", Some("garbage")),
-        ];
-        assert_eq!(compute_turn_elapsed_seconds(&trace_bad_next)[0], None);
-    }
-
-    #[test]
-    fn compute_turn_elapsed_seconds_zero_on_identical_timestamps() {
-        let trace = vec![
-            make_record("turn_0", Some("2026-05-21T03:29:30+00:00")),
-            make_record("turn_1", Some("2026-05-21T03:29:30+00:00")),
-        ];
+        assert_eq!(compute_turn_elapsed_seconds(&trace), vec![None, None]);
+        trace[0].trace.metadata.turn_duration_ms = Some(60_999);
+        trace[1].trace.metadata.turn_duration_ms = Some(0);
         assert_eq!(
-            compute_turn_elapsed_seconds(&trace)[0],
-            Some(0),
-            "identical timestamps ⇒ Some(0), not None",
+            compute_turn_elapsed_seconds(&trace),
+            vec![Some(60), Some(0)]
         );
     }
 
-    #[test]
-    fn compute_turn_elapsed_seconds_returns_none_on_reversed_order() {
-        // Trace is malformed (turn_1's timestamp predates turn_0's),
-        // which produces a negative delta — `u64::try_from` rejects
-        // it and the slot is `None`. The trace replay should not
-        // emit nonsense data when the input is non-chronological.
-        let trace = vec![
-            make_record("turn_0", Some("2026-05-21T03:29:30+00:00")),
-            make_record("turn_1", Some("2026-05-21T03:00:00+00:00")),
+    #[tokio::test]
+    async fn background_start_receipt_does_not_fabricate_a_zero_live_count() {
+        let mut record = make_record("background", None);
+        record.trace.after_state_history = vec![
+            assistant_with_tool_calls(vec![tc(
+                "call-bg",
+                "run_terminal_command",
+                r#"{"is_background":true}"#,
+            )]),
+            ConversationItem::ToolResult(ToolResultItem {
+                tool_call_id: "call-bg".into(),
+                content: "backgrounded, task_id=task-123".into(),
+                images: vec![],
+            }),
         ];
-        assert_eq!(compute_turn_elapsed_seconds(&trace)[0], None);
+        for measured in [None, Some(0), Some(1)] {
+            record.trace.metadata.outstanding_background_tasks = measured;
+            let stub = CapturingStub::new(
+                r#"{"category":"not_stalled_complete","confidence":0.9,"evidence":"e"}"#,
+            );
+            let result = process_turn(
+                &record,
+                "m",
+                LAZINESS_DEFAULT_MIN_CONFIDENCE,
+                false,
+                None,
+                &stub,
+            )
+            .await;
+            assert_eq!(result.classifier_backing_task_count, measured);
+            let request = stub.take();
+            let text = request.items[1].text_content();
+            let runtime = text
+                .lines()
+                .find(|line| line.starts_with("[runtime_state]"))
+                .unwrap();
+            match measured {
+                Some(value) => assert_eq!(
+                    runtime,
+                    format!("[runtime_state] outstanding_background_tasks={value}")
+                ),
+                None => assert_eq!(runtime, "[runtime_state]"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -1915,9 +1710,7 @@ mod tests {
             _ => panic!(),
         };
         assert!(
-            user_text.contains(
-                "[runtime_state] outstanding_background_tasks_and_subagents=0 turn_elapsed_seconds=629\n"
-            ),
+            user_text.contains("[runtime_state] turn_elapsed_seconds=629\n"),
             "runtime_state line carries turn_elapsed_seconds: {user_text}",
         );
     }
@@ -1957,7 +1750,7 @@ mod tests {
             .map(|(line, _)| line)
             .expect("runtime_state line terminated with newline");
         assert_eq!(
-            runtime_state_line, "[runtime_state] outstanding_background_tasks_and_subagents=0",
+            runtime_state_line, "[runtime_state]",
             "runtime_state line omits turn_elapsed_seconds when absent",
         );
         assert!(
@@ -1966,11 +1759,7 @@ mod tests {
         );
     }
 
-    /// End-to-end: a 2-turn trace whose `turn_started_at` timestamps
-    /// are 60s apart emits `turn_elapsed_seconds=60` on the first
-    /// turn's JSONL line and omits the field on the last turn. The
-    /// JSONL line for every turn carries the (possibly-null)
-    /// `turn_elapsed_seconds` field for downstream operators.
+    /// JSONL carries only explicit measurements, independent of next-turn time.
     #[tokio::test]
     async fn end_to_end_jsonl_carries_turn_elapsed_seconds_field() {
         let trace = vec![
@@ -1982,6 +1771,8 @@ mod tests {
                         request_id: Some("r0".into()),
                         session_id: Some("s".into()),
                         turn_started_at: Some("2026-05-21T03:29:30+00:00".into()),
+                        turn_duration_ms: Some(60_000),
+                        outstanding_background_tasks: None,
                     },
                     after_state_history: vec![ConversationItem::User(UserItem {
                         content: vec![ContentPart::Text { text: "hi".into() }],
@@ -1999,6 +1790,8 @@ mod tests {
                         request_id: Some("r1".into()),
                         session_id: Some("s".into()),
                         turn_started_at: Some("2026-05-21T03:30:30+00:00".into()),
+                        turn_duration_ms: None,
+                        outstanding_background_tasks: None,
                     },
                     after_state_history: vec![ConversationItem::User(UserItem {
                         content: vec![ContentPart::Text { text: "hi".into() }],
@@ -2040,8 +1833,8 @@ mod tests {
     }
 
     /// End-to-end against the reference trace (skipped when absent):
-    /// turn_1 must carry `turn_elapsed_seconds≈630` (10.5 min), and
-    /// the stub forces `stalled_false_completion` to confirm the
+    /// No execution duration is inferred from old start-only metadata. The
+    /// stub forces `stalled_false_completion` to confirm the
     /// JSONL surfaces the new category cleanly.
     #[tokio::test]
     async fn reference_trace_turn_1_carries_elapsed_and_new_category() {
@@ -2076,15 +1869,10 @@ mod tests {
             .map(|l| serde_json::from_str(l).expect("json"))
             .collect();
         assert_eq!(lines.len(), trace.len());
-        // turn_1 (second entry) — 03:29:30 → 03:40:00 ≈ 630 s.
         let turn_1 = &lines[1];
-        let elapsed = turn_1
-            .get("turn_elapsed_seconds")
-            .and_then(|v| v.as_u64())
-            .expect("elapsed present for turn_1");
-        assert!(
-            (600..=660).contains(&elapsed),
-            "turn_1 elapsed should be ~630 s, got {elapsed}",
+        assert_eq!(
+            turn_1.get("turn_elapsed_seconds"),
+            Some(&serde_json::Value::Null)
         );
         // The classifier's stubbed verdict must be surfaced in the
         // parsed-category field on the JSONL line.

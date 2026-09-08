@@ -11,6 +11,33 @@
 
 #![cfg(unix)]
 
+#[ctor::ctor]
+fn redirect_unified_log_for_integration_tests() {
+    diagnostics::unified_log::redirect_to_temp_for_tests();
+}
+
+#[test]
+fn unified_log_redirect_precedes_test_start() {
+    const CHILD_HOME: &str = "GROW_LEADER_LOG_ISOLATION_HOME";
+    if let Some(expected) = std::env::var_os(CHILD_HOME) {
+        let expected = std::path::PathBuf::from(expected);
+        assert_eq!(config::grow_home(), expected);
+        let real_path = expected.join("logs/unified.jsonl");
+        assert!(!real_path.exists());
+        diagnostics::unified_log::info("leader-integration-log-isolation", None, None);
+        let snapshot = diagnostics::unified_log::snapshot_log().unwrap();
+        assert!(String::from_utf8_lossy(&snapshot).contains("leader-integration-log-isolation"));
+        assert!(!real_path.exists(), "unified log escaped process temp redirect");
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "unified_log_redirect_precedes_test_start", "--nocapture"])
+        .env("GROW_HOME", home.path()).env(CHILD_HOME, home.path())
+        .status().unwrap();
+    assert!(status.success());
+}
+
 use std::time::Duration;
 
 use shell::cpu_profile::ControlErrorCode;
@@ -3004,11 +3031,9 @@ async fn raw_recv_acp(reader: &mut tokio::io::ReadHalf<UnixStream>) -> serde_jso
 /// request ids are unique per process (global `ClientId` counter) and the pid
 /// filter fences off other test processes appending to the same shared log.
 ///
-/// This binary does not sandbox GROW_HOME, so on a dev machine these entries
-/// land in the real `~/.grow` log — accepted: the server already writes
-/// `leader.client.*` lines there from every test in this file, and the
-/// pid+request-id fence keeps the counting sound regardless of what else is
-/// in the file. (Bazel sandboxes HOME, so CI writes stay test-scoped.)
+/// A pre-main constructor redirects this binary's unified log to a private
+/// process temporary directory. The pid/request-id fence isolates concurrent
+/// cases within that file; it does not rely on writing the developer's log.
 fn orphan_log_count(request_id: &str) -> usize {
     let Some(bytes) = ::diagnostics::unified_log::snapshot_log() else {
         return 0;
@@ -3040,7 +3065,7 @@ async fn wait_for_orphan_log(request_id: &str) -> usize {
 /// Poll until the server logged `leader.client.disconnected` for `client_id`.
 /// The deterministic disconnect signal for sessions that still have other
 /// subscribers (no `evict_sessions` is emitted for those). Same
-/// real-home-write caveat and pid fence as [`orphan_log_count`].
+/// temporary-log redirection and pid fence as [`orphan_log_count`].
 async fn wait_for_client_disconnected_log(client_id: u64) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {

@@ -1,0 +1,132 @@
+{
+  "scope": "top-level CLI variants only; dispatch references do not prove behavioral coverage",
+  "sources": {
+    "crates/codegen/pager/src/app/cli.rs": "3be68db1a2abb096631fbe4bbff099e77f88342e20c46fed676f7c96243c622b",
+    "crates/codegen/cli/src/main.rs": "8523a7611cf908e8cb3fbaba5bd4c5d6eec91e19cfc74b0b313f8fc2c52d1505"
+  },
+  "count": 19,
+  "commands": [
+    {
+      "command": "Agent",
+      "dispatch_reference_lines": [
+        1432
+      ]
+    },
+    {
+      "command": "Inspect",
+      "dispatch_reference_lines": [
+        1460
+      ]
+    },
+    {
+      "command": "Doctor",
+      "dispatch_reference_lines": [
+        1276,
+        1454
+      ]
+    },
+    {
+      "command": "Du",
+      "dispatch_reference_lines": [
+        1286,
+        1457
+      ]
+    },
+    {
+      "command": "Leader",
+      "dispatch_reference_lines": [
+        1481
+      ]
+    },
+    {
+      "command": "Mcp",
+      "dispatch_reference_lines": [
+        1465
+      ]
+    },
+    {
+      "command": "Plugin",
+      "dispatch_reference_lines": [
+        1469
+      ]
+    },
+    {
+      "command": "Memory",
+      "dispatch_reference_lines": [
+        1517
+      ]
+    },
+    {
+      "command": "Models",
+      "dispatch_reference_lines": [
+        1473
+      ]
+    },
+    {
+      "command": "Sessions",
+      "dispatch_reference_lines": [
+        1493
+      ]
+    },
+    {
+      "command": "Wrap",
+      "dispatch_reference_lines": [
+        1390,
+        1541
+      ]
+    },
+    {
+      "command": "Export",
+      "dispatch_reference_lines": [
+        1501
+      ]
+    },
+    {
+      "command": "Trace",
+      "dispatch_reference_lines": [
+        1505
+      ]
+    },
+    {
+      "command": "Trajectory",
+      "dispatch_reference_lines": [
+        1513
+      ]
+    },
+    {
+      "command": "Update",
+      "dispatch_reference_lines": [
+        1520
+      ]
+    },
+    {
+      "command": "Version",
+      "dispatch_reference_lines": [
+        1420,
+        1973
+      ]
+    },
+    {
+      "command": "Completions",
+      "dispatch_reference_lines": [
+        1386,
+        1544
+      ]
+    },
+    {
+      "command": "Worktree",
+      "dispatch_reference_lines": [
+        1485
+      ]
+    },
+    {
+      "command": "Dashboard",
+      "dispatch_reference_lines": [
+        1010,
+        1025,
+        1548,
+        1549
+      ]
+    }
+  ]
+}

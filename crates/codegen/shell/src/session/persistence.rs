@@ -338,6 +338,8 @@ impl RewindTransaction {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum PersistenceMsg {
+    /// Actor thread has exited: close admission and drain accepted messages.
+    Stop,
     /// A session update (ACP update or Grow extension update)
     Update(SessionUpdate),
     AppendUpdateDurablyAndAck {
@@ -1653,6 +1655,7 @@ mod title_projection_tests {
 pub struct PersistenceHandle {
     pub tx: mpsc::UnboundedSender<PersistenceMsg>,
     noop: bool,
+    task: Option<tokio::task::AbortHandle>,
     session_directory: Option<Arc<crate::session::storage::ContainedDirectory>>,
 }
 
@@ -1663,6 +1666,7 @@ fn actor_channel(
     let handle = PersistenceHandle {
         tx,
         noop: false,
+        task: None,
         session_directory,
     };
     (handle, rx)
@@ -1714,11 +1718,17 @@ impl From<crate::session::storage::AppendUpdateError> for DurableAppendError {
 }
 
 impl PersistenceHandle {
+    /// Passive task observation: does not keep the sender or writer lease alive.
+    pub(crate) fn task_completion(&self) -> Option<tokio::task::AbortHandle> {
+        self.task.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn from_sender_for_test(tx: mpsc::UnboundedSender<PersistenceMsg>) -> Self {
         Self {
             tx,
             noop: false,
+            task: None,
             session_directory: None,
         }
     }
@@ -1728,6 +1738,7 @@ impl PersistenceHandle {
         Self {
             tx,
             noop: true,
+            task: None,
             session_directory: None,
         }
     }
@@ -1993,6 +2004,7 @@ impl SessionPersistence {
                 spawn_worktree_touch(&self.info);
             }
             match msg {
+                PersistenceMsg::Stop => self.rx.close(),
                 PersistenceMsg::Flush => {
                     self.flush_pending().await;
                 }
@@ -2343,12 +2355,12 @@ pub(crate) async fn new(
     }
 
     let session_directory = storage.open_session(info)?.directory_handle();
-    let (handle, rx) = actor_channel(Some(session_directory));
+    let (mut handle, rx) = actor_channel(Some(session_directory));
 
     let info_clone = info.clone();
     let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
 
-    tokio::task::spawn(async move {
+    let task = tokio::task::spawn(async move {
         let persistence = SessionPersistence {
             info: info_clone,
             storage: storage.clone(),
@@ -2358,6 +2370,7 @@ pub(crate) async fn new(
         };
         persistence.run().await;
     });
+    handle.task = Some(task.abort_handle());
 
     Ok(handle)
 }
@@ -2402,11 +2415,11 @@ pub(crate) async fn new_child(
     }
     let session_directory = storage.open_session(info)?.directory_handle();
 
-    let (handle, rx) = actor_channel(Some(session_directory.clone()));
+    let (mut handle, rx) = actor_channel(Some(session_directory.clone()));
 
     let info_clone = info.clone();
     let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
-    tokio::task::spawn(async move {
+    let task = tokio::task::spawn(async move {
         let persistence = SessionPersistence {
             info: info_clone,
             storage: storage.clone(),
@@ -2416,6 +2429,7 @@ pub(crate) async fn new_child(
         };
         persistence.run().await;
     });
+    handle.task = Some(task.abort_handle());
 
     Ok((handle, timeline.events().to_vec(), session_directory))
 }
@@ -2488,11 +2502,11 @@ pub(crate) async fn load_light(
         return Ok((persisted_info, PersistenceHandle::noop()));
     }
 
-    let (handle, rx) = actor_channel(Some(session_directory));
+    let (mut handle, rx) = actor_channel(Some(session_directory));
 
     let storage: Arc<dyn StorageAdapter> = Arc::new(storage);
 
-    tokio::task::spawn(async move {
+    let task = tokio::task::spawn(async move {
         let persistence = SessionPersistence {
             info: loaded_info,
             storage: storage.clone(),
@@ -2502,6 +2516,7 @@ pub(crate) async fn load_light(
         };
         persistence.run().await;
     });
+    handle.task = Some(task.abort_handle());
 
     Ok((persisted_info, handle))
 }
@@ -2595,7 +2610,13 @@ const DEFAULT_CLEANUP_TTL_DAYS: u32 = 30;
 /// never competes with the agent's single-threaded `LocalSet`.
 pub fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
     CLEANUP_SESSIONS_ONCE.call_once(|| {
-        let ttl_days = resolve_cleanup_ttl_days();
+        let ttl_days = match resolve_cleanup_ttl_days() {
+            Ok(days) => days,
+            Err(error) => {
+                tracing::error!(%error, "invalid session cleanup policy; preserving history");
+                return;
+            }
+        };
         let root = grow_home();
         let sessions_root = root.join("sessions");
 
@@ -2607,9 +2628,13 @@ pub fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
             "SESSION_CLEANUP_START: scanning for stale session entities"
         );
 
-        let adapter = JsonlStorageAdapter::with_root(root);
+        let adapter = JsonlStorageAdapter::with_root(root.clone());
         let (sessions_deleted, errors) =
-            match adapter.cleanup_stale_sessions_sync(ttl_days, skip_session_dir) {
+            match adapter.cleanup_stale_sessions_sync(ttl_days, skip_session_dir, |info| {
+                crate::session::storage::search::SEARCH_INDEX_MANAGER.enqueue(
+                    root.clone(), info.id.0.to_string(), info.cwd.clone(),
+                );
+            }) {
                 Ok(stats) => stats,
                 Err(error) => {
                     tracing::error!(%error, "session entity cleanup failed closed");
@@ -2627,20 +2652,53 @@ pub fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
     });
 }
 
-/// Resolve TTL from config.toml `[storage] cleanup_ttl_days`, falling back to 30.
-fn resolve_cleanup_ttl_days() -> u32 {
-    // Try to load config and read [storage] section
-    if let Ok(layers) = crate::config::ConfigLayers::load() {
-        let effective = layers.effective_config_disk_only();
-        if let Some(storage) = effective.get("storage")
-            && let Some(ttl) = storage.get("cleanup_ttl_days")
-            && let Some(days) = ttl.as_integer()
-            && days > 0
-        {
-            return days as u32;
+/// Missing TTL uses 30 days; invalid configuration must never shorten retention.
+fn resolve_cleanup_ttl_days() -> io::Result<u32> {
+    let layers = crate::config::ConfigLayers::load()?;
+    cleanup_ttl_from_config(&layers.effective_config_disk_only())
+}
+
+fn cleanup_ttl_from_config(effective: &toml::Value) -> io::Result<u32> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidInput,
+        "storage.cleanup_ttl_days must be a positive integer representable as u32");
+    let Some(storage) = effective.get("storage") else {
+        return Ok(DEFAULT_CLEANUP_TTL_DAYS);
+    };
+    let storage = storage.as_table().ok_or_else(invalid)?;
+    let Some(ttl) = storage.get("cleanup_ttl_days") else {
+        return Ok(DEFAULT_CLEANUP_TTL_DAYS);
+    };
+    let days = ttl.as_integer().ok_or_else(invalid)?;
+    let days = u32::try_from(days).map_err(|_| invalid())?;
+    if days == 0 {
+        return Err(invalid());
+    }
+    Ok(days)
+}
+
+#[cfg(test)]
+mod cleanup_ttl_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_ttl_preserves_default_and_valid_values() {
+        for (text, expected) in [
+            ("", 30), ("[storage]", 30),
+            ("[storage]\ncleanup_ttl_days = 90", 90),
+            ("[storage]\ncleanup_ttl_days = 4294967295", u32::MAX),
+        ] {
+            assert_eq!(cleanup_ttl_from_config(&toml::from_str(text).unwrap()).unwrap(), expected);
         }
     }
-    DEFAULT_CLEANUP_TTL_DAYS
+
+    #[test]
+    fn cleanup_ttl_rejects_wrapping_or_malformed_policy() {
+        for value in ["4294967296", "9223372036854775807", "0", "-1", "1.5", "true", "\"30\""] {
+            let config = toml::from_str(&format!("[storage]\ncleanup_ttl_days = {value}")).unwrap();
+            assert_eq!(cleanup_ttl_from_config(&config).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{value}");
+        }
+        assert!(cleanup_ttl_from_config(&toml::from_str("storage = 30").unwrap()).is_err());
+    }
 }
 
 #[cfg(test)]

@@ -200,3 +200,49 @@ impl Reminder for SkillDiscoveryReminder {
         vec![]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::output::FileContent;
+    use crate::types::resources::Resources;
+
+    #[tokio::test]
+    async fn direct_skill_read_preserves_disabled_baseline() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let dir = root.join(".grow/skills/known");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: known\ndescription: Known skill\n---\nBody\n",
+        )
+        .unwrap();
+        let mut baseline = discovery::parse_skill_files(vec![(path.clone(), SkillScope::Local)]);
+        assert_eq!(baseline.len(), 1);
+        baseline[0].enabled = false;
+        let mut manager = SkillManager::new();
+        manager.seed(Some(root), None, baseline.clone(), None, None);
+        let _ = manager.take_pending_reconciliation();
+        let mut resources = Resources::default();
+        resources.insert(manager);
+        let resources = std::sync::Arc::new(tokio::sync::Mutex::new(resources));
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
+            content: String::new(),
+            absolute_path: path,
+            offset: None,
+            limit: None,
+            raw_output: String::new(),
+            total_lines: 5,
+            extracted_images: vec![],
+        }));
+        SkillDiscoveryReminder
+            .collect_reminders(resources.clone(), &output)
+            .await;
+        let mut resources = resources.lock().await;
+        let manager = resources.get_mut::<SkillManager>().unwrap();
+        assert_eq!(manager.slash_skills(), baseline);
+        assert!(manager.take_pending_reconciliation().is_none());
+    }
+}

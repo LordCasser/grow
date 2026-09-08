@@ -953,3 +953,101 @@ async fn provider_command_runs_in_cwd() {
         Some("file-tok")
     );
 }
+
+#[tokio::test]
+async fn credential_helper_errors_do_not_echo_output() {
+    for (name, script, expected) in [
+        (
+            "stderr",
+            "printf '%s' 'credential-sentinel' >&2; exit 7",
+            "exited",
+        ),
+        (
+            "json",
+            "printf '%s' '{\"access_token\":\"fixture-token\",\"expires_in\":\"credential-sentinel\"}'",
+            "JSON",
+        ),
+    ] {
+        let provider = AuthProviderRef::new(
+            format!("test-private-helper-{name}"),
+            AuthProviderConfig {
+                command: "/bin/sh".into(),
+                args: Some(vec!["-c".into(), script.into()]),
+                ..Default::default()
+            },
+        );
+        let error = mint_provider_token(&provider, false, None)
+            .await
+            .err()
+            .expect("invalid helper output must fail");
+        let error = format!("{error:#}");
+        assert!(
+            !error.contains("credential-sentinel"),
+            "helper output leaked: {name}"
+        );
+        assert!(!error.contains("fixture-token"));
+        assert!(error.contains("stderr captured:"));
+        if name == "json" {
+            assert!(error.contains("Data, line 1, column"));
+        }
+        assert!(
+            error.contains(expected),
+            "missing structural failure: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn short_lived_token_is_sendable_until_expiry_or_failed_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut provider = test_counting_provider("test-short-lived-sendable", dir.path());
+    provider.config.token_ttl_secs = Some(30);
+    let token = provider.ensure_fresh_token(None).await.rotated().unwrap();
+    let resolver = provider.bearer_resolver();
+    assert_eq!(resolver.current_bearer().as_deref(), Some(token.as_str()));
+    let mut changed = provider.clone();
+    changed.config.token_ttl_secs = Some(20);
+    assert_eq!(changed.cached_token(), None);
+    test_expire_provider_token(&provider.name);
+    assert_eq!(resolver.current_bearer(), None);
+
+    provider.ensure_fresh_token(None).await.rotated().unwrap();
+    assert!(resolver.current_bearer().is_some());
+    provider.config.cwd = Some(dir.path().to_string_lossy().into_owned());
+    provider.ensure_fresh_token(None).await.rotated().unwrap();
+    let resolver = provider.bearer_resolver();
+    assert!(resolver.current_bearer().is_some());
+    dir.close().unwrap();
+    assert_eq!(
+        provider.ensure_fresh_token(None).await,
+        ProviderRefreshOutcome::MintFailed
+    );
+    assert_eq!(resolver.current_bearer(), None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn provider_relative_cwd_and_program_resolve_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = std::env::current_dir().unwrap();
+    let dir = tempfile::tempdir_in(&parent).unwrap();
+    let script = dir.path().join("token.sh");
+    std::fs::write(&script, "#!/bin/sh\ncat token.txt\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(dir.path().join("token.txt"), "relative-cwd-token").unwrap();
+    let relative = dir.path().strip_prefix(&parent).unwrap();
+    assert!(!relative.is_absolute());
+    let provider = AuthProviderRef::new(
+        "test-relative-cwd-and-program".into(),
+        AuthProviderConfig {
+            command: "./token.sh".into(),
+            args: Some(vec![]),
+            cwd: Some(relative.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+    );
+    let token = mint_provider_token(&provider, false, None)
+        .await
+        .expect("relative cwd must resolve only once");
+    assert_eq!(token.token, "relative-cwd-token");
+}

@@ -342,6 +342,7 @@ impl AgentView {
             last_interrupt: None,
             cancel_subagents_preference: None,
             cancel_trigger_hint: None,
+            rewind_read: None,
             rewind_state: None,
             rewind_points: None,
             inline_edit: None,

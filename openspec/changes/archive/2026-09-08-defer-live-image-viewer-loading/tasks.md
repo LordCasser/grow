@@ -1,0 +1,4 @@
+- [x] Finish completion/renderer/source ownership review and choose the minimal source representation.
+- [x] Connect real viewer admission to background loading for memory and file sources.
+- [x] Verify real input entry, protocol capture, completion/failure and reopen ownership.
+- [x] Update docs, validate and archive.

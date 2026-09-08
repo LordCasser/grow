@@ -1,0 +1,3 @@
+- [x] Bound retained images while resolving tokens sequentially.
+- [x] Test exact budget, overflow across lines and same-line tokens, and text/path preservation.
+- [x] Update guide, validate and archive.

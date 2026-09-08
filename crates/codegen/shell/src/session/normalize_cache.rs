@@ -122,13 +122,25 @@ fn weigh_entry(_k: &[u8; 32], v: &NormalizedEntry) -> u32 {
         .unwrap_or(u32::MAX)
 }
 
-/// `spawn_blocking` adapter mapping `JoinError` → [`NormalizeError`].
+static NORMALIZE_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Admit one image compute at a time; cancellation cannot release a running
+/// worker's permit. Maps `JoinError` to [`NormalizeError`].
 pub(crate) async fn run_blocking<F, T>(work: F) -> Result<T, NormalizeError>
 where
     F: FnOnce() -> Result<T, NormalizeError> + Send + 'static,
     T: Send + 'static,
 {
-    match tokio::task::spawn_blocking(work).await {
+    let permit = NORMALIZE_WORKERS
+        .acquire()
+        .await
+        .map_err(|error| NormalizeError(format!("normalization admission failed: {error}")))?;
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    {
         Ok(r) => r,
         Err(e) => Err(NormalizeError(format!("join error: {e}"))),
     }
@@ -138,6 +150,37 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn canceled_waiter_retains_running_worker_admission() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = tokio::spawn(run_blocking(move || {
+            let _ = started_tx.send(());
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            Ok(())
+        }));
+        started_rx.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let mut second = tokio::spawn(run_blocking(|| Ok(42)));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), second)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            42
+        );
+    }
 
     fn enabled_cache(max_bytes: u64) -> NormalizeCache {
         let cache = NormalizeCache::with_capacity(max_bytes);

@@ -270,13 +270,7 @@ fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
     }
 
     match OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(file) => Some(LogWriter {
-            file,
-            identity: path_identity(&path),
-            path,
-            last_maintenance: Instant::now(),
-            detached: false,
-        }),
+        Ok(file) => LogWriter::from_open_file(file, path),
         Err(e) => {
             tracing::warn!("[unified_log] failed to open log file: {e}");
             None
@@ -285,6 +279,27 @@ fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
 }
 
 impl LogWriter {
+    fn from_open_file(file: File, path: PathBuf) -> Option<Self> {
+        let metadata = file.metadata().ok()?;
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            Some((metadata.dev(), metadata.ino()))
+        };
+        #[cfg(not(unix))]
+        let identity = {
+            let _ = metadata;
+            Some((0, 0))
+        };
+        Some(Self {
+            identity,
+            file,
+            path,
+            last_maintenance: Instant::now(),
+            detached: false,
+        })
+    }
+
     /// Re-point at the live file if ours was replaced or removed, and trim if
     /// the file has grown past [`MAX_SIZE`].
     ///
@@ -357,7 +372,15 @@ fn write_entry(entry: &LogEntry) {
     write_lines(&line);
 }
 
-/// Drop the oldest lines from the file, keeping roughly the last half,
+fn read_trim_window(reader: &mut (impl Read + Seek), len: u64) -> std::io::Result<Vec<u8>> {
+    let start = (len / 2).max(len.saturating_sub(MAX_SIZE / 2));
+    reader.seek(std::io::SeekFrom::Start(start))?;
+    let mut data = Vec::new();
+    reader.take(len - start).read_to_end(&mut data)?;
+    Ok(data)
+}
+
+/// Drop the oldest lines, keeping roughly the last half up to 2.5 MiB,
 /// **preserving the inode**.
 ///
 /// Rewrites the retained tail at offset 0 and truncates to match. This must
@@ -384,9 +407,8 @@ fn write_entry(entry: &LogEntry) {
 /// the log itself, because trimming in place is only safe for one process at
 /// a time — see the comment in the body.
 ///
-/// Known limitation: a single line longer than half the file leaves no
-/// newline to cut at, and the trim is skipped rather than split that line.
-/// The log then stays over its cap until a shorter line arrives.
+/// Known limitation: if the bounded tail contains no newline, trimming is
+/// skipped rather than splitting a line. This is not a hard disk-size cap.
 pub fn trim_file(path: &std::path::Path) {
     // One trimmer at a time, across processes. Writers decide on the real
     // on-disk size, so when the log crosses the cap every process reaches
@@ -414,15 +436,22 @@ pub fn trim_file(path: &std::path::Path) {
         return;
     }
 
-    let mut data = Vec::new();
-    if let Err(e) = file.read_to_end(&mut data) {
-        tracing::warn!("[unified_log] trim read failed: {e}");
+    let Ok(metadata) = file.metadata() else {
+        return;
+    };
+    if !metadata.is_file() {
         return;
     }
-    let half = data.len() / 2;
-    // Find the first newline after the halfway point so we don't split a line.
-    let start = match data[half..].iter().position(|&b| b == b'\n') {
-        Some(pos) => half + pos + 1,
+    let data = match read_trim_window(&mut file, metadata.len()) {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::warn!("[unified_log] trim read failed: {e}");
+            return;
+        }
+    };
+    // Discard the first partial line in the admitted tail window.
+    let start = match data.iter().position(|&b| b == b'\n') {
+        Some(pos) => pos + 1,
         None => return,
     };
     let tail = &data[start..];
@@ -710,6 +739,34 @@ mod tests {
     /// `$TMPDIR` reaper.
     #[cfg(unix)]
     #[test]
+    fn writer_initialization_tracks_open_handle_after_path_changes() {
+        for replace in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("log.jsonl");
+            fs::write(&path, b"old\n").unwrap();
+            let old_identity = path_identity(&path);
+            let file = OpenOptions::new().append(true).open(&path).unwrap();
+            if replace {
+                let replacement = dir.path().join("replacement");
+                fs::write(&replacement, b"new\n").unwrap();
+                fs::rename(replacement, &path).unwrap();
+            } else {
+                fs::remove_file(&path).unwrap();
+            }
+            let mut writer = LogWriter::from_open_file(file, path.clone()).unwrap();
+            assert_eq!(writer.identity, old_identity);
+            assert_ne!(writer.identity, path_identity(&path));
+            writer.last_maintenance = Instant::now() - MAINTENANCE_INTERVAL;
+            assert!(writer.maintain());
+            writer.file.write_all(b"visible\n").unwrap();
+            writer.file.flush().unwrap();
+            assert!(fs::read_to_string(&path).unwrap().contains("visible"));
+            assert_eq!(writer.identity, path_identity(&path));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn maintain_reopens_after_the_file_is_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.jsonl");
@@ -927,6 +984,49 @@ mod tests {
             "the recovered writer must be attached to the visible file, \
              got: {visible:?}",
         );
+    }
+
+    #[test]
+    fn trim_window_reads_only_the_tail_budget() {
+        struct Counted {
+            cursor: std::io::Cursor<Vec<u8>>,
+            bytes: usize,
+        }
+        impl Read for Counted {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.cursor.read(out)?;
+                self.bytes += count;
+                Ok(count)
+            }
+        }
+        impl Seek for Counted {
+            fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+                self.cursor.seek(pos)
+            }
+        }
+        let len = MAX_SIZE * 3;
+        let mut reader = Counted {
+            cursor: std::io::Cursor::new(vec![b'x'; len as usize + 20]),
+            bytes: 0,
+        };
+        let tail = read_trim_window(&mut reader, len).unwrap();
+        assert_eq!(tail.len() as u64, MAX_SIZE / 2);
+        assert_eq!(reader.bytes as u64, MAX_SIZE / 2);
+        assert_eq!(reader.cursor.position(), len);
+    }
+
+    #[test]
+    fn trim_large_file_retains_recent_lines_within_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.jsonl");
+        let mut file = File::create(&path).unwrap();
+        file.set_len(MAX_SIZE * 3).unwrap();
+        file.seek(std::io::SeekFrom::End(0)).unwrap();
+        file.write_all(b"\nrecent-1\nrecent-2\n").unwrap();
+        let identity = path_identity(&path);
+        trim_file(&path);
+        assert_eq!(fs::read(&path).unwrap(), b"recent-1\nrecent-2\n");
+        assert_eq!(path_identity(&path), identity);
     }
 
     #[test]

@@ -1396,11 +1396,11 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(result.map(|_| ()).map_err(|error| acp::Error::invalid_request().data(error)));
                     }
                     SessionCommand::SetSessionTitle { title, respond_to } => {
-                        // A user title wins permanently. Taking the capability
+                        // A user title wins permanently. Revoking the capability
                         // here prevents a later prompt from launching a title
                         // Sideband; an already-running Sideband still fails
                         // closed when it attempts to append after this event.
-                        session.session_title_route.borrow_mut().take();
+                        session.session_title_route.borrow_mut().revoke();
                         let result = session
                             .commit_session_title(title, chat_state::SessionTitleSource::User)
                             .await;
@@ -2593,8 +2593,10 @@ pub(super) async fn run_session(
                             .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
-                            let result = s.handle_ai_suggest(&prefix, &cwd, model_override.as_deref()).await;
-                            let _ = respond_to.send(result);
+                            super::recap::deliver_suggestion(
+                                s.handle_ai_suggest(&prefix, &cwd, model_override.as_deref()),
+                                respond_to,
+                            ).await;
                         });
                     }
                     SessionCommand::SuggestPrompt { model_override, respond_to } => {
@@ -2605,8 +2607,10 @@ pub(super) async fn run_session(
                             .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
-                            let result = s.handle_suggest_prompt(model_override.as_deref()).await;
-                            let _ = respond_to.send(result);
+                            super::recap::deliver_suggestion(
+                                s.handle_suggest_prompt(model_override.as_deref()),
+                                respond_to,
+                            ).await;
                         });
                     }
                     SessionCommand::RewriteMemoryNote { raw_text, context_summary, respond_to } => {

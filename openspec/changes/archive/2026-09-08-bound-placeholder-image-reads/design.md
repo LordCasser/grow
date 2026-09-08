@@ -1,0 +1,4 @@
+## Evidence
+load_placeholder_image_with_cap规范化后调用load_canonical_placeholder_image；recover_orphan_placeholders也调用该入口。该入口前缀/deny-list/扩展名/metadata检查后fs::read，最后再比较data.len。既有oversize测试只覆盖静态metadata早退。
+## Design
+保留前置检查，在打开文件后调用私有read_placeholder_image_bytes(reader, max_bytes)；take(max+1)读取并沿用TooLarge/ReadFailed。TooLarge.actual可能是流读取观察值而非完整文件长度，Display与注释相应调整。计数reader测试确保不只是读取后判断；真实文件增长后测试同一流入口拒绝。保留精确cap有效PNG加载和现有授权/MIME回归。

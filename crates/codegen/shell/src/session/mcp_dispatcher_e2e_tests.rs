@@ -134,7 +134,10 @@ impl RestartActions for E2eActions {
             .expect("ShutdownState mutex poisoned")
             .is_shutting_down(server)
     }
-    async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
+    async fn respawn_stdio(
+        &self,
+        server: &str,
+    ) -> Result<(), crate::session::mcp_restart::RecoveryError> {
         self.respawn_calls.borrow_mut().push(server.to_string());
         // Panic on an unscripted call: a test that under-scripts its
         // outcomes is a test bug, and `Err("not scripted")` would
@@ -159,7 +162,7 @@ impl RestartActions for E2eActions {
             state.bind_client_events(&client);
             state.owned_clients.insert(server.to_string(), client);
         }
-        outcome
+        outcome.map_err(Into::into)
     }
     fn push_status(&self, payload: &McpServerStatusPayload) {
         self.pushes.borrow_mut().push(payload.clone());
@@ -167,13 +170,17 @@ impl RestartActions for E2eActions {
     async fn is_http_server_configured(&self, server: &str) -> bool {
         self.http_configured.borrow().contains(server)
     }
-    async fn reset_http_client(&self, server: &str) -> Result<(), String> {
+    async fn reset_http_client(
+        &self,
+        server: &str,
+    ) -> Result<(), crate::session::mcp_restart::RecoveryError> {
         self.reset_calls.borrow_mut().push(server.to_string());
         self.reset_outcomes
             .borrow_mut()
             .get_mut(server)
             .and_then(|q| q.pop_front())
             .unwrap_or_else(|| Err("not scripted".to_string()))
+                .map_err(Into::into)
     }
 }
 

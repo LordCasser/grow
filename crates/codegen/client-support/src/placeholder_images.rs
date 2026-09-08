@@ -44,16 +44,9 @@
 //!
 //! ## `file://` URI convention
 //!
-//! Both the TUI's `prompt_images::build_content_blocks_with_workspace`
-//! and the server-side recovery in [`recover_orphan_placeholders`]
-//! emit `file://{canonical.display()}` URIs **without** percent-encoding
-//! the path. This deviates from RFC 3986 (a path with spaces should be
-//! `%20`-encoded) but it is internally consistent across producer and
-//! consumer: [`canonical_from_file_uri`] parses inbound URIs using both
-//! the relaxed unencoded form **and** percent-decoded form so dedup
-//! works against either convention. Do **not** add percent-encoding on
-//! one side without also doing it on the other — past-issue: producer
-//! / consumer asymmetry breaks dedup.
+//! Image URI producers share [`file_uri_from_path`]; consumers parse the
+//! standard file URL once. Literal `%20` and a space are distinct filenames.
+//! Placeholder text itself still carries an unencoded filesystem path.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -284,12 +277,13 @@ pub enum PlaceholderLoadError {
     /// Resolved path is not a regular file (e.g. directory, FIFO).
     #[error("path is not a regular file")]
     NotAFile,
-    /// `std::fs::read` failed after canonicalisation. The variant
+    /// Opening or reading the file failed after canonicalisation. The variant
     /// retains only the `io::ErrorKind`, not the verbose message.
     #[error("read failed: {0:?}")]
     ReadFailed(std::io::ErrorKind),
-    /// File exceeds the configured per-image byte cap.
-    #[error("file is {actual} bytes, exceeds {limit}-byte cap")]
+    /// File exceeds the configured per-image byte cap. `actual` is the
+    /// observed count, possibly only cap+1 from a bounded read.
+    #[error("file exceeds {limit}-byte cap (observed {actual} bytes)")]
     TooLarge { actual: usize, limit: usize },
     /// Bytes do not decode as a supported image. Routed through
     /// [`image::ImageReader::with_guessed_format`] +
@@ -462,15 +456,9 @@ pub fn load_canonical_placeholder_image(
         });
     }
 
-    let data = std::fs::read(canonical).map_err(|e| PlaceholderLoadError::ReadFailed(e.kind()))?;
-    // Re-check after read: a sparse/grown file may exceed the cap
-    // even when the metadata snapshot was under it.
-    if data.len() > max_bytes {
-        return Err(PlaceholderLoadError::TooLarge {
-            actual: data.len(),
-            limit: max_bytes,
-        });
-    }
+    let file = std::fs::File::open(canonical)
+        .map_err(|error| PlaceholderLoadError::ReadFailed(error.kind()))?;
+    let data = read_placeholder_image_bytes(file, max_bytes)?;
 
     // Image-decoder validation: routed through the `image` crate's
     // header parser so a file with PNG magic bytes followed by arbitrary
@@ -483,6 +471,25 @@ pub fn load_canonical_placeholder_image(
         data,
         mime_type: mime_type.to_owned(),
     })
+}
+
+fn read_placeholder_image_bytes(
+    reader: impl std::io::Read,
+    max_bytes: usize,
+) -> Result<Vec<u8>, PlaceholderLoadError> {
+    use std::io::Read;
+    let mut data = Vec::new();
+    reader
+        .take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut data)
+        .map_err(|error| PlaceholderLoadError::ReadFailed(error.kind()))?;
+    if data.len() > max_bytes {
+        return Err(PlaceholderLoadError::TooLarge {
+            actual: data.len(),
+            limit: max_bytes,
+        });
+    }
+    Ok(data)
 }
 
 /// Header-only validation via the shared image_validate helper.
@@ -558,14 +565,11 @@ pub fn recover_orphan_placeholders_with_prefixes(
 /// form to exercise the aggregate cap with small synthetic values
 /// (real 200 MB tests would burn disk/CPU per run).
 ///
-/// Aggregate-cap semantics: the loop reads the next image, then checks
-/// `aggregate_bytes + image.len() > aggregate_max`. The first image
-/// that pushes the running total **strictly above** the cap is
-/// dropped and the loop `break`s; earlier images already in
-/// `raw_images` stay. The cap is therefore an **inclusive** upper
-/// bound on the aggregate — a running total exactly equal to the cap
-/// is admitted, the next byte trips the break. See test
-/// `recover_orphan_placeholders_aggregate_cap_inclusive_boundary`.
+/// Each candidate uses the smaller of the per-image cap and the remaining
+/// recovery budget. An exact fit is admitted; exhausted budget stops before
+/// the next candidate. When remaining budget is tighter, an oversized file
+/// stops recovery even before MIME validation. Per-image-only failures still
+/// skip that candidate and allow later smaller images.
 pub fn recover_orphan_placeholders_with_prefixes_and_caps(
     query: &str,
     raw_images: &mut Vec<agent_client_protocol::schema::v1::ImageContent>,
@@ -591,6 +595,11 @@ pub fn recover_orphan_placeholders_with_prefixes_and_caps(
     let mut recovered: usize = 0;
     let mut aggregate_bytes: usize = 0;
     for ph in placeholders {
+        let remaining = aggregate_max.saturating_sub(aggregate_bytes);
+        if remaining == 0 {
+            break;
+        }
+        let read_max = per_image_max.min(remaining);
         let canonical = match dunce::canonicalize(Path::new(&ph.path)) {
             Ok(c) => c,
             Err(_) => {
@@ -604,7 +613,7 @@ pub fn recover_orphan_placeholders_with_prefixes_and_caps(
         if attached_canonical.contains(&canonical) {
             continue;
         }
-        match load_canonical_placeholder_image(&canonical, allowed_prefixes, per_image_max) {
+        match load_canonical_placeholder_image(&canonical, allowed_prefixes, read_max) {
             Ok(loaded) => {
                 let next_total = aggregate_bytes.saturating_add(loaded.data.len());
                 if next_total > aggregate_max {
@@ -621,7 +630,7 @@ pub fn recover_orphan_placeholders_with_prefixes_and_caps(
                 let data = base64::engine::general_purpose::STANDARD.encode(&loaded.data);
                 raw_images.push(
                     agent_client_protocol::schema::v1::ImageContent::new(data, loaded.mime_type)
-                        .uri(format!("file://{}", canonical.display()))
+                        .uri(file_uri_from_path(&canonical))
                         // Record the real `[Image #N]` number so it resolves by
                         // number, matching the TUI-attached images (which set it
                         // too) and avoiding position-based collisions.
@@ -635,29 +644,29 @@ pub fn recover_orphan_placeholders_with_prefixes_and_caps(
                     error = %e,
                     "placeholder_images: orphan placeholder failed to load",
                 );
+                if remaining < per_image_max && matches!(e, PlaceholderLoadError::TooLarge { .. }) {
+                    break;
+                }
             }
         }
     }
     recovered
 }
 
-/// Parse a `file://...` URI into a canonical `PathBuf`, accepting both
-/// the relaxed unencoded form emitted by the TUI / server (see the
-/// `file://` URI convention note in the module header) and the
-/// percent-encoded RFC 3986 form. Returns `None` if the URI does not
-/// start with `file://`; otherwise returns the canonicalised path
-/// (falling back to the raw path when canonicalisation fails so the
-/// caller can still compare against attached URIs).
+/// Encode an absolute filesystem path as a file URI without lossy string conversion.
+pub fn file_uri_from_path(path: &Path) -> Option<String> {
+    url::Url::from_file_path(path).ok().map(String::from)
+}
+
+/// Resolve a plain file URI, decoding path bytes once. If the file is absent,
+/// retain the parsed path so callers can still compare attachment identities.
 pub fn canonical_from_file_uri(uri: &str) -> Option<PathBuf> {
-    let raw_path_str = uri.strip_prefix("file://")?;
-    // Try percent-decoding first; fall back to the literal form. Both
-    // are valid per the module's `file://` URI convention.
-    let decoded: std::borrow::Cow<'_, str> = match urlencoding::decode(raw_path_str) {
-        Ok(c) => c,
-        Err(_) => std::borrow::Cow::Borrowed(raw_path_str),
-    };
-    let raw = Path::new(decoded.as_ref());
-    Some(dunce::canonicalize(raw).unwrap_or_else(|_| raw.to_path_buf()))
+    let url = url::Url::parse(uri).ok()?;
+    if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    let path = url.to_file_path().ok()?;
+    Some(dunce::canonicalize(&path).unwrap_or(path))
 }
 
 #[cfg(test)]
@@ -965,6 +974,66 @@ mod tests {
     }
 
     #[test]
+    fn bounded_placeholder_read_stops_at_limit_plus_one() {
+        use std::io::{Cursor, Read};
+        for size in [0, 8, 9, 128] {
+            let mut reader = Cursor::new(vec![7; size]);
+            let result = read_placeholder_image_bytes(&mut reader, 8);
+            assert_eq!(reader.position(), size.min(9) as u64);
+            if size <= 8 {
+                assert_eq!(result.unwrap(), vec![7; size]);
+            } else {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("observed 9 bytes"));
+                assert!(matches!(
+                    error,
+                    PlaceholderLoadError::TooLarge {
+                        actual: 9,
+                        limit: 8
+                    }
+                ));
+            }
+        }
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        assert!(matches!(
+            read_placeholder_image_bytes(Broken, 8),
+            Err(PlaceholderLoadError::ReadFailed(
+                std::io::ErrorKind::PermissionDenied
+            ))
+        ));
+    }
+
+    #[test]
+    fn placeholder_file_growth_is_bounded_and_exact_cap_png_loads() {
+        use std::io::{Seek, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_png(dir.path(), "growing.png");
+        let allowed = dunce::canonicalize(dir.path()).unwrap();
+        let image =
+            load_placeholder_image_with_cap(path.to_str().unwrap(), &[allowed], PNG_BYTES.len())
+                .unwrap();
+        assert_eq!(image.data, PNG_BYTES);
+        let mut file = std::fs::File::open(&path).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), PNG_BYTES.len() as u64);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[0; 128])
+            .unwrap();
+        assert!(matches!(
+            read_placeholder_image_bytes(&mut file, PNG_BYTES.len()),
+            Err(PlaceholderLoadError::TooLarge { .. })
+        ));
+        assert_eq!(file.stream_position().unwrap(), PNG_BYTES.len() as u64 + 1);
+    }
+
+    #[test]
     fn load_placeholder_image_rejects_oversize_via_injectable_cap() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_png(dir.path(), "small-but-over-cap.png");
@@ -1144,6 +1213,49 @@ mod tests {
         assert_eq!(parsed, canon);
     }
 
+    #[test]
+    fn image_file_uri_roundtrips_reserved_and_literal_percent_names() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["space name.png", "literal%20name.png", "literal%2Fname.png", "hash#query?图片.png"] {
+            let path = write_png(dir.path(), name);
+            let canonical = dunce::canonicalize(&path).unwrap();
+            let uri = file_uri_from_path(&path).unwrap();
+            assert_eq!(canonical_from_file_uri(&uri), Some(canonical));
+        }
+        assert!(file_uri_from_path(Path::new("relative.png")).is_none());
+        assert!(canonical_from_file_uri("file:///tmp/image.png?other=1").is_none());
+        assert!(canonical_from_file_uri("file:///tmp/image.png#other").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_file_uri_roundtrips_non_utf8_path_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        // Some Unix filesystems (including this host's APFS) reject creation
+        // of invalid UTF-8 names. Test path-byte conversion without file I/O.
+        let path = dunce::canonicalize(dir.path()).unwrap()
+            .join(std::ffi::OsString::from_vec(b"image-\xff.png".to_vec()));
+        let uri = file_uri_from_path(&path).unwrap();
+        assert!(uri.contains("%FF"));
+        assert_eq!(canonical_from_file_uri(&uri), Some(path));
+    }
+
+    #[test]
+    fn percent_filename_attachment_does_not_hide_a_different_space_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let literal = write_png(dir.path(), "same%20name.png");
+        let spaced = write_png(dir.path(), "same name.png");
+        let uri = file_uri_from_path(&literal).unwrap();
+        assert!(uri.contains("%2520"));
+        let mut raw = vec![make_acp_image(&uri)];
+        let query = format!("[Image #1: {}] [Image #2: {}]", literal.display(), spaced.display());
+        let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
+        assert_eq!(recover_orphan_placeholders_with_prefixes(&query, &mut raw, &allowed), 1);
+        assert_eq!(raw.len(), 2);
+        assert_eq!(canonical_from_file_uri(raw[1].uri.as_deref().unwrap()), Some(dunce::canonicalize(spaced).unwrap()));
+    }
+
     // ----- recover_orphan_placeholders (hermetic, no ambient $HOME) -------
 
     /// Build a non-empty ACP `ImageContent` so a future dedup change
@@ -1303,6 +1415,61 @@ mod tests {
     }
 
     // ----- Aggregate cap -------------------------------------------------
+
+    #[test]
+    fn recovery_rejects_over_remaining_budget_before_mime_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let large = dir.path().join("invalid.png");
+        std::fs::write(&large, vec![0; PNG_BYTES.len() * 2]).unwrap();
+        let small = write_png(dir.path(), "valid.png");
+        let query = format!(
+            "[Image #1: {}] [Image #2: {}]",
+            large.display(),
+            small.display()
+        );
+        let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
+        let mut raw = Vec::new();
+        let recovered = recover_orphan_placeholders_with_prefixes_and_caps(
+            &query,
+            &mut raw,
+            &allowed,
+            1_000,
+            PNG_BYTES.len(),
+        );
+        // The oversized first candidate exhausts admission without needing
+        // to load it fully or classify its malformed bytes.
+        assert_eq!(recovered, 0);
+        assert!(raw.is_empty());
+    }
+
+    #[test]
+    fn recovery_per_image_rejection_allows_later_smaller_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let large = dir.path().join("large.png");
+        std::fs::write(&large, vec![0; PNG_BYTES.len() * 2]).unwrap();
+        let small = write_png(dir.path(), "small.png");
+        let query = format!(
+            "[Image #1: {}] [Image #2: {}]",
+            large.display(),
+            small.display()
+        );
+        let allowed = vec![dunce::canonicalize(dir.path()).unwrap()];
+        for aggregate in [PNG_BYTES.len(), PNG_BYTES.len() * 2] {
+            let mut raw = Vec::new();
+            assert_eq!(
+                recover_orphan_placeholders_with_prefixes_and_caps(
+                    &query,
+                    &mut raw,
+                    &allowed,
+                    PNG_BYTES.len(),
+                    aggregate
+                ),
+                1
+            );
+            assert_eq!(raw.len(), 1);
+            assert_eq!(display_number_from_meta(raw[0].meta.as_ref()), Some(2));
+        }
+    }
 
     /// Two placeholders, aggregate cap below the cumulative byte
     /// total of both. The first image fits; the second pushes the

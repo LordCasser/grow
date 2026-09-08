@@ -75,11 +75,9 @@ impl SlashCommand for ExportCommand {
 /// The `SlashController` handles nucleo fuzzy ranking on the returned items
 /// automatically — we just provide the candidates.
 ///
-/// Synchronous `read_dir` — same pattern as `/model` and `/theme` which query
-/// `ModelState` synchronously. Local directory listing is sub-millisecond;
-/// the 1000-entry pre-sort cap guards against pathological directories.
-/// Moving to the `@`-style background daemon would require adding tick-based
-/// polling to the slash command system (which is currently event-driven only).
+/// Synchronous directory listing inspects at most 1000 iterator results,
+/// including hidden entries and errors. This bounds enumeration work, not
+/// filesystem latency; returned suggestions retain their separate 100-item cap.
 fn list_path_completions(cwd: &Path, query: &str) -> Vec<ArgItem> {
     let trimmed = query.trim_start();
     if trimmed.is_empty() {
@@ -118,8 +116,15 @@ fn list_path_completions(cwd: &Path, query: &str) -> Vec<ArgItem> {
         Err(_) => return Vec::new(),
     };
 
+    collect_path_completions(entries, &typed_prefix)
+}
+
+fn collect_path_completions(
+    entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
+    typed_prefix: &str,
+) -> Vec<ArgItem> {
     let mut items: Vec<ArgItem> = Vec::new();
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.take(1000).filter_map(Result::ok) {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
@@ -142,10 +147,6 @@ fn list_path_completions(cwd: &Path, query: &str) -> Vec<ArgItem> {
             },
         });
 
-        // Pre-sort cap to avoid pathological directories.
-        if items.len() >= 1000 {
-            break;
-        }
     }
 
     // Sort: directories first, then alphabetical. Truncate after sort.
@@ -166,6 +167,57 @@ mod tests {
     use crate::app::actions::Action;
     use crate::app::bundle::BundleState;
     use crate::settings::PagerLocalSnapshot;
+
+    #[test]
+    fn hidden_entries_and_errors_consume_enumeration_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join(".hidden"), b"").unwrap();
+        let mut consumed = 0;
+        let entries = std::iter::from_fn(|| {
+            if consumed == 1001 {
+                return None;
+            }
+            consumed += 1;
+            if consumed % 2 == 0 {
+                Some(Err(std::io::Error::other("injected directory entry error")))
+            } else {
+                Some(std::fs::read_dir(directory.path()).unwrap().next().unwrap())
+            }
+        });
+        assert!(collect_path_completions(entries, "prefix/").is_empty());
+        assert_eq!(consumed, 1000);
+    }
+
+    #[test]
+    fn visible_path_completions_preserve_prefix_sorting_and_output_cap() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir(root.join("folder")).unwrap();
+        std::fs::write(root.join("z.txt"), b"").unwrap();
+        std::fs::write(root.join("a.txt"), b"").unwrap();
+        std::fs::write(root.join(".hidden"), b"").unwrap();
+        let items = list_path_completions(root, "./");
+        assert_eq!(items.iter().map(|item| item.display.as_str()).collect::<Vec<_>>(), ["folder/", "a.txt", "z.txt"]);
+        assert_eq!(items[0].insert_text, "./folder/");
+        assert_eq!(items[1].insert_text, "./a.txt");
+        assert_eq!(items[0].description, "directory");
+        for index in 0..120 {
+            std::fs::write(root.join(format!("item-{index:03}")), b"").unwrap();
+        }
+        assert_eq!(list_path_completions(root, "./").len(), 100);
+        assert!(list_path_completions(root, "missing/").is_empty());
+        assert!(list_path_completions(root, "").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_directory_keeps_drill_down_suffix() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("target")).unwrap();
+        std::os::unix::fs::symlink(directory.path().join("target"), directory.path().join("link")).unwrap();
+        let items = list_path_completions(directory.path(), "./");
+        assert!(items.iter().any(|item| item.insert_text == "./link/" && item.description == "directory"));
+    }
 
     static DEFAULT_BUNDLE_STATE: BundleState = BundleState {
         has_cache: false,

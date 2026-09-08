@@ -156,7 +156,7 @@ pub enum ChatStateCommand {
     /// Persist the exact user-message event, then accept it into Timeline.
     PushUserMessageDurably {
         item: ConversationItem,
-        reply: oneshot::Sender<Result<(), TimelineWriteError>>,
+        reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
     },
 
     /// Push a user message with an explicit dangling-repair reason.

@@ -1,0 +1,177 @@
+{
+  "baseline_head": "1e1fda6d2f7b3990d2c0a34d0c0015b9b1edbb5c",
+  "branch": "codex/openspec-sdd",
+  "date": "2026-09-07",
+  "meaning": "Historical working-tree source evidence, not a clean commit or proof of test execution.",
+  "sources": [
+    {
+      "path": "AGENTS.md",
+      "sha256": "31e4d9085a18042327d403d62de38385876a360521be3856eaca73d62f8f9f41"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "a5270065958855faabbb0ad0df2e12b99f085a788a798cd66c2c7acc5c0b5002"
+    },
+    {
+      "path": "crates/codegen/agent/src/prompt/agents_md.rs",
+      "sha256": "ce052b89a6b38dd6dcb77abddaf9ca99556805ed89780a4f0d737dd673221e0f"
+    },
+    {
+      "path": "crates/codegen/chat-state/src/actor/tests.rs",
+      "sha256": "407e40ca2893d0f361cbddb268613a9ad75582df3af4bab7c602df96f0deeae2"
+    },
+    {
+      "path": "crates/codegen/cli/src/main.rs",
+      "sha256": "8523a7611cf908e8cb3fbaba5bd4c5d6eec91e19cfc74b0b313f8fc2c52d1505"
+    },
+    {
+      "path": "crates/codegen/config/src/loader.rs",
+      "sha256": "b4bec77398f32877d86e146a6dcb4c8883550f41643ba3354969cabcc1fafd26"
+    },
+    {
+      "path": "crates/codegen/hooks/src/dispatcher.rs",
+      "sha256": "c8e5c5d57e570a8f5589f29ffa530bdf7a5ad14a581fe3d2106f140ffa4daf67"
+    },
+    {
+      "path": "crates/codegen/mcp/src/lib.rs",
+      "sha256": "9aa1ac9c6d2a6991dfcc24f47d06e96b2a28a42c7be3c33634c404277c8f9980"
+    },
+    {
+      "path": "crates/codegen/memory/src/search.rs",
+      "sha256": "0df663a2fbac7bad9e6852bfa35e8a90d50c6521498a3d0f667fef9d50473ddc"
+    },
+    {
+      "path": "crates/codegen/memory/src/storage.rs",
+      "sha256": "3b88fd249eba0e874cf25f7b702b121153c4b53f8dd719793bb0cc841631417f"
+    },
+    {
+      "path": "crates/codegen/pager/src/headless.rs",
+      "sha256": "a73266895214c85bfd14df2e57a0796b146b5bd3164a8834fd296f704d1b936f"
+    },
+    {
+      "path": "crates/codegen/sampler/src/actor/request_task.rs",
+      "sha256": "469ce09789e65a93920c0797260d0545626db4016ce5867ce9365b3719004c03"
+    },
+    {
+      "path": "crates/codegen/sampler/src/lib.rs",
+      "sha256": "418daac2812f5e67d94cd635cf39ff663cc0476746c926cf3f313eb1c54194f6"
+    },
+    {
+      "path": "crates/codegen/sandbox/src/lib.rs",
+      "sha256": "0ae5bb16c09d6bdb35e0cca4e995514bab6eee0b2a25cc2bea1c5112ec28756e"
+    },
+    {
+      "path": "crates/codegen/shell/src/coordination/protocol.rs",
+      "sha256": "210bdae822e4890028960300985badb837b6e1e585f36558a87782184c10d3f3"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/actor/compaction.rs",
+      "sha256": "4adc954b21117443d33ab58cd23b3ed1ac5bf54819b10b23d8ad4ee61b6e58d8"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/actor/input_admission.rs",
+      "sha256": "fe0270791e41dda46647443d27454a090ddd46a80a3fbc9f5dd1f75ab0a09d5d"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/actor/tests/compaction_pre_prune_tests.rs",
+      "sha256": "ec5b35392cf261d8439650dd5e11657aba80b280c7cde2d74b8a12682742501d"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/actor/tool/authorization.rs",
+      "sha256": "507181e80d6ca617d51941d142f0b969ba5ea5cd2e14daac99710548cf0769fd"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/actor/turn/admission.rs",
+      "sha256": "539750375ce57bf0e663b76974ca60d545a0beb454294d3becde461b450919d8"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/behavior.rs",
+      "sha256": "b50e452420d7eab26bc84952b2a15f7d7f44a98351e7564ffd6aebb8b631957d"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/goal_tracker.rs",
+      "sha256": "4bd34612b8c6a5afb438a37a2976217710dfee2e843115755ed6482af0b7a27e"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/storage/mod.rs",
+      "sha256": "8bd6759b2fca8f9c752a84aa2c958a52b18ffb0cabce2bd90344f68e35318945"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/subagent_capability.rs",
+      "sha256": "994b65d3873e3a93d5c224bdb56aa816f8d3bb76c621f8af6060545c24fc0f40"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/workflow/store.rs",
+      "sha256": "e1011bcfd1e6f88611322f0f8f9fc963ceab41f123bb88d004191fe94149ceb0"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/workflow/workspace.rs",
+      "sha256": "06f11f14ad2e2fecac407cbe7b734a505139306c3d9e76026ca5077c4268d8f6"
+    },
+    {
+      "path": "crates/codegen/workflow/src/journal.rs",
+      "sha256": "4455633c2a2378377f6154cbfc4365f22d1ed57a08ba80c686f1a2a63903518c"
+    },
+    {
+      "path": "crates/codegen/workflow/src/run.rs",
+      "sha256": "790b9c7bcdce49dcca58d9a242ac3dbbcd31d732590a460f1fbbf193c9fab07d"
+    },
+    {
+      "path": "crates/codegen/workspace/src/permission/manager.rs",
+      "sha256": "4018b6534c01fe40a8a21204b36764f6c2b392edb9490d225b45b7db10029234"
+    },
+    {
+      "path": "crates/codegen/workspace/src/project_config.rs",
+      "sha256": "9665c860e4e4fddb89028a8158af5ca7c09248ada3ddfcf82d77ddf31f1e6091"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "9940224d9ec981b239b10371b7d98c559b3fe5196a4c54a451da127786c77bca"
+    }
+  ],
+  "worktree_status_at_capture": [
+    " M README.md",
+    " M ROADMAP.md",
+    " M crates/codegen/agent/Cargo.toml",
+    " M crates/codegen/agent/src/plugins/git_install.rs",
+    " M crates/codegen/chat-state/src/trajectory.rs",
+    " M crates/codegen/memory/src/backend.rs",
+    " M crates/codegen/memory/src/index.rs",
+    " M crates/codegen/memory/src/lib.rs",
+    " M crates/codegen/memory/src/search.rs",
+    " M crates/codegen/memory/src/storage.rs",
+    " M crates/codegen/pager/src/slash/commands/loop_cmd.rs",
+    " M crates/codegen/plugin-marketplace/src/installer.rs",
+    " M crates/codegen/shell/src/session/actor/goal_support.rs",
+    " M crates/codegen/shell/src/session/actor/laziness.rs",
+    " M crates/codegen/shell/src/session/actor/laziness_classifier.rs",
+    " M crates/codegen/shell/src/session/actor/prompt_queue.rs",
+    " M crates/codegen/shell/src/session/actor/slash_exec.rs",
+    " M crates/codegen/shell/src/session/actor/spawn.rs",
+    " M crates/codegen/shell/src/session/goal_tracker.rs",
+    " M crates/codegen/shell/src/session/helpers/memory_flush.rs",
+    " M crates/codegen/shell/src/session/trajectory.html",
+    " M crates/codegen/shell/src/session/trajectory.rs",
+    " M crates/codegen/shell/src/trace_classifier/mod.rs",
+    " M crates/codegen/tools/src/implementations/grow_build/scheduler/actor.rs",
+    " M crates/codegen/tools/src/implementations/grow_build/scheduler/interval.rs",
+    " M crates/codegen/tools/src/implementations/grow_build/scheduler/types.rs",
+    " M crates/codegen/tools/src/implementations/grow_build/search_replace/helpers.rs",
+    " M crates/codegen/tools/src/implementations/grow_build/search_replace/mod.rs",
+    " M crates/codegen/tools/src/implementations/grow_build_hashline/edit/apply.rs",
+    " M crates/codegen/tools/src/implementations/grow_build_hashline/edit/mod.rs",
+    " M crates/codegen/tools/src/implementations/memory/search_tool.rs",
+    "?? .github/workflows/openspec.yml",
+    "?? AGENTS.md",
+    "?? docs/README.md",
+    "?? docs/architecture/README.md",
+    "?? docs/architecture/continuous-feature-audit.md",
+    "?? docs/architecture/project-review-2026-09-07.md",
+    "?? docs/architecture/trajectory-review-2026-09-07.md",
+    "?? docs/development.md",
+    "?? openspec/",
+    "?? scripts/test_trajectory_ui.cjs",
+    "?? tmp-feature-removal-candidates.md"
+  ],
+  "note": "Other tasks may edit the shared worktree concurrently. Hashes identify the reviewed snapshot, not a lock on the branch."
+}

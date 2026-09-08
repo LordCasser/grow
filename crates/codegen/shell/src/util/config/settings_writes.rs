@@ -3,7 +3,8 @@ use anyhow::Result;
 
 // ---------------------------------------------------------------------------
 // Settings helpers — typed disk-write wrappers for each setting.
-// All route through `update_config` → `merge_section` → `save_config`.
+// All route through `update_config`, which reads raw TOML and merges settings
+// under the shared write lock before saving.
 // ---------------------------------------------------------------------------
 
 /// Persist `[ui].compact_mode` via `update_config`.

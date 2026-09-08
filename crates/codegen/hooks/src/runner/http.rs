@@ -3,7 +3,7 @@
 //! Executes hooks by POSTing the event envelope JSON to a URL endpoint.
 //! Supports the same blocking (deny/allow) response format as command hooks.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use url::Url;
@@ -17,6 +17,7 @@ use super::{
 };
 
 const RESPONSE_PREVIEW_MAX: usize = 200;
+const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// CWE-918: `true` if `ip` is in a private, link-local, or cloud metadata range
 /// that must be blocked to prevent SSRF. Loopback (`127.x`/`::1`) is allowed for
@@ -70,41 +71,28 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
     }
 }
 
-/// CWE-918: prevent SSRF. Only HTTPS is allowed and resolved IPs must not be
-/// private/link-local/metadata. Known gap: the request re-resolves the host, so
-/// a rebinding DNS server can still swap in a blocked IP after this check.
-async fn validate_hook_url(url: &str) -> Result<(), String> {
+/// Resolve once and return only addresses admitted by the hook IP policy.
+async fn validate_hook_url(url: &str) -> Result<(String, Vec<SocketAddr>), String> {
     let parsed = Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
-
     if parsed.scheme() != "https" {
         return Err(format!(
             "only https:// URLs are allowed for HTTP hooks, got {}://",
             parsed.scheme()
         ));
     }
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "URL has no host".to_string())?;
-
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_blocked_ip(&ip) {
-            return Err(format!("URL resolves to blocked private/internal IP: {ip}"));
-        }
-        return Ok(());
-    }
-
+    let host = parsed.host().ok_or_else(|| "URL has no host".to_string())?;
     let port = parsed.port_or_known_default().unwrap_or(443);
-    let addr_str = format!("{host}:{port}");
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(&addr_str)
-        .await
-        .map_err(|e| format!("DNS resolution failed for {host}: {e}"))?
-        .collect();
-
+    let addrs: Vec<SocketAddr> = match host {
+        url::Host::Ipv4(ip) => vec![SocketAddr::new(IpAddr::V4(ip), port)],
+        url::Host::Ipv6(ip) => vec![SocketAddr::new(IpAddr::V6(ip), port)],
+        url::Host::Domain(domain) => tokio::net::lookup_host((domain, port))
+            .await
+            .map_err(|e| format!("DNS resolution failed for {domain}: {e}"))?
+            .collect(),
+    };
     if addrs.is_empty() {
         return Err(format!("DNS resolved no addresses for {host}"));
     }
-
     for addr in &addrs {
         if is_blocked_ip(&addr.ip()) {
             return Err(format!(
@@ -113,12 +101,14 @@ async fn validate_hook_url(url: &str) -> Result<(), String> {
             ));
         }
     }
-
-    Ok(())
+    Ok((host.to_string(), addrs))
 }
 
-fn build_hook_client(timeout_ms: u64) -> reqwest::Client {
+fn build_hook_client(timeout_ms: u64, host: &str, addrs: &[SocketAddr]) -> reqwest::Client {
     reqwest::Client::builder()
+        // Proxy-side resolution would bypass the address admission above.
+        .no_proxy()
+        .resolve_to_addrs(host, addrs)
         .timeout(Duration::from_millis(timeout_ms))
         // `validate_hook_url` only vets the initial URL, not redirect targets.
         .redirect(reqwest::redirect::Policy::none())
@@ -126,6 +116,35 @@ fn build_hook_client(timeout_ms: u64) -> reqwest::Client {
         // A default fallback would follow redirects and drop the timeout,
         // reopening the SSRF path; build only fails on a TLS init fault.
         .expect("hook HTTP client config is valid")
+}
+
+/// Read decision bodies without retaining unbounded endpoint output.
+async fn read_response_body(
+    mut response: reqwest::Response,
+    log_url: &str,
+) -> Result<String, HookRunnerResult> {
+    let mut body = Vec::new();
+    loop {
+        let chunk = response.chunk().await.map_err(|error| {
+            if error.is_timeout() {
+                HookRunnerResult::TimedOut
+            } else {
+                HookRunnerResult::Failed(format!(
+                    "failed to read response body for {}: {}",
+                    log_url,
+                    error.without_url()
+                ))
+            }
+        })?;
+        let Some(chunk) = chunk else { break };
+        if chunk.len() > MAX_RESPONSE_BYTES - body.len() {
+            return Err(HookRunnerResult::Failed(format!(
+                "HTTP hook response exceeds {MAX_RESPONSE_BYTES} bytes"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// POST the serialized `HookEventEnvelope` to `spec.url` and parse the response
@@ -137,173 +156,166 @@ pub async fn run_http_hook(
     _ctx: &RunContext<'_>,
     mode: GateKind,
 ) -> HookRunOutput {
+    run_http_hook_with_validation(spec, envelope, mode, validate_hook_url).await
+}
+
+async fn run_http_hook_with_validation(
+    spec: &HookSpec,
+    envelope: &HookEventEnvelope,
+    mode: GateKind,
+    validate: impl AsyncFn(&str) -> Result<(String, Vec<SocketAddr>), String>,
+) -> HookRunOutput {
     let start = Instant::now();
-
-    let Some(ref raw_url) = spec.url else {
-        return (
-            HookRunnerResult::Failed("http hook has no 'url' field".into()),
-            start.elapsed(),
-            None,
-        );
-    };
-
-    // Re-expand the URL here (in addition to the load-time pass) because plugin
-    // vars (e.g. `${GROW_PLUGIN_ROOT}/check`) only land in `extra_env` after
-    // the plugin adapter runs. Unset refs are preserved so `validate_hook_url`
-    // rejects them rather than smuggling a literal `${VAR}` past validation.
-    let expanded_url = crate::env_expand::expand_env_vars_with_extra(raw_url, &spec.extra_env);
-    let url: &str = &expanded_url;
-    // Prefer the pre-expansion source for logs so resolved `env` secrets don't
-    // reach `~/.grow/logs`; threaded into the reqwest error format below so
-    // reqwest's default `Display` (which appends the URL) can't bypass it.
-    let log_url: &str = spec.url_raw.as_deref().unwrap_or(url);
-
-    let make_info = |status: Option<u16>, preview: Option<String>| -> HttpInfo {
-        HttpInfo {
-            url: url.to_owned(),
-            raw_url: spec.url_raw.clone(),
-            status,
-            response_preview: preview,
-        }
-    };
-
-    // CWE-918: validate before sending. Bound the DNS lookup by the hook
-    // timeout; the reqwest timeout only covers the request that follows.
-    let validation = tokio::time::timeout(
-        Duration::from_millis(spec.timeout_ms),
-        validate_hook_url(url),
-    )
-    .await;
-    let validation = match validation {
-        Ok(validation) => validation,
-        Err(_) => {
+    let mut timeout_info = None;
+    let execute = async {
+        let Some(ref raw_url) = spec.url else {
             return (
-                HookRunnerResult::TimedOut,
+                HookRunnerResult::Failed("http hook has no 'url' field".into()),
                 start.elapsed(),
-                Some(make_info(None, None)),
+                None,
             );
-        }
-    };
-    if let Err(reason) = validation {
-        tracing::warn!(
-            hook_name = %spec.name,
-            url = %log_url,
-            %reason,
-            "SSRF protection: blocked HTTP hook URL"
-        );
-        return (
-            HookRunnerResult::Failed(format!("blocked by SSRF protection: {reason}")),
-            start.elapsed(),
-            Some(make_info(None, None)),
-        );
-    }
+        };
 
-    let body = match serde_json::to_string(envelope) {
-        Ok(j) => j,
-        Err(e) => {
-            return (
-                HookRunnerResult::Failed(format!("failed to serialize envelope: {e}")),
-                start.elapsed(),
-                Some(make_info(None, None)),
-            );
-        }
-    };
+        // Re-expand the URL here (in addition to the load-time pass) because plugin
+        // vars (e.g. `${GROW_PLUGIN_ROOT}/check`) only land in `extra_env` after
+        // the plugin adapter runs. Unset refs are preserved so `validate_hook_url`
+        // rejects them rather than smuggling a literal `${VAR}` past validation.
+        let expanded_url = crate::env_expand::expand_env_vars_with_extra(raw_url, &spec.extra_env);
+        let url: &str = &expanded_url;
+        // Prefer the pre-expansion source for logs so resolved `env` secrets don't
+        // reach `~/.grow/logs`; threaded into the reqwest error format below so
+        // reqwest's default `Display` (which appends the URL) can't bypass it.
+        let log_url: &str = spec.url_raw.as_deref().unwrap_or(url);
 
-    let client = build_hook_client(spec.timeout_ms);
+        let make_info = |status: Option<u16>, preview: Option<String>| -> HttpInfo {
+            HttpInfo {
+                url: url.to_owned(),
+                raw_url: spec.url_raw.clone(),
+                status,
+                response_preview: preview,
+            }
+        };
 
-    let response = match client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            let elapsed = start.elapsed();
-            // SECURITY: `reqwest::Error::Display` appends the request URL, which
-            // may embed an `env`-map secret and leak into `Failed.error` and
-            // pager scrollback. `e.without_url()` strips it so we substitute
-            // `log_url` (the raw source form).
-            if e.is_timeout() {
+        timeout_info = Some(make_info(None, None));
+        let validation = validate(url).await;
+        let (host, addrs) = match validation {
+            Ok(validated) => validated,
+            Err(reason) => {
+                tracing::warn!(
+                    hook_name = %spec.name,
+                    url = %log_url,
+                    %reason,
+                    "SSRF protection: blocked HTTP hook URL"
+                );
                 return (
-                    HookRunnerResult::TimedOut,
+                    HookRunnerResult::Failed(format!("blocked by SSRF protection: {reason}")),
+                    start.elapsed(),
+                    Some(make_info(None, None)),
+                );
+            }
+        };
+
+        let body = match serde_json::to_string(envelope) {
+            Ok(j) => j,
+            Err(e) => {
+                return (
+                    HookRunnerResult::Failed(format!("failed to serialize envelope: {e}")),
+                    start.elapsed(),
+                    Some(make_info(None, None)),
+                );
+            }
+        };
+
+        let client = build_hook_client(spec.timeout_ms, &host, &addrs);
+
+        let response = match client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let elapsed = start.elapsed();
+                // SECURITY: `reqwest::Error::Display` appends the request URL, which
+                // may embed an `env`-map secret and leak into `Failed.error` and
+                // pager scrollback. `e.without_url()` strips it so we substitute
+                // `log_url` (the raw source form).
+                if e.is_timeout() {
+                    return (
+                        HookRunnerResult::TimedOut,
+                        elapsed,
+                        Some(make_info(None, None)),
+                    );
+                }
+                let error = format!("HTTP request failed for {}: {}", log_url, e.without_url());
+                return (
+                    HookRunnerResult::Failed(error),
                     elapsed,
                     Some(make_info(None, None)),
                 );
             }
-            let error = format!("HTTP request failed for {}: {}", log_url, e.without_url());
+        };
+
+        let status = response.status();
+        let status_code = status.as_u16();
+        timeout_info = Some(make_info(Some(status_code), None));
+        let elapsed = start.elapsed();
+
+        tracing::debug!(
+            hook_name = %spec.name,
+            url = %log_url,
+            status = status_code,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "http hook completed"
+        );
+
+        if mode == GateKind::Observe {
+            let http_info = Some(make_info(Some(status_code), None));
+            if status.is_success() {
+                return (HookRunnerResult::Success, elapsed, http_info);
+            }
             return (
-                HookRunnerResult::Failed(error),
+                HookRunnerResult::Failed(format!("HTTP status {}", status)),
                 elapsed,
-                Some(make_info(None, None)),
+                http_info,
             );
         }
-    };
 
-    let status = response.status();
-    let status_code = status.as_u16();
-    let elapsed = start.elapsed();
-
-    tracing::debug!(
-        hook_name = %spec.name,
-        url = %log_url,
-        status = status_code,
-        elapsed_ms = elapsed.as_millis() as u64,
-        "http hook completed"
-    );
-
-    if mode == GateKind::Observe {
-        let http_info = Some(make_info(Some(status_code), None));
-        if status.is_success() {
-            return (HookRunnerResult::Success, elapsed, http_info);
-        }
-        return (
-            HookRunnerResult::Failed(format!("HTTP status {}", status)),
-            elapsed,
-            http_info,
-        );
-    }
-
-    let response_text = match response.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            // SECURITY: scrub the URL as in the send-failure branch above.
-            if e.is_timeout() {
+        let response_text = match read_response_body(response, log_url).await {
+            Ok(text) => text,
+            Err(result) => {
                 return (
-                    HookRunnerResult::TimedOut,
-                    elapsed,
+                    result,
+                    start.elapsed(),
                     Some(make_info(Some(status_code), None)),
                 );
             }
-            return (
-                HookRunnerResult::Failed(format!(
-                    "failed to read response body for {}: {}",
-                    log_url,
-                    e.without_url()
-                )),
-                elapsed,
-                Some(make_info(Some(status_code), None)),
-            );
-        }
-    };
+        };
+        let elapsed = start.elapsed();
 
-    let response_preview = if response_text.trim().is_empty() {
-        None
-    } else {
-        Some(truncate_preview(&response_text))
-    };
+        let response_preview = if response_text.trim().is_empty() {
+            None
+        } else {
+            Some(truncate_preview(&response_text))
+        };
 
-    let http_info = Some(make_info(Some(status_code), response_preview.clone()));
+        let http_info = Some(make_info(Some(status_code), response_preview.clone()));
 
-    let result = match mode {
-        GateKind::Prompt | GateKind::Tool => {
-            parse_http_blocking_result(&response_text, status, &spec.name)
-        }
-        GateKind::Stop => parse_http_stop_result(&response_text, status, &spec.name),
-        GateKind::Observe => HookRunnerResult::Success,
+        let result = match mode {
+            GateKind::Prompt | GateKind::Tool => {
+                parse_http_blocking_result(&response_text, status, &spec.name)
+            }
+            GateKind::Stop => parse_http_stop_result(&response_text, status, &spec.name),
+            GateKind::Observe => HookRunnerResult::Success,
+        };
+        (result, elapsed, http_info)
     };
-    (result, elapsed, http_info)
+    match tokio::time::timeout(Duration::from_millis(spec.timeout_ms), execute).await {
+        Ok(result) => result,
+        Err(_) => (HookRunnerResult::TimedOut, start.elapsed(), timeout_info),
+    }
 }
 
 /// HTTP analogue of `command::parse_stop_result`: a 2xx JSON body is parsed for
@@ -321,11 +333,14 @@ fn parse_http_stop_result(
     if trimmed.is_empty() {
         return HookRunnerResult::Stop(StopHookOutcome::default());
     }
-    match serde_json::from_str::<StopHookJson>(trimmed) {
+    match super::parse_hook_json::<StopHookJson>(trimmed) {
         Ok(json) => match stop_json_to_outcome(json, hook_name) {
             Ok(outcome) => HookRunnerResult::Stop(outcome),
             Err(err) => HookRunnerResult::Failed(err),
         },
+        Err(e) if super::is_structured_output_error(trimmed, &e) => HookRunnerResult::Failed(
+            format!("stop hook '{hook_name}' returned invalid decision JSON: {e}"),
+        ),
         Err(e) => {
             tracing::warn!(
                 hook_name = %hook_name,
@@ -351,11 +366,17 @@ fn parse_http_blocking_result(
         return HookRunnerResult::Failed(format!("HTTP status {} with empty body", status));
     }
 
-    match serde_json::from_str::<super::GateHookJson>(response_text) {
+    match super::parse_hook_json::<super::GateHookJson>(response_text) {
         Ok(output) => match super::gate_json_to_decision(output, hook_name) {
+            Ok(HookDecision::Allow) if !status.is_success() => {
+                HookRunnerResult::Failed(format!("HTTP status {status}"))
+            }
             Ok(decision) => HookRunnerResult::Decision(decision),
             Err(err) => HookRunnerResult::Failed(err),
         },
+        Err(e) if super::is_structured_output_error(response_text, &e) => HookRunnerResult::Failed(
+            format!("hook '{hook_name}' returned invalid decision JSON: {e}"),
+        ),
         Err(e) => {
             if status.is_success() {
                 tracing::warn!(
@@ -404,6 +425,46 @@ mod tests {
     #[ctor::ctor]
     fn install_rustls_provider() {
         diagnostics::tls::install_ring_provider_once();
+    }
+
+    #[test]
+    fn http_allow_cannot_hide_failure_status() {
+        for code in [302, 403, 500] {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert!(matches!(
+                parse_http_blocking_result(r#"{"decision":"allow"}"#, status, "gate"),
+                HookRunnerResult::Failed(_)
+            ));
+            assert!(matches!(
+                parse_http_blocking_result(r#"{"decision":"deny"}"#, status, "gate"),
+                HookRunnerResult::Decision(HookDecision::Deny { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn structured_errors_are_not_http_log_noise() {
+        for body in [
+            r#"{"decision":false}"#,
+            r#"{"decision":"block","typo":1}"#,
+            "{\"decision\":",
+            "[]",
+        ] {
+            assert!(
+                matches!(
+                    parse_http_blocking_result(body, StatusCode::OK, "gate"),
+                    HookRunnerResult::Failed(_)
+                ),
+                "{body}"
+            );
+            assert!(
+                matches!(
+                    parse_http_stop_result(body, StatusCode::OK, "stop"),
+                    HookRunnerResult::Failed(_)
+                ),
+                "{body}"
+            );
+        }
     }
 
     #[test]
@@ -520,14 +581,15 @@ mod tests {
     }
 
     #[test]
-    fn http_invalid_json_success_status_fail_open() {
-        for body in ["not json at all", r#"{"decision":"deny""#] {
-            let result = parse_http_blocking_result(body, StatusCode::OK, "test-hook");
-            assert!(matches!(
-                result,
-                HookRunnerResult::Decision(HookDecision::Allow)
-            ));
-        }
+    fn http_plain_text_allows_but_truncated_json_fails() {
+        assert!(matches!(
+            parse_http_blocking_result("not json at all", StatusCode::OK, "test-hook"),
+            HookRunnerResult::Decision(HookDecision::Allow)
+        ));
+        assert!(matches!(
+            parse_http_blocking_result(r#"{"decision":"deny""#, StatusCode::OK, "test-hook"),
+            HookRunnerResult::Failed(_)
+        ));
     }
 
     #[test]
@@ -649,6 +711,77 @@ mod tests {
     use crate::config::HookSpec;
     use crate::event::{HookEventEnvelope, HookEventName, HookPayload};
     use crate::test_support::with_env_var;
+
+    #[tokio::test]
+    async fn validation_and_body_share_total_timeout() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let raw = format!("http://{addr}/hook");
+        let spec = HookSpec {
+            name: "test-ssrf-post-expand".into(),
+            event: HookEventName::PreToolUse,
+            handler_type: crate::config::HandlerType::Http,
+            configured_matcher: None,
+            matcher: None,
+            enabled: true,
+            command: None,
+            command_raw: None,
+            url: Some(raw.to_string()),
+            url_raw: Some(raw.to_string()),
+            timeout_ms: 200,
+            on_failure: crate::config::OnFailure::Allow,
+            source_dir: std::env::temp_dir(),
+            extra_env: Default::default(),
+            layer: crate::config::HookProvenance::File,
+        };
+
+        let envelope = HookEventEnvelope {
+            hook_event_name: HookEventName::PreToolUse,
+            session_id: "test".into(),
+            cwd: "/tmp".into(),
+            workspace_root: "/tmp".into(),
+            timestamp: "2025-01-01T00:00:00Z".into(),
+            transcript_path: None,
+            client_identifier: None,
+            prompt_id: None,
+            permission_mode: None,
+            payload: HookPayload::PreToolUse {
+                tool_name: "test".into(),
+                tool_use_id: "id-1".into(),
+                tool_input: serde_json::json!({}),
+                tool_input_truncated: false,
+                subagent_type: None,
+            },
+        };
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            let _ = socket.write_all(b"{}").await;
+        });
+        let (result, elapsed, info) =
+            run_http_hook_with_validation(&spec, &envelope, GateKind::Tool, async |_: &str| {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                Ok(("127.0.0.1".into(), vec![addr]))
+            })
+            .await;
+        server.await.unwrap();
+        assert!(
+            matches!(result, HookRunnerResult::TimedOut),
+            "each phase must not get a new budget: {result:?}"
+        );
+        assert!(elapsed >= Duration::from_millis(200));
+        let info = info.unwrap();
+        assert_eq!(info.status, Some(200));
+        assert_eq!(info.url, raw);
+        assert!(info.response_preview.is_none());
+    }
 
     /// SSRF validation in `run_http_hook` must operate on the post-expansion URL,
     /// and `HttpInfo` must carry the resolved form while `raw_url` mirrors the
@@ -818,6 +951,100 @@ mod tests {
     /// The hook client must not follow redirects: `validate_hook_url` only vets
     /// the initial URL, so a followed 3xx would reach an unvalidated target.
     #[tokio::test]
+    async fn decision_body_limit_rejects_unfinished_oversized_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for size in [0, MAX_RESPONSE_BYTES, MAX_RESPONSE_BYTES + 1] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                socket.read(&mut request).await.unwrap();
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                    .await
+                    .unwrap();
+                if size > 0 {
+                    socket
+                        .write_all(format!("{size:x}\r\n").as_bytes())
+                        .await
+                        .unwrap();
+                    socket.write_all(&vec![b'x'; size]).await.unwrap();
+                    socket.write_all(b"\r\n").await.unwrap();
+                }
+                if size <= MAX_RESPONSE_BYTES {
+                    socket.write_all(b"0\r\n\r\n").await.unwrap();
+                }
+                let _ = released.await;
+            });
+            let response = build_hook_client(5000, "127.0.0.1", &[addr])
+                .get(format!("http://{addr}/hook"))
+                .send()
+                .await
+                .unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                read_response_body(response, "test-hook"),
+            )
+            .await;
+            let _ = release.send(());
+            server.await.unwrap();
+            let result = result.expect("oversized body must fail before EOF or request timeout");
+            if size > MAX_RESPONSE_BYTES {
+                assert!(
+                    matches!(result, Err(HookRunnerResult::Failed(reason)) if reason.contains("exceeds"))
+                );
+            } else {
+                assert_eq!(result.unwrap(), "x".repeat(size));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_client_pins_addresses_and_preserves_host() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            let count = socket.read(&mut bytes).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&bytes[..count]).to_ascii_lowercase()
+        });
+        let response = build_hook_client(1000, "pinned.invalid", &[addr])
+            .get(format!("http://pinned.invalid:{}/hook", addr.port()))
+            .send()
+            .await;
+        if response.is_err() {
+            server.abort();
+        }
+        assert!(response.unwrap().status().is_success());
+        assert!(
+            server
+                .await
+                .unwrap()
+                .contains(&format!("host: pinned.invalid:{}", addr.port()))
+        );
+    }
+
+    #[tokio::test]
+    async fn ipv6_literals_are_classified_without_dns() {
+        assert!(
+            validate_hook_url("https://[fd00::1]/hook")
+                .await
+                .unwrap_err()
+                .contains("blocked")
+        );
+        let (_, addrs) = validate_hook_url("https://[::1]:8443/hook").await.unwrap();
+        assert_eq!(addrs, vec!["[::1]:8443".parse::<SocketAddr>().unwrap()]);
+    }
+
+    #[tokio::test]
     async fn hook_client_does_not_follow_redirects() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -844,7 +1071,7 @@ mod tests {
             }
         });
 
-        let client = build_hook_client(5000);
+        let client = build_hook_client(5000, "127.0.0.1", &[addr]);
         let resp = client
             .post(format!("http://{addr}/hook"))
             .body("{}")

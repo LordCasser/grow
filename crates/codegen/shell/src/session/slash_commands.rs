@@ -836,7 +836,7 @@ pub(crate) struct ParsedSkillRef {
     pub args: String,
     /// The resolved `SkillInfo` path, for loading SKILL.md.
     pub skill_path: String,
-    /// Scope-qualified name (e.g. "user:commit"), used for diagnostics.
+    /// Scope/plugin-qualified name (e.g. "user:commit"), also used for expansion identity.
     pub qualified_name: String,
     /// Plugin name if this is a plugin skill.
     pub plugin_name: Option<String>,
@@ -1006,13 +1006,9 @@ impl BuiltinAction {
         }
     }
 }
-/// How to rewrite the user's prompt when a slash command resolves to a skill.
-///
-/// - `RewriteToRun` (default): replace `/foo args` with `"run /foo args"`,
-///   matching today's Grow flow that calls our dedicated `skill` tool.
-/// - `Passthrough`: leave the prompt verbatim. Some templates use this —
-///   the model is trained to spot a leading `/<name>`, look it up in the
-///   `<agent_skills>` listing, and call the Read tool on `fullPath`.
+/// Legacy selector retained pending removal review R11.
+/// `resolve` ignores both variants: skill invocations preserve the original
+/// prompt blocks, and callers expand skill bodies separately.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum SkillSlashRewrite {
     #[default]
@@ -1102,26 +1098,37 @@ fn parse_skill_references_with_catalog(
             .collect(),
     )
 }
+/// The prompt and per-reference outcomes from the same body reads.
+pub(super) struct SkillExpansion {
+    pub information: Option<String>,
+    /// One entry per input reference, true only when its block was generated.
+    pub loaded: Vec<bool>,
+}
 /// Load each parsed skill's SKILL.md, apply substitutions, and build the
 /// `<skill_information>` envelope.
 ///
 /// Shared by turn start (prompt assembly in `process_conversation_turn`) and
 /// the mid-turn interjection drain, so a skill delivers identically whether
-/// it starts a turn or is force-sent into a running one. Returns `None` when
-/// no skill content loads (missing files are logged and skipped; the
-/// `<skills_referenced>` index still lists every parsed ref).
+/// it starts a turn or is force-sent into a running one. Information is `None`
+/// when no content loads; the reference index includes only loaded blocks.
 pub(super) async fn build_skill_information_for_refs(
     parsed_skills: &[ParsedSkillRef],
     slash_skills: &[SkillInfo],
     session_id: &str,
-) -> Option<String> {
+) -> SkillExpansion {
     use tools::implementations::skills::skill::{
         SkillRef, SubstitutionContext, apply_substitutions, build_skill_block,
         build_skill_information, load_skill_content,
     };
     let mut skill_blocks: Vec<String> = Vec::new();
-    for sk in parsed_skills {
-        let Some(info) = slash_skills.iter().find(|s| s.path == sk.skill_path) else {
+    let mut refs = Vec::new();
+    let mut loaded = vec![false; parsed_skills.len()];
+    for (index, sk) in parsed_skills.iter().enumerate() {
+        let Some(info) = slash_skills.iter().find(|s| {
+            s.path == sk.skill_path
+                && s.plugin_name == sk.plugin_name
+                && format_skill_name(s) == sk.qualified_name
+        }) else {
             continue;
         };
         match load_skill_content(info).await {
@@ -1145,6 +1152,11 @@ pub(super) async fn build_skill_information_for_refs(
                     },
                 );
                 skill_blocks.push(build_skill_block(&sk.name, &sk.args, &content));
+                loaded[index] = true;
+                refs.push(SkillRef {
+                    name: &sk.name,
+                    path: &sk.skill_path,
+                });
             }
             Err(e) => {
                 let body_less_product =
@@ -1165,17 +1177,11 @@ pub(super) async fn build_skill_information_for_refs(
             }
         }
     }
-    if skill_blocks.is_empty() {
-        return None;
+    SkillExpansion {
+        information: (!skill_blocks.is_empty())
+            .then(|| build_skill_information(&skill_blocks, &refs)),
+        loaded,
     }
-    let refs: Vec<SkillRef<'_>> = parsed_skills
-        .iter()
-        .map(|sk| SkillRef {
-            name: &sk.name,
-            path: &sk.skill_path,
-        })
-        .collect();
-    Some(build_skill_information(&skill_blocks, &refs))
 }
 /// Resolve prompt blocks as a slash command.
 /// `Ok(blocks)` = not a command, pass through. `Err(outcome)` = matched.
@@ -1184,6 +1190,7 @@ pub(super) fn resolve(
     skills: &[SkillInfo],
     availability: CommandAvailability,
     _skill_rewrite: SkillSlashRewrite,
+
     workflows: &[crate::session::workflow::registry::WorkflowListing],
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
     let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
@@ -1308,14 +1315,15 @@ mod tests {
         prompt_blocks: Vec<acp::ContentBlock>,
         skills: &[SkillInfo],
         availability: CommandAvailability,
-        skill_rewrite: SkillSlashRewrite,
+        _skill_rewrite: SkillSlashRewrite,
+
         workflows: &[crate::session::workflow::registry::WorkflowListing],
     ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
         super::resolve(
             prompt_blocks,
             skills,
             availability,
-            skill_rewrite,
+            SkillSlashRewrite::default(),
             workflows,
         )
     }
@@ -1538,9 +1546,9 @@ mod tests {
         let skills = vec![skill];
         let parsed = parse_skill_references("/commit fix typo", &skills, all_gated())
             .expect("known skill must parse");
-        let info = build_skill_information_for_refs(&parsed, &skills, "sid-1")
-            .await
-            .expect("skill body must load");
+        let expansion = build_skill_information_for_refs(&parsed, &skills, "sid-1").await;
+        assert_eq!(expansion.loaded, [true]);
+        let info = expansion.information.expect("skill body must load");
         assert!(info.starts_with("<skill_information>"), "got: {info}");
         assert!(
             info.contains("<skill name=\"commit\" args=\"fix typo\">"),
@@ -1553,11 +1561,67 @@ mod tests {
         let missing = vec![make_skill("ghost", true)];
         let parsed = parse_skill_references("/ghost", &missing, all_gated())
             .expect("known skill must parse");
-        assert_eq!(
-            build_skill_information_for_refs(&parsed, &missing, "sid-1").await,
-            None
-        );
+        let expansion = build_skill_information_for_refs(&parsed, &missing, "sid-1").await;
+        assert_eq!(expansion.loaded, [false]);
+        assert_eq!(expansion.information, None);
+        let empty = build_skill_information_for_refs(&[], &missing, "sid-1").await;
+        assert!(empty.loaded.is_empty());
+        assert_eq!(empty.information, None);
     }
+    #[tokio::test]
+    async fn build_skill_information_for_refs_indexes_only_loaded_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut available = make_skill("available", true);
+        available.path = dir
+            .path()
+            .join("available.md")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(&available.path, "Loaded body").unwrap();
+        let mut missing = make_skill("missing", true);
+        missing.path = dir.path().join("missing.md").to_string_lossy().into_owned();
+        let mut gone = make_skill("gone", true);
+        gone.path = dir.path().join("gone.md").to_string_lossy().into_owned();
+        let skills = vec![available, missing, gone];
+        let mut parsed = Vec::new();
+        for name in ["available", "missing", "gone"] {
+            parsed
+                .extend(parse_skill_references(&format!("/{name}"), &skills, all_gated()).unwrap());
+        }
+        let expansion = build_skill_information_for_refs(&parsed, &skills[..2], "sid").await;
+        assert_eq!(expansion.loaded, [true, false, false]);
+        let info = expansion.information.unwrap();
+        assert!(info.contains("Loaded body"));
+        assert!(info.contains("name=\"available\""));
+        assert!(!info.contains("name=\"missing\""), "{info}");
+        assert!(!info.contains("name=\"gone\""), "{info}");
+    }
+
+    #[tokio::test]
+    async fn build_skill_information_preserves_selected_identity_at_shared_path() {
+        let mut native = make_skill("review", true);
+        native.body = Some("Native snapshot".into());
+        let mut plugin = native.clone();
+        plugin.scope = SkillScope::Plugin;
+        plugin.plugin_name = Some("inspector".into());
+        plugin.plugin_root = Some("/plugins/inspector".into());
+        plugin.body = Some("Plugin snapshot ${GROW_PLUGIN_ROOT}".into());
+        let skills = vec![native, plugin];
+        let parsed = parse_skill_references("/inspector:review", &skills, all_gated()).unwrap();
+        let expansion = build_skill_information_for_refs(&parsed, &skills, "sid").await;
+        assert_eq!(expansion.loaded, [true]);
+        let info = expansion.information.unwrap();
+        assert!(
+            info.contains("Plugin snapshot /plugins/inspector"),
+            "{info}"
+        );
+        assert!(!info.contains("Native snapshot"), "{info}");
+
+        let gone = build_skill_information_for_refs(&parsed, &skills[..1], "sid").await;
+        assert_eq!(gone.loaded, [false]);
+        assert_eq!(gone.information, None);
+    }
+
     #[test]
     fn resolve_loop_annotates_block_with_compact_display_text() {
         let outcome = resolve(
@@ -1627,7 +1691,7 @@ mod tests {
             vec![text_block("/commit fix typo")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::Passthrough,
+            SkillSlashRewrite::default(),
             &[],
         )
         .unwrap_err();
@@ -1636,7 +1700,7 @@ mod tests {
             vec![text_block("/commit")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::Passthrough,
+            SkillSlashRewrite::default(),
             &[],
         )
         .unwrap_err();
@@ -2504,8 +2568,7 @@ mod tests {
             resolve(
                 vec![text_block("/review inspect the patch")],
                 &[],
-                all_gated(),
-                SkillSlashRewrite::default(),
+                all_gated(), SkillSlashRewrite::default(),
                 &workflows,
             )
             .unwrap_err(),
@@ -2541,8 +2604,7 @@ mod tests {
             resolve(
                 vec![text_block("/status")],
                 &skills,
-                all_gated(),
-                SkillSlashRewrite::default(),
+                all_gated(), SkillSlashRewrite::default(),
                 &workflows,
             )
             .unwrap_err(),

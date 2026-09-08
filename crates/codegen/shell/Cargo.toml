@@ -93,6 +93,7 @@ git2 = { version = "0.21", default-features = false, features = [
 ] }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
+same-file = "1.0.6"
 nucleo = { workspace = true }
 arc-swap = { workspace = true }
 infer = { workspace = true }

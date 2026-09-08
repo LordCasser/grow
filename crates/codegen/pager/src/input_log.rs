@@ -1,11 +1,38 @@
 //! Input flight recorder — rolling buffer of recent key events.
 //!
-//! Ctrl+Shift+D dumps to `~/.grow/logs/input-debug-<timestamp>.json`.
+//! Esc followed by unmodified d within 500ms dumps to
+//! `~/.grow/logs/input-debug-<timestamp>-<random>.json` when the input handler reaches that chord.
 //! Can be better utilized once input bugs are fully resolved.
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::time::Instant;
+/// Keep a complete private diagnostic snapshot without replacing earlier dumps.
+pub(crate) fn write_input_dump(
+    directory: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+    json: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    write_input_dump_with(directory, now, |file| {
+        std::io::Write::write_all(file, json.as_bytes())
+    })
+}
+
+fn write_input_dump_with(
+    directory: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(directory)?;
+    let mut file = tempfile::Builder::new()
+        .prefix(&format!("input-debug-{}-", now.format("%Y%m%d-%H%M%S")))
+        .suffix(".json")
+        .tempfile_in(directory)?;
+    write(file.as_file_mut())?;
+    file.as_file().sync_all()?;
+    file.keep().map(|(_, path)| path).map_err(|error| error.error)
+}
+
 /// Default ring buffer capacity (~10 seconds of fast typing).
 const DEFAULT_CAPACITY: usize = 200;
 /// Snapshot of textarea state captured by `PromptWidget::handle_key`.
@@ -188,6 +215,40 @@ pub fn format_key_code_raw(code: &KeyCode) -> String {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_dump_same_timestamp_preserves_each_private_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let logs = directory.path().join("nested/logs");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-07T12:34:56Z").unwrap().to_utc();
+        let first = super::write_input_dump(&logs, now, r#"{"snapshot":1}"#).unwrap();
+        let second = super::write_input_dump(&logs, now, r#"{"snapshot":2}"#).unwrap();
+        assert_ne!(first, second);
+        for (path, expected) in [(&first, r#"{"snapshot":1}"#), (&second, r#"{"snapshot":2}"#)] {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+            assert!(path.file_name().unwrap().to_string_lossy().starts_with("input-debug-20260907-123456-"));
+            assert_eq!(path.extension().unwrap(), "json");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+            }
+        }
+        let error = super::write_input_dump_with(&logs, now, |file| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+            }
+            std::io::Write::write_all(file, b"partial")?;
+            Err(std::io::Error::other("injected write error"))
+        }).unwrap_err();
+        assert_eq!(error.to_string(), "injected write error");
+        assert_eq!(std::fs::read_dir(&logs).unwrap().count(), 2);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), r#"{"snapshot":1}"#);
+        assert!(super::write_input_dump(&first.join("invalid"), now, "{}").is_err());
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), r#"{"snapshot":1}"#);
+    }
+
     use super::*;
     use std::thread;
     use std::time::Duration;

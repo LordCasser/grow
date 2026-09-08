@@ -864,7 +864,7 @@ impl MouseScrollState {
     /// disabling drops it (the buffered writer flushes on drop). Returns
     /// the log path when now recording, `None` when now off.
     pub fn toggle_scroll_log(&mut self) -> Option<std::path::PathBuf> {
-        if self.recorder.is_some() {
+        if self.scroll_log_active() {
             self.recorder = None;
             return None;
         }
@@ -875,7 +875,7 @@ impl MouseScrollState {
 
     /// Whether the flight recorder is active (the `/debug` status line).
     pub fn scroll_log_active(&self) -> bool {
-        self.recorder.is_some()
+        self.recorder.as_ref().is_some_and(ScrollLogRecorder::is_active)
     }
 
     /// `cancel_backlog` (direction flips only): skip the catch-up flush and

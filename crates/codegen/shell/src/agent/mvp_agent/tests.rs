@@ -3136,3 +3136,392 @@ mod soft_default_settings_emit {
             .await;
     }
 }
+
+
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn recap_extension_acknowledges_only_enqueued_commands() {
+    let home = tempfile::tempdir().unwrap();
+    let _home = test_support::EnvGuard::set("GROW_HOME", home.path());
+    let _recap = test_support::EnvGuard::set("GROW_SESSION_RECAP", "1");
+    let agent = build_minimal_agent_for_tests();
+    for auto in [false, true] {
+        for closed in [false, true] {
+            let sid = acp::SessionId::new(format!("recap-{auto}-{closed}"));
+            let (mut handle, receiver) = make_test_handle_with_receiver("test/default", None);
+            handle.info.id = sid.clone();
+            let mut receiver = Some(receiver);
+            if closed { drop(receiver.take()); }
+            agent.sessions.borrow_mut().insert(sid.clone(), handle);
+            let request = acp::ExtRequest::new(
+                "grow/recap",
+                serde_json::value::to_raw_value(&serde_json::json!({
+                    "sessionId": sid.0.to_string(), "auto": auto,
+                })).unwrap().into(),
+            );
+            let response = crate::extensions::recap::handle(&agent, &request).await;
+            if closed {
+                let error = response.expect_err("closed receiver cannot accept recap");
+                assert_eq!(error.code, acp::Error::internal_error().code);
+                assert_eq!(error.data, Some(serde_json::json!("session command channel closed")));
+            } else {
+                assert!(response.is_ok());
+                assert!(matches!(receiver.as_mut().unwrap().try_recv().unwrap(),
+                    crate::session::SessionCommand::Recap { auto: queued } if queued == auto));
+                assert!(receiver.as_mut().unwrap().try_recv().is_err());
+            }
+            agent.sessions.borrow_mut().remove(&sid);
+        }
+    }
+}
+
+#[test]
+fn session_rename_lifecycle_is_serialized() {
+    const CHILD: &str = "GROW_TEST_RENAME_LIFECYCLE_HOME";
+    let Ok(home) = std::env::var(CHILD) else {
+        let temp = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "agent::mvp_agent::tests::session_rename_lifecycle_is_serialized", "--nocapture"])
+            .env("GROW_HOME", temp.path()).env(CHILD, temp.path())
+            .output().unwrap();
+        assert!(output.status.success(), "child failed: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "child test was not executed");
+        return;
+    };
+    assert_eq!(::config::grow_home(), std::path::PathBuf::from(&home));
+    run_local_for_bridge_test(|| async move {
+        use crate::session::storage::StorageAdapter;
+        let agent = build_minimal_agent_for_tests();
+        let sid = acp::SessionId::new("rename-lifecycle-test");
+        let info = crate::session::info::Info { id: sid.clone(), cwd: home.clone() };
+        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(home.into());
+        storage.init_session(&info, crate::session::persistence::default_model_id()).await.unwrap();
+        drop(storage); // Release initializer's writer lease before dormant mutation.
+        {
+        let (mut handle, mut commands) = make_test_handle_with_receiver("test/default", None);
+        handle.info = info.clone();
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        let request = acp::ExtRequest::new("grow/session/rename", serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": sid.0.as_ref(), "title": "renamed", "cwd": info.cwd,
+        })).unwrap().into());
+        let prior = agent.lock_session_lifecycle(&sid).await;
+        let rename = crate::extensions::session_admin::handle(&agent, &request);
+        tokio::pin!(rename);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut rename).await.is_err());
+        assert!(commands.try_recv().is_err(), "no title command before lifecycle acquisition");
+        drop(prior);
+        // A loader is announced before it can acquire its lifecycle guard.
+        let announced = agent.begin_session_load(&sid);
+        let command = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::select! {
+                result = &mut rename => panic!("rename ended before actor reply: {result:?}"),
+                command = commands.recv() => command.unwrap(),
+            }
+        }).await.expect("rename must not wait for a loader queued behind it");
+        let TestSessionCommand::SetSessionTitle { respond_to, .. } = command else { panic!("expected title command") };
+        let competing_load = agent.lock_session_lifecycle(&sid);
+        tokio::pin!(competing_load);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut competing_load).await.is_err());
+        let deletion = agent.teardown_live_session_before_delete(&sid);
+        tokio::pin!(deletion);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut deletion).await.is_err());
+        let second_rename = crate::extensions::session_admin::handle(&agent, &request);
+        tokio::pin!(second_rename);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut second_rename).await.is_err());
+        let mut timeline = chat_state::Timeline::default();
+        let event = timeline.record(chat_state::TimelineEventKind::SessionTitle(chat_state::SessionTitleEvent {
+            title: "renamed".into(), source: chat_state::SessionTitleSource::User,
+        })).unwrap();
+        respond_to.send(Ok(event)).unwrap();
+        rename.await.unwrap();
+        let acquired = tokio::time::timeout(std::time::Duration::from_secs(1), &mut competing_load).await.unwrap();
+        drop(acquired);
+        drop(announced);
+        // Pending competitors are dropped without deleting any session.
+        }
+        agent.sessions.borrow_mut().remove(&sid);
+        let announced = agent.begin_session_load(&sid);
+        let request = acp::ExtRequest::new("grow/session/rename", serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": sid.0.as_ref(), "title": "dormant renamed", "cwd": info.cwd,
+        })).unwrap().into());
+        tokio::time::timeout(std::time::Duration::from_secs(3), crate::extensions::session_admin::handle(&agent, &request))
+            .await.expect("dormant rename must not await an announced loader").unwrap();
+        drop(announced);
+        let summaries = crate::session::persistence::list_summaries(Some(&info.cwd)).await.unwrap();
+        assert_eq!(summaries.iter().find(|s| s.info.id == sid).unwrap().display_title(), "dormant renamed");
+    });
+}
+
+
+#[test]
+fn cold_resume_preserves_durable_effort_chain() {
+    const CHILD: &str = "GROW_TEST_COLD_EFFORT_HOME";
+    let Ok(home) = std::env::var(CHILD) else {
+        for case in ["high", "none", "unsupported"] {
+            let temp = tempfile::tempdir().unwrap();
+            for phase in 0..if case == "high" {
+                4
+            } else if case == "none" {
+                3
+            } else {
+                2
+            } {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "agent::mvp_agent::tests::cold_resume_preserves_durable_effort_chain",
+                        "--nocapture",
+                    ])
+                    .env("GROW_TEST_COLD_EFFORT_CASE", case)
+                    .env("GROW_HOME", temp.path())
+                    .env(CHILD, temp.path())
+                    .env("GROW_TEST_COLD_EFFORT_PHASE", phase.to_string())
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "child failed: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                    "child test did not run"
+                );
+            }
+        }
+        return;
+    };
+    assert_eq!(::config::grow_home(), std::path::PathBuf::from(&home));
+    run_local_for_bridge_test(|| async move {
+        use acp_transport::AcpAgentHandler as _;
+        use sampling_types::ReasoningEffort;
+        let phase: u32 = std::env::var("GROW_TEST_COLD_EFFORT_PHASE")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let case = std::env::var("GROW_TEST_COLD_EFFORT_CASE").unwrap();
+        let raw = r#"
+[models]
+default = "test/default"
+[provider.test]
+api_backend = "chat_completions"
+[provider.test.options]
+base_url = "http://127.0.0.1:1/v1"
+api_key = "test-only"
+[provider.test.models.default]
+context_window = 128000
+reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
+"#;
+        let raw = if case == "none" && phase == 0 {
+            raw.replace(
+                "reasoning_efforts = [{value = \"max\", default = true}, {value = \"high\"}]",
+                "reasoning_efforts = []",
+            )
+        } else if case == "unsupported" && phase > 0 {
+            raw.replace(", {value = \"high\"}", "")
+        } else {
+            raw.to_owned()
+        };
+        std::fs::write(std::path::Path::new(&home).join("config.toml"), &raw).unwrap();
+        let mut cfg =
+            crate::agent::config::Config::new_from_toml_cfg(&toml::from_str(&raw).unwrap())
+                .unwrap();
+        cfg.default_model_override = None;
+        cfg.remote_settings = Some(crate::util::config::RemoteSettings::default());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = MvpAgent::new(GatewaySender::new(tx), &cfg).unwrap();
+        agent.initialize(acp::InitializeRequest::new(acp::ProtocolVersion::V1).meta(
+            serde_json::json!({"startupHints":{"nonInteractive":true,"skipGitStatus":true,"skipProjectLayout":true}}).as_object().cloned()
+        )).await.unwrap();
+        agent.set_auth_method(acp::AuthMethodId::new("provider.api_key"));
+        let cwd = std::path::Path::new(&home).join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        if phase != 0 {
+            let sid = acp::SessionId::new(
+                std::fs::read_to_string(std::path::Path::new(&home).join("test-session-id"))
+                    .unwrap(),
+            );
+            let storage =
+                crate::session::storage::jsonl::JsonlStorageAdapter::with_root(home.clone().into());
+            let events = storage
+                .read_timeline_events_sync(&crate::session::info::Info {
+                    id: sid.clone(),
+                    cwd: cwd.to_str().unwrap().to_owned(),
+                })
+                .unwrap();
+            crate::session::persistence::latest_model_selection(&events)
+                .unwrap_or_else(|error| panic!("before cold resume {phase}: {error}"));
+            drop(storage);
+            let load = agent
+                .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                .await;
+            if case == "unsupported" {
+                let error = load.expect_err("unsupported historical effort must fail before spawn");
+                assert!(
+                    format!("{error:?}").contains("no longer admits persisted reasoning effort")
+                );
+                assert!(agent.control_session_handle(&sid).is_none());
+                return;
+            }
+            load.unwrap();
+            let expected = if case == "none" {
+                None
+            } else if phase == 3 {
+                Some(ReasoningEffort::Max)
+            } else {
+                Some(ReasoningEffort::High)
+            };
+            assert_eq!(
+                agent
+                    .control_session_handle(&sid)
+                    .unwrap()
+                    .model_route
+                    .snapshot()
+                    .sampling_config
+                    .reasoning_effort,
+                expected
+            );
+            // Reconnect while resident must also keep the live route, including None.
+            agent
+                .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                .await
+                .unwrap();
+            assert_eq!(
+                agent
+                    .control_session_handle(&sid)
+                    .unwrap()
+                    .model_route
+                    .snapshot()
+                    .sampling_config
+                    .reasoning_effort,
+                expected
+            );
+            let changes = events.iter().filter(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Observation(obs) if obs.scope == "model" && obs.name == "changed")).count();
+            assert_eq!(
+                changes,
+                if case == "none" {
+                    0
+                } else if phase == 3 {
+                    2
+                } else {
+                    1
+                },
+                "hydration must not append model changes"
+            );
+            if case == "high" && phase == 2 {
+                let lock = agent.model_reload_lock.lock().await;
+                let enqueued = crate::agent::handlers::model_switch::enqueue(
+                    &agent,
+                    &lock,
+                    agent.control_session_handle(&sid).unwrap(),
+                    crate::agent::handlers::model_switch::ModelSwitchRequest::new(
+                        sid.clone(),
+                        crate::agent::models::ModelId::new("test/default"),
+                    )
+                    .meta(
+                        serde_json::json!({"reasoningEffort":"max"})
+                            .as_object()
+                            .cloned(),
+                    ),
+                )
+                .unwrap();
+                drop(lock);
+                crate::agent::handlers::model_switch::finish(&agent, enqueued)
+                    .await
+                    .unwrap();
+            }
+            if case == "high" && phase == 1 {
+                // A real same-process close must release its persistence lease
+                // before an immediate cold load is admitted.
+                assert!(agent.close_session_explicit(&sid).await.unwrap());
+                agent.load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone())).await.unwrap();
+                assert_eq!(agent.control_session_handle(&sid).unwrap().model_route.snapshot().sampling_config.reasoning_effort, expected);
+            }
+            assert!(agent.close_session_explicit(&sid).await.unwrap());
+            return;
+        }
+        let created = agent
+            .new_session(acp::NewSessionRequest::new(cwd.clone()))
+            .await
+            .unwrap();
+        let sid = created.session_id;
+        if case != "none" {
+            let handle = agent.control_session_handle(&sid).unwrap();
+            assert_eq!(
+                handle
+                    .model_route
+                    .snapshot()
+                    .sampling_config
+                    .reasoning_effort,
+                Some(ReasoningEffort::Max)
+            );
+            let lock = agent.model_reload_lock.lock().await;
+            let enqueued = crate::agent::handlers::model_switch::enqueue(
+                &agent,
+                &lock,
+                handle,
+                crate::agent::handlers::model_switch::ModelSwitchRequest::new(
+                    sid.clone(),
+                    crate::agent::models::ModelId::new("test/default"),
+                )
+                .meta(
+                    serde_json::json!({"reasoningEffort":"high"})
+                        .as_object()
+                        .cloned(),
+                ),
+            )
+            .unwrap();
+            drop(lock);
+            crate::agent::handlers::model_switch::finish(&agent, enqueued)
+                .await
+                .unwrap();
+            assert_eq!(
+                agent
+                    .control_session_handle(&sid)
+                    .unwrap()
+                    .model_route
+                    .snapshot()
+                    .sampling_config
+                    .reasoning_effort,
+                Some(ReasoningEffort::High)
+            );
+        } else {
+            assert_eq!(
+                agent
+                    .control_session_handle(&sid)
+                    .unwrap()
+                    .model_route
+                    .snapshot()
+                    .sampling_config
+                    .reasoning_effort,
+                None
+            );
+        }
+        std::fs::write(
+            std::path::Path::new(&home).join("test-session-id"),
+            sid.0.as_ref(),
+        )
+        .unwrap();
+        assert!(agent.close_session_explicit(&sid).await.unwrap());
+    });
+}
+
+#[tokio::test(start_paused = true)]
+async fn persistence_drain_timeout_retains_incarnation() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("persistence-drain-timeout");
+    let (release, wait) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move { let _ = wait.await; });
+    let actor = std::thread::spawn(|| {});
+    while !actor.is_finished() { tokio::task::yield_now().await; }
+    agent.session_threads.borrow_mut().insert(sid.clone(), crate::session::SessionThread::with_persistence(actor, Some(task.abort_handle()), None));
+    let error = agent.drain_old_session_thread(&sid).await.unwrap_err();
+    assert!(error.contains("still shutting down"));
+    assert!(agent.session_threads.borrow().contains_key(&sid));
+    let _ = release.send(());
+    task.await.unwrap();
+    assert_eq!(agent.drain_old_session_thread(&sid).await.unwrap(), SessionThreadExit::Clean);
+    assert!(!agent.session_threads.borrow().contains_key(&sid));
+}

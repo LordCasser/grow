@@ -75,7 +75,7 @@ pub(super) fn append_prompt_images(
             None => std::borrow::Cow::Borrowed(image.encoded_bytes.as_deref().expect("checked above")),
         };
         let uri = image.session_image_path.as_ref().or(image.source_path.as_ref())
-            .map(|path| format!("file://{}", path.display()));
+            .and_then(|path| shell::session::placeholder_images::file_uri_from_path(path));
         blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(
             base64::engine::general_purpose::STANDARD.encode(&bytes), image.mime_type.clone(),
         ).uri(uri).meta(Some(shell::session::placeholder_images::display_number_meta(image.display_number)))));
@@ -509,6 +509,17 @@ pub(crate) async fn persist_setting(
         format!("persist_setting({key}) expected {expected}, got {got:?}")
     }
     match key {
+        "permission_mode" => {
+            let SettingValue::Enum(canonical) = value else {
+                return Err(kind_mismatch("permission_mode", "Enum", &value));
+            };
+            if crate::app::actions::PermissionModeKind::from_canonical(canonical).is_none() {
+                return Err(format!("invalid default permission mode: {canonical}"));
+            }
+            shell::util::config::update_config(|cfg| {
+                cfg.ui.permission_mode = Some(canonical.to_string());
+            }).await.map_err(|error| error.to_string())
+        }
         "compact_mode" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("compact_mode", "Bool", &value));

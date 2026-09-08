@@ -446,3 +446,23 @@ async fn rewind_to_synthetic_auto_wake_turn_cuts_at_the_wake() {
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_history_read_failure_preserves_conversation() {
+    tokio::task::LocalSet::new().run_until(async {
+        let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+        seed_test_timeline(&actor, seed_conversation(true), &["P0", "Background task abc completed", "P2"]).await;
+        let source = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(source.path(), [0xff, b'\n']).unwrap();
+        actor.file_state_tracker = std::sync::Arc::new(workspace::session::file_state::FileStateTracker::with_lazy_file(source.reopen().unwrap(), source.path().to_path_buf()));
+        let before = actor.chat_state_handle.get_conversation().await.iter().map(|item| item.text_content()).collect::<Vec<_>>();
+        let result = actor.handle_rewind(RewindRequest { target_prompt_index: 2, force: true, mode: RewindMode::ConversationOnly }).await;
+        assert!(result.is_err(), "unreadable rewind history must abort the operation");
+        assert_eq!(actor.chat_state_handle.get_prompt_index().await, 3);
+        let after = actor.chat_state_handle.get_conversation().await.iter().map(|item| item.text_content()).collect::<Vec<_>>();
+        assert_eq!(before, after);
+        assert!(!actor.session_dir.join(crate::session::persistence::REWIND_TRANSACTION_FILE).exists());
+    }).await;
+}

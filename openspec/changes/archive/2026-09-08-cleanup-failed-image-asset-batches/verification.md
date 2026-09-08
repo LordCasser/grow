@@ -1,0 +1,4 @@
+# Verification
+- main; low-disk locked/offline `cargo test -p shell --lib session::image_describe::tests`:19 passed,0 failed/ignored,0.09s. Incremental off,dev/test debug=0,jobs=2,RUST_MIN_STACK=16777216.
+- Injected second-write IO error after first real handle-relative atomic publication; only pre-existing file remains and original injected error is returned. Later invalid Base64 exercises same rollback. Existing asset persistence/order and symlink-directory rejection tests pass. Explicit temporary directories; no user home mutations.
+- Base64 regression is helper error coverage, not evidence normalized production images routinely contain invalid Base64. IO injection is the failure model for late persistence errors. Cleanup-error warning path not fault-injected. Not crash-atomic and does not cover failures after successful helper return.

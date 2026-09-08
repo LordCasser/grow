@@ -1,0 +1,3 @@
+## Evidence and design
+Standalone configured_report_for_terminal先configure_tmux_report，再对非SSH/非VSCode Remote读取FixRequest::ssh_alias_is_configured。TUI DoctorCommand::report_for_terminal只调用configure_tmux_report。后台app::doctor输入最终调用该TUI入口。
+将现有configure_tmux_report入口扩为configure_doctor_report，一份环境请求同时供shell状态与tmux路径选择。现有内部tmux纯输入函数及configured_report过滤器保持。测试通过显式请求输入覆盖本地已配置/未配置和远端；不改全局环境、不执行shell。

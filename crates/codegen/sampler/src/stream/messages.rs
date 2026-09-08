@@ -680,9 +680,15 @@ pub fn stream_messages<'a>(
             message_id: final_message_id,
             raw_stop_reason: final_raw_stop_reason,
             stop_sequence: final_stop_sequence,
-            native_continuation: Some(NativeContinuationFragment::Messages(
-                native_blocks.into_values().collect(),
-            )),
+            // Never replay unsigned thinking. Visible facts above remain
+            // available to the portable projector, including all tool calls.
+            native_continuation: if native_blocks.values().any(|block| {
+                matches!(block, ContentBlock::Thinking { signature, .. } if signature.trim().is_empty())
+            }) {
+                None
+            } else {
+                Some(NativeContinuationFragment::Messages(native_blocks.into_values().collect()))
+            },
         };
 
         yield SamplingEvent::Completed {

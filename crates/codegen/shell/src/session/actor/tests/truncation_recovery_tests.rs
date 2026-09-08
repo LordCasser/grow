@@ -230,17 +230,15 @@ fn chat_completions_turn(text: &str, finish_reason: Option<&str>) -> ScriptedRes
 
 // ─── Actor fixture ────────────────────────────────────────────────────────
 
-/// Run a test body on a dedicated thread with an 8MB stack, matching
-/// `SESSION_THREAD_STACK_SIZE` in spawn.rs. The turn loop's async state
-/// machine chain needs 2–4MB (the `handle_prompt` frame alone is ~63KB and
-/// mock servers complete synchronously, stacking several turn iterations
-/// into one poll); the default 2MB test thread stack overflows and aborts.
+/// Run nested mock sampling futures with the same 32 MiB test stack as
+/// image_input_recovery_tests. Debug mock turns can complete within one
+/// poll and exceed the production thread stack; production is unchanged.
 /// `resume_unwind` re-raises the body's panic on the test thread so the
 /// original assertion message survives (plain `join().unwrap()` would
 /// collapse it to `Any { .. }`).
 fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(32 * 1024 * 1024)
         .spawn(body)
         .unwrap()
         .join()
@@ -433,7 +431,16 @@ fn chat_completions_request_count(server: &MockInferenceServer) -> usize {
 
 #[test]
 fn rejected_native_continuation_falls_back_silently_and_keeps_session_usable() {
-    run_with_session_stack(|| {
+    native_rejection_fallback(false);
+}
+
+#[test]
+fn missing_signature_native_continuation_retries_portably() {
+    native_rejection_fallback(true);
+}
+
+fn native_rejection_fallback(missing_signature: bool) {
+    run_with_session_stack(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -453,16 +460,26 @@ fn rejected_native_continuation_falls_back_silently_and_keeps_session_usable() {
             );
             server.enqueue_response(
                 "/v1/messages",
-                ScriptedResponse::json(
-                    400,
-                    json!({
-                        "type": "error",
-                        "error": {
-                            "type": "invalid_request_error",
-                            "message": "constructed provider continuation rejection"
-                        }
-                    }),
-                ),
+                if missing_signature {
+                    ScriptedResponse::sse(vec![SseEvent::data(
+                        json!({
+                            "type": "content_block_delta", "index": 0,
+                            "delta": {"type": "signature_delta"}
+                        })
+                        .to_string(),
+                    )])
+                } else {
+                    ScriptedResponse::json(
+                        400,
+                        json!({
+                            "type": "error",
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": "constructed provider continuation rejection"
+                            }
+                        }),
+                    )
+                },
             );
             server.enqueue_response(
                 "/v1/messages",
@@ -524,7 +541,16 @@ fn rejected_native_continuation_falls_back_silently_and_keeps_session_usable() {
 
 #[test]
 fn failed_portable_retry_notifies_once_without_poisoning_session() {
-    run_with_session_stack(|| {
+    failed_portable_retry(false);
+}
+
+#[test]
+fn missing_signature_portable_retry_stops_after_one_reset() {
+    failed_portable_retry(true);
+}
+
+fn failed_portable_retry(missing_signature: bool) {
+    run_with_session_stack(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -544,13 +570,23 @@ fn failed_portable_retry_notifies_once_without_poisoning_session() {
             for message in ["native rejected", "portable request rejected"] {
                 server.enqueue_response(
                     "/v1/messages",
-                    ScriptedResponse::json(
-                        400,
-                        json!({
-                            "type": "error",
-                            "error": {"type": "invalid_request_error", "message": message}
-                        }),
-                    ),
+                    if missing_signature {
+                        ScriptedResponse::sse(vec![SseEvent::data(
+                            json!({
+                                "type":"content_block_delta", "index":0,
+                                "delta":{"type":"signature_delta"}
+                            })
+                            .to_string(),
+                        )])
+                    } else {
+                        ScriptedResponse::json(
+                            400,
+                            json!({
+                                "type": "error",
+                                "error": {"type": "invalid_request_error", "message": message}
+                            }),
+                        )
+                    },
                 );
             }
             server.enqueue_response(

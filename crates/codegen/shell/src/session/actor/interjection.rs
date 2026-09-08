@@ -436,6 +436,7 @@ impl SessionActor {
             &self.session_id_string(),
         )
         .await
+        .information
     }
 
     /// Drain all pending interjections, wrap them, and inject each as a

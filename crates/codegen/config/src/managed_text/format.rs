@@ -11,9 +11,9 @@ pub struct CommentSyntax {
 impl CommentSyntax {
     pub fn new(prefix: impl Into<String>) -> Result<Self, ManagedConfigError> {
         let prefix = prefix.into();
-        if prefix.is_empty() || prefix.contains(['\r', '\n']) {
+        if prefix.is_empty() || prefix.contains(['\r', '\n', '\0']) {
             return Err(ManagedConfigError::InvalidRequest(
-                "comment prefix must be one non-empty line".to_owned(),
+                "comment prefix must be one non-empty line without NUL bytes".to_owned(),
             ));
         }
         Ok(Self { prefix })
@@ -29,6 +29,7 @@ impl CommentSyntax {
 pub(super) struct RenderedUpdate {
     pub updated: String,
     pub unmanaged_text: String,
+    pub requested_items: Vec<ManagedItemState>,
 }
 
 pub(super) fn validate_request(request: &ManagedConfigRequest) -> Result<(), ManagedConfigError> {
@@ -45,6 +46,12 @@ pub(super) fn validate_request(request: &ManagedConfigRequest) -> Result<(), Man
         if !names.insert(&item.name) {
             return Err(ManagedConfigError::InvalidRequest(format!(
                 "duplicate requested item {}",
+                item.name
+            )));
+        }
+        if item.body.contains('\0') {
+            return Err(ManagedConfigError::InvalidRequest(format!(
+                "item {} contains NUL bytes",
                 item.name
             )));
         }
@@ -94,27 +101,6 @@ pub(super) fn outer_block(
         .map(|(start, end)| text[start..end].trim_end_matches(['\r', '\n']).to_owned()))
 }
 
-pub(super) fn item_state(
-    original: &str,
-    namespace: &str,
-    owned_item_prefix: &str,
-    item: &ManagedItem,
-    comments: &CommentSyntax,
-    path: &Path,
-) -> Result<ManagedItemState, ManagedConfigError> {
-    let parsed = parse_block(original, namespace, owned_item_prefix, comments, path)?;
-    let Some(range) = parsed.items.get(&item.name) else {
-        return Ok(ManagedItemState::Absent);
-    };
-    let expected = item_section(item, comments, parsed.newline);
-    let actual = original[range.start..range.end].trim_end_matches(['\r', '\n']);
-    Ok(if actual == expected {
-        ManagedItemState::Exact
-    } else {
-        ManagedItemState::NeedsUpdate
-    })
-}
-
 pub(super) fn render_update(
     original: &str,
     namespace: &str,
@@ -125,36 +111,57 @@ pub(super) fn render_update(
 ) -> Result<RenderedUpdate, ManagedConfigError> {
     let initial = parse_block(original, namespace, owned_item_prefix, comments, path)?;
     let unmanaged_text = initial.unmanaged_text(original);
-    let mut updated = original.to_owned();
+    let eol = initial.newline.as_str();
+    let mut requested_items = Vec::with_capacity(items.len());
+    let mut edits = Vec::with_capacity(items.len());
+    let mut additions = Vec::new();
     for item in items {
-        let parsed = parse_block(&updated, namespace, owned_item_prefix, comments, path)?;
-        let section = item_section(item, comments, parsed.newline);
-        updated = if let Some(range) = parsed.items.get(&item.name) {
-            let keep_eol = updated[range.start..range.end].ends_with('\n');
-            let replacement = if keep_eol {
-                format!("{section}{}", parsed.newline.as_str())
+        let mut section = item_section(item, comments, initial.newline);
+        if let Some(range) = initial.items.get(&item.name) {
+            let actual = &original[range.start..range.end];
+            requested_items.push(if actual.trim_end_matches(['\r', '\n']) == section {
+                ManagedItemState::Exact
             } else {
-                section
-            };
-            replace_range(&updated, range.start, range.end, &replacement)
-        } else if let Some(close) = parsed.outer_close {
-            let insertion = format!("{section}{}", parsed.newline.as_str());
-            replace_range(&updated, close.start, close.start, &insertion)
+                ManagedItemState::NeedsUpdate
+            });
+            if actual.ends_with('\n') {
+                section.push_str(eol);
+            }
+            edits.push((range.start, range.end, section));
         } else {
-            append_outer(
-                &updated,
-                namespace,
-                &section,
-                comments,
-                parsed.newline,
-                parsed.final_newline,
-            )
-        };
+            requested_items.push(ManagedItemState::Absent);
+            additions.push(section);
+        }
     }
+    let updated = if let Some(close) = initial.outer_close {
+        if !additions.is_empty() {
+            edits.push((close.start, close.start, additions.join(eol) + eol));
+        }
+        edits.sort_unstable_by_key(|(start, _, _)| *start);
+        let mut updated = String::with_capacity(original.len());
+        let mut cursor = 0;
+        for (start, end, replacement) in edits {
+            updated.push_str(&original[cursor..start]);
+            updated.push_str(&replacement);
+            cursor = end;
+        }
+        updated.push_str(&original[cursor..]);
+        updated
+    } else {
+        append_outer(
+            original,
+            namespace,
+            &additions.join(eol),
+            comments,
+            initial.newline,
+            initial.final_newline,
+        )
+    };
     parse_block(&updated, namespace, owned_item_prefix, comments, path)?;
     Ok(RenderedUpdate {
         updated,
         unmanaged_text,
+        requested_items,
     })
 }
 
@@ -211,14 +218,6 @@ impl ParsedBlock {
         unmanaged.push_str(&text[end..]);
         unmanaged
     }
-}
-
-fn replace_range(text: &str, start: usize, end: usize, replacement: &str) -> String {
-    let mut result = String::with_capacity(text.len() - (end - start) + replacement.len());
-    result.push_str(&text[..start]);
-    result.push_str(replacement);
-    result.push_str(&text[end..]);
-    result
 }
 
 fn append_outer(

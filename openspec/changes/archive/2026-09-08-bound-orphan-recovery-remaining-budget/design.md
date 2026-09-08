@@ -1,0 +1,5 @@
+## Evidence
+recover_orphan_placeholders_with_prefixes_and_caps将per_image_max直接传给load_canonical_placeholder_image，再通过loaded.data.len计算aggregate。上一修复使loader实际流读取有界，现在需在调用前传入剩余额度。
+## Design
+循环首部计算remaining=aggregate_max-aggregate_bytes，零即break。通过min传入loader；TooLarge且remaining<per_image_max时break，其余失败continue。等于per_image_max时保留单图限制优先、允许后续更小图片的语义。保留事后aggregate检查作为防御，不改变已附图和display_number。
+候选文件超过剩余额度可在metadata阶段直接停止，因此不再为判定MIME而先完整读取；无效超额候选也可触发预算停止。这是有意的资源准入策略，不能宣称与旧循环所有失败日志顺序完全一致。

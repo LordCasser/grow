@@ -104,11 +104,11 @@ pub struct ScheduledTaskPreview {
     pub tag: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DoctorRequest {
     Report,
     ListFixes,
-    Fix(crate::diagnostics::DiagnosticId),
+    Fix(crate::diagnostics::DiagnosticId, Option<std::path::PathBuf>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

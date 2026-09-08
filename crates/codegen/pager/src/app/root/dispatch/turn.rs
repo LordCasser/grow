@@ -340,10 +340,10 @@ pub(super) fn do_cancel_turn_with_pause(
     // Clearing `current_prompt_id` (via `finish_turn`) is what makes orphan
     // chunks/PR for the cancelled turn get dropped by the `promptId` gate
     // in acp_handler / PromptResponse handler.
-    // When a prompt is queued on the server-authoritative shared queue, cancel
-    // restores the FRONT queued prompt to the input instead (handled after the
-    // cleanup below). So skip the in-flight rewind in that case — the user wants
-    // the queued prompt back, not the in-flight one.
+    // A non-empty server-authoritative shared queue also prevents rewind.
+    // Cancel leaves those inputs queued for the server to promote; the pager
+    // adopts that promotion from queue updates rather than restoring a queued
+    // input into the composer.
     //
     // Minimal mode prints each committed block once into the terminal's native
     // scrollback, and that print can't be "un-printed". A user-prompt block

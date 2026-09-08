@@ -3,7 +3,6 @@
 
 use super::*;
 
-use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::session::SideQuestionError;
 use backon::BackoffBuilder as _;
 use sampling_types::SamplingError;
@@ -29,6 +28,25 @@ fn should_retry_side_question(e: &SamplingError) -> bool {
     e.is_overloaded() && !e.is_retry_vetoed()
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static RECAP_AFTER_PREPARE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    pub(super) static SIDE_QUESTION_AFTER_PREPARE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(super) async fn deliver_suggestion(
+    generation: impl std::future::Future<Output = Option<String>>,
+    mut respond_to: tokio::sync::oneshot::Sender<Option<String>>,
+) {
+    tokio::select! {
+        biased;
+        _ = respond_to.closed() => {}
+        result = generation => { let _ = respond_to.send(result); }
+    }
+}
+
 impl SessionActor {
     /// Handle a /btw side question — single-turn model call using the
     /// parent session's full context.
@@ -46,10 +64,17 @@ impl SessionActor {
         &self,
         question: &str,
     ) -> Result<String, SideQuestionError> {
-        let sampling_client = self
-            .prepare_chat_completion(false)
-            .await
+        let prepared = self.prepare_chat_completion_config(false).await;
+        let model = prepared.model.clone();
+        let sampling_client = sampler::SamplingClient::new(prepared)
             .map_err(|e| SideQuestionError::PrepareClient(e.to_string()))?;
+
+        #[cfg(test)]
+        SIDE_QUESTION_AFTER_PREPARE.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
 
         // Full conversation snapshot including system prompt, tool calls, and results.
         // Strip reasoning/thinking blocks from assistant items so we don't send
@@ -102,13 +127,6 @@ impl SessionActor {
              {question}"
         );
         items.push(ConversationItem::user(wrapped_question.clone()));
-
-        let model = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
 
         // Don't set temperature explicitly — cli-chat-proxy may inject
         // `thinking` config via request_defaults for thinking-enabled models,
@@ -281,7 +299,10 @@ impl SessionActor {
         // (not on failure/empty/cancel) so auto can retry later for this turn if needed.
         let clear_in_flight = || self.recap_in_flight.set(false);
 
-        let sampling_client = match self.prepare_chat_completion(false).await {
+        let prepared = self.prepare_chat_completion_config(false).await;
+        let context_window = prepared.context_window;
+        let model = prepared.model.clone();
+        let sampling_client = match sampler::SamplingClient::new(prepared) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "recap: failed to prepare sampling client");
@@ -294,6 +315,13 @@ impl SessionActor {
             }
         };
 
+        #[cfg(test)]
+        RECAP_AFTER_PREPARE.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+
         let tag = self.reminder_wrapper_tag();
         // Strip reasoning only on the Messages backend (it rejects thinking
         // blocks without a `thinking` config). Other backends keep reasoning
@@ -302,17 +330,9 @@ impl SessionActor {
         let strip_reasoning =
             sampling_client.api_backend() == crate::sampling::ApiBackend::Messages;
 
-        // Budget off the recap model's context window (today the session model).
-        // One read serves both the window and the model.
-        let sampling_config = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_config
-            .as_ref()
-            .map(|c| c.context_window.get())
-            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        // The model, backend and budget belong to the client preparation snapshot.
         let items =
             session_recap::budget_recap_items(conversation, tag, strip_reasoning, context_window);
-
-        let model = sampling_config.map(|c| c.model).unwrap_or_default();
 
         // Leave BOTH temperature and max_output_tokens unset: the cli-chat-proxy
         // layer may inject a `thinking` budget for thinking-enabled models
@@ -922,5 +942,49 @@ mod tests {
             elapsed <= std::time::Duration::from_millis(3_100),
             "elapsed {elapsed:?} above maximum backoff"
         );
+    }
+}
+
+#[cfg(test)]
+mod suggestion_delivery_tests {
+    use super::deliver_suggestion;
+
+    #[tokio::test]
+    async fn suggestion_delivery_closed_before_start_never_polls() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drop(rx);
+        deliver_suggestion(async { panic!("abandoned generation was polled") }, tx).await;
+    }
+
+    #[tokio::test]
+    async fn suggestion_delivery_closure_drops_active_generation() {
+        struct OnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = OnDrop(dropped.clone());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut delivery = Box::pin(deliver_suggestion(
+            async move {
+                let _guard = guard;
+                std::future::pending::<Option<String>>().await
+            },
+            tx,
+        ));
+        assert!(futures_util::poll!(&mut delivery).is_pending());
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+        drop(rx);
+        assert!(futures_util::poll!(&mut delivery).is_ready());
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn suggestion_delivery_returns_result() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        deliver_suggestion(async { Some("git status".into()) }, tx).await;
+        assert_eq!(rx.await.unwrap().as_deref(), Some("git status"));
     }
 }

@@ -210,19 +210,36 @@ impl LocalDraftStore {
 
     pub(crate) fn load(&self, key: &LocalDraftKey) -> io::Result<Option<LocalDraftRecord>> {
         let path = self.path(key);
-        let file = match File::open(&path) {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = match options.open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let len = file.metadata()?.len() as usize;
-        if len > MAX_RECORD_BYTES {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "local draft source is not a regular file"));
+        }
+        if metadata.len() > MAX_RECORD_BYTES as u64 {
             self.quarantine(&path)?;
             return Ok(None);
         }
-        let mut bytes = Vec::with_capacity(len);
-        file.take(MAX_RECORD_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)?;
+        self.load_from_reader(&path, file)
+    }
+
+    fn load_from_reader(&self, path: &Path, reader: impl Read) -> io::Result<Option<LocalDraftRecord>> {
+        let mut bytes = Vec::new();
+        reader.take(MAX_RECORD_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_RECORD_BYTES {
+            self.quarantine(path)?;
+            return Ok(None);
+        }
         let record = serde_json::from_slice::<LocalDraftRecord>(&bytes).ok();
         let Some(record) = record.filter(|r| r.version == SCHEMA_VERSION && validate_record(r))
         else {
@@ -233,14 +250,14 @@ impl LocalDraftStore {
     }
 
     pub(crate) fn write(&self, key: &LocalDraftKey, record: &LocalDraftRecord) -> io::Result<()> {
-        if !record.has_payload() {
-            return self.remove(key);
-        }
         if record.version != SCHEMA_VERSION || !validate_record(record) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid local draft record",
             ));
+        }
+        if !record.has_payload() {
+            return self.remove(key);
         }
         self.ensure_root()?;
         let path = self.path(key);
@@ -319,6 +336,7 @@ pub(crate) struct LocalDraftRuntime {
     keys: HashMap<AgentId, LocalDraftKey>,
     loaded: HashSet<LocalDraftKey>,
     tracked: HashMap<LocalDraftKey, TrackedDraft>,
+    invalidations: HashMap<LocalDraftKey, Instant>,
     active_key: Option<LocalDraftKey>,
     next_revision: u64,
 }
@@ -330,6 +348,29 @@ impl LocalDraftRuntime {
         active: Option<AgentId>,
         now: Instant,
     ) {
+        let mut retired = HashSet::new();
+        self.keys.retain(|id, key| {
+            if agents.contains_key(id) {
+                true
+            } else {
+                retired.insert(key.clone());
+                false
+            }
+        });
+        for key in retired {
+            if self.keys.values().any(|live| live == &key) {
+                continue;
+            }
+            self.flush_key(&key, now);
+            self.loaded.remove(&key);
+            if self.active_key.as_ref() == Some(&key) {
+                self.active_key = None;
+            }
+            if self.tracked.get(&key).is_some_and(|tracked| tracked.due.is_none()) {
+                self.tracked.remove(&key);
+            }
+        }
+        let mut recovered_active_pending = false;
         for (id, agent) in agents.iter_mut() {
             let desired = agent
                 .session
@@ -344,6 +385,11 @@ impl LocalDraftRuntime {
             if let Some(old) = self.keys.insert(*id, key.clone())
                 && old != key
             {
+                if self.invalidations.contains_key(&old) || self.invalidations.contains_key(&key) {
+                    // A stale cwd file must not be migrated across an invalidation.
+                    self.invalidate_key(&old, now);
+                    self.invalidate_key(&key, now);
+                } else {
                 self.flush_key(&old, now);
                 if let Err(error) = self.store.rekey(&old, &key) {
                     tracing::warn!(?error, "failed to rekey local draft at session bind");
@@ -351,9 +397,15 @@ impl LocalDraftRuntime {
                 if let Some(tracked) = self.tracked.remove(&old) {
                     self.tracked.insert(key.clone(), tracked);
                 }
+                }
                 self.loaded.remove(&key);
             }
-            if self.loaded.insert(key.clone()) {
+            if self.loaded.insert(key.clone()) && !self.invalidations.contains_key(&key) {
+                if let Some(tracked) = self.tracked.get(&key).filter(|tracked| tracked.due.is_some()) {
+                    // A failed closing checkpoint owns newer content than disk.
+                    restore_agent(agent, &tracked.record);
+                    recovered_active_pending |= active == Some(*id);
+                } else {
                 match self.store.load(&key) {
                     Ok(Some(record)) => {
                         self.next_revision = self.next_revision.max(record.revision);
@@ -373,9 +425,16 @@ impl LocalDraftRuntime {
                     Ok(None) => {}
                     Err(error) => tracing::warn!(?error, "failed to load local draft"),
                 }
+                }
             }
             match capture_agent(agent, 0) {
                 Ok(mut record) => {
+                    if self.invalidations.contains_key(&key) {
+                        if !record.has_payload() {
+                            continue;
+                        }
+                        self.invalidations.remove(&key);
+                    }
                     let serialized = serde_json::to_vec(&record).unwrap_or_default();
                     let changed = self
                         .tracked
@@ -400,10 +459,7 @@ impl LocalDraftRuntime {
                     }
                 }
                 Err(error) => {
-                    self.tracked.remove(&key);
-                    if let Err(remove_error) = self.store.remove(&key) {
-                        tracing::warn!(?remove_error, "failed to remove unsafe local draft");
-                    }
+                    self.invalidate_key(&key, now);
                     tracing::warn!(target: "pager::local_drafts", ?error, "local draft was not persisted");
                 }
             }
@@ -413,16 +469,21 @@ impl LocalDraftRuntime {
             if let Some(old) = self.active_key.take() {
                 self.flush_key(&old, now);
             }
-            if let Some(key) = active_key.as_ref() {
+            if let Some(key) = active_key.as_ref()
+                && !recovered_active_pending
+            {
                 self.flush_key(key, now);
             }
             self.active_key = active_key;
         }
         self.flush_due(now);
+        let live_keys: HashSet<_> = self.keys.values().cloned().collect();
+        self.loaded.retain(|key| live_keys.contains(key));
+        self.tracked.retain(|key, tracked| live_keys.contains(key) || tracked.due.is_some());
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        self.tracked.values().filter_map(|t| t.due).min()
+        self.tracked.values().filter_map(|t| t.due).chain(self.invalidations.values().copied()).min()
     }
 
     /// Transfers every ACP prompt-RPC variant out of the local recovery
@@ -436,27 +497,34 @@ impl LocalDraftRuntime {
         // window it can still be the canonical-cwd key even though the Effect
         // already carries the newly bound SessionId.
         let current_key = self.keys.get(&agent_id).cloned();
-        self.disarm_agent(agent_id);
-        if let Some(key) = current_key.as_ref()
-            && let Err(error) = self.store.remove(key)
-        {
-            tracing::warn!(?error, "failed to clear current-key submitted local draft");
+        let now = Instant::now();
+        if let Some(key) = current_key.as_ref() {
+            self.invalidate_key(key, now);
         }
         let Ok(session_key) = LocalDraftKey::session(&session_id.0) else {
             return;
         };
-        if current_key.as_ref() != Some(&session_key)
-            && let Err(error) = self.store.remove(&session_key)
-        {
-            tracing::warn!(?error, "failed to clear session-key submitted local draft");
+        if current_key.as_ref() != Some(&session_key) {
+            self.invalidate_key(&session_key, now);
         }
     }
 
-    fn disarm_agent(&mut self, agent_id: AgentId) {
-        let Some(key) = self.keys.get(&agent_id).cloned() else {
-            return;
-        };
-        self.tracked.remove(&key);
+    fn invalidate_key(&mut self, key: &LocalDraftKey, now: Instant) {
+        self.tracked.remove(key);
+        let due = *self.invalidations.entry(key.clone()).or_insert(now);
+        if due <= now {
+            self.retry_invalidation(key, now);
+        }
+    }
+
+    fn retry_invalidation(&mut self, key: &LocalDraftKey, now: Instant) {
+        match self.store.remove(key) {
+            Ok(()) => { self.invalidations.remove(key); }
+            Err(error) => {
+                self.invalidations.insert(key.clone(), now + WRITE_RETRY_BACKOFF);
+                tracing::warn!(?error, "failed to invalidate local draft; retry scheduled");
+            }
+        }
     }
 
     pub(crate) fn flush_all(&mut self) {
@@ -464,6 +532,9 @@ impl LocalDraftRuntime {
         let now = Instant::now();
         for key in keys {
             self.flush_key(&key, now);
+        }
+        for key in self.invalidations.keys().cloned().collect::<Vec<_>>() {
+            self.retry_invalidation(&key, now);
         }
     }
 
@@ -477,6 +548,12 @@ impl LocalDraftRuntime {
             .collect::<Vec<_>>();
         for key in keys {
             self.flush_key(&key, now);
+        }
+        let expired = self.invalidations.iter()
+            .filter(|(_, due)| **due <= now)
+            .map(|(key, _)| key.clone()).collect::<Vec<_>>();
+        for key in expired {
+            self.retry_invalidation(&key, now);
         }
     }
 
@@ -602,6 +679,9 @@ fn restore_agent(agent: &mut AgentView, record: &LocalDraftRecord) {
 }
 
 fn validate_record(record: &LocalDraftRecord) -> bool {
+    if record.composer.is_some() && record.staged_prompt.is_some() {
+        return false;
+    }
     let valid_prompt = |prompt: &DraftPrompt| {
         prompt.text.len() <= MAX_TEXT_BYTES
             && prompt.cursor <= prompt.text.len()
@@ -671,6 +751,296 @@ mod tests {
             staged_prompt: None,
             deferred_session_mode: mode,
         }
+    }
+
+    #[test]
+    fn failed_rpc_invalidation_survives_binding_close_and_reopen() {
+        for structured in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("drafts");
+            let mut app = crate::app::root::tests::test_app_with_agent();
+            app.local_drafts = LocalDraftRuntime { store: LocalDraftStore::new(root.clone()), ..Default::default() };
+            let id = *app.agents.keys().next().unwrap();
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.session_id = None;
+            agent.prompt.set_text("submitted cwd draft");
+            let cwd_key = LocalDraftKey::cwd(&agent.session.cwd).unwrap();
+            let now = Instant::now();
+            app.sync_local_drafts(now);
+            app.sync_local_drafts(now + DEBOUNCE);
+            let sid = acp_transport::protocol::SessionId::new("invalidation-bind");
+            let session_key = LocalDraftKey::session(&sid.0).unwrap();
+            app.local_drafts.store.write(&session_key, &record("stale session draft", None)).unwrap();
+            let blocked = directory.path().join("blocked");
+            fs::write(&blocked, b"not a directory").unwrap();
+            app.local_drafts.store = LocalDraftStore::new(blocked);
+            let effect = if structured {
+                crate::app::actions::Effect::SendPromptBlocks { agent_id: id, session_id: sid.clone(), blocks: vec![], images: vec![], prompt_id: "blocks".into() }
+            } else {
+                crate::app::actions::Effect::SendPrompt { agent_id: id, session_id: sid.clone(), text: "submitted".into(), prompt_id: "text".into(), skill_token_ranges: vec![] }
+            };
+            app.transfer_local_draft_ownership(&effect);
+            assert_eq!(app.local_drafts.invalidations.len(), 2);
+            let deadline = app.local_drafts.next_deadline().unwrap();
+            let before = deadline - Duration::from_millis(100);
+            app.local_drafts.store = LocalDraftStore::new(root);
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.session_id = Some(sid);
+            agent.prompt.set_text("");
+            app.sync_local_drafts(before);
+            assert_eq!(app.local_drafts.invalidations.len(), 2);
+            assert_eq!(app.local_drafts.store.load(&cwd_key).unwrap().unwrap().composer.unwrap().text, "submitted cwd draft");
+            assert_eq!(app.local_drafts.store.load(&session_key).unwrap().unwrap().composer.unwrap().text, "stale session draft");
+            let mut closed = app.agents.shift_remove(&id).unwrap();
+            app.sync_local_drafts(before);
+            closed.prompt.set_text("");
+            let reopened = AgentId(9900);
+            app.agents.insert(reopened, closed);
+            app.active_view = crate::app::root::ActiveView::Agent(reopened);
+            app.sync_local_drafts(before);
+            assert!(app.agents[&reopened].prompt.text().is_empty());
+            assert_eq!(app.local_drafts.next_deadline(), Some(deadline));
+            app.sync_local_drafts(deadline);
+            assert!(app.local_drafts.invalidations.is_empty());
+            assert!(app.local_drafts.store.load(&cwd_key).unwrap().is_none());
+            assert!(app.local_drafts.store.load(&session_key).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn repeated_capture_failure_keeps_deadline_and_new_draft_cancels_delete() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("drafts");
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        app.local_drafts = LocalDraftRuntime { store: LocalDraftStore::new(root.clone()), ..Default::default() };
+        let id = *app.agents.keys().next().unwrap();
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("capture-delete"));
+        agent.prompt.set_text("old");
+        let now = Instant::now();
+        app.sync_local_drafts(now);
+        app.sync_local_drafts(now + DEBOUNCE);
+        let key = app.local_drafts.keys[&id].clone();
+        let blocked = directory.path().join("blocked");
+        fs::write(&blocked, b"not a directory").unwrap();
+        app.local_drafts.store = LocalDraftStore::new(blocked);
+        app.agents.get_mut(&id).unwrap().prompt.set_text(&"x".repeat(MAX_TEXT_BYTES + 1));
+        let failed = now + DEBOUNCE + DEBOUNCE;
+        app.sync_local_drafts(failed);
+        let deadline = failed + WRITE_RETRY_BACKOFF;
+        assert_eq!(app.local_drafts.next_deadline(), Some(deadline));
+        app.sync_local_drafts(failed + Duration::from_millis(10));
+        assert_eq!(app.local_drafts.next_deadline(), Some(deadline));
+        app.local_drafts.store = LocalDraftStore::new(root);
+        app.agents.get_mut(&id).unwrap().prompt.set_text("new valid draft");
+        app.sync_local_drafts(failed + Duration::from_millis(20));
+        assert!(app.local_drafts.invalidations.is_empty());
+        app.sync_local_drafts(deadline);
+        assert_eq!(app.local_drafts.store.load(&key).unwrap().unwrap().composer.unwrap().text, "new valid draft");
+    }
+
+    #[test]
+    fn closing_and_reopening_restores_saved_draft_and_releases_clean_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        app.local_drafts = LocalDraftRuntime { store: LocalDraftStore::new(directory.path().to_path_buf()), ..Default::default() };
+        let id = *app.agents.keys().next().unwrap();
+        let sid = acp_transport::protocol::SessionId::new("reopen-draft");
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid.clone());
+        agent.prompt.set_text("saved draft");
+        agent.prompt.set_cursor(3);
+        agent.session.deferred_session_mode = Some(tools::types::BehaviorId::Plan);
+        let now = Instant::now();
+        app.sync_local_drafts(now);
+        let mut closed = app.agents.shift_remove(&id).unwrap();
+        app.sync_local_drafts(now + DEBOUNCE);
+        assert!(app.local_drafts.keys.is_empty());
+        assert!(app.local_drafts.loaded.is_empty());
+        assert!(app.local_drafts.tracked.is_empty());
+        closed.prompt.set_text("");
+        closed.session.deferred_session_mode = None;
+        let reopened = AgentId(9876);
+        app.agents.insert(reopened, closed);
+        app.active_view = crate::app::root::ActiveView::Agent(reopened);
+        app.sync_local_drafts(now + DEBOUNCE + DEBOUNCE);
+        let agent = &app.agents[&reopened];
+        assert_eq!(agent.prompt.text(), "saved draft");
+        assert_eq!(agent.prompt.cursor(), 3);
+        assert_eq!(agent.session.deferred_session_mode, Some(tools::types::BehaviorId::Plan));
+        assert!(agent.session.pending_prompts.is_empty());
+        assert!(app.local_drafts.store.load(&LocalDraftKey::session(&sid.0).unwrap()).unwrap().is_some());
+    }
+
+    #[test]
+    fn closing_failed_checkpoint_keeps_latest_and_retry_deadline_on_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("drafts");
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        app.local_drafts = LocalDraftRuntime { store: LocalDraftStore::new(root.clone()), ..Default::default() };
+        let id = *app.agents.keys().next().unwrap();
+        let sid = acp_transport::protocol::SessionId::new("failed-close");
+        let key = LocalDraftKey::session(&sid.0).unwrap();
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(sid);
+        agent.prompt.set_text("old");
+        let now = Instant::now();
+        app.sync_local_drafts(now);
+        app.sync_local_drafts(now + DEBOUNCE);
+        // Keep the stale disk record, but route writes through an unavailable root.
+        let blocked = directory.path().join("blocked");
+        fs::write(&blocked, b"not a directory").unwrap();
+        app.local_drafts.store = LocalDraftStore::new(blocked);
+        app.agents.get_mut(&id).unwrap().prompt.set_text("latest unsaved");
+        app.sync_local_drafts(now + DEBOUNCE + DEBOUNCE);
+        let mut closed = app.agents.shift_remove(&id).unwrap();
+        let closing = now + DEBOUNCE + DEBOUNCE + DEBOUNCE;
+        app.sync_local_drafts(closing);
+        let retry = closing + WRITE_RETRY_BACKOFF;
+        assert_eq!(app.local_drafts.next_deadline(), Some(retry));
+        app.sync_local_drafts(closing + Duration::from_millis(10));
+        assert_eq!(app.local_drafts.next_deadline(), Some(retry));
+        app.local_drafts.store = LocalDraftStore::new(root);
+        closed.prompt.set_text("");
+        let reopened = AgentId(9877);
+        app.agents.insert(reopened, closed);
+        app.active_view = crate::app::root::ActiveView::Agent(reopened);
+        app.sync_local_drafts(closing + Duration::from_millis(20));
+        assert_eq!(app.agents[&reopened].prompt.text(), "latest unsaved");
+        assert_eq!(app.local_drafts.next_deadline(), Some(retry));
+        assert_eq!(app.local_drafts.store.load(&key).unwrap().unwrap().composer.unwrap().text, "old");
+        app.sync_local_drafts(retry);
+        assert_eq!(app.local_drafts.store.load(&key).unwrap().unwrap().composer.unwrap().text, "latest unsaved");
+        app.agents.shift_remove(&reopened);
+        app.sync_local_drafts(retry);
+        assert!(app.local_drafts.tracked.is_empty());
+    }
+
+    #[test]
+    fn closing_one_shared_key_owner_keeps_runtime_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        app.local_drafts = LocalDraftRuntime { store: LocalDraftStore::new(directory.path().to_path_buf()), ..Default::default() };
+        let id = *app.agents.keys().next().unwrap();
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("shared-draft"));
+        agent.prompt.set_text("shared");
+        let now = Instant::now();
+        app.sync_local_drafts(now);
+        let key = app.local_drafts.keys[&id].clone();
+        // Model a second owner disappearing; the surviving real Agent remains.
+        app.local_drafts.keys.insert(AgentId(9878), key.clone());
+        app.sync_local_drafts(now + DEBOUNCE);
+        assert_eq!(app.local_drafts.keys.len(), 1);
+        assert!(app.local_drafts.loaded.contains(&key));
+        assert!(app.local_drafts.tracked.contains_key(&key));
+        assert_eq!(app.agents[&id].prompt.text(), "shared");
+    }
+
+    #[test]
+    fn conflicting_prompt_sources_cannot_replace_or_remove_a_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalDraftStore::new(directory.path().to_path_buf());
+        let key = LocalDraftKey::session("exclusive").unwrap();
+        let original = record("keep", None);
+        store.write(&key, &original).unwrap();
+        for text in ["conflict", ""] {
+            let mut invalid = record(text, None);
+            invalid.staged_prompt = invalid.composer.clone();
+            assert_eq!(store.write(&key, &invalid).unwrap_err().kind(), io::ErrorKind::InvalidData);
+            assert_eq!(store.load(&key).unwrap(), Some(original.clone()));
+        }
+        let mut staged_only = record("staged", None);
+        staged_only.staged_prompt = staged_only.composer.take();
+        store.write(&key, &staged_only).unwrap();
+        assert_eq!(store.load(&key).unwrap(), Some(staged_only));
+        store.write(&key, &LocalDraftRecord::empty(0)).unwrap();
+        assert!(store.load(&key).unwrap().is_none());
+    }
+
+    #[test]
+    fn conflicting_disk_record_is_quarantined_without_restoring() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalDraftStore::new(directory.path().to_path_buf());
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let agent = app.agents.values_mut().next().unwrap();
+        agent.prompt.set_text("");
+        agent.session.deferred_session_mode = None;
+        let sid = acp_transport::protocol::SessionId::new("conflicting-draft");
+        agent.session.session_id = Some(sid.clone());
+        let key = LocalDraftKey::session(&sid.0).unwrap();
+        let mut invalid = record("composer", Some(tools::types::BehaviorId::Plan));
+        invalid.staged_prompt = record("staged", None).composer;
+        let bytes = serde_json::to_vec(&invalid).unwrap();
+        fs::write(store.path(&key), &bytes).unwrap();
+        app.local_drafts = LocalDraftRuntime { store, ..Default::default() };
+        app.sync_local_drafts(Instant::now());
+        let agent = app.agents.values().next().unwrap();
+        assert!(agent.prompt.text().is_empty());
+        assert!(agent.session.pending_prompts.is_empty());
+        assert!(agent.session.deferred_session_mode.is_none());
+        let quarantined = fs::read_dir(directory.path().join("quarantine")).unwrap()
+            .map(|entry| entry.unwrap().path()).collect::<Vec<_>>();
+        assert_eq!(quarantined.len(), 1);
+        assert_eq!(fs::read(&quarantined[0]).unwrap(), bytes);
+    }
+
+    #[test]
+    fn source_byte_allowance_and_growth_quarantine() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalDraftStore::new(directory.path().to_path_buf());
+        let key = LocalDraftKey::session("bounded").unwrap();
+        let path = store.path(&key);
+        let expected = record("draft", None);
+        let mut bytes = serde_json::to_vec(&expected).unwrap();
+        bytes.resize(MAX_RECORD_BYTES, b' ');
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(store.load(&key).unwrap(), Some(expected));
+        let mut reader = File::open(&path).unwrap();
+        assert_eq!(reader.metadata().unwrap().len(), MAX_RECORD_BYTES as u64);
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[b' '; 64]).unwrap();
+        assert!(store.load_from_reader(&path, &mut reader).unwrap().is_none());
+        use std::io::Seek;
+        assert_eq!(reader.stream_position().unwrap(), MAX_RECORD_BYTES as u64 + 1);
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(directory.path().join("quarantine")).unwrap().count(), 1);
+        bytes.push(b' ');
+        fs::write(&path, &bytes).unwrap();
+        assert!(store.load(&key).unwrap().is_none());
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(directory.path().join("quarantine")).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_sources_reject_without_blocking_or_quarantine() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalDraftStore::new(directory.path().to_path_buf());
+        let key = LocalDraftKey::session("special").unwrap();
+        let path = store.path(&key);
+        let target = directory.path().join("target");
+        fs::write(&target, serde_json::to_vec(&record("linked", None)).unwrap()).unwrap();
+        symlink(&target, &path).unwrap();
+        assert_eq!(store.load(&key).unwrap(), Some(record("linked", None)));
+        fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            for is_directory in [false, true] {
+                if is_directory {
+                    fs::remove_file(&path).unwrap();
+                    fs::create_dir(&path).unwrap();
+                }
+                assert_eq!(store.load(&key).unwrap_err().kind(), io::ErrorKind::InvalidData);
+                assert!(path.exists());
+                assert!(!store.root.join("quarantine").exists());
+            }
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
     }
 
     #[test]

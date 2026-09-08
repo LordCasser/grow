@@ -70,11 +70,11 @@ pub async fn embed_missing_chunks(
 
     // Batch in groups of 32 (provider's typical max batch size)
     for batch in chunks.chunks(32) {
-        let texts: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
+        let texts: Vec<&str> = batch.iter().map(|(_, text, _)| text.as_str()).collect();
         match provider.embed_batch(&texts).await {
             Ok(embeddings) => {
-                for ((chunk_id, _), embedding) in batch.iter().zip(embeddings.iter()) {
-                    if let Err(e) = index.upsert_embedding(chunk_id, embedding) {
+                for ((chunk_id, _, hash), embedding) in batch.iter().zip(embeddings.iter()) {
+                    if let Err(e) = index.upsert_embedding(chunk_id, hash, embedding) {
                         tracing::warn!(
                             target: diagnostics::memory_log::TARGET,
                             chunk_id,

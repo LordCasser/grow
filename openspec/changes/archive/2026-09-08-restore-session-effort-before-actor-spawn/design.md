@@ -1,0 +1,6 @@
+# Design
+The startup route must carry the loaded selection before the actor is published. Prefer carrying the already resolved sampling configuration across SessionSpawnOptions rather than introducing another optional override authority. New-session configuration and loaded-session configuration must each be resolved once by their owning entry path. Persisted None must remain distinct from a model default. Do not treat unsupported historical effort as permission to silently change durable selection; reject unsupported explicit effort before actor publication.
+
+Remove the post-load restore command: cold actors are initialized from persistence and resident actors retain their live selection. Hydration must not be emitted as a user selection; actual subsequent user switches must continue the durable chain. Include a load/switch/load regression with different historical and default effort, and a workflow argument-error case if the existing fixture can exercise it without provider requests.
+
+Scope excludes automatic repair of corrupt logs, catalog endpoint/provider identity drift across restarts, and redesign of search cleanup. Endpoint drift needs a separate persisted-route policy because endpoint fingerprints cannot reconstruct credentials or URLs.

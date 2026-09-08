@@ -1,0 +1,4 @@
+# Design
+CLI and pager install_firehose activate RoutingLayer for per-session debug output. Opening a session sink calls update_latest_symlink; it is best-effort. Keep existing path naming and atomic rename. Removing the initial remove_file lets symlink creation arbitrate collision without overwriting another entry. A stale collision can prevent latest refresh for that session until retention cleanup; log data writing continues. No retry/new naming framework.
+
+Independent audit findings: seven-day pruning runs only at per-session logger installation, not periodically; it is not a disk byte quota. Old mtime does not prove a log has no open writer. Per-session worker guards persist until process exit, and concurrent first opens can park redundant writers. Record separately rather than expanding this ownership fix.

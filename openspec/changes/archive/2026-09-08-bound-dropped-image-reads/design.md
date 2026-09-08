@@ -1,0 +1,6 @@
+## Evidence
+try_read_dropped_path在anchor/URI门禁后调用read_image_at_path；后者is_file后直接fs::read再sniff和读dimensions。失败回退NonImage，不是删除输入文本。真实UI使用try_read_dropped_paths，区别于待删除候选R18的旧发送builder。
+## Design
+保持原路径门禁；打开文件并读取同句柄metadata，只接受regular和不超过50MB的长度。Unix打开使用O_NONBLOCK，避免检查后切换为FIFO导致阻塞；不加O_NOFOLLOW，保留用户显式拖入symlink的既有语义。私有reader helper用take(limit+1)，拒绝空和超限。大小合法后才sniff/decode dimensions。
+## Limits
+预算只限制编码字节，不限制系统级文件I/O耗时或解码后像素；不宣称路径和内容不可变。旧MAX_SEND_BYTES仍独属于候选旧builder，不新增生产引用。

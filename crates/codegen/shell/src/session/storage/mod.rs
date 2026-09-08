@@ -3176,8 +3176,8 @@ pub trait StorageAdapter: Send + Sync {
 
     /// Load session data WITHOUT updates (for memory efficiency when updates
     /// will be streamed). Implementations also do NOT read rewind points here;
-    /// those are deferred and lazily loaded on demand from the path returned by
-    /// [`rewind_points_file_path`](StorageAdapter::rewind_points_file_path).
+    /// the resume path separately pins their source file and defers loading to
+    /// [`FileStateTracker::with_lazy_source`](workspace::session::file_state::FileStateTracker::with_lazy_source).
     async fn load_session_without_updates(&self, info: &Info) -> io::Result<PersistedDataLight>;
 
     /// Loads the summary of the session

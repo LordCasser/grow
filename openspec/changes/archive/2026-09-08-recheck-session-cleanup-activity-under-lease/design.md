@@ -1,0 +1,5 @@
+# Design
+After acquiring the existing writer lease, reread and validate the candidate summary through its pinned directory and re-evaluate activity cutoff before quarantine/delete. Do not use a cached summary accidentally. Preserve identity checks, explicitly skipped session, current writers and future activity. Add deterministic fixture that refreshes a candidate between initial scan and lease-time eligibility; no actual user history cleanup.
+
+# Implementation
+The initial scan/age check remains a candidate filter. A private delete_if_still_stale helper acquires the existing writer lease, reads bounded summary bytes from the already-pinned directory (not its cached summary), validates against the scanned Info, and rechecks last_active_at/updated_at before calling the existing identity-checked delete. Read/identity errors preserve the candidate and count through the existing cleanup error path. Leases use the adapter cache and remain until deletion or adapter drop, including reclassified candidates; no new lease lifetime mechanism.

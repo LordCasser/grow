@@ -273,12 +273,10 @@ fn set_permission_mode_inner_scoped(app: &mut AppView, mode: shell::util::config
     }
 }
 
-/// Set `permission_mode`. SHELL-owned, emits
-/// `Effect::PersistPermissionMode` with rollback. The drain runs
-/// unconditionally on always-approve (even duplicate dispatches) because
-/// a permission could arrive between dispatches.
 /// Set the active session's permission mode without changing the persisted
-/// default used by future sessions.
+/// default used by future sessions. Emits `NotifySessionPermissionMode`.
+/// Always-approve drains even on duplicate selections because a permission
+/// may have arrived since the previous selection.
 pub(super) fn set_permission_mode(
     app: &mut AppView,
     kind: crate::app::actions::PermissionModeKind,
@@ -349,10 +347,10 @@ pub(super) fn set_default_permission_mode(
         "✓ Default permission mode: {}",
         kind.display_name()
     ));
-    vec![Effect::PersistPermissionMode {
-        canonical: kind.as_canonical(),
-        session_id: None,
-        persist: crate::app::actions::PermissionModePersist::WithRollback(previous),
+    vec![Effect::PersistSetting {
+        key: "permission_mode",
+        value: crate::settings::SettingValue::Enum(kind.as_canonical()),
+        rollback_value: crate::settings::SettingValue::Enum(previous),
     }]
 }
 

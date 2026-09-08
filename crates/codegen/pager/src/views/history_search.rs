@@ -63,7 +63,9 @@ enum Msg {
 
 struct Daemon {
     shared: Arc<Mutex<Snapshot>>,
-    tx: SyncSender<Msg>,
+    tx: SyncSender<()>,
+    pending: Arc<Mutex<Option<(usize, Msg)>>>,
+    next_generation: std::cell::Cell<usize>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -72,30 +74,30 @@ const MAX_RESULTS: usize = 100;
 impl Daemon {
     fn new() -> Self {
         let shared = Arc::new(Mutex::new(Snapshot::default()));
-        let (tx, rx) = sync_channel::<Msg>(256);
+        let (tx, rx) = sync_channel::<()>(1);
+        let pending = Arc::new(Mutex::new(None));
+        let worker_pending = Arc::clone(&pending);
 
         let out = shared.clone();
         let worker = move || {
             let mut pattern = MultiPattern::new(1);
             let mut matcher = Matcher::new(Config::DEFAULT);
             let mut items: Vec<(String, Utf32String)> = Vec::new();
-            let mut generation: usize = 0;
             let mut prev_q = String::new();
 
-            while let Ok(msg) = rx.recv() {
-                let msg = drain_to_latest(msg, &rx);
+            while rx.recv().is_ok() {
+                let msg = worker_pending.lock().unwrap().take();
+                let Some((generation, msg)) = msg else { continue };
 
                 match msg {
                     Msg::SetItems(new) => {
                         items = build_items(new);
                         prev_q.clear();
-                        generation += 1;
                         publish_matches(&items, "", &mut pattern, &mut matcher, &out, generation);
                     }
                     Msg::SetItemsAndQuery(new, query) => {
                         items = build_items(new);
                         prev_q.clear();
-                        generation += 1;
                         let trimmed = query.trim().to_string();
                         publish_matches(
                             &items,
@@ -108,7 +110,6 @@ impl Daemon {
                         prev_q = trimmed;
                     }
                     Msg::SetQuery(query) => {
-                        generation += 1;
                         let trimmed = query.trim().to_string();
 
                         if trimmed.is_empty() {
@@ -161,7 +162,7 @@ impl Daemon {
             }
         };
 
-        Self { shared, tx, handle }
+        Self { shared, tx, pending, next_generation: std::cell::Cell::new(0), handle }
     }
 }
 
@@ -249,30 +250,37 @@ fn publish_query_matches(
     };
 }
 
-/// Drain the channel to the most recent message, coalescing queries.
-fn drain_to_latest(first: Msg, rx: &std::sync::mpsc::Receiver<Msg>) -> Msg {
-    let mut current = first;
-    while let Ok(next) = rx.try_recv() {
-        current = match (current, next) {
-            // Coalesce consecutive SetQuery — keep latest.
-            (Msg::SetQuery(_), next @ Msg::SetQuery(_)) => next,
-            // Preserve the item refresh and latest query as one atomic update.
-            (Msg::SetItems(items), Msg::SetQuery(query)) => Msg::SetItemsAndQuery(items, query),
-            (Msg::SetItemsAndQuery(items, _), Msg::SetQuery(query)) => {
-                Msg::SetItemsAndQuery(items, query)
-            }
-            // Stop always wins.
-            (_, stop @ Msg::Stop) => return stop,
-            // SetItems after SetQuery — keep SetItems (reset).
-            (_, next) => next,
-        };
+/// Preserve the latest item refresh together with its following query.
+fn merge_pending(current: Msg, next: Msg) -> Msg {
+    match (current, next) {
+        (Msg::Stop, _) | (_, Msg::Stop) => Msg::Stop,
+        (Msg::SetItems(items), Msg::SetQuery(query))
+        | (Msg::SetItemsAndQuery(items, _), Msg::SetQuery(query)) => {
+            Msg::SetItemsAndQuery(items, query)
+        }
+        (_, next) => next,
     }
-    current
+}
+
+impl Daemon {
+    fn submit(&self, msg: Msg) -> usize {
+        let generation = self.next_generation.get().checked_add(1).expect("history request generation exhausted");
+        self.next_generation.set(generation);
+        let mut pending = self.pending.lock().unwrap();
+        *pending = Some((generation, match pending.take() {
+            Some((_, current)) => merge_pending(current, msg),
+            None => msg,
+        }));
+        // A full channel already carries the required wake. Matching and
+        // publishing happen outside this short pending-state critical section.
+        let _ = self.tx.try_send(());
+        generation
+    }
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.tx.send(Msg::Stop);
+        self.submit(Msg::Stop);
     }
 }
 
@@ -289,7 +297,7 @@ pub struct HistorySearchState {
     active: bool,
     saved_text: String,
     snapshot: Snapshot,
-    last_gen: usize,
+    requested_generation: usize,
     pub selected: usize,
     /// While `true`, selection tracks the bottom-most (most-recent / best-match)
     /// entry as results stream in. Set on `activate`, cleared once the user
@@ -323,7 +331,7 @@ impl HistorySearchState {
             active: false,
             saved_text: String::new(),
             snapshot: Snapshot::default(),
-            last_gen: 0,
+            requested_generation: 0,
             selected: 0,
             stick_to_bottom: true,
             last_query: String::new(),
@@ -347,7 +355,7 @@ impl HistorySearchState {
 
     pub fn refresh_items(&mut self, history: &[HistoryEntry]) {
         let items: Vec<String> = history.iter().map(|e| e.text.clone()).collect();
-        let _ = self.daemon.tx.send(Msg::SetItems(items));
+        self.submit_request(Msg::SetItems(items));
     }
 
     /// Activate in SEARCH mode (`/history`): send items to the
@@ -377,10 +385,7 @@ impl HistorySearchState {
         self.stick_to_bottom = true;
         self.last_query.clear();
         self.refresh_items(history);
-        // Eagerly grab the initial snapshot.
-        self.snapshot = self.daemon.shared.lock().unwrap().clone();
-        self.last_gen = self.snapshot.generation;
-        self.selected = self.snapshot.items.len().saturating_sub(1);
+        self.selected = 0;
     }
 
     /// False when the matcher thread never started, so the overlay cannot open
@@ -412,7 +417,13 @@ impl HistorySearchState {
             self.last_query = query.to_string();
             self.stick_to_bottom = true;
         }
-        let _ = self.daemon.tx.send(Msg::SetQuery(query.to_string()));
+        self.submit_request(Msg::SetQuery(query.to_string()));
+    }
+
+    fn submit_request(&mut self, msg: Msg) {
+        self.requested_generation = self.daemon.submit(msg);
+        self.snapshot = Snapshot::default();
+        self.hovered = None;
     }
 
     /// Apply a signaled result snapshot. Returns `true` if changed.
@@ -421,10 +432,10 @@ impl HistorySearchState {
             return false;
         }
         let snap = self.daemon.shared.lock().unwrap().clone();
-        if snap.generation == self.last_gen {
+        if snap.generation != self.requested_generation
+            || snap.generation == self.snapshot.generation {
             return false;
         }
-        self.last_gen = snap.generation;
         self.snapshot = snap;
         let len = self.snapshot.items.len();
         if len == 0 {
@@ -539,6 +550,84 @@ impl HistorySearchState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_snapshots_cannot_be_accepted_after_reopen_query_or_refresh() {
+        let mut state = HistorySearchState::new();
+        // Prevent the real worker from racing the injected completion snapshots.
+        state.daemon.submit(Msg::Stop);
+        state.daemon.handle.take().unwrap().join().unwrap();
+        state.daemon.handle = Some(std::thread::spawn(|| {}));
+        let make_snapshot = |generation, text: &str| Snapshot {
+            generation,
+            items: vec![HistoryMatchResult { text: text.into(), indices: vec![] }].into(),
+        };
+        state.activate(&entries(&["old"]), "");
+        let old = state.requested_generation;
+        *state.daemon.shared.lock().unwrap() = make_snapshot(old, "old");
+        assert!(state.poll());
+        assert_eq!(state.selected_text(), Some("old"));
+        state.deactivate();
+        state.activate(&entries(&["new"]), "");
+        assert_eq!(state.selected_text(), None);
+        assert!(!state.poll());
+        let reopened = state.requested_generation;
+        state.update_query("new");
+        *state.daemon.shared.lock().unwrap() = make_snapshot(reopened, "outdated");
+        assert!(!state.poll());
+        assert_eq!(state.result_count(), 0);
+        let current = state.requested_generation;
+        *state.daemon.shared.lock().unwrap() = make_snapshot(current, "new");
+        assert!(state.poll());
+        assert!(!state.poll());
+        assert_eq!(state.selected_text(), Some("new"));
+        state.set_hovered(Some(0));
+        state.refresh_items(&entries(&["newer"]));
+        assert_eq!(state.selected_text(), None);
+        assert_eq!(state.hovered(), None);
+        assert!(!state.select_hovered());
+        assert!(!state.poll());
+    }
+
+    #[test]
+    fn pending_updates_and_drop_do_not_wait_for_a_worker() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (tx, rx) = sync_channel(1);
+            let pending = Arc::new(Mutex::new(None));
+            let daemon = Daemon {
+                shared: Arc::new(Mutex::new(Snapshot::default())),
+                tx, pending: Arc::clone(&pending), next_generation: std::cell::Cell::new(0), handle: None,
+            };
+            daemon.submit(Msg::SetItems(vec!["latest item".into()]));
+            for index in 0..1000 {
+                daemon.submit(Msg::SetQuery(format!("query-{index}")));
+            }
+            assert!(matches!(&*pending.lock().unwrap(),
+                Some((_, Msg::SetItemsAndQuery(items, query)))
+                if items == &["latest item"] && query == "query-999"));
+            // No receiver has consumed a notification: Drop must still return.
+            drop(daemon);
+            assert!(matches!(*pending.lock().unwrap(), Some((_, Msg::Stop))));
+            assert!(rx.try_recv().is_ok());
+            assert!(rx.try_recv().is_err());
+            done_tx.send(()).unwrap();
+        });
+        done_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn pending_refresh_resets_query_and_stop_wins() {
+        let old = Msg::SetItemsAndQuery(vec!["old".into()], "old-query".into());
+        let refreshed = merge_pending(old, Msg::SetItems(vec!["new".into()]));
+        assert!(matches!(&refreshed, Msg::SetItems(items) if items == &["new"]));
+        let queried = merge_pending(refreshed, Msg::SetQuery("new-query".into()));
+        assert!(matches!(queried, Msg::SetItemsAndQuery(items, query)
+            if items == ["new"] && query == "new-query"));
+        assert!(matches!(merge_pending(Msg::Stop, Msg::SetQuery("late".into())), Msg::Stop));
+        assert!(matches!(merge_pending(Msg::SetQuery("old".into()), Msg::Stop), Msg::Stop));
+    }
 
     fn entries(texts: &[&str]) -> Vec<HistoryEntry> {
         texts

@@ -29,6 +29,7 @@ fn test_actor(info: Info, storage: Arc<dyn StorageAdapter>) -> ActorGuard {
         handle: PersistenceHandle {
             tx,
             noop: false,
+            task: Some(task.abort_handle()),
             session_directory: None,
         },
         task,
@@ -263,4 +264,32 @@ async fn current_model_write_preserves_omitted_metadata() {
         "the write-back must not clear the persisted agent name"
     );
     actor.stop().await;
+}
+
+#[tokio::test]
+async fn stop_drains_accepted_updates_with_retained_sender() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info { id: acp::SessionId::new("stop-drain"), cwd: dir.path().to_string_lossy().into_owned() };
+    let storage = Arc::new(JsonlStorageAdapter::with_root(dir.path().into()));
+    storage.init_session(&info, default_model_id()).await.unwrap();
+    let actor = test_actor(info.clone(), storage);
+    let retained = actor.handle.clone();
+    actor.handle.tx.send(PersistenceMsg::Update(neutral_update(&info, "before stop"))).unwrap();
+    actor.handle.tx.send(PersistenceMsg::Stop).unwrap();
+    // Accepted before the current-thread runtime polls the receiver closure.
+    actor.handle.tx.send(PersistenceMsg::Update(neutral_update(&info, "already queued"))).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), actor.task).await.unwrap().unwrap();
+    assert!(retained.tx.send(PersistenceMsg::Flush).is_err());
+    assert!(retained.task_completion().unwrap().is_finished());
+    let replacement = JsonlStorageAdapter::with_root(dir.path().into());
+    let loaded = replacement.load_session_for_write_without_updates(&info).await.unwrap();
+    assert_eq!(loaded.summary.num_messages, 1); // Adjacent text chunks merge.
+    let updates = replacement.load_session(&info).await.unwrap().updates;
+    let texts: Vec<_> = updates.iter().filter_map(|update| {
+        let SessionUpdate::Acp(notification) = update else { return None; };
+        let acp::SessionUpdate::AgentMessageChunk(chunk) = &notification.update else { return None; };
+        let acp::ContentBlock::Text(text) = &chunk.content else { return None; };
+        Some(text.text.as_str())
+    }).collect();
+    assert_eq!(texts, ["before stopalready queued"]);
 }

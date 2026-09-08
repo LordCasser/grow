@@ -1,0 +1,11 @@
+# Verification
+- main, locked/offline low-disk Cargo flags (incremental/dev-debug/test-debug off, jobs 2, RUST_MIN_STACK=16777216).
+- shell title_source_tests: 2 passed, 0 failed, 0 ignored, 0.00 s. Actual Timeline append/record fixtures place notification and a control fact after the input; selected source remains the input and differs from the tail. Missing, duplicate and synthetic-only prompt identities are rejected. No full FIFO/provider title integration test was run.
+- shell session::helpers::session_title::tests: 15 passed, 0 failed, 0 ignored, 0.00 s.
+- chat-state push_user_message_durably_waits_for_timeline_commit: 1 passed, 0.00 s. Returned event serialized equality with persistence record, remains same source after later input.
+- chat-state durable_user_message_retries_an_uncertain_persistence_failure and lost_timeline_ack_retries_the_exact_event_once: 1 passed each, 0.03 s each; existing exact retry behavior retained.
+- Initial shell compilation was deliberately interrupted after another title caller (direct command without prompt index) was found; no test result from that run. Final caller sweep covers ordinary admission and direct command.
+- First chat-state test compile failed because the assertion compared TimelineEvent without PartialEq. Changed test to compare full serialized events; no product trait added. All three selected chat-state tests then passed.
+- The direct-command path uses the same now-event-returning durable commit verified above; actual terminal execution was not performed. Shell linker compact-unwind warning remains.
+- No user-state writes, no Windows run, and no claim of full end-to-end model title generation coverage.
+- Strict all 16 / archived 234 passed. cargo clean removed 8,517 files / 3.5 GiB; final available disk 65 GiB.

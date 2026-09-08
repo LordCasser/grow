@@ -1194,6 +1194,12 @@ impl SessionActor {
         }
 
         if let Some(input) = rewound_input {
+            if let Err(error) = self.file_state_tracker.get_rewind_points().await {
+                let _ = input.respond_to.send(Err(acp::Error::internal_error().data(format!(
+                    "cancel terminal was committed but rewind history could not load: {error}"
+                ))));
+                return Ok(());
+            }
             let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
             let target_prompt_index = current_prompt_index.saturating_sub(1);
             if let Err(error) = self
@@ -1208,9 +1214,15 @@ impl SessionActor {
                     ))));
                 return Ok(());
             }
-            self.file_state_tracker
+            if let Err(error) = self.file_state_tracker
                 .truncate_from(target_prompt_index)
-                .await;
+                .await
+            {
+                let _ = input.respond_to.send(Err(acp::Error::internal_error().data(format!(
+                    "conversation rewind committed but checkpoint truncation failed: {error}"
+                ))));
+                return Ok(());
+            }
             let _ = input.respond_to.send(Ok(PromptTurnOk {
                 stop_reason: acp::StopReason::Cancelled,
                 total_tokens,

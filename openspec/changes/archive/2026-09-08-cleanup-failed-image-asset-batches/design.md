@@ -1,0 +1,4 @@
+# Design
+Actual call chain: turn admission -> persist_and_prepend_image_files -> persist_user_images -> contained asset directory atomic exclusive writes. Current write_atomic reports success once published; directory-sync degradation is warned separately. Earlier commentary hypothesizing post-publication ordinary error was corrected after reading current implementation.
+
+Keep filenames and successful ordering. Track successful paths already in out; on failure remove their single-component filenames through the held assets directory with durable removal. Failed filename is not in out and must not be removed. Existing assets are never cleanup candidates. A private writer callback seam permits deterministic IO error after first real publication. Cleanup failure logs warning while returning original batch error. Not crash-atomic; errors after this function successfully returns (later admission) are separate lifecycle work.

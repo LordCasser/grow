@@ -96,6 +96,8 @@ pub struct DiagnosticFacts {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TmuxFacts {
+    /// Raw startup candidates; commas are not escaped by tmux.
+    pub config_files: Option<String>,
     pub extended_keys: TmuxOptionFact,
     pub set_clipboard: TmuxOptionFact,
     pub allow_passthrough_support: TmuxSupportFact,

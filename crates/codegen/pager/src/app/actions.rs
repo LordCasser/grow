@@ -279,14 +279,14 @@ pub enum Action {
     },
     /// Export the active (sub)agent's conversation transcript as Markdown.
     /// `None` => copy to clipboard (with route-aware toast + stats); `Some(p)` => write UTF-8 file
-    /// (all ~ expansion, parent dir creation, and fs::write live in the dispatch handler).
+    /// Explicit file output is resolved in dispatch and committed by the background writer.
     ExportConversation {
         file_path: Option<std::path::PathBuf>,
     },
     /// Render the active (sub)agent's full transcript to a temp Markdown file and
     /// open it in `$PAGER` (default `less`), suspending the inline TUI for the
     /// duration. The dispatch handler renders + writes the file and arms
-    /// `AppView::pending_pager_path`; the event loop does the suspend/restore.
+    /// `AppView::pending_pager`; the event loop does the suspend/restore.
     OpenTranscriptPager,
     /// Minimal mode (`grow --minimal`): re-print the most-recently committed
     /// folded block (collapsed reasoning / truncated tool output) into native
@@ -1159,6 +1159,16 @@ impl ClipboardPasteSource {
             Self::BracketedInserted { .. } => None,
         }
     }
+    /// Use only after a successful file probe produced no classified entries.
+    /// Original text owns its existing insertion path, including bracketed text
+    /// that was already inserted before the asynchronous probe completed.
+    pub fn file_url_text_on_miss<'a>(&self, urls: &'a str) -> Option<&'a str> {
+        if self.text().is_some_and(|text| !text.trim().is_empty()) || urls.trim().is_empty() {
+            None
+        } else {
+            Some(urls)
+        }
+    }
     pub fn synchronous_insertion(&self) -> Option<ClipboardTextInsertion> {
         match self {
             Self::BracketedInserted { insertion, .. } => Some(*insertion),
@@ -1255,6 +1265,10 @@ pub enum AfterSessionDelete {
 }
 #[derive(Debug)]
 pub enum Effect {
+    WriteTranscriptFile {
+        id: u64,
+        request: crate::app::transcript_file_writes::TranscriptFileWrite,
+    },
     /// Create a new ACP session.
     CreateSession {
         agent_id: AgentId,
@@ -1853,10 +1867,12 @@ pub enum Effect {
         cwd: std::path::PathBuf,
     },
     FetchRewindPoints {
+        request_id: uuid::Uuid,
         agent_id: AgentId,
         session_id: acp::SessionId,
     },
     RewindPreview {
+        request_id: uuid::Uuid,
         agent_id: AgentId,
         session_id: acp::SessionId,
         target_prompt_index: usize,
@@ -1930,11 +1946,13 @@ pub enum Effect {
         agent_id: AgentId,
         child_session_id: Option<String>,
         owner_id: u64,
-        path: std::path::PathBuf,
+        source: crate::prompt_images::ImageViewerLoadSource,
+        protocol: crate::terminal::image::GraphicsProtocol,
     },
-    PlanDoctorFix {
+    PrepareDoctor {
         target: DoctorFixTarget,
-        report: Box<crate::diagnostics::DiagnosticReport>,
+        input: Box<crate::app::doctor::DoctorReportInput>,
+        permit: tokio::sync::OwnedSemaphorePermit,
         terminal: crate::terminal::TerminalContext,
         request: crate::slash::command::DoctorRequest,
     },
@@ -1981,6 +1999,7 @@ pub enum SubagentKillOutcome {
 }
 #[derive(Debug, Clone)]
 pub enum DoctorPlanningOutcome {
+    Report(String),
     Listing(String),
     Plan(Box<crate::diagnostics::FixPlan>),
     RunLocally(String),
@@ -2024,6 +2043,12 @@ pub struct ControlRequestFailure {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
+    TranscriptFileWritten {
+        id: u64,
+        agent_id: AgentId,
+        session_id: Option<acp::SessionId>,
+        result: Result<String, String>,
+    },
     /// Session was created successfully.
     SessionCreated {
         agent_id: AgentId,
@@ -2463,7 +2488,7 @@ pub enum TaskResult {
     },
     /// `grow/recap` request acknowledged (fire-and-forget). The recap itself
     /// arrives separately as a `SessionRecap` notification; this only carries
-    /// a transport error, if any, for logging.
+    /// a transport or admission error, if any, for feedback cleanup.
     RecapRequested {
         /// Session the recap was requested for — lets the handler find the
         /// agent whose manual loading spinner must be cleared on failure.
@@ -2532,20 +2557,24 @@ pub enum TaskResult {
         error: String,
     },
     RewindPointsLoaded {
+        request_id: uuid::Uuid,
         agent_id: AgentId,
         points: Vec<crate::views::rewind::RewindPointInfo>,
     },
     RewindPointsFailed {
+        request_id: uuid::Uuid,
         agent_id: AgentId,
         error: String,
     },
     RewindPreviewComplete {
+        request_id: uuid::Uuid,
         agent_id: AgentId,
         response: crate::views::rewind::RewindResponse,
         target_prompt_index: usize,
         mode: crate::views::rewind::RewindMode,
     },
     RewindPreviewFailed {
+        request_id: uuid::Uuid,
         agent_id: AgentId,
         error: String,
     },
@@ -2622,6 +2651,7 @@ pub enum TaskResult {
         result: crate::prompt_images::ImageLoadResult,
     },
     DoctorFixPlanned {
+        report_only: bool,
         target: DoctorFixTarget,
         result: Result<DoctorPlanningOutcome, String>,
     },

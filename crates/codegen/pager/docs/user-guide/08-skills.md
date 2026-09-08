@@ -97,12 +97,12 @@ Multi-word frontmatter keys use kebab-case (single-word keys like `model` are wr
 | Field | Description |
 |-------|-------------|
 | `when-to-use` | Trigger phrases for automatic invocation, kept separate from `description`. |
-| `allowed-tools` | Tools the skill uses, as a YAML list or a comma- or space-separated string. |
+| `allowed-tools` | Declared tools, shown in skill details, as a YAML list or a comma- or space-separated string. This metadata does not restrict tool access; normal session permissions still apply. |
 | `argument-hint` | Hint text shown in the slash-command autocomplete (for example, `commit message`). |
 | `user-invocable` | Whether you can run the skill as a slash command. Defaults to `true`; set `false` to hide it from slash commands. (To stop the model from invoking a skill, set `disable-model-invocation` instead.) |
 | `disable-model-invocation` | When `true`, only your slash command runs the skill -- the model cannot invoke it automatically. Defaults to `false`. |
-| `model` | Model override for running the skill. |
-| `effort` | Reasoning-effort override. |
+| `model` | Stored model metadata; currently does not override session sampling. |
+| `effort` | Stored reasoning-effort metadata; currently does not override session sampling. |
 | `license` | License identifier (for example, `Apache-2.0`). |
 | `compatibility` | Environment requirements (for example, `Requires git, docker, jq`). |
 | `metadata` | Arbitrary string key-value pairs. Grow promotes `metadata.author` and `metadata.short-description` for display. |
@@ -216,3 +216,5 @@ See the [Plugins guide](09-plugins.md) for more on installing plugins that provi
 5. **Version-control project skills.** Commit `.grow/skills/` to your repository so the whole team benefits. User skills in `~/.grow/skills/` stay personal and unshared.
 
 6. **Test by running it.** Invoke `/name` and confirm the skill works before you rely on automatic invocation.
+
+Skill frontmatter must be complete, valid YAML. Grow skips malformed headers instead of repairing them into partial metadata. Quote scalar values containing a colon followed by a space, such as `description: "Deploy: push to production"`. Plain Markdown without frontmatter remains supported.

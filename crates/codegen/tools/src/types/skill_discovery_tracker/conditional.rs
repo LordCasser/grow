@@ -26,6 +26,14 @@ impl ConditionalSkills {
         self.held.is_empty()
     }
 
+    /// Keep already-loaded metadata authoritative when discovery parses the
+    /// same file again without its configuration or conditional gate.
+    pub(super) fn known_skill(&self, path: &Path) -> Option<&SkillInfo> {
+        self.held
+            .iter()
+            .find(|skill| canonical_path(&skill.path) == path)
+    }
+
     /// A `paths:` skill that hasn't been triggered yet — withheld from the
     /// listing until a matching file is touched.
     pub(super) fn is_pending(&self, s: &SkillInfo) -> bool {

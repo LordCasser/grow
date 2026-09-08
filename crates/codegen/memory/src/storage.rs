@@ -128,20 +128,24 @@ impl MemoryStorage {
         self.workspace_dir.join("MEMORY.md")
     }
 
-    /// Classify a file path as a memory source type.
+    /// Classify a path if it is one of this storage's indexable memory files.
     ///
-    /// Returns `"global"`, `"workspace"`, or `"session"` based on location.
-    pub fn classify_source(&self, path: &Path) -> &'static str {
-        if path.starts_with(&self.workspace_dir) {
-            if path.file_name().is_some_and(|f| f == "MEMORY.md") {
-                "workspace"
-            } else {
-                "session"
-            }
-        } else if path.starts_with(&self.global_dir) {
-            "global"
+    /// This is deliberately the same lexical scope used by
+    /// [`list_memory_files`]. Watcher paths for deleted files cannot be
+    /// canonicalized, so the predicate must not depend on the file existing.
+    pub fn classify_source(&self, path: &Path) -> Option<&'static str> {
+        if paths_equivalent(path, &self.global_memory_file()) {
+            Some("global")
+        } else if paths_equivalent(path, &self.workspace_memory_file()) {
+            Some("workspace")
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("md")
+            && path
+                .parent()
+                .is_some_and(|parent| paths_equivalent(parent, &self.sessions_dir()))
+        {
+            Some("session")
         } else {
-            "session"
+            None
         }
     }
 
@@ -324,13 +328,16 @@ impl MemoryStorage {
 
         // Global MEMORY.md
         let global_file = self.global_memory_file();
-        if global_file.is_file() {
+        if self.classify_source(&global_file) == Some("global") && global_file.is_file() {
             files.push(global_file);
         }
 
         // Workspace MEMORY.md
         let workspace_file = self.workspace_memory_file();
-        if workspace_file.is_file() {
+        if workspace_file != self.global_memory_file()
+            && self.classify_source(&workspace_file) == Some("workspace")
+            && workspace_file.is_file()
+        {
             files.push(workspace_file);
         }
 
@@ -341,7 +348,7 @@ impl MemoryStorage {
                 .filter_map(|entry| {
                     let entry = entry.ok()?;
                     let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    if self.classify_source(&path) == Some("session") {
                         Some(path)
                     } else {
                         None
@@ -512,6 +519,30 @@ impl MemoryStorage {
         }
 
         Ok(removed)
+    }
+}
+
+/// Compare paths even when a watcher reports a canonical path while storage
+/// was configured through a symlink. For a removed file, canonicalize its
+/// parent and append the missing basename instead of requiring the file.
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let canonical = |path: &Path| -> std::io::Result<PathBuf> {
+        dunce::canonicalize(path).or_else(|_| {
+            let parent = path.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "path has no parent")
+            })?;
+            let name = path.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "path has no file name")
+            })?;
+            Ok(dunce::canonicalize(parent)?.join(name))
+        })
+    };
+    match (canonical(left), canonical(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -965,6 +996,40 @@ mod tests {
                 .to_str()
                 .unwrap()
                 == "memory"
+        );
+    }
+
+    #[test]
+    fn classify_source_matches_list_scope_and_rejects_sibling_workspace_files() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("current");
+        let sibling_dir = global_dir.join("sibling");
+        let storage = MemoryStorage::with_paths(global_dir.clone(), workspace_dir.clone());
+        std::fs::create_dir_all(workspace_dir.join("sessions")).unwrap();
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+
+        assert_eq!(
+            storage.classify_source(&global_dir.join("MEMORY.md")),
+            Some("global")
+        );
+        assert_eq!(
+            storage.classify_source(&workspace_dir.join("MEMORY.md")),
+            Some("workspace")
+        );
+        assert_eq!(
+            storage.classify_source(&workspace_dir.join("sessions").join("today.md")),
+            Some("session")
+        );
+        assert_eq!(
+            storage.classify_source(&sibling_dir.join("MEMORY.md")),
+            None,
+            "sibling workspace files must not enter this workspace index"
+        );
+        assert_eq!(
+            storage.classify_source(&workspace_dir.join("nested").join("note.md")),
+            None,
+            "enumeration only includes the workspace MEMORY.md and direct session logs"
         );
     }
 

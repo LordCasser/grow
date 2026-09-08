@@ -59,7 +59,7 @@ pub struct AcpConnection {
     /// Whether cancel-rewind is enabled (resolved by shell from config layers).
     pub cancel_rewind_enabled: bool,
     /// Whether the session-recap feature is rolled out for this connection,
-    /// resolved by the shell (remote settings / config / env; default OFF) and
+    /// resolved by the shell (remote settings / config / env; default ON) and
     /// advertised in `InitializeResponse.meta.sessionRecap`. The client gates
     /// its automatic away-recap poll and the manual `/recap` on this so a
     /// disabled feature produces zero `grow/recap` traffic. Defaults to `false`

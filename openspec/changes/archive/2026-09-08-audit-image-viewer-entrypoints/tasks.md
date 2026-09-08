@@ -1,0 +1,3 @@
+- [x] Trace constructor callers and loading-state producers across the checkout.
+- [x] Distinguish dormant test admission from live synchronous input work.
+- [x] Record deletion candidate and separate live fix proposal; validate and archive.

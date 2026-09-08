@@ -1,0 +1,8 @@
+## Evidence
+clipboard.rs run_attachments_osascript、get_image回退、set_image_file均使用Command::output；clipboard_osascript_command已经detach并设置null stdin与两个pipe。已有wait_with_deadline只等待直接子进程，不能处理持有输出管道的后代，不能直接复用。
+
+## Design
+在macOS平台模块内增加私有runner，保留std::process::Output结果以复用checked_command_stdout。同时有界读取两条管道，主循环检查输出越界和进程期限；所有退出分支终止拥有的进程组，正常退出也关闭遗留后代。管道结果收集额外最多300ms。使用tty-utils现有ProcessGroup，不创建跨crate框架。5秒允许正常脚本启动和图片转换；1MiB用于路径文本输出，二进制仍走临时文件。
+
+## Verification
+仅使用隔离shell假脚本验证正常stdout/stderr/非零状态、持续输出、超时和leader退出但后代持有管道；不访问真实剪贴板。保留既有argv及AppleScript语法测试。

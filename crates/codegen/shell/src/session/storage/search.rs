@@ -35,6 +35,7 @@ use chat_state::Timeline;
 use sampling_types::ConversationItem;
 
 const SEARCH_INDEX_DEBOUNCE_MS: u64 = 500;
+const SEARCH_INDEX_CONTENTION_RETRY: Duration = Duration::from_secs(1);
 const SEARCH_CONTENT_CHAR_LIMIT: usize = 200_000;
 const BOOTSTRAP_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -421,7 +422,15 @@ fn clear_last_bootstrap_at(db_path: &Path) -> io::Result<()> {
 }
 
 fn sqlite_to_io_error(error: rusqlite::Error) -> io::Error {
-    io::Error::other(format!("sqlite error: {error}"))
+    io::Error::other(error)
+}
+
+fn is_search_index_contention(error: &io::Error) -> bool {
+    matches!(
+        error.get_ref().and_then(|source| source.downcast_ref::<rusqlite::Error>()),
+        Some(rusqlite::Error::SqliteFailure(error, _))
+            if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 /// Rate-limits a repetitive log site: the first `cap` events go to `warn`, the
@@ -955,6 +964,9 @@ async fn flush_ready(
     for key in ready {
         pending.remove(&key);
         if let Err(e) = upsert_by_key(root_dir, storage, &key).await {
+            if is_search_index_contention(&e) {
+                pending.insert(key.clone(), Instant::now() + SEARCH_INDEX_CONTENTION_RETRY);
+            }
             log_session_index_failure(
                 &key.session_id,
                 &e,
@@ -1078,33 +1090,13 @@ async fn reindex_all(
         .store(summaries.len() as u64, Ordering::Relaxed);
     let expected_ids: HashSet<String> = summaries.iter().map(|s| s.info.id.to_string()).collect();
 
-    // Pin each ledger before spawning parallel work. Every task retains the
-    // identity-checked file handle selected by the storage authority.
-    let sessions: Vec<(Summary, TimelineLedgerReader)> = summaries
-        .into_iter()
-        .map(|summary| {
-            storage
-                .open_timeline_reader(&summary.info)
-                .map(|reader| (summary, reader))
-        })
-        .collect::<io::Result<_>>()?;
-
-    // Pre-scan: count sessions that will be skipped due to size cap
-    let mut skipped_large = 0u64;
-    for (_, reader) in &sessions {
-        if should_skip_session(reader.snapshot_len(), BOOTSTRAP_MAX_FILE_SIZE) {
-            skipped_large += 1;
-        }
-    }
-
     tracing::info!(
-        total_sessions = sessions.len(),
-        skipped_large = skipped_large,
+        total_sessions = summaries.len(),
         "session search bootstrap starting"
     );
 
-    // Semaphore-bounded parallel indexing: spawn a task per session,
-    // each acquiring a permit before doing the heavy I/O work.
+    // Semaphore-bounded parallel indexing: admit a session before opening
+    // its reader, then spawn its indexing task.
     // max_concurrent (default 4) limits disk I/O contention and keeps
     // the tokio blocking thread pool available for other work.
     let semaphore = Arc::new(Semaphore::new(BOOTSTRAP_MAX_CONCURRENT.max(1)));
@@ -1113,8 +1105,17 @@ async fn reindex_all(
 
     let mut join_set = tokio::task::JoinSet::new();
 
-    for (summary, timeline_reader) in sessions {
-        let sem = semaphore.clone();
+    for summary in summaries {
+        // Bound admission before opening a ledger. The blocking fold shares
+        // ownership so an async timeout cannot admit replacement readers early.
+        let permit = Arc::new(
+            semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore is never closed"),
+        );
+        let timeline_reader = storage.open_timeline_reader(&summary.info)?;
         let progress = progress_arc.clone();
         let root = root_owned.clone();
         let claim_lost = Arc::clone(&claim_lost);
@@ -1122,12 +1123,7 @@ async fn reindex_all(
         let max_file_size = BOOTSTRAP_MAX_FILE_SIZE;
 
         join_set.spawn(async move {
-            // Acquire semaphore permit — this provides backpressure,
-            // limiting concurrency to max_concurrent (default 4).
-            // Safety: the semaphore is never closed — it lives in an Arc
-            // shared only by tasks spawned in this loop, all of which
-            // complete before the Arc is dropped.
-            let _permit = sem.acquire().await.expect("semaphore is never closed");
+            let _permit = permit;
 
             // A successor owns the index once the claim is lost. These
             // upserts are idempotent, not fenced; stopping just avoids
@@ -1170,9 +1166,11 @@ async fn reindex_all(
             // The inner block is `async move` to own summary, timeline_reader,
             // and root — the outer block retains session_id and progress
             // for post-timeout error reporting.
+            let reader_permit = Arc::clone(&_permit);
             match tokio::time::timeout(timeout_dur, async move {
                 // Collect content via one strict Timeline fold.
                 let (content, bytes_read) = match tokio::task::spawn_blocking(move || {
+                    let _reader_permit = reader_permit;
                     collect_timeline_indexable_content(timeline_reader)
                 })
                 .await
@@ -2153,6 +2151,194 @@ mod tests {
 
     // ── delete-evict contract ──────────────────────────────────────────────
 
+    #[test]
+    fn search_contention_keeps_sqlite_error_identity() {
+        for (code, retry) in [
+            (rusqlite::ffi::SQLITE_BUSY, true),
+            (rusqlite::ffi::SQLITE_LOCKED, true),
+            (rusqlite::ffi::SQLITE_CORRUPT, false),
+            (rusqlite::ffi::SQLITE_IOERR, false),
+        ] {
+            let error = sqlite_to_io_error(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert_eq!(is_search_index_contention(&error), retry);
+        }
+        assert!(!is_search_index_contention(&io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "unrelated filesystem error"
+        )));
+        assert!(!is_search_index_contention(&io::Error::other(
+            "database is locked"
+        )));
+    }
+
+    #[tokio::test]
+    async fn search_pending_terminal_errors_and_missing_index_do_not_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let storage =
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
+        let info = Info {
+            id: acp::SessionId::new("invalid-summary"),
+            cwd: "/ws".into(),
+        };
+        storage
+            .init_session(&info, crate::session::persistence::default_model_id())
+            .await
+            .unwrap();
+        let directory = storage.open_session(&info).unwrap().directory_handle();
+        std::fs::write(
+            directory.display_path().join(super::super::SUMMARY_FILE),
+            b"invalid json",
+        )
+        .unwrap();
+        drop(directory);
+        drop(storage);
+        let storage =
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
+        let bad = SessionSearchKey {
+            session_id: info.id.0.to_string(),
+            cwd: info.cwd.clone(),
+        };
+        assert_eq!(
+            upsert_by_key(root.path(), &storage, &bad)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        let absent = SessionSearchKey {
+            session_id: "missing".into(),
+            cwd: "/ws".into(),
+        };
+        let mut pending = HashMap::from([(bad, Instant::now()), (absent, Instant::now())]);
+        flush_ready(root.path(), &storage, &mut pending).await;
+        assert!(pending.is_empty());
+        assert!(!search_index_exists(root.path()));
+    }
+
+    #[tokio::test]
+    async fn busy_eviction_retries_without_another_notification() {
+        let root = tempfile::tempdir().unwrap();
+        let db_path = search_db_path(root.path());
+        let doc = build_session_doc(
+            &test_summary("busy-session", "/ws", "contendedrecord"),
+            "body".into(),
+        );
+        with_search_index(&db_path, |index| index.upsert_doc(&doc)).unwrap();
+        let blocker = rusqlite::Connection::open(&db_path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let storage =
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
+        let key = SessionSearchKey {
+            session_id: "busy-session".into(),
+            cwd: "/ws".into(),
+        };
+        let mut pending = HashMap::from([(key.clone(), Instant::now())]);
+        flush_ready(root.path(), &storage, &mut pending).await;
+        blocker.execute_batch("ROLLBACK").unwrap();
+        let retry_at = *pending
+            .get(&key)
+            .expect("SQLite contention must retain the failed eviction");
+        assert!(retry_at > Instant::now(), "retry must not spin immediately");
+        flush_ready(root.path(), &storage, &mut pending).await;
+        assert_eq!(pending.get(&key), Some(&retry_at));
+        let before = with_search_index(&db_path, |index| {
+            index.query("contendedrecord", None, 10, 0, false)
+        })
+        .unwrap();
+        assert_eq!(before.results.len(), 1);
+        tokio::time::sleep_until(retry_at).await;
+        flush_ready(root.path(), &storage, &mut pending).await;
+        assert!(pending.is_empty());
+        let after = with_search_index(&db_path, |index| {
+            index.query("contendedrecord", None, 10, 0, false)
+        })
+        .unwrap();
+        assert!(after.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_cleanup_reports_keys_for_search_eviction() {
+        for indexed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let storage =
+                crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
+            let info = crate::session::info::Info {
+                id: acp_transport::protocol::SessionId::new("auto-cleanup-search"),
+                cwd: "/test/workspace".into(),
+            };
+            let mut summary = storage
+                .init_session(&info, crate::session::persistence::default_model_id())
+                .await
+                .unwrap();
+            summary.created_at = chrono::Utc::now() - chrono::Duration::days(60);
+            summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+            summary.last_active_at = Some(summary.updated_at);
+            let directory = storage.open_session(&info).unwrap().directory_handle();
+            std::fs::write(
+                directory
+                    .display_path()
+                    .join(crate::session::storage::SUMMARY_FILE),
+                serde_json::to_vec(&summary).unwrap(),
+            )
+            .unwrap();
+            drop(directory);
+            drop(storage);
+            if indexed {
+                let doc = build_session_doc(&summary, "uniqueobsoletecleanup".into());
+                with_search_index(&search_db_path(root.path()), |index| index.upsert_doc(&doc))
+                    .unwrap();
+                let before = with_search_index(&search_db_path(root.path()), |index| {
+                    index.query("uniqueobsoletecleanup", None, 10, 0, false)
+                })
+                .unwrap();
+                assert_eq!(before.results.len(), 1);
+            }
+            let cleaner =
+                crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
+            let mut keys = Vec::new();
+            let stats = cleaner
+                .cleanup_stale_sessions_sync(30, None, |deleted| {
+                    keys.push(SessionSearchKey {
+                        session_id: deleted.id.0.to_string(),
+                        cwd: deleted.cwd.clone(),
+                    })
+                })
+                .unwrap();
+            assert_eq!(stats, (1, 0));
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0].session_id, info.id.0.as_ref());
+            assert_eq!(keys[0].cwd, info.cwd);
+            if indexed {
+                let manager = SearchIndexManager::start();
+                for key in keys {
+                    manager.enqueue(root.path().into(), key.session_id, key.cwd);
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let after = with_search_index(&search_db_path(root.path()), |index| {
+                            index.query("uniqueobsoletecleanup", None, 10, 0, false)
+                        })
+                        .unwrap();
+                        if after.results.is_empty() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("queued cleanup eviction must reach the correct root");
+            } else {
+                for key in keys {
+                    upsert_by_key(root.path(), &cleaner, &key).await.unwrap();
+                }
+                assert!(!search_index_exists(root.path()));
+            }
+        }
+    }
+
     /// A session delete must remove its index row even when no index was
     /// ever built, and must never create an index as a side effect.
     #[tokio::test]
@@ -2196,6 +2382,73 @@ mod tests {
         .unwrap();
 
         assert_eq!(hits("memorable"), 0, "a delete must land");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bootstrap_many_sessions_under_descriptor_limit() {
+        const CHILD: &str = "GROW_TEST_BOOTSTRAP_FD_HOME";
+        const TEST: &str =
+            "session::storage::search::tests::bootstrap_many_sessions_under_descriptor_limit";
+        let Ok(home) = std::env::var(CHILD) else {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD, tmp.path())
+                .env("GROW_HOME", tmp.path())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("1 passed"),
+                "child must run the regression: {stdout}"
+            );
+            return;
+        };
+        let home = PathBuf::from(home);
+        assert_eq!(::config::grow_home(), home);
+        let root = home.join("fixture");
+        for i in 0..96 {
+            // Drop each writer's directory/lease before reducing the limit.
+            let storage = super::super::JsonlStorageAdapter::with_root(root.clone());
+            let info = Info {
+                id: acp::SessionId::new(format!("fd-session-{i}")),
+                cwd: "/fd-test".into(),
+            };
+            storage
+                .init_session(&info, crate::agent::models::ModelId::new("test"))
+                .await
+                .unwrap();
+        }
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // Child process only: no parent/test-suite resource limits are changed.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        limit.rlim_cur = 64;
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        let storage = super::super::JsonlStorageAdapter::with_root(root.clone());
+        let outcome = bootstrap_with_lease(&root, &storage, BootstrapRole::Launch)
+            .await
+            .unwrap();
+        assert_eq!(outcome, BootstrapOutcome::Done);
+        assert_eq!(has_completed_bootstrap_marker(&root).await, Some(true));
+        assert_eq!(
+            with_search_index(&search_db_path(&root), |index| index
+                .all_indexed_session_ids())
+            .unwrap()
+            .len(),
+            96
+        );
     }
 
     // ── bootstrap lease gate tests ─────────────────────────────────────────

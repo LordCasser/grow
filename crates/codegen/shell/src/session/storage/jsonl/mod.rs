@@ -464,13 +464,15 @@ impl JsonlStorageAdapter {
     /// This closes the crash window without treating a sideband as a second
     /// model-facing store: the returned result is still only provenance for a
     /// new parent Timeline projection.
-    pub(crate) fn recover_completed_image_description_from_directory(
+    pub(crate) fn recover_completed_image_descriptions_from_directory(
         session: &super::ContainedDirectory,
         parent_timeline_id: &str,
         source_revision: u64,
-        source: chat_state::SurfaceId,
-        prompt: &str,
-    ) -> io::Result<Option<(String, chat_state::TimelineRangeRef)>> {
+        queries: &[(chat_state::SurfaceId, String)],
+    ) -> io::Result<Vec<Option<(String, chat_state::TimelineRangeRef)>>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
         let events = super::read_committed_jsonl_from_directory::<chat_state::TimelineEvent>(
             session,
             std::ffi::OsStr::new(super::TIMELINE_FILE),
@@ -481,6 +483,29 @@ impl JsonlStorageAdapter {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let ledgers =
             Self::read_sideband_ledgers_from_directory(session, parent_timeline_id, &parent)?;
+        queries
+            .iter()
+            .map(|(source, prompt)| {
+                Self::select_completed_image_description(
+                    &parent,
+                    &ledgers,
+                    parent_timeline_id,
+                    source_revision,
+                    *source,
+                    prompt,
+                )
+            })
+            .collect()
+    }
+
+    fn select_completed_image_description(
+        parent: &Timeline,
+        ledgers: &super::SidebandLedgers,
+        parent_timeline_id: &str,
+        source_revision: u64,
+        source: chat_state::SurfaceId,
+        prompt: &str,
+    ) -> io::Result<Option<(String, chat_state::TimelineRangeRef)>> {
         let candidates = parent
             .events()
             .iter()
@@ -845,10 +870,16 @@ impl JsonlStorageAdapter {
     fn rewind_points_file(&self, info: &Info) -> PathBuf {
         self.session_dir(info).join("rewind_points.jsonl")
     }
+    // Missing entries and invalid entities are established exclusions.
+    // Operational errors cannot establish that a partial scan is complete.
+    fn is_skippable_scan_error(error: &io::Error) -> bool {
+        matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::InvalidData)
+    }
+
     /// Enumerate identity-checked session entities from the pinned storage
     /// authority. Directory names, cwd markers, and Summary identity are one
     /// indivisible admission boundary; callers never receive an ambient path.
-    fn scan_opened_sessions(&self, cwd: Option<&str>) -> io::Result<Vec<OpenedSession>> {
+    fn scan_opened_sessions<T>(&self, cwd: Option<&str>, mut project: impl FnMut(OpenedSession) -> T) -> io::Result<Vec<T>> {
         if !matches!(&self.dir_mode, SessionDirMode::FromRoot(_)) {
             return Ok(Vec::new());
         }
@@ -871,7 +902,8 @@ impl JsonlStorageAdapter {
                 false,
             ) {
                 Ok(directory) => directory,
-                Err(_) => continue,
+                Err(error) if Self::is_skippable_scan_error(&error) => continue,
+                Err(error) => return Err(error),
             };
             for session_name in cwd_directory.list_names()? {
                 if session_name.to_string_lossy().starts_with('.') {
@@ -883,20 +915,26 @@ impl JsonlStorageAdapter {
                     false,
                 ) {
                     Ok(directory) => directory,
-                    Err(_) => continue,
+                    Err(error) if Self::is_skippable_scan_error(&error) => continue,
+                    Err(error) => return Err(error),
                 };
                 let summary = match Self::read_summary_from_directory(&directory) {
                     Ok(summary) => summary,
-                    Err(_) => continue,
+                    Err(error) if Self::is_skippable_scan_error(&error) => continue,
+                    Err(error) => return Err(error),
                 };
-                if Self::validate_physical_session_identity(
+                if let Err(error) = Self::validate_physical_session_identity(
                     &cwd_name,
                     &cwd_directory,
                     &session_name,
                     &summary,
-                )
-                .is_err()
-                    || summary.validate_current_format().is_err()
+                ) {
+                    if Self::is_skippable_scan_error(&error) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                if summary.validate_current_format().is_err()
                     || summary.is_hidden()
                     || cwd.is_some_and(|expected| expected != summary.info.cwd)
                 {
@@ -914,13 +952,13 @@ impl JsonlStorageAdapter {
                     .opened_sessions
                     .lock()
                     .map_err(|_| io::Error::other("session capability cache poisoned"))?
-                    .entry(key)
-                    .or_insert_with(|| candidate.clone())
-                    .clone();
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or(candidate);
                 let canonical_summary = Self::read_summary_from_directory(&directory)?;
                 Self::validate_session_identity(&summary.info, &canonical_summary)?;
                 let summary = canonical_summary;
-                opened.push(OpenedSession { directory, summary });
+                opened.push(project(OpenedSession { directory, summary }));
             }
         }
         Ok(opened)
@@ -928,10 +966,7 @@ impl JsonlStorageAdapter {
 
     pub(crate) fn list_sessions_sync(&self, cwd: Option<&str>) -> io::Result<Vec<Summary>> {
         let mut summaries = self
-            .scan_opened_sessions(cwd)?
-            .into_iter()
-            .map(|opened| opened.summary)
-            .collect::<Vec<_>>();
+            .scan_opened_sessions(cwd, |opened| opened.summary)?;
         summaries.sort_by_cached_key(|s| {
             (
                 std::cmp::Reverse(s.last_active_at.unwrap_or(s.updated_at)),
@@ -2411,37 +2446,71 @@ impl JsonlStorageAdapter {
         &self,
         ttl_days: u32,
         skip_session_dir: Option<&Path>,
+        mut on_deleted: impl FnMut(&Info),
     ) -> io::Result<(u32, u32)> {
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(ttl_days));
+        if ttl_days == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "session cleanup TTL must be positive"));
+        }
+        let cutoff = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::days(i64::from(ttl_days)))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "session cleanup cutoff exceeds supported date range"))?;
         let mut deleted = 0u32;
         let mut errors = 0u32;
-        for opened in self.scan_opened_sessions(None)? {
-            if skip_session_dir.is_some_and(|skip| opened.directory().display_path() == skip) {
+        // Finish discovery before mutation, retaining summaries rather than
+        // one directory capability per candidate.
+        for summary in self.scan_opened_sessions(None, |opened| opened.summary)? {
+            if skip_session_dir.is_some_and(|skip| self.session_dir(&summary.info) == skip) {
                 continue;
             }
-            let activity = opened
-                .summary()
-                .last_active_at
-                .unwrap_or(opened.summary().updated_at);
+            let activity = summary.last_active_at.unwrap_or(summary.updated_at);
             if activity >= cutoff {
                 continue;
             }
-            match self.try_acquire_writer_lease(&opened.summary().info) {
-                Ok(false) => continue,
-                Ok(true) => match self.delete_opened_session(opened) {
-                    Ok(()) => deleted = deleted.saturating_add(1),
-                    Err(error) => {
-                        errors = errors.saturating_add(1);
-                        tracing::warn!(%error, "failed to delete stale session entity");
-                    }
-                },
+            let info = summary.info;
+            // Share the pinned authority, but scope maintenance leases and
+            // directory caches to this candidate, including non-delete paths.
+            // In particular, do not reuse the caller's live writer lease.
+            let candidate = Self {
+                opened_sessions: Default::default(),
+                writer_leases: Default::default(),
+                timeline_prefixes: Default::default(),
+                ..self.clone()
+            };
+            let result = candidate.open_session(&info)
+                .and_then(|opened| candidate.delete_if_still_stale(opened, cutoff));
+            match result {
+                Ok(true) => {
+                    deleted = deleted.saturating_add(1);
+                    on_deleted(&info);
+                }
+                Ok(false) => {}
                 Err(error) => {
                     errors = errors.saturating_add(1);
-                    tracing::warn!(%error, "failed to acquire stale session writer lease");
+                    tracing::warn!(%error, "failed to establish or delete stale session entity");
                 }
             }
         }
         Ok((deleted, errors))
+    }
+
+    /// Recheck the same entity after gaining exclusive writer ownership.
+    fn delete_if_still_stale(
+        &self,
+        mut opened: OpenedSession,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> io::Result<bool> {
+        if !self.try_acquire_writer_lease(&opened.summary().info)? {
+            return Ok(false);
+        }
+        let current = Self::read_summary_from_directory(opened.directory())?;
+        Self::validate_session_identity(&opened.summary().info, &current)?;
+        current.validate_current_format()?;
+        if current.is_hidden() || current.last_active_at.unwrap_or(current.updated_at) >= cutoff {
+            return Ok(false);
+        }
+        opened.summary = current;
+        self.delete_opened_session(opened)?;
+        Ok(true)
     }
 
     fn read_summary_from_directory(directory: &super::ContainedDirectory) -> io::Result<Summary> {
@@ -3471,9 +3540,11 @@ impl StorageAdapter for JsonlStorageAdapter {
         .map_err(io::Error::other)?
     }
     fn open_timeline_reader(&self, info: &Info) -> io::Result<super::TimelineLedgerReader> {
-        let opened = self.open_session(info)?;
-        let file = opened
-            .directory()
+        // Projection readers must not populate the adapter's writer cache.
+        let directory = self.session_directory(info, false)?;
+        let summary = Self::read_summary_from_directory(&directory)?;
+        Self::validate_session_identity(info, &summary)?;
+        let file = directory
             .open_regular(
                 std::ffi::OsStr::new(super::TIMELINE_FILE),
                 "mandatory Timeline ledger",
@@ -3490,7 +3561,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             })?;
         super::TimelineLedgerReader::from_file(
             file,
-            opened.directory().display_path().join(super::TIMELINE_FILE),
+            directory.display_path().join(super::TIMELINE_FILE),
         )
     }
 }

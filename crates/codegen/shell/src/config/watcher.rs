@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -94,14 +94,12 @@ pub enum ConfigChangeEvent {
 /// to register additional cwds at runtime when new sessions open in
 /// previously-unwatched directories.
 pub struct ConfigFileWatcher {
-    debouncer: Debouncer<AccessFilteredWatcher>,
-    /// Project cwds currently registered (via [`Self::start`]'s `cwd`
-    /// argument or [`Self::watch_path`]). Tracked so that
-    /// (a) [`Self::watch_path`] is idempotent at our layer instead of
-    /// relying on `notify`'s internal de-dup, and
-    /// (b) [`Self::unwatch_path`] can drop the OS watches for a cwd
-    /// that is no longer needed, bounding inotify-watch accumulation
-    /// as sessions churn across directories.
+    state: std::sync::Arc<parking_lot::Mutex<ConfigWatchState>>,
+}
+
+struct ConfigWatchState {
+    // Installed after callback construction; callback holds only a Weak state.
+    debouncer: Option<Debouncer<AccessFilteredWatcher>>,
     watched_cwds: HashSet<PathBuf>,
 }
 
@@ -121,8 +119,19 @@ impl ConfigFileWatcher {
         let debounce = debounce.unwrap_or(DEFAULT_DEBOUNCE);
         let (tx, rx) = mpsc::unbounded_channel();
         let grow_home_buf = grow_home.to_path_buf();
+        let state = std::sync::Arc::new(parking_lot::Mutex::new(ConfigWatchState {
+            debouncer: None,
+            watched_cwds: HashSet::new(),
+        }));
+        let weak_state = std::sync::Arc::downgrade(&state);
         let mut debouncer = new_filtered_debouncer(debounce, move |res: DebounceEventResult| {
             let Ok(events) = res else { return };
+            let Some(state) = weak_state.upgrade() else {
+                return;
+            };
+            // Serialize directory maintenance with explicit watch/unwatch.
+            // The debouncer callback is separate from the raw notify handler.
+            let mut state = state.lock();
 
             let mut batch_events: Vec<ConfigChangeEvent> = Vec::new();
             for event in events {
@@ -131,6 +140,25 @@ impl ConfigFileWatcher {
                 let parent = path.parent();
 
                 let change = match name {
+                    Some(".grow") if parent.is_some_and(|p| state.watched_cwds.contains(p)) => {
+                        if let Some(debouncer) = &mut state.debouncer {
+                            // A replacement directory must not inherit a watch on the old inode.
+                            let _ = debouncer.watcher().unwatch(path);
+                            if path.is_dir() {
+                                if let Err(error) =
+                                    debouncer.watcher().watch(path, RecursiveMode::NonRecursive)
+                                {
+                                    log_watch_error(
+                                        &error,
+                                        "failed to attach project config directory",
+                                    );
+                                }
+                            }
+                        }
+                        Some(ConfigChangeEvent::ProjectConfigChanged {
+                            path: path.join("config.toml"),
+                        })
+                    }
                     Some("config.toml") if parent == Some(grow_home_buf.as_path()) => {
                         Some(ConfigChangeEvent::GlobalConfigChanged)
                     }
@@ -175,9 +203,7 @@ impl ConfigFileWatcher {
 
         // Add the two narrow non-recursive cwd watches
         // promoted to first-class watch targets. Both are non-fatal —
-        // a missing directory just means the corresponding files don't
-        // exist yet and will be picked up by `watch_path` on the next
-        // session that opens in this cwd.
+        // the parent watch handles a later `.grow` creation and attaches its watch.
         //
         // When the leader's own cwd is also covered by
         // `extra_paths` (e.g. `find_project_configs(cwd)` already
@@ -201,13 +227,12 @@ impl ConfigFileWatcher {
             "config file watcher started"
         );
 
-        Some((
-            Self {
-                debouncer,
-                watched_cwds,
-            },
-            rx,
-        ))
+        {
+            let mut current = state.lock();
+            current.debouncer = Some(debouncer);
+            current.watched_cwds = watched_cwds;
+        }
+        Some((Self { state }, rx))
     }
 
     /// Register `<cwd>/` and `<cwd>/.grow/` as **non-recursive** watch
@@ -233,11 +258,12 @@ impl ConfigFileWatcher {
         // re-opening sessions in the same directory doesn't churn the
         // OS watcher. `notify` de-dups internally too, but tracking the
         // set here also enables `unwatch_path`.
-        if self.watched_cwds.contains(cwd) {
+        let mut state = self.state.lock();
+        if state.watched_cwds.contains(cwd) {
             return;
         }
-        watch_cwd_dirs(&mut self.debouncer, cwd);
-        self.watched_cwds.insert(cwd.to_path_buf());
+        watch_cwd_dirs(state.debouncer.as_mut().expect("initialized watcher"), cwd);
+        state.watched_cwds.insert(cwd.to_path_buf());
     }
 
     /// Remove the two non-recursive watches (`<cwd>/` and
@@ -252,10 +278,11 @@ impl ConfigFileWatcher {
     /// unwatch once the *last* session sharing this cwd closes —
     /// `ConfigFileWatcher` tracks distinct cwds, not session counts.
     pub fn unwatch_path(&mut self, cwd: &Path) {
-        if !self.watched_cwds.remove(cwd) {
+        let mut state = self.state.lock();
+        if !state.watched_cwds.remove(cwd) {
             return;
         }
-        unwatch_cwd_dirs(&mut self.debouncer, cwd);
+        unwatch_cwd_dirs(state.debouncer.as_mut().expect("initialized watcher"), cwd);
     }
 }
 
@@ -265,14 +292,8 @@ impl ConfigFileWatcher {
 /// directory, quota exhausted, permission denied, etc.) — the caller has
 /// no reasonable recovery path beyond the existing user-triggered refresh.
 ///
-/// **Known limitation:** if `<cwd>/.grow/` does not yet
-/// exist at session-open time, the `.grow/` watch fails ENOENT and is
-/// swallowed at `debug!`. A later `mkdir <cwd>/.grow/` followed by a
-/// write to `<cwd>/.grow/config.toml` will NOT be observed — the
-/// `<cwd>/` watch is non-recursive, so subdirectory creation isn't
-/// surfaced as a watch-add trigger. Users hitting this case must hit
-/// the explicit refresh button. A robust fix (re-attempt on parent-
-/// directory create) is out of scope here.
+/// If `.grow` is missing, the cwd watch observes its later creation and the
+/// callback attaches the non-recursive directory watch before publishing a reload.
 fn watch_cwd_dirs(debouncer: &mut Debouncer<AccessFilteredWatcher>, cwd: &Path) {
     if let Err(e) = debouncer.watcher().watch(cwd, RecursiveMode::NonRecursive) {
         log_watch_error(&e, "failed to watch project cwd (non-recursive)");
@@ -376,10 +397,6 @@ fn dirs_contain(dirs: &[PathBuf], target: &Path) -> bool {
     dirs.iter().any(|dir| paths_equal(dir, target))
 }
 
-fn path_set_contains(dirs: &HashSet<PathBuf>, target: &Path) -> bool {
-    dirs.iter().any(|dir| paths_equal(dir, target))
-}
-
 fn grow_discovery_refresh_dirs(config_dir: &Path) -> [(PathBuf, RecursiveMode); 3] {
     [
         (config_dir.join("skills"), RecursiveMode::Recursive),
@@ -398,17 +415,37 @@ fn project_grow_refresh_dirs(project_root: &Path) -> Vec<(PathBuf, RecursiveMode
 fn attach_new_refresh_dirs(
     debouncer: &mut Debouncer<AccessFilteredWatcher>,
     refresh_dirs: &[(PathBuf, RecursiveMode)],
-    refreshed_dirs: &mut HashSet<PathBuf>,
+    refreshed_dirs: &mut HashMap<PathBuf, same_file::Handle>,
     err_msg: &str,
 ) -> bool {
     let mut changed = false;
     for (dir, mode) in refresh_dirs {
-        if path_set_contains(refreshed_dirs, dir) || !dir.is_dir() {
-            continue;
+        let current = if dir.is_dir() {
+            match same_file::Handle::from_path(dir) {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    tracing::warn!(path = %dir.display(), %error, "failed to identify discovery directory");
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let previous = refreshed_dirs
+            .keys()
+            .find(|path| paths_equal(path, dir))
+            .cloned();
+        if let Some(path) = previous {
+            if current.as_ref() == refreshed_dirs.get(&path) {
+                continue;
+            }
+            let _ = debouncer.watcher().unwatch(&path);
+            refreshed_dirs.remove(&path);
         }
+        let Some(current) = current else { continue };
         match debouncer.watcher().watch(dir, *mode) {
             Ok(()) => {
-                refreshed_dirs.insert(dir.clone());
+                refreshed_dirs.insert(dir.clone(), current);
                 changed = true;
             }
             Err(error) => log_watch_error(&error, err_msg),
@@ -417,40 +454,11 @@ fn attach_new_refresh_dirs(
     changed
 }
 
-/// Paths successfully watched under a scoped Grow root (root + skill subdirs).
-fn watch_skill_subdirs(
-    debouncer: &mut Debouncer<AccessFilteredWatcher>,
-    config_dir: &Path,
-) -> HashSet<PathBuf> {
-    let mut watched = HashSet::new();
-    match debouncer
-        .watcher()
-        .watch(config_dir, RecursiveMode::NonRecursive)
-    {
-        Ok(()) => {
-            watched.insert(config_dir.to_path_buf());
-        }
-        Err(error) => log_watch_error(&error, "failed to watch config dir root"),
-    }
-    for (dir, mode) in grow_discovery_refresh_dirs(config_dir) {
-        if !dir.is_dir() {
-            continue;
-        }
-        match debouncer.watcher().watch(&dir, mode) {
-            Ok(()) => {
-                watched.insert(dir);
-            }
-            Err(error) => log_watch_error(&error, "failed to watch discovery subdir"),
-        }
-    }
-    watched
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SkillsWatchPlan {
     grow_roots: Vec<PathBuf>,
     recursive_roots: Vec<PathBuf>,
-    /// Non-recursive parent so first create of a missing project Grow root is observed.
+    /// Non-recursive parent observes creation and replacement of the project Grow root.
     project_parent_watch: Option<PathBuf>,
     refresh_dirs: Vec<(PathBuf, RecursiveMode)>,
 }
@@ -468,6 +476,7 @@ fn plan_skills_watch_targets(
     for dir in dirs_to_watch {
         if is_grow_config_root(dir, grow_home) {
             grow_roots.push(dir.clone());
+            refresh_dirs.push((dir.clone(), RecursiveMode::NonRecursive));
             refresh_dirs.extend(grow_discovery_refresh_dirs(dir));
         } else {
             recursive_roots.push(dir.clone());
@@ -476,16 +485,14 @@ fn plan_skills_watch_targets(
 
     let mut project_parent_watch = None;
     if let Some(project_root) = project_root {
-        let mut missing_project_grow = false;
         for name in GROW_CONFIG_ROOT_NAMES {
             let grow_root = project_root.join(name);
             if !dirs_contain(dirs_to_watch, &grow_root) {
-                missing_project_grow = true;
                 refresh_dirs.push((grow_root.clone(), RecursiveMode::NonRecursive));
                 refresh_dirs.extend(grow_discovery_refresh_dirs(&grow_root));
             }
         }
-        if missing_project_grow && !dirs_contain(dirs_to_watch, project_root) {
+        if !dirs_contain(dirs_to_watch, project_root) {
             project_parent_watch = Some(project_root.to_path_buf());
         }
     }
@@ -505,7 +512,7 @@ fn plan_skills_watch_targets(
 pub struct ProjectDiscoveryWatcher {
     debouncer: Debouncer<AccessFilteredWatcher>,
     refresh_dirs: Vec<(PathBuf, RecursiveMode)>,
-    refreshed_dirs: HashSet<PathBuf>,
+    refreshed_dirs: HashMap<PathBuf, same_file::Handle>,
 }
 
 impl ProjectDiscoveryWatcher {
@@ -540,20 +547,15 @@ impl ProjectDiscoveryWatcher {
             .map_err(|error| tracing::warn!(%error, "failed to create project workflow watcher"))
             .ok()?;
 
-        let initial = if project_grow.is_dir() {
-            project_grow.clone()
-        } else {
-            project_root.clone()
-        };
         if let Err(error) = debouncer
             .watcher()
-            .watch(&initial, RecursiveMode::NonRecursive)
+            .watch(&project_root, RecursiveMode::NonRecursive)
         {
             log_watch_error(&error, "failed to watch project workflow parent");
             return None;
         }
         let refresh_dirs = project_grow_refresh_dirs(&project_root);
-        let mut refreshed_dirs = HashSet::from([initial]);
+        let mut refreshed_dirs = HashMap::new();
         attach_new_refresh_dirs(
             &mut debouncer,
             &refresh_dirs,
@@ -570,7 +572,7 @@ impl ProjectDiscoveryWatcher {
         ))
     }
 
-    /// Attach watches for seed dirs that now exist (call after a discovery event).
+    /// Reconcile watches for created or replaced directories after a discovery event.
     pub fn refresh_new_dirs(&mut self) {
         attach_new_refresh_dirs(
             &mut self.debouncer,
@@ -585,7 +587,7 @@ impl ProjectDiscoveryWatcher {
 pub struct SkillsFileWatcher {
     debouncer: Debouncer<AccessFilteredWatcher>,
     refresh_dirs: Vec<(PathBuf, RecursiveMode)>,
-    refreshed_dirs: HashSet<PathBuf>,
+    refreshed_dirs: HashMap<PathBuf, same_file::Handle>,
 }
 
 impl SkillsFileWatcher {
@@ -657,18 +659,18 @@ impl SkillsFileWatcher {
             .map_err(|e| tracing::warn!(error = %e, "failed to create skills file watcher"))
             .ok()?;
 
-        let mut watched = 0;
-        let mut refreshed_dirs = HashSet::new();
-        for dir in &plan.grow_roots {
-            let attached = watch_skill_subdirs(&mut debouncer, dir);
-            watched += attached.len();
-            refreshed_dirs.extend(attached);
-        }
+        let mut refreshed_dirs = HashMap::new();
+        attach_new_refresh_dirs(
+            &mut debouncer,
+            &plan.refresh_dirs,
+            &mut refreshed_dirs,
+            "failed to watch discovery directory",
+        );
+        let mut watched = refreshed_dirs.len();
         for dir in &plan.recursive_roots {
             match debouncer.watcher().watch(dir, RecursiveMode::Recursive) {
                 Ok(()) => {
                     watched += 1;
-                    refreshed_dirs.insert(dir.clone());
                 }
                 Err(e) => log_watch_error(&e, "failed to watch directory for skill changes"),
             }
@@ -680,7 +682,6 @@ impl SkillsFileWatcher {
             {
                 Ok(()) => {
                     watched += 1;
-                    refreshed_dirs.insert(parent_watch.clone());
                 }
                 Err(error) => log_watch_error(
                     &error,
@@ -706,8 +707,8 @@ impl SkillsFileWatcher {
         ))
     }
 
-    /// Attach watches for seed dirs that now exist (call after a discovery event).
-    /// Returns true if any new watch was attached.
+    /// Reconcile watches for created or replaced directories after a discovery event.
+    /// Returns true if any new or replacement watch was attached.
     pub fn refresh_new_discovery_dirs(&mut self) -> bool {
         attach_new_refresh_dirs(
             &mut self.debouncer,
@@ -810,9 +811,14 @@ mod tests {
             vec![grow_home.clone(), project_grow.clone()]
         );
         assert_eq!(plan.recursive_roots, vec![custom]);
-        assert_eq!(plan.project_parent_watch, None);
-        let expected = grow_discovery_refresh_dirs(&grow_home)
+        assert_eq!(
+            plan.project_parent_watch.as_deref(),
+            Some(Path::new("/repo"))
+        );
+        let expected = [(grow_home.clone(), RecursiveMode::NonRecursive)]
             .into_iter()
+            .chain(grow_discovery_refresh_dirs(&grow_home))
+            .chain([(project_grow.clone(), RecursiveMode::NonRecursive)])
             .chain(grow_discovery_refresh_dirs(&project_grow))
             .collect::<Vec<_>>();
         assert_eq!(plan.refresh_dirs, expected);
@@ -839,5 +845,146 @@ mod tests {
                 ),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod late_config_directory_tests {
+    use super::*;
+
+    async fn expect_project_change(
+        rx: &mut mpsc::UnboundedReceiver<ConfigChangeEvent>,
+        path: &Path,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = rx.recv().await.expect("watcher channel closed");
+                if event
+                    == (ConfigChangeEvent::ProjectConfigChanged {
+                        path: path.to_owned(),
+                    })
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("project config event missing");
+    }
+
+    #[tokio::test]
+    async fn config_watch_late_directory_and_recreation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let project = root.join("project");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        let (mut watcher, mut rx) =
+            ConfigFileWatcher::start(&home, &[], Some(&project), Some(Duration::from_millis(40)))
+                .unwrap();
+        let grow = project.join(".grow");
+        let config = grow.join("config.toml");
+        std::fs::create_dir(&grow).unwrap();
+        std::fs::write(&config, "first = true").unwrap();
+        expect_project_change(&mut rx, &config).await;
+        while rx.try_recv().is_ok() {}
+        std::fs::write(&config, "second = true").unwrap();
+        expect_project_change(&mut rx, &config).await;
+        std::fs::remove_dir_all(&grow).unwrap();
+        expect_project_change(&mut rx, &config).await;
+        std::fs::create_dir(&grow).unwrap();
+        std::fs::write(&config, "third = true").unwrap();
+        expect_project_change(&mut rx, &config).await;
+        while rx.try_recv().is_ok() {}
+        std::fs::write(&config, "fourth = true").unwrap();
+        expect_project_change(&mut rx, &config).await;
+        watcher.unwatch_path(&project);
+        while rx.try_recv().is_ok() {}
+        std::fs::remove_dir_all(&grow).unwrap();
+        std::fs::create_dir(&grow).unwrap();
+        std::fs::write(&config, "unwatched = true").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), rx.recv())
+                .await
+                .is_err(),
+            "unwatch must prevent revival"
+        );
+    }
+}
+
+#[cfg(test)]
+mod replacement_discovery_tests {
+    use super::*;
+    async fn next_change(rx: &mut mpsc::UnboundedReceiver<DiscoveryChange>) {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("replacement directory change missing")
+            .expect("watcher closed");
+    }
+    #[test]
+    fn refresh_detects_atomic_directory_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let grow = root.join(".grow");
+        std::fs::create_dir_all(grow.join("skills")).unwrap();
+        let (mut watcher, _rx) =
+            SkillsFileWatcher::start_with_dirs(&[grow.clone()], &grow, Some(&root)).unwrap();
+        assert!(!watcher.refresh_new_discovery_dirs());
+        std::fs::rename(grow.join("skills"), grow.join("old-skills")).unwrap();
+        std::fs::create_dir(grow.join("skills")).unwrap();
+        assert!(
+            watcher.refresh_new_discovery_dirs(),
+            "replacement needs a new watch"
+        );
+        assert!(!watcher.refresh_new_discovery_dirs());
+        std::fs::write(grow.join("skills/SKILL.md"), "ordinary edit").unwrap();
+        assert!(!watcher.refresh_new_discovery_dirs());
+        std::fs::rename(&grow, root.join("old-grow")).unwrap();
+        std::fs::create_dir_all(grow.join("skills")).unwrap();
+        assert!(watcher.refresh_new_discovery_dirs());
+        assert!(!watcher.refresh_new_discovery_dirs());
+    }
+
+    #[tokio::test]
+    async fn skills_discovery_observes_recreated_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let grow = root.join(".grow");
+        std::fs::create_dir_all(grow.join("skills")).unwrap();
+        let (mut watcher, mut rx) =
+            SkillsFileWatcher::start_with_dirs(&[grow.clone()], &grow, Some(&root)).unwrap();
+        std::fs::remove_dir_all(&grow).unwrap();
+        next_change(&mut rx).await;
+        watcher.refresh_new_discovery_dirs();
+        while rx.try_recv().is_ok() {}
+        std::fs::create_dir_all(grow.join("skills")).unwrap();
+        next_change(&mut rx).await;
+        assert!(watcher.refresh_new_discovery_dirs());
+        while rx.try_recv().is_ok() {}
+        std::fs::create_dir_all(grow.join("skills/nested")).unwrap();
+        std::fs::write(grow.join("skills/nested/SKILL.md"), "updated").unwrap();
+        next_change(&mut rx).await;
+        assert!(!watcher.refresh_new_discovery_dirs());
+    }
+
+    #[tokio::test]
+    async fn project_discovery_observes_recreated_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let grow = root.join(".grow");
+        std::fs::create_dir_all(grow.join("workflows")).unwrap();
+        let (mut watcher, mut rx) = ProjectDiscoveryWatcher::start(&root).unwrap();
+        std::fs::remove_dir_all(&grow).unwrap();
+        next_change(&mut rx).await;
+        watcher.refresh_new_dirs();
+        while rx.try_recv().is_ok() {}
+        std::fs::create_dir_all(grow.join("workflows")).unwrap();
+        std::fs::write(grow.join("workflows/check.rhai"), "first").unwrap();
+        next_change(&mut rx).await;
+        watcher.refresh_new_dirs();
+        while rx.try_recv().is_ok() {}
+        std::fs::write(grow.join("workflows/check.rhai"), "second").unwrap();
+        next_change(&mut rx).await;
     }
 }

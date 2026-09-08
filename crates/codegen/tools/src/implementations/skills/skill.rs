@@ -59,7 +59,10 @@ pub struct SkillOutput {
 pub fn build_skill_message(skill: &SkillInfo, content: &str) -> String {
     format!(
         "<skill name=\"{}\" description=\"{}\" path=\"{}\">\n{}\n</skill>",
-        skill.name, skill.description, skill.path, content
+        escape_xml(&skill.name),
+        escape_xml(&skill.description),
+        escape_xml(&skill.path),
+        content
     )
 }
 
@@ -75,6 +78,8 @@ pub fn build_skill_message(skill: &SkillInfo, content: &str) -> String {
 /// </skill>
 /// ```
 pub fn build_skill_block(name: &str, args: &str, content: &str) -> String {
+    let name = escape_xml(name);
+    let args = escape_xml(args);
     if args.is_empty() {
         format!("<skill name=\"{name}\">\n{content}\n</skill>")
     } else {
@@ -124,7 +129,8 @@ pub fn build_skill_information(skill_blocks: &[String], refs: &[SkillRef<'_>]) -
         for r in deduped {
             out.push_str(&format!(
                 "<skill name=\"{}\" path=\"{}\"/>\n",
-                r.name, r.path
+                escape_xml(r.name),
+                escape_xml(r.path)
             ));
         }
         out.push_str("</skills_referenced>\n");
@@ -215,8 +221,7 @@ fn extract_command_args(text: &str) -> Option<&str> {
     if args.is_empty() { None } else { Some(args) }
 }
 
-/// Escape XML special characters
-#[cfg(test)]
+/// Escape XML attribute special characters. Keep skill bodies unchanged.
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -244,7 +249,7 @@ pub struct SubstitutionContext<'a> {
 /// |----------|-------------|
 /// | `$ARGUMENTS` | Full arguments string (empty if none) |
 /// | `$ARGUMENTS[N]` | Nth argument (0-indexed, whitespace-split) |
-/// | `$N` | Shorthand for `$ARGUMENTS[N]` (no upper bound) |
+/// | `$N` | Positional shorthand within the argument count plus 20 slots |
 /// | `${SKILL_DIR}` | Directory containing the SKILL.md |
 /// | `${SESSION_ID}` | Current session ID |
 /// | `${GROW_PLUGIN_ROOT}` | Plugin root dir (plugin-backed skills) |
@@ -275,71 +280,53 @@ pub fn apply_substitutions(content: &mut String, args: Option<&str>, ctx: &Subst
     // a path token still receives its arguments.
     let mut args_substituted = false;
 
-    // $ARGUMENTS[N] first (before $ARGUMENTS to avoid partial match).
-    // Scan up to the actual argument count + a buffer to handle
-    // out-of-range refs that should become empty.
-    let max_idx = argv.len().max(1);
-    for i in (0..max_idx + 20).rev() {
-        let pattern = format!("$ARGUMENTS[{i}]");
-        if content.contains(&pattern) {
-            let replacement = argv.get(i).unwrap_or(&"");
-            *content = content.replace(&pattern, replacement);
+    static TOKENS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"\$ARGUMENTS\[[0-9]+\]|\$[0-9]+|\$ARGUMENTS|\$\{(?:SKILL_DIR|SESSION_ID|GROW_PLUGIN_ROOT|GROW_PLUGIN_DATA)\}",
+        ).expect("valid skill substitution token pattern")
+    });
+    // Replacement values are literal output, never input to another pass.
+    let expanded = TOKENS.replace_all(content, |captures: &regex::Captures<'_>| {
+        let token = captures.get(0).unwrap().as_str();
+        if let Some(index) = token
+            .strip_prefix("$ARGUMENTS[")
+            .and_then(|s| s.strip_suffix(']'))
+        {
             args_substituted = true;
+            return index
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| argv.get(index))
+                .copied()
+                .unwrap_or("")
+                .to_owned();
         }
-    }
-
-    // $N shorthand — only match "$" followed by digits that are NOT
-    // part of a larger number (e.g. $0, $12 but not $100 in "$100").
-    // We replace from high to low so $12 is tried before $1.
-    for i in (0..max_idx + 20).rev() {
-        let pattern = format!("${i}");
-        let pat_len = pattern.len();
-        let replacement = argv.get(i).copied().unwrap_or("");
-        let mut result = String::with_capacity(content.len());
-        let mut rest = content.as_str();
-        while let Some(pos) = rest.find(&pattern) {
-            result.push_str(&rest[..pos]);
-            let after = &rest[pos + pat_len..];
-            // Only substitute if the next character is NOT a digit
-            // (to avoid turning "$100" into replacement + "00").
-            if after.starts_with(|c: char| c.is_ascii_digit()) {
-                result.push_str(&pattern);
-            } else {
-                result.push_str(replacement);
+        if token == "$ARGUMENTS" {
+            args_substituted = true;
+            return args_str.to_owned();
+        }
+        if let Some(index) = token
+            .strip_prefix('$')
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            // Preserve the established shorthand range, so ordinary dollar
+            // amounts such as $100 do not consume the argument suffix.
+            if index < argv.len().max(1).saturating_add(20) {
                 args_substituted = true;
+                return argv.get(index).copied().unwrap_or("").to_owned();
             }
-            rest = after;
         }
-        result.push_str(rest);
-        *content = result;
-    }
-
-    // $ARGUMENTS (full string)
-    if content.contains("$ARGUMENTS") {
-        *content = content.replace("$ARGUMENTS", args_str);
-        args_substituted = true;
-    }
-
-    // Canonical skill directory.
-    if let Some(dir) = ctx.skill_dir {
-        if content.contains("${SKILL_DIR}") {
-            *content = content.replace("${SKILL_DIR}", dir);
+        match token {
+            "${SKILL_DIR}" => ctx.skill_dir,
+            "${SESSION_ID}" => ctx.session_id,
+            "${GROW_PLUGIN_ROOT}" => ctx.plugin_root,
+            "${GROW_PLUGIN_DATA}" => ctx.plugin_data,
+            _ => None,
         }
-    }
-
-    // Canonical session identifier.
-    if let Some(sid) = ctx.session_id {
-        if content.contains("${SESSION_ID}") {
-            *content = content.replace("${SESSION_ID}", sid);
-        }
-    }
-
-    // Expand plugin-path tokens via the shared helper (single source of truth).
-    // Note: these do NOT set `args_substituted`, so they never suppress the
-    // **ARGUMENTS:** suffix below.
-    if ctx.plugin_root.is_some() || ctx.plugin_data.is_some() {
-        *content = crate::util::substitute_plugin_tokens(content, ctx.plugin_root, ctx.plugin_data);
-    }
+        .unwrap_or(token)
+        .to_owned()
+    });
+    *content = expanded.into_owned();
 
     // Append the **ARGUMENTS:** suffix only when no argument token consumed the
     // args (the path/metadata tokens above do not count), preserving args for
@@ -351,6 +338,85 @@ pub fn apply_substitutions(content: &mut String, args: Option<&str>, ctx: &Subst
         content.push_str("\n\n**ARGUMENTS:** ");
         content.push_str(a);
     }
+}
+
+/// Locate the destination after the already-parsed label, preserving source spelling.
+fn skill_link_destination_span(source: &str, reference: bool) -> Option<std::ops::Range<usize>> {
+    let after_label = if reference {
+        source.match_indices("]:").find_map(|(offset, _)| {
+            let escapes = source[..offset]
+                .bytes()
+                .rev()
+                .take_while(|b| *b == b'\\')
+                .count();
+            (escapes % 2 == 0).then_some(offset + 2)
+        })?
+    } else {
+        // Destination/title are not text events. Nested markup (including code
+        // and images) remains inside the label; outer wrappers span the whole link.
+        let label_end = pulldown_cmark::Parser::new(source)
+            .into_offset_iter()
+            .map(|(_, range)| range.end)
+            .filter(|end| *end < source.len())
+            .max()
+            .unwrap_or(0);
+        label_end + source[label_end..].find("](")? + 2
+    };
+    let bytes = source.as_bytes();
+    let mut start = after_label;
+    while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+        start += 1;
+    }
+    let angled = bytes.get(start) == Some(&b'<');
+    let mut cursor = start + usize::from(angled);
+    let mut depth = 0usize;
+    while let Some(&byte) = bytes.get(cursor) {
+        if byte == b'\\' {
+            cursor += 2;
+            continue;
+        }
+        if angled {
+            if byte == b'>' {
+                return Some(start..cursor + 1);
+            }
+        } else {
+            match byte {
+                b'(' => depth += 1,
+                b')' if depth == 0 => break,
+                b')' => depth -= 1,
+                b if b.is_ascii_whitespace() => break,
+                _ => {}
+            }
+        }
+        cursor += 1;
+    }
+    (!angled && cursor <= source.len() && cursor > start).then_some(start..cursor)
+}
+
+fn skill_link_destination_text(path: &str, angled: bool) -> String {
+    let angled = angled || path.chars().any(char::is_whitespace);
+    let mut result = String::new();
+    if angled {
+        result.push('<');
+    }
+    for ch in path.chars() {
+        match ch {
+            '&' => result.push_str("&amp;"),
+            '\\' | '<' | '>' => {
+                result.push('\\');
+                result.push(ch);
+            }
+            '(' | ')' if !angled => {
+                result.push('\\');
+                result.push(ch);
+            }
+            _ => result.push(ch),
+        }
+    }
+    if angled {
+        result.push('>');
+    }
+    result
 }
 
 /// Resolve relative markdown link/image targets to absolute paths when
@@ -408,29 +474,26 @@ pub fn resolve_skill_internal_links(body: &str, skill_dir: &std::path::Path) -> 
             continue;
         }
 
-        let resolved_str = resolved.to_string_lossy().to_string();
-        let url_str = url.as_ref();
-
-        match link_type {
-            LinkType::Inline => {
-                let event_src = &body[event_range.clone()];
-                if let Some(rel) = event_src.rfind(url_str) {
-                    let start = event_range.start + rel;
-                    edits.push((start..start + url_str.len(), resolved_str));
-                }
-            }
+        let span = match link_type {
+            LinkType::Inline => Some(event_range.clone()),
             LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => {
-                if let Some(def_span) = ref_def_spans.get(id) {
-                    let def_src = &body[def_span.clone()];
-                    if let Some(rel) = def_src.rfind(url_str) {
-                        let start = def_span.start + rel;
-                        if !edits.iter().any(|(r, _)| r.start == start) {
-                            edits.push((start..start + url_str.len(), resolved_str));
-                        }
-                    }
-                }
+                ref_def_spans.get(id).cloned()
             }
-            _ => {}
+            _ => None,
+        };
+        let Some(span) = span else { continue };
+        let source = &body[span.clone()];
+        let Some(destination) = skill_link_destination_span(source, link_type != LinkType::Inline)
+        else {
+            continue;
+        };
+        let replacement = skill_link_destination_text(
+            &resolved.to_string_lossy(),
+            source[destination.clone()].starts_with('<'),
+        );
+        let range = span.start + destination.start..span.start + destination.end;
+        if !edits.iter().any(|(existing, _)| *existing == range) {
+            edits.push((range, replacement));
         }
     }
 
@@ -446,41 +509,48 @@ pub fn resolve_skill_internal_links(body: &str, skill_dir: &std::path::Path) -> 
     result
 }
 
-/// Extract the body of a skill file (everything after the YAML frontmatter).
-///
-/// Returns the content unchanged if there is no frontmatter.
-pub fn extract_skill_body(content: &str) -> String {
+/// Split only complete frontmatter delimiter lines, matching the disk reader.
+pub(super) fn split_skill_frontmatter(content: &str) -> Option<(&str, &str)> {
     let content = content.trim_start();
-    if !content.starts_with("---") {
-        return content.to_string();
+    let mut lines = content.split_inclusive('\n');
+    let opening = lines.next()?;
+    if opening.trim() != "---" {
+        return None;
     }
-
-    // Find the closing ---
-    if let Some(rest) = content.get(3..)
-        && let Some(closing_idx) = rest.find("\n---")
-    {
-        // Return everything after the closing ---
-        let after_frontmatter = &rest[closing_idx + 4..];
-        return after_frontmatter.trim_start().to_string();
+    let yaml_start = opening.len();
+    let mut offset = yaml_start;
+    for line in lines {
+        if line.trim() == "---" {
+            return Some((
+                &content[yaml_start..offset],
+                &content[offset + line.len()..],
+            ));
+        }
+        offset += line.len();
     }
+    None
+}
 
-    // If we can't find proper frontmatter, return the whole content
-    content.to_string()
+/// Extract the skill body after complete YAML frontmatter, trimming leading whitespace.
+/// Without complete frontmatter, retain the content after leading whitespace.
+pub fn extract_skill_body(content: &str) -> String {
+    split_skill_frontmatter(content)
+        .map_or(content, |(_, body)| body)
+        .trim_start()
+        .to_string()
 }
 
 /// Load skill content from its file, stripping YAML frontmatter.
 ///
 /// Public entrypoint for the shell crate to load skill content at
-/// prompt-assembly time (the new zero-round-trip path). The private
-/// `load_skill_content` in `grow_build/skill/mod.rs` is a duplicate
-/// of this.
+/// prompt-assembly time. Preloaded bodies, including empty bodies, are snapshots.
 pub async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
     // Producers strip frontmatter before setting `body`. Re-strip would drop a
     // leading Markdown HR (`---`) and skip link resolution for disk skills.
-    if let Some(body) = skill.body.as_ref().filter(|b| !b.is_empty()) {
+    if let Some(body) = skill.body.as_ref() {
         return Ok(body.clone());
     }
-    // Synthetic product paths are never on disk; empty body is authoritative.
+    // Synthetic product paths are never on disk and require a preloaded body.
     if skill.path.contains("://") {
         return Err(format!(
             "Skill '{}' has no preloaded body (path '{}')",
@@ -512,7 +582,7 @@ pub async fn load_skill_with_body(skill: &SkillInfo) -> Result<SkillInfo, String
         None => body,
     };
     let mut loaded = skill.clone();
-    loaded.body = if body.is_empty() { None } else { Some(body) };
+    loaded.body = Some(body);
     Ok(loaded)
 }
 
@@ -520,6 +590,37 @@ pub async fn load_skill_with_body(skill: &SkillInfo) -> Result<SkillInfo, String
 mod tests {
     use super::*;
     use crate::implementations::skills::types::SkillScope;
+
+    #[test]
+    fn skill_envelope_escapes_attributes_and_preserves_body() {
+        let name = "review\"<&";
+        let args = "say \"hello\" <tag> & more";
+        let body = "Raw <example> & **Markdown**";
+        let block = build_skill_block(name, args, body);
+        assert_eq!(
+            block,
+            "<skill name=\"review&quot;&lt;&amp;\" args=\"say &quot;hello&quot; &lt;tag&gt; &amp; more\">\nRaw <example> & **Markdown**\n</skill>"
+        );
+        assert_eq!(
+            build_skill_block(name, "", body),
+            "<skill name=\"review&quot;&lt;&amp;\">\nRaw <example> & **Markdown**\n</skill>"
+        );
+        let refs = [
+            SkillRef {
+                name,
+                path: "/skills/\"<&/SKILL.md",
+            },
+            SkillRef {
+                name,
+                path: "/skills/\"<&/SKILL.md",
+            },
+        ];
+        let info = build_skill_information(&[block.clone()], &refs);
+        let reference =
+            "<skill name=\"review&quot;&lt;&amp;\" path=\"/skills/&quot;&lt;&amp;/SKILL.md\"/>";
+        assert_eq!(info.matches(reference).count(), 1, "{info}");
+        assert!(info.contains(&block));
+    }
 
     #[test]
     fn test_escape_xml() {
@@ -544,10 +645,66 @@ It has multiple lines."#;
     }
 
     #[test]
+    fn frontmatter_requires_complete_delimiter_lines() {
+        for content in [
+            "---not-frontmatter\nname: test\n---\nKeep this body",
+            "---\nname: test\n---not-a-close\nKeep this body",
+        ] {
+            assert_eq!(extract_skill_body(content), content);
+            assert!(
+                super::super::discovery::parse_skill_frontmatter(content, Some("test")).is_err()
+            );
+        }
+        for content in [
+            "---\nname: test\n---\nBody",
+            "---\r\nname: test\r\n---\r\nBody",
+        ] {
+            assert_eq!(extract_skill_body(content), "Body");
+            assert!(
+                super::super::discovery::parse_skill_frontmatter(content, Some("test")).is_ok()
+            );
+        }
+        assert_eq!(extract_skill_body("---\nname: test\n---"), "");
+    }
+
+    #[test]
     fn test_extract_skill_body_no_frontmatter() {
         let content = "Just some content without frontmatter";
         let body = extract_skill_body(content);
         assert_eq!(body, content);
+    }
+
+    #[tokio::test]
+    async fn empty_skill_snapshot_survives_disk_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(&path, "---\nname: empty\n---\n").unwrap();
+        let skill = SkillInfo {
+            name: "empty".into(),
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let frozen = load_skill_with_body(&skill).await.unwrap();
+        std::fs::write(&path, "Changed after freezing").unwrap();
+        assert_eq!(load_skill_content(&frozen).await.unwrap(), "");
+        assert_eq!(
+            load_skill_content(&skill).await.unwrap(),
+            "Changed after freezing"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(load_skill_content(&frozen).await.unwrap(), "");
+        assert_eq!(frozen.body.as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn empty_preloaded_synthetic_body_is_authoritative() {
+        let skill = SkillInfo {
+            name: "empty".into(),
+            path: "chat-product://empty".into(),
+            body: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(load_skill_content(&skill).await.unwrap(), "");
     }
 
     #[tokio::test]
@@ -768,9 +925,7 @@ You are helping the user create a commit.
 
     #[test]
     fn test_build_skill_message_special_chars_in_fields() {
-        // Verify that description/path containing quotes or angle brackets
-        // are inserted verbatim (no escaping) so the test breaks if we add
-        // escaping later.
+        // Attribute values are escaped; the Markdown body stays verbatim.
         let skill = SkillInfo {
             name: "deploy-v2".to_string(),
             description: "Deploy \"staging\" & <prod>".to_string(),
@@ -782,7 +937,7 @@ You are helping the user create a commit.
         let message = build_skill_message(&skill, content);
 
         let expected = "\
-<skill name=\"deploy-v2\" description=\"Deploy \"staging\" & <prod>\" path=\"/path/with spaces/SKILL.md\">
+<skill name=\"deploy-v2\" description=\"Deploy &quot;staging&quot; &amp; &lt;prod&gt;\" path=\"/path/with spaces/SKILL.md\">
 Deploy instructions.
 </skill>";
         assert_eq!(message, expected);
@@ -1048,6 +1203,25 @@ Step 2: Check for bugs.
     }
 
     #[test]
+    fn substitutions_preserve_inserted_token_text() {
+        let ctx = SubstitutionContext {
+            skill_dir: Some("/dir/${SESSION_ID}"),
+            session_id: Some("real-session"),
+            ..Default::default()
+        };
+        for (template, args, expected) in [
+            ("$ARGUMENTS", Some("${SESSION_ID}"), "${SESSION_ID}"),
+            ("$ARGUMENTS[1]", Some("first $0"), "$0"),
+            ("${SKILL_DIR}", None, "/dir/${SESSION_ID}"),
+            ("$ARGUMENTS[1000000]", Some("first"), ""),
+        ] {
+            let mut content = template.to_owned();
+            apply_substitutions(&mut content, args, &ctx);
+            assert_eq!(content, expected, "template: {template}");
+        }
+    }
+
+    #[test]
     fn test_unknown_dollar_tokens_left_unchanged() {
         let mut content = "Price: $100, var: ${UNKNOWN}".to_string();
         apply_substitutions(&mut content, None, &SubstitutionContext::default());
@@ -1294,6 +1468,93 @@ Review code.
     }
 
     // ── resolve_skill_internal_links ────────────────────────────────
+
+    #[test]
+    fn internal_link_title_matching_destination_stays_literal() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::write(root.join("guide.md"), "guide").unwrap();
+        for (body, expected) in [
+            (
+                "[guide](guide.md \"guide.md\")".to_owned(),
+                format!("[guide]({}/guide.md \"guide.md\")", root.display()),
+            ),
+            (
+                "[guide][ref]\n\n[ref]: guide.md \"guide.md\"".to_owned(),
+                format!(
+                    "[guide][ref]\n\n[ref]: {}/guide.md \"guide.md\"",
+                    root.display()
+                ),
+            ),
+        ] {
+            assert_eq!(resolve_skill_internal_links(&body, &root), expected);
+        }
+    }
+
+    #[test]
+    fn internal_link_resolution_preserves_labels_code_and_nested_images() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::write(root.join("guide.md"), "guide").unwrap();
+        let target = root.join("guide.md").display().to_string();
+        for (body, expected) in [
+            (
+                "[guide.md](guide.md \"guide.md\")".to_owned(),
+                format!("[guide.md]({target} \"guide.md\")"),
+            ),
+            (
+                "[`fake](guide.md)` label](guide.md)".to_owned(),
+                format!("[`fake](guide.md)` label]({target})"),
+            ),
+            ("[](guide.md)".to_owned(), format!("[]({target})")),
+            (
+                "[![image](guide.md)](guide.md)".to_owned(),
+                format!("[![image]({target})]({target})"),
+            ),
+            (
+                "[guide.md]\n\n[guide.md]: <guide.md> \"guide.md\"".to_owned(),
+                format!("[guide.md]\n\n[guide.md]: <{target}> \"guide.md\""),
+            ),
+            (
+                "`[guide](guide.md)`".to_owned(),
+                "`[guide](guide.md)`".to_owned(),
+            ),
+        ] {
+            assert_eq!(
+                resolve_skill_internal_links(&body, &root),
+                expected,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn internal_link_resolution_keeps_escaped_destinations_parseable() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap().join("skill root");
+        std::fs::create_dir(&root).unwrap();
+        for (file, body) in [
+            ("guide(1).md", r"[guide](guide\(1\).md)"),
+            ("a&b.md", "[guide](a&amp;b.md)"),
+            ("with space.md", "[guide](<with space.md>)"),
+        ] {
+            std::fs::write(root.join(file), "guide").unwrap();
+            let resolved = resolve_skill_internal_links(body, &root);
+            let destinations: Vec<_> = pulldown_cmark::Parser::new(&resolved)
+                .filter_map(|event| match event {
+                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link {
+                        dest_url, ..
+                    }) => Some(dest_url.into_string()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                destinations,
+                vec![root.join(file).display().to_string()],
+                "{resolved}"
+            );
+        }
+    }
 
     #[test]
     fn resolve_internal_links_blocks_path_traversal() {

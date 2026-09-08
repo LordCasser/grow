@@ -27,13 +27,13 @@ sha2 = { workspace = true }
 strum = { workspace = true }
 thiserror = { workspace = true }
 tool-types.workspace = true
+tempfile = { workspace = true }
 
 [features]
 default = []
 default-bazel = []
 
 [dev-dependencies]
-tempfile = { workspace = true }
 serde_json = { workspace = true }
 serial_test = { workspace = true }
 # `ctor` installs the rustls ring provider once before tests run (via

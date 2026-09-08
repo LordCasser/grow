@@ -7,27 +7,18 @@ use crate::slash::command::{
     AppCtx, ArgItem, CommandExecCtx, CommandResult, DoctorRequest, SlashCommand,
 };
 
-const USAGE: &str =
-    "Usage: /doctor [fix [ssh-wrap|tmux-clipboard|dcs-passthrough|tmux-extended-keys]]";
+const USAGE: &str = "Usage: /doctor [fix [ssh-wrap|tmux-clipboard|dcs-passthrough|tmux-extended-keys] [--config PATH]]";
 
 pub struct DoctorCommand;
 
 impl DoctorCommand {
     pub(crate) fn report_for_terminal(
         terminal: &crate::terminal::TerminalContext,
-        screen_mode: crate::app::ScreenMode,
+        evidence: crate::diagnostics::probes::TuiProbeEvidence<'_>,
         runtime: crate::diagnostics::TuiRuntimeRequest<'_>,
     ) -> crate::diagnostics::DiagnosticReport {
         let query = crate::diagnostics::probes::LiveTmuxProbe;
-        let snapshot = crate::diagnostics::probes::collect_doctor_tui(
-            terminal,
-            crate::diagnostics::probes::TuiProbeEvidence {
-                fullscreen_active: screen_mode.is_fullscreen(),
-                kitty_flags_pushed: crate::app::kitty_flags_pushed(),
-                xtversion: crate::terminal::xtversion::detected(),
-            },
-            &query,
-        );
+        let snapshot = crate::diagnostics::probes::collect_doctor_tui(terminal, evidence, &query);
         let runtime_findings = crate::diagnostics::collect_tui_runtime_findings(
             &snapshot.common,
             runtime.notification_method,
@@ -40,7 +31,7 @@ impl DoctorCommand {
         let mut report = crate::diagnostics::view(snapshot.into());
         crate::diagnostics::merge_tui_runtime_findings(&mut report, runtime_findings);
         crate::diagnostics::merge_tui_runtime_findings(&mut report, agent_findings);
-        report
+        crate::diagnostics::configure_doctor_report(report, terminal)
     }
 }
 
@@ -54,7 +45,7 @@ impl SlashCommand for DoctorCommand {
     }
 
     fn usage(&self) -> &str {
-        "/doctor [fix [FIX]]"
+        "/doctor [fix [FIX] [--config PATH]]"
     }
 
     fn takes_args(&self) -> bool {
@@ -101,15 +92,25 @@ impl SlashCommand for DoctorCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        let mut tokens = args.split_whitespace();
-        match (tokens.next(), tokens.next(), tokens.next()) {
-            (None, None, None) => CommandResult::Doctor(DoctorRequest::Report),
-            (Some("fix"), None, None) => CommandResult::Doctor(DoctorRequest::ListFixes),
-            (Some("fix"), Some(value), None) => match crate::diagnostics::resolve_fix_id(value) {
-                Ok(id) => CommandResult::Doctor(DoctorRequest::Fix(id)),
-                Err(error) => CommandResult::Error(format!("{error}\n{USAGE}")),
-            },
-            _ => CommandResult::Error(USAGE.to_owned()),
+        let Some(tokens) = shlex::split(args) else {
+            return CommandResult::Error(format!("Unclosed quote in doctor arguments.\n{USAGE}"));
+        };
+        let words = tokens.iter().map(String::as_str).collect::<Vec<_>>();
+        let (value, config) = match words.as_slice() {
+            [] => return CommandResult::Doctor(DoctorRequest::Report),
+            ["fix"] => return CommandResult::Doctor(DoctorRequest::ListFixes),
+            ["fix", value] => (*value, None),
+            ["fix", value, "--config", path] if !path.is_empty() => {
+                (*value, Some(std::path::PathBuf::from(path)))
+            }
+            _ => return CommandResult::Error(USAGE.to_owned()),
+        };
+        match crate::diagnostics::resolve_fix_id(value) {
+            Ok(id) if config.is_some() && id == crate::diagnostics::SSH_WRAP_ID => {
+                CommandResult::Error("--config is only supported for tmux fixes.".to_owned())
+            }
+            Ok(id) => CommandResult::Doctor(DoctorRequest::Fix(id, config)),
+            Err(error) => CommandResult::Error(format!("{error}\n{USAGE}")),
         }
     }
 }
@@ -167,7 +168,7 @@ mod tests {
         ] {
             assert!(matches!(
                 run(&format!("fix {value}")),
-                CommandResult::Doctor(DoctorRequest::Fix(parsed)) if parsed == id
+                CommandResult::Doctor(DoctorRequest::Fix(parsed, None)) if parsed == id
             ));
         }
     }
@@ -222,6 +223,23 @@ mod tests {
             "fix terminal.tmux-extended-keys",
         ] {
             assert!(command.suggest_args(&context, query).is_none(), "{query:?}");
+        }
+    }
+    #[test]
+    fn explicit_tmux_target_preserves_quoted_path() {
+        assert!(matches!(
+            run("fix tmux-clipboard --config '/tmp/custom config.tmux'"),
+            CommandResult::Doctor(DoctorRequest::Fix(id, Some(path)))
+                if id == crate::diagnostics::TMUX_CLIPBOARD_ID && path == std::path::Path::new("/tmp/custom config.tmux")
+        ));
+        for input in [
+            "fix tmux-clipboard --config",
+            "fix tmux-clipboard --config ''",
+            "fix tmux-clipboard --config 'unterminated",
+            "fix ssh-wrap --config /tmp/config",
+            "fix tmux-clipboard --config /tmp/a --config /tmp/b",
+        ] {
+            assert!(matches!(run(input), CommandResult::Error(_)), "{input}");
         }
     }
 }

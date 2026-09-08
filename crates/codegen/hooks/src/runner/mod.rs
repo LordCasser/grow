@@ -32,6 +32,24 @@ pub enum HookRunnerResult {
     Failed(String),
 }
 
+/// Hook decision protocols use objects, never positional JSON arrays.
+pub(crate) fn parse_hook_json<T: serde::de::DeserializeOwned>(
+    input: &str,
+) -> Result<T, serde_json::Error> {
+    if input.trim_start().starts_with('[') {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            "hook decision must be a JSON object",
+        ));
+    }
+    serde_json::from_str(input)
+}
+
+/// Distinguish ordinary text output from an invalid structured decision.
+/// Deserialize directly into the schema so duplicate/unknown fields stay errors.
+pub(crate) fn is_structured_output_error(input: &str, error: &serde_json::Error) -> bool {
+    error.is_data() || input.trim_start().starts_with(['{', '['])
+}
+
 /// JSON from `PreToolUse` gate hooks:
 /// `{"decision": "allow" | "deny" | "block", "reason": "…"}`.
 #[derive(Debug, Deserialize)]

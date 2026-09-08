@@ -1,0 +1,11 @@
+# Design
+
+Keep the existing semaphore and JoinSet. Admit one summary at a time before opening its reader through StorageAdapter. Move an owned permit into shared ownership between the async indexing task and its blocking Timeline fold: capacity is returned only after both have stopped using their admitted work. Remove the eager all-reader collection and its size pre-scan; size checks continue per admitted reader. No new queue or storage abstraction is needed.
+
+Reader identity and snapshot length are established at admission rather than all at startup. list_sessions and the expected-ID set remain the startup snapshot. A failed reader open still fails bootstrap without writing a completion marker; already admitted tasks may have produced idempotent rows. Partial writes are already possible on later failures.
+
+Validate with a child-process-only reduced descriptor limit and more temporary sessions than that limit. Never modify the parent process limit or real GROW_HOME. Confirm existing bootstrap claim/marker regressions. Slow blocking-read timeout ownership needs explicit coverage or a stated verification gap; timeout does not imply cancellation of blocking IO.
+
+Further source inspection: open_timeline_reader currently calls open_session, which inserts each directory into the adapter capability cache. Bounding only ledger files would still retain O(session count) directory handles. This read-only path must open and identity-check its directory without publishing it into the writer cache, then return only the pinned ledger. Keep the same contained-directory authority and summary identity checks. No writer APIs or global cache eviction policy change.
+
+The initial list_sessions_sync scanner also retains directory capabilities in both its result vector and opened_sessions cache. Generalize its existing result projection so listing retains Summary only, while cleanup can still retain OpenedSession for identity-bound deletion. Reuse an already cached writer capability when present, but do not insert observational candidates. Keep duplicate detection, physical identity, hidden filtering, sorting and cleanup revalidation unchanged. This is necessary to make the end-to-end descriptor regression pass; changing only the final indexing loop is insufficient.

@@ -164,6 +164,13 @@ pub(super) fn apply(
         observe(observer, TransactionPhase::BeforePublish, &plan)?;
         parent_anchor.revalidate()?;
         apply_exact_path_mode(&temp_path, plan.original.mode)?;
+        let identity =
+            source::FileIdentity::from_metadata(&temp_file.metadata().map_err(|source| {
+                ManagedConfigError::Read {
+                    path: temp_path.clone(),
+                    source,
+                }
+            })?);
         observer
             .publish(&temp_path, &plan.target_path)
             .map_err(|source| ManagedConfigError::Publish {
@@ -171,14 +178,17 @@ pub(super) fn apply(
                 source,
             })?;
         temp = None;
-        Ok::<(), ManagedConfigError>(())
+        Ok::<_, ManagedConfigError>(identity)
     })();
 
-    if let Err(error) = precommit {
-        cleanup(temp.as_deref());
-        cleanup(backup.as_deref());
-        return Err(error);
-    }
+    let published_identity = match precommit {
+        Ok(identity) => identity,
+        Err(error) => {
+            cleanup(temp.as_deref());
+            cleanup(backup.as_deref());
+            return Err(error);
+        }
+    };
 
     let post_publish = (|| {
         observe(observer, TransactionPhase::AfterPublish, &plan)?;
@@ -194,12 +204,12 @@ pub(super) fn apply(
                 phase: "mutate-published-target",
                 source,
             })?;
-        verify_published(&plan)?;
+        verify_published(&plan, published_identity)?;
         Ok::<(), ManagedConfigError>(())
     })();
 
     if let Err(primary) = post_publish {
-        match rollback(&plan, observer, &parent_anchor) {
+        match rollback(&plan, observer, &parent_anchor, published_identity) {
             Ok(()) => {
                 cleanup(backup.as_deref());
                 return Err(primary);
@@ -208,6 +218,7 @@ pub(super) fn apply(
                 return Err(ManagedConfigError::Recovery {
                     primary: Box::new(primary),
                     recovery: Box::new(recovery),
+                    backup_path: backup,
                 });
             }
         }
@@ -324,11 +335,28 @@ fn apply_exact_path_mode(_: &Path, _: Option<u32>) -> Result<(), ManagedConfigEr
     Ok(())
 }
 
-fn verify_published(plan: &ManagedConfigPlan) -> Result<(), ManagedConfigError> {
-    let published = fs::read(&plan.target_path).map_err(|source| ManagedConfigError::Read {
+fn verify_published(
+    plan: &ManagedConfigPlan,
+    identity: source::FileIdentity,
+) -> Result<(), ManagedConfigError> {
+    let metadata =
+        fs::symlink_metadata(&plan.target_path).map_err(|source| ManagedConfigError::Read {
+            path: plan.target_path.clone(),
+            source,
+        })?;
+    if !metadata.file_type().is_file() || source::FileIdentity::from_metadata(&metadata) != identity
+    {
+        return Err(ManagedConfigError::Verification {
+            path: plan.target_path.clone(),
+            reason: "published file identity changed; refusing to overwrite the current target"
+                .to_owned(),
+        });
+    }
+    let file = File::open(&plan.target_path).map_err(|source| ManagedConfigError::Read {
         path: plan.target_path.clone(),
         source,
     })?;
+    let published = source::read_bounded(file, &plan.target_path, plan.updated.len() as u64)?;
     if published != plan.updated {
         return Err(ManagedConfigError::Verification {
             path: plan.target_path.clone(),
@@ -348,9 +376,11 @@ fn rollback(
     plan: &ManagedConfigPlan,
     observer: &dyn TransactionObserver,
     parent_anchor: &source::ParentAnchor,
+    published_identity: source::FileIdentity,
 ) -> Result<(), ManagedConfigError> {
     observe(observer, TransactionPhase::BeforeRollback, plan)?;
     parent_anchor.revalidate()?;
+    verify_published(plan, published_identity)?;
     if let Some(original) = &plan.original.bytes {
         let (rollback_path, mut rollback_file) =
             reserve_artifact(&plan.target_path, "grow-rollback", None, plan.original.mode)?;
@@ -363,7 +393,15 @@ fn rollback(
             cleanup(Some(&rollback_path));
             return Err(error);
         }
-        apply_exact_path_mode(&rollback_path, plan.original.mode)?;
+        let ready = (|| {
+            apply_exact_path_mode(&rollback_path, plan.original.mode)?;
+            parent_anchor.revalidate()?;
+            verify_published(plan, published_identity)
+        })();
+        if let Err(error) = ready {
+            cleanup(Some(&rollback_path));
+            return Err(error);
+        }
         if let Err(source) = fs::rename(&rollback_path, &plan.target_path) {
             cleanup(Some(&rollback_path));
             return Err(ManagedConfigError::Publish {
@@ -372,6 +410,8 @@ fn rollback(
             });
         }
     } else {
+        parent_anchor.revalidate()?;
+        verify_published(plan, published_identity)?;
         match fs::remove_file(&plan.target_path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -392,11 +432,12 @@ fn rollback(
 fn verify_rollback(plan: &ManagedConfigPlan) -> Result<(), ManagedConfigError> {
     match &plan.original.bytes {
         Some(original) => {
-            let restored =
-                fs::read(&plan.target_path).map_err(|source| ManagedConfigError::Read {
+            let file =
+                File::open(&plan.target_path).map_err(|source| ManagedConfigError::Read {
                     path: plan.target_path.clone(),
                     source,
                 })?;
+            let restored = source::read_bounded(file, &plan.target_path, original.len() as u64)?;
             if &restored != original || current_mode(&plan.target_path)? != plan.original.mode {
                 return Err(ManagedConfigError::Verification {
                     path: plan.target_path.clone(),

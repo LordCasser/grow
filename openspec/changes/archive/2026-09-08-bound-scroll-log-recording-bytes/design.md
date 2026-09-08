@@ -1,0 +1,4 @@
+# Design
+ScrollLogRecorder新增remaining_bytes，new默认64*1024*1024。write_line在lazy open前计算UTF8 line.len()+1（checked_add），超预算不写新行。达到预算或拒绝下一行时显式flush已有BufWriter，再进入Disabled并记录限额消息，既有is_active/toggle负责显示off及重新开始。64MiB提供单次诊断有限存储，不限制单个事件原始数值或滚动速度。
+
+测试通过模块内小预算验证精确边界、UTF8和换行计数、缓冲flush、拒绝超大首行不打开/截断已有目标、禁用后不再增长及新记录器重新启动。生产构造器预算用常量断言，不生成64MiB测试垃圾。scroll matrix parse/group读到完整行前缀且容许尾部未finalize；其等待预期finalize的长任务仍可能在达到上限时超时，不能伪造finalize。

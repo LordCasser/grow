@@ -15,7 +15,44 @@ use crate::matcher::HookMatcher;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookRegistry {
+    #[serde(deserialize_with = "deserialize_registry_hooks")]
     hooks: HashMap<HookEventName, Vec<HookSpec>>,
+}
+
+fn recompile_matcher(spec: &mut HookSpec) {
+    if spec.event.traits().matcher == crate::event::MatcherPolicy::Ignored {
+        spec.matcher = None;
+        return;
+    }
+    spec.matcher = spec.configured_matcher.as_ref().map(|pattern| {
+        HookMatcher::new(pattern).unwrap_or_else(|error| {
+            tracing::warn!(hook = %spec.name, %pattern, %error,
+                "hooks: hook will match no tools until its matcher pattern is fixed");
+            HookMatcher::never()
+        })
+    });
+}
+
+fn deserialize_registry_hooks<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<HookEventName, Vec<HookSpec>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut hooks = HashMap::<HookEventName, Vec<HookSpec>>::deserialize(deserializer)?;
+    for (event, specs) in &mut hooks {
+        for spec in specs {
+            if spec.event != *event {
+                return Err(serde::de::Error::custom(format!(
+                    "hook event {} does not match registry event {event}",
+                    spec.event
+                )));
+            }
+            spec.validate().map_err(serde::de::Error::custom)?;
+            recompile_matcher(spec);
+        }
+    }
+    Ok(hooks)
 }
 
 impl HookRegistry {
@@ -40,11 +77,12 @@ impl HookRegistry {
     }
 
     pub fn append_specs(&mut self, specs: Vec<HookSpec>) {
-        for spec in specs {
+        for mut spec in specs {
             if let Err(detail) = spec.validate() {
                 tracing::error!(hook = %spec.name, %detail, "hooks: rejected invalid HookSpec");
                 continue;
             }
+            recompile_matcher(&mut spec);
             self.hooks.entry(spec.event).or_default().push(spec);
         }
     }
@@ -84,29 +122,11 @@ impl HookRegistry {
         all
     }
 
-    /// Rebuild the `matcher` field (serde skips it) from `configured_matcher`
-    /// after any wire restore; until then a configured pattern acts as match-all.
-    /// An invalid pattern can't be rejected here (the registry is live), so it
-    /// installs [`HookMatcher::never`]: fail closed rather than match all.
+    /// Refresh derived matchers from configuration, including removed patterns.
+    /// Registry deserialization and admission already maintain this invariant.
     pub fn recompile_matchers(&mut self) {
-        for specs in self.hooks.values_mut() {
-            for spec in specs.iter_mut() {
-                if let Some(ref pattern) = spec.configured_matcher {
-                    match HookMatcher::new(pattern) {
-                        Ok(m) => spec.matcher = Some(m),
-                        Err(e) => {
-                            tracing::warn!(
-                                hook = %spec.name,
-                                pattern = %pattern,
-                                error = %e,
-                                "hooks: hook will match no tools until its matcher pattern is fixed"
-                            );
-                            // Fail closed: invalid matcher must not match-all.
-                            spec.matcher = Some(HookMatcher::never());
-                        }
-                    }
-                }
-            }
+        for spec in self.hooks.values_mut().flatten() {
+            recompile_matcher(spec);
         }
     }
 }
@@ -198,25 +218,49 @@ pub fn collect_specs_from_sources(
 /// Build a registry from specs, deduping on (event, command_raw,
 /// url_raw, configured_matcher, on_failure) so a hook from several origins runs once; earlier
 /// specs win, so callers place higher-authority first. `timeout_ms`/`extra_env`
-/// are intentionally excluded from the key.
+/// are intentionally excluded from the key. Missing raw display fields fall
+/// back to their effective command/URL values. Direct relative executables also
+/// include their source directory, since the same text can name different files.
 pub fn registry_from_specs_deduped(specs: Vec<HookSpec>) -> HookRegistry {
     let mut hooks: HashMap<HookEventName, Vec<HookSpec>> = HashMap::new();
     let mut seen_content: std::collections::HashSet<(
         HookEventName,
-        String,
+        std::ffi::OsString,
+        Option<std::path::PathBuf>,
         String,
         String,
         crate::config::OnFailure,
     )> = std::collections::HashSet::new();
-    for spec in specs {
+    for mut spec in specs {
         if let Err(detail) = spec.validate() {
             tracing::error!(hook = %spec.name, %detail, "hooks: rejected invalid HookSpec");
             continue;
         }
+        recompile_matcher(&mut spec);
         let key = (
             spec.event,
-            spec.command_raw.clone().unwrap_or_default(),
-            spec.url_raw.clone().unwrap_or_default(),
+            spec.command_raw
+                .as_ref()
+                .map(std::ffi::OsString::from)
+                .or_else(|| {
+                    spec.command
+                        .as_ref()
+                        .map(|command| command.as_os_str().to_owned())
+                })
+                .unwrap_or_default(),
+            spec.command
+                .as_ref()
+                .filter(|command| {
+                    spec.handler_type == crate::config::HandlerType::Command
+                        && command.is_relative()
+                        && !crate::config::command_uses_shell(&command.to_string_lossy())
+                })
+                .map(|_| spec.source_dir.clone()),
+            spec.url_raw
+                .as_ref()
+                .or(spec.url.as_ref())
+                .cloned()
+                .unwrap_or_default(),
             spec.configured_matcher.clone().unwrap_or_default(),
             spec.on_failure,
         );
@@ -896,6 +940,145 @@ mod tests {
     }
 
     #[test]
+    fn restored_registry_validates_event_identity_and_policy() {
+        let mut combined = HookRegistry::default();
+        for event in HookEventName::ALL {
+            let mut spec = recompile_test_spec("restored", None);
+            spec.event = *event;
+            let mut registry = HookRegistry::default();
+            let mut second = spec.clone();
+            second.name = "second".into();
+            registry.append_specs(vec![spec.clone(), second.clone()]);
+            combined.append_specs(vec![spec, second]);
+            let valid = serde_json::to_value(&registry).unwrap();
+            let restored: HookRegistry = serde_json::from_value(valid.clone()).unwrap();
+            assert_eq!(restored.hooks_for(*event).len(), 2);
+            assert_eq!(serde_json::to_value(restored).unwrap(), valid);
+
+            let different = if *event == HookEventName::PreToolUse {
+                HookEventName::Stop
+            } else {
+                HookEventName::PreToolUse
+            };
+            let mut mismatched = valid;
+            mismatched["hooks"][event.to_string()][0]["event"] =
+                serde_json::to_value(different).unwrap();
+            let error = serde_json::from_value::<HookRegistry>(mismatched)
+                .expect_err("contradictory event identity must fail");
+            assert!(error.to_string().contains("event"));
+        }
+        let valid = serde_json::to_value(combined).unwrap();
+        let restored: HookRegistry = serde_json::from_value(valid.clone()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), valid);
+    }
+
+    #[test]
+    fn restored_registry_rejects_invalid_failure_policy() {
+        let mut spec = recompile_test_spec("invalid", None);
+        spec.event = HookEventName::SessionStart;
+        spec.on_failure = crate::config::OnFailure::Block;
+        let mut registry = HookRegistry::default();
+        registry.hooks.insert(spec.event, vec![spec]);
+        let error = serde_json::from_value::<HookRegistry>(serde_json::to_value(registry).unwrap())
+            .expect_err("invalid restored policy must fail");
+        assert!(error.to_string().contains("on_failure=block"));
+    }
+
+    #[test]
+    fn ignored_matcher_policy_survives_registry_boundaries() {
+        for event in HookEventName::ALL
+            .iter()
+            .copied()
+            .filter(|event| event.traits().matcher == crate::event::MatcherPolicy::Ignored)
+        {
+            for pattern in ["read_file", "[invalid"] {
+                let input = serde_json::json!({"hooks": {
+                    event.to_string(): [{"matcher": pattern, "hooks": [{
+                        "type": "command", "command": "check.sh"
+                    }]}]
+                }});
+                let (specs, errors) =
+                    config::parse_hook_file(&input.to_string(), Path::new("/tmp/hooks.json"));
+                assert!(errors.is_empty());
+                assert!(specs[0].matcher.is_none());
+                for mode in ["append", "dedup", "serde", "refresh"] {
+                    let mut registry = HookRegistry::default();
+                    match mode {
+                        "append" => registry.append_specs(specs.clone()),
+                        "dedup" => registry = registry_from_specs_deduped(specs.clone()),
+                        _ => {
+                            registry.hooks.insert(event, specs.clone());
+                        }
+                    }
+                    if mode == "serde" {
+                        registry = serde_json::from_value(serde_json::to_value(registry).unwrap())
+                            .unwrap();
+                    } else if mode == "refresh" {
+                        registry.recompile_matchers();
+                    }
+                    let spec = &registry.hooks_for(event)[0];
+                    assert_eq!(spec.configured_matcher.as_deref(), Some(pattern));
+                    assert!(spec.matcher.is_none(), "{event} {pattern} {mode}");
+                    assert!(crate::matcher::matcher_allows(spec.matcher.as_ref(), None));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn matcher_boundary_restores_configured_intent() {
+        for mode in ["append", "dedup", "serde"] {
+            for pattern in [Some("read_file"), Some("[invalid"), None] {
+                let mut spec = recompile_test_spec("test", pattern);
+                spec.matcher = Some(HookMatcher::new("write_file").unwrap());
+                let registry = match mode {
+                    "dedup" => registry_from_specs_deduped(vec![spec]),
+                    "serde" => {
+                        let mut original = HookRegistry::default();
+                        original.hooks.insert(spec.event, vec![spec]);
+                        serde_json::from_value::<HookRegistry>(
+                            serde_json::to_value(original).unwrap(),
+                        )
+                        .unwrap()
+                    }
+                    _ => {
+                        let mut registry = HookRegistry::default();
+                        registry.append_specs(vec![spec]);
+                        registry
+                    }
+                };
+                let matcher = registry.hooks_for(HookEventName::PreToolUse)[0]
+                    .matcher
+                    .as_ref();
+                assert_eq!(
+                    crate::matcher::matcher_allows(matcher, Some("read_file")),
+                    pattern != Some("[invalid"),
+                    "{mode} {pattern:?}"
+                );
+                assert_eq!(
+                    crate::matcher::matcher_allows(matcher, Some("write_file")),
+                    pattern.is_none(),
+                    "{mode} {pattern:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matcher_boundary_clears_removed_pattern() {
+        let mut registry = HookRegistry::default();
+        let mut spec = recompile_test_spec("test", None);
+        spec.matcher = Some(HookMatcher::new("read_file").unwrap());
+        registry.hooks.insert(spec.event, vec![spec]);
+        registry.recompile_matchers();
+        assert!(
+            registry.hooks_for(HookEventName::PreToolUse)[0]
+                .matcher
+                .is_none()
+        );
+    }
+
+    #[test]
     fn recompile_matchers_leaves_intentional_match_all() {
         let mut registry = HookRegistry::default();
         registry.append_specs(vec![recompile_test_spec("all", None)]);
@@ -940,6 +1123,62 @@ mod tests {
             hooks[0].extra_env.get("POLICY").map(String::as_str),
             Some("strict")
         );
+    }
+
+    #[test]
+    fn relative_command_dedup_uses_execution_base_only() {
+        for (command, expected) in [
+            ("check.sh", 2),
+            ("bin/check.sh", 2),
+            ("/shared/check.sh", 1),
+            ("echo checked", 1),
+            ("printf\tok", 1),
+            ("cat\ntrue", 1),
+            ("${HOOK_ROOT}/check.sh", 1),
+        ] {
+            let mut first = recompile_test_spec("first", None);
+            first.command = Some(command.into());
+            first.command_raw = Some(command.into());
+            first.source_dir = "/hooks/first".into();
+            let mut second = first.clone();
+            second.name = "second".into();
+            second.source_dir = "/hooks/second".into();
+            let duplicate = first.clone();
+            let registry = registry_from_specs_deduped(vec![first, second, duplicate]);
+            assert_eq!(registry.len(), expected, "{command}");
+            assert_eq!(
+                registry.hooks_for(HookEventName::PreToolUse)[0].name,
+                "first"
+            );
+        }
+    }
+
+    #[test]
+    fn dedup_without_raw_preserves_distinct_execution_values() {
+        for http in [false, true] {
+            let mut first = recompile_test_spec("first", None);
+            let mut second = recompile_test_spec("second", None);
+            for (spec, value) in [(&mut first, "first"), (&mut second, "second")] {
+                spec.command_raw = None;
+                if http {
+                    spec.handler_type = crate::config::HandlerType::Http;
+                    spec.command = None;
+                    spec.url = Some(format!("https://example.com/{value}"));
+                    spec.url_raw = None;
+                } else {
+                    spec.command = Some(format!("{value}.sh").into());
+                }
+            }
+            let mut duplicate = first.clone();
+            duplicate.name = "duplicate".into();
+            let registry = registry_from_specs_deduped(vec![first, second, duplicate]);
+            let names: Vec<_> = registry
+                .hooks_for(HookEventName::PreToolUse)
+                .iter()
+                .map(|spec| spec.name.as_str())
+                .collect();
+            assert_eq!(names, vec!["first", "second"], "http={http}");
+        }
     }
 
     #[test]

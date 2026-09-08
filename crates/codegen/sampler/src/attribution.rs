@@ -66,21 +66,10 @@ impl SamplingConsumer {
     }
 }
 
-/// Maximum prefix length the sampler shares with attribution
-/// callbacks across the crate boundary. Mirrors
-/// `shell::auth::token_suffix` (which truncates to 12 chars
-/// before any sink) so the two crates stay in lock-step on the
-/// "bearers leaving the sampler are 12-char prefixes only" invariant.
-///
-/// The cross-crate boundary is the only place this constant is
-/// load-bearing -- changing it requires updating `token_suffix` in
-/// `shell/src/auth/manager.rs` to match, otherwise the
-/// shell's local-log payload and the sampler's callback argument
-/// will disagree on prefix length.
-/// Bearer-fragment length shared with attribution callbacks: the **last**
-/// N chars (JWT heads are a shared constant; only the tail distinguishes
-/// tokens). Must stay in lock-step with `token_suffix` in
-/// `shell/src/auth/model.rs`, the comparison site.
+/// Maximum number of trailing characters shared with optional attribution
+/// callbacks. Tokens at or below this length are passed in full; truncation
+/// is not credential redaction. The repository currently supplies a callback
+/// implementation only in tests.
 pub const SENT_BEARER_PREFIX_LEN: usize = 12;
 /// Last [`SENT_BEARER_PREFIX_LEN`] characters of a bearer, char-boundary
 /// safe (bearer strings are visible-ASCII per the header grammars, but a
@@ -119,11 +108,9 @@ pub trait Auth401AttributionCallback: Send + Sync + std::fmt::Debug {
     /// that was actually sent on the wire. The sampler extracts the
     /// bearer from the `Authorization` header (or `x-api-key` for
     /// Anthropic Messages API backends) and truncates it to that
-    /// fragment **before crossing this trait boundary** -- the full
-    /// bearer never leaves [`crate::SamplingClient`]. This is the
-    /// scrub-at-the-boundary invariant: even a misbehaving callback
-    /// implementation that logs `sent_bearer_prefix` directly leaks
-    /// only the prefix, never the full credential.
+    /// fragment before crossing this trait boundary. Credentials no longer
+    /// than the fragment limit cross in full. Consumers must treat this value
+    /// as sensitive and must not assume truncation makes it safe to log.
     ///
     /// `None` indicates the request had no bearer header at all
     /// (distinct from "had a bearer that turned out to be stale").

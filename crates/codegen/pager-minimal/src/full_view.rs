@@ -48,7 +48,7 @@ const PUMP_BUDGET: Duration = Duration::from_millis(8);
 /// streaming-markdown blocks). Budgeted slices amortized across frames are how
 /// other scrollback TUIs keep transcript-scale work off the critical path
 /// (budgeted commit ticks / cell caches / throttled frame loops). On completion
-/// the file is written and `pending_pager_path` armed; the event loop then
+/// the file is written and `pending_pager` armed; the event loop then
 /// suspends into `$PAGER`.
 pub fn pump_transcript(app: &mut AppView) {
     let Some(mut build) = minimal_api::take_minimal_transcript(app) else {
@@ -122,7 +122,7 @@ pub fn pump_transcript(app: &mut AppView) {
     finish_transcript(app, id, build.out);
 }
 
-/// Write the finished transcript and arm `pending_pager_path` (ANSI → the
+/// Write the finished transcript and arm `pending_pager` (ANSI → the
 /// event loop adds `-R` for `less`). Errors surface as a system block on the
 /// build's owning agent (which may differ from the active view — the user can
 /// tab away while the build runs).
@@ -137,11 +137,8 @@ fn finish_transcript(app: &mut AppView, id: pager::app::session::AgentId, out: S
         }
         return;
     }
-    let path = std::env::temp_dir().join(format!("grow-transcript-{}.ansi", uuid::Uuid::new_v4()));
-    match std::fs::write(&path, out) {
-        Ok(()) => {
-            minimal_api::app_set_pending_pager(app, path, true);
-        }
+    match minimal_api::app_set_pending_pager(app, id, &out, true) {
+        Ok(()) => {}
         Err(e) => {
             if let Some(agent) = minimal_api::app_agent_mut(app, id) {
                 minimal_api::agent_scrollback_mut(agent).push_block(

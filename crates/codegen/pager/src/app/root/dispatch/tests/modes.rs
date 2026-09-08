@@ -408,7 +408,7 @@ fn set_plan_mode_mutates_only_active_agent_not_others() {
 // SHELL-owned, but with rollback semantics: a disk-write failure
 // routes through `apply_setting_rollback("permission_mode", _)`
 // which calls `set_always_approve_mode_inner(app, prev)` to revert. The
-// outer setter never re-emits `Effect::PersistPermissionMode` on
+// outer setter never re-emits permission persistence on
 // rollback so a persistent disk failure does not loop.
 //
 // Security invariants the test suite pins:
@@ -424,10 +424,7 @@ fn set_plan_mode_mutates_only_active_agent_not_others() {
 //     always-approve never picks a more-permissive option than `AllowOnce`.
 //   - `app.current_ui.permission_mode` stays in lock-step with
 //     `agent.session.always_approve_mode` so the modal snapshot is fresh.
-//   - `Effect::PersistPermissionMode { persist:
-//     PermissionModePersist::WithRollback(prev) }` emitted
-//     exactly once per typed-setter dispatch (see
-//     `app::actions::PermissionModePersist`).
+//   - Default preference writes use the shared PersistSetting coordinator.
 //   - Rollback via `apply_setting_rollback("permission_mode",
 //     SettingValue::Enum(_))` reverts the in-memory state via
 //     `set_always_approve_mode_inner` (no re-emit). Refreshes any open
@@ -709,10 +706,8 @@ fn always_approve_on_drain_clears_double_click_tracker() {
 ///    response. The shell's `map_selected_outcome` resolves this to
 ///    `PromptOutcome::AllowOnce`, so the in-flight tool call is
 ///    allowed exactly once (no per-tool whitelisting).
-/// 2. The dispatcher returns a `PersistPermissionMode` effect with
-///    canonical `"always-approve"` — this is what flips
-///    `[ui] permission_mode` on disk AND fires the
-///    `grow/permission_mode_changed` ACP notification back to the shell.
+/// 2. The dispatcher notifies the current session of `always-approve`
+///    without changing the default preference on disk.
 /// 3. The agent's per-session `always_approve_mode` flag is flipped to true,
 ///    so subsequent permission requests are auto-approved by
 ///    `handle_permission_request`.
@@ -787,7 +782,7 @@ fn enable_always_approve_sends_response_and_changes_only_this_session() {
 }
 
 /// If the user picks "enable-always-approve" while always-approve is ALREADY
-/// on, the dispatcher must NOT re-emit `PersistPermissionMode`
+/// on, the dispatcher must NOT re-emit permission change
 /// (which would queue a redundant disk write + ACP notification).
 /// In practice always-approve-on suppresses the permission panel entirely
 /// (`handle_permission_request` auto-approves), so this state is
@@ -826,13 +821,18 @@ fn enable_always_approve_is_idempotent_when_always_approve_already_on() {
         other => panic!("expected Selected response, got {other:?}"),
     }
 
-    // No redundant PersistPermissionMode. (The initial session selection
+    // No redundant permission change. (The initial session selection
     // dispatch above already produced one for the always-approve-flip.)
     assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::PersistPermissionMode { .. })),
-        "redundant PersistPermissionMode when always-approve already on — the dispatcher \
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::NotifySessionPermissionMode { .. }
+                | Effect::PersistSetting {
+                    key: "permission_mode",
+                    ..
+                }
+        )),
+        "redundant permission change when always-approve already on — the dispatcher \
              must short-circuit to avoid double-writing config.toml and double-firing \
              grow/permission_mode_changed",
     );
@@ -1253,6 +1253,102 @@ fn session_permission_change_does_not_rewrite_default_settings_snapshot() {
 }
 
 #[test]
+fn default_permission_failure_chain_preserves_session_and_confirmed_default() {
+    use crate::settings::SettingValue;
+    for first_succeeds in [false, true] {
+        let mut app = test_app_with_agent();
+        app.auto_mode_gate = true;
+        let initial_session = app.agents[&AgentId(0)].session.permission_mode();
+        let first = dispatch(
+            Action::SetDefaultPermissionMode(PermissionModeKind::AlwaysApprove),
+            &mut app,
+        );
+        assert_eq!(first.len(), 1);
+        assert!(
+            dispatch(
+                Action::SetDefaultPermissionMode(PermissionModeKind::Auto),
+                &mut app
+            )
+            .is_empty()
+        );
+        let result = if first_succeeds {
+            TaskResult::SettingPersisted {
+                key: "permission_mode",
+                value: SettingValue::Enum("always-approve"),
+            }
+        } else {
+            TaskResult::SettingPersistFailed {
+                key: "permission_mode",
+                rollback_value: SettingValue::Enum("ask"),
+                error: "first failed".into(),
+            }
+        };
+        let next = dispatch(Action::TaskComplete(result), &mut app);
+        assert_eq!(next.len(), 1);
+        let Effect::PersistSetting {
+            key: "permission_mode",
+            value: SettingValue::Enum("auto"),
+            rollback_value,
+        } = &next[0]
+        else {
+            panic!("expected queued default permission write");
+        };
+        assert_eq!(
+            app.agents[&AgentId(0)].session.permission_mode(),
+            initial_session
+        );
+        let finished = dispatch(
+            Action::TaskComplete(TaskResult::SettingPersistFailed {
+                key: "permission_mode",
+                rollback_value: rollback_value.clone(),
+                error: "second failed".into(),
+            }),
+            &mut app,
+        );
+        assert!(finished.is_empty());
+        assert_eq!(
+            shell::util::config::permission_mode_canonical_str(app.default_permission_mode),
+            if first_succeeds {
+                "always-approve"
+            } else {
+                "ask"
+            }
+        );
+        assert_eq!(
+            app.agents[&AgentId(0)].session.permission_mode(),
+            initial_session
+        );
+    }
+}
+
+#[test]
+fn default_permission_earlier_failure_preserves_latest_choice() {
+    let mut app = test_app_with_agent();
+    app.auto_mode_gate = true;
+    dispatch(
+        Action::SetDefaultPermissionMode(PermissionModeKind::AlwaysApprove),
+        &mut app,
+    );
+    dispatch(
+        Action::SetDefaultPermissionMode(PermissionModeKind::Auto),
+        &mut app,
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::SettingPersistFailed {
+            key: "permission_mode",
+            rollback_value: crate::settings::SettingValue::Enum("ask"),
+            error: "first write failed".into(),
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        shell::util::config::permission_mode_canonical_str(app.default_permission_mode),
+        "auto"
+    );
+    assert!(!app.agents[&AgentId(0)].session.is_always_approve());
+}
+
+#[test]
 fn default_permission_change_is_future_session_only() {
     let mut app = test_app_with_agent();
     let effects = dispatch(
@@ -1267,9 +1363,9 @@ fn default_permission_change_is_future_session_only() {
     );
     assert!(matches!(
         effects.as_slice(),
-        [Effect::PersistPermissionMode {
-            canonical: "always-approve",
-            session_id: None,
+        [Effect::PersistSetting {
+            key: "permission_mode",
+            value: crate::settings::SettingValue::Enum("always-approve"),
             ..
         }]
     ));

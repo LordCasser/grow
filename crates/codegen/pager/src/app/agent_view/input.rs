@@ -423,8 +423,16 @@ impl AgentView {
         registry: &ActionRegistry,
         effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
+        if matches!(ev, Event::Key(_)) {
+            self.prompt.last_input_delta = Default::default();
+        }
         match self.handle_minimal_btw_input(ev) {
-            crate::minimal_api::MinimalBtwInput::Handled(outcome) => *outcome,
+            crate::minimal_api::MinimalBtwInput::Handled(outcome) => {
+                if let Event::Key(key) = ev {
+                    self.record_input(key, &outcome);
+                }
+                *outcome
+            },
             crate::minimal_api::MinimalBtwInput::Occluded => {
                 let jump_dismissed = self.dismiss_jump_picker_if_suppressed();
                 let suspended = crate::minimal_api::suspend_minimal_btw(self);
@@ -436,7 +444,11 @@ impl AgentView {
                                 && key.code == KeyCode::Esc
                                 && key.modifiers.is_empty()
                     ) {
-                    InputOutcome::Changed
+                    let outcome = InputOutcome::Changed;
+                    if let Event::Key(key) = ev {
+                        self.record_input(key, &outcome);
+                    }
+                    outcome
                 } else {
                     self.handle_input(ev, registry, effects)
                 };
@@ -509,6 +521,25 @@ impl AgentView {
         prompt_paging: bool,
         effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
+        if matches!(ev, Event::Key(_)) {
+            self.prompt.last_input_delta = Default::default();
+        }
+        let mut delegated = false;
+        let outcome = self.route_input_inner(ev, registry, prompt_paging, effects, &mut delegated);
+        if !delegated && let Event::Key(key) = ev {
+            self.record_input(key, &outcome);
+        }
+        outcome
+    }
+
+    fn route_input_inner(
+        &mut self,
+        ev: &Event,
+        registry: &ActionRegistry,
+        prompt_paging: bool,
+        effects: &mut Vec<super::actions::Effect>,
+        delegated: &mut bool,
+    ) -> InputOutcome {
         if matches!(ev, Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::Esc)
             && let Some(invocation) = self.session.pending_memory_browse.take()
         {
@@ -569,6 +600,7 @@ impl AgentView {
             }
             if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
                 child_view.mark_as_subagent_view();
+                *delegated = true;
                 return child_view.handle_input_inner(ev, registry, prompt_paging, effects);
             }
             return InputOutcome::Unchanged;

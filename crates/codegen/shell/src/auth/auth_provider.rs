@@ -405,7 +405,9 @@ async fn mint_provider_token(
         .as_deref()
         .map(str::trim)
         .filter(|c| !c.is_empty())
-        .map(crate::util::expand_home);
+        .map(crate::util::expand_home)
+        .map(std::path::absolute)
+        .transpose()?;
 
     let mut cmd = match config.args {
         Some(ref args) => {
@@ -421,7 +423,7 @@ async fn mint_provider_token(
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        // Capture stderr for the failure log; inheriting corrupts the TUI.
+        // Drain stderr without echoing credential-bearing output into the TUI or logs.
         .stderr(Stdio::piped())
         // Reaps the direct child if the future is dropped; `run_capped`
         // additionally kills the whole process group on timeout.
@@ -448,11 +450,7 @@ async fn mint_provider_token(
     let parsed = match parse_token_output(&output) {
         Ok(parsed) => parsed,
         Err(e) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "{e} (stderr: {})",
-                crate::util::truncate(stderr.trim(), 300)
-            );
+            anyhow::bail!("{e} (stderr captured: {} bytes)", output.stderr.len());
         }
     };
     let expires_at = parsed
@@ -522,8 +520,10 @@ impl AuthProviderRef {
     }
 
     /// Cache-only read for sync resolution: never runs the command, blocks, or
-    /// mutates. `None` for an unresolved ref, a cold or stale cache, or a mint
-    /// in progress; minting happens pre-turn via [`AuthProviderRef::ensure_fresh_token`].
+    /// mutates. `None` for an unresolved ref, a cold, expired or mismatched
+    /// cache, or a mint in progress. The proactive refresh margin does not
+    /// invalidate a still-live token; minting happens pre-turn via
+    /// [`AuthProviderRef::ensure_fresh_token`].
     pub(crate) fn cached_token(&self) -> Option<String> {
         if !self.resolved {
             return None;
@@ -542,7 +542,10 @@ impl AuthProviderRef {
         };
         guard
             .as_ref()
-            .filter(|m| !minted_token_is_stale(m, &self.config))
+            .filter(|m| {
+                token_identity(&m.minted_with) == token_identity(&self.config)
+                    && !m.expires_at.is_some_and(|at| chrono::Utc::now() >= at)
+            })
             .map(|m| m.token.clone())
     }
 
@@ -590,6 +593,11 @@ impl AuthProviderRef {
                     error = %e,
                     "auth provider pre-turn mint failed"
                 );
+                // Retain helper context but withdraw the old bearer even if
+                // the failed refresh was only triggered by the skew window.
+                if let Some(minted) = slot.as_mut() {
+                    minted.expires_at = Some(chrono::Utc::now());
+                }
                 return ProviderRefreshOutcome::MintFailed;
             }
         };

@@ -189,6 +189,18 @@ pub struct HookSpec {
     pub layer: HookProvenance,
 }
 
+/// Shared execution routing for command hooks and their deduplication context.
+pub(crate) fn command_uses_shell(command: &str) -> bool {
+    command.contains([' ', '\t', '\n'])
+        || command.contains('|')
+        || command.contains('&')
+        || command.contains(';')
+        || command.contains('>')
+        || command.contains('<')
+        || command.contains('$')
+        || command.starts_with('~')
+}
+
 impl HookSpec {
     /// Revalidate programmatic, plugin, and serialized construction at every
     /// registry boundary. Raw config additionally retains field presence so an

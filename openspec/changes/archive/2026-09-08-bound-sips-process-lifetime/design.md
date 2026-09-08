@@ -1,0 +1,4 @@
+## Evidence and design
+Use existing tty_utils detach_std_command and ProcessGroup, following the clipboard runner's ownership pattern. No output drain threads are needed because all three standard streams are null. A private runner polls try_wait every15ms, with a caller-supplied Duration for deterministic short tests. Production passes10seconds. Group cleanup also runs after normal leader exit because descendants may remain. Ignore Unix ESRCH only; report other cleanup errors. Kill/reap the direct child after failed attachment or wait/timeout errors.
+## Limits
+The deadline covers spawned process execution, not filesystem writes, OS spawn latency or uninterruptible kernel waits. Escaped process groups and denied kill requests cannot be guaranteed reclaimed; failures propagate and are logged by conversion before existing fallback. Output file read limits remain separate.

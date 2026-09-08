@@ -63,7 +63,24 @@ impl SessionActor {
                 last_editor: None,
                 kind: kind.to_string(),
                 text: Self::queue_text_from_blocks(&prompt_blocks),
-                combined_texts: None,
+                // Match the replay reader: display-only metadata may contain
+                // malformed entries, but needs at least two non-empty strings.
+                combined_texts: prompt_blocks.iter().find_map(|block| {
+                    let acp::ContentBlock::Text(text) = block else {
+                        return None;
+                    };
+                    let segments = text
+                        .meta
+                        .as_ref()?
+                        .get(::prompt_queue::COMBINED_DISPLAY_TEXTS_META)?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>();
+                    (segments.len() >= 2).then_some(segments)
+                }),
             }
         });
         let input_ids = if let Some(queue) = queue_meta.as_ref() {
@@ -902,7 +919,14 @@ impl SessionActor {
         if pending.len() < 2 {
             return;
         }
-        let gates: Vec<CombineGate<'_>> = pending.iter().map(Self::combine_gate).collect();
+        // Wrapping and truncation apply once to the combined body, so every
+        // participating request must use the same parsing mode as the front.
+        let verbatim = pending[0].verbatim;
+        let gates: Vec<CombineGate<'_>> = pending
+            .iter()
+            .take_while(|item| item.verbatim == verbatim)
+            .map(Self::combine_gate)
+            .collect();
         let n = combine_prefix_len(gates, skip_ids);
         if n < 2 {
             return;
@@ -924,17 +948,25 @@ impl SessionActor {
             // the promote broadcast's `running_combined_texts`.
             Self::respond_removed_prompt(next.respond_to);
             let extra = Self::joined_text_blocks(&next.prompt_blocks);
+            let extra_segments = next
+                .queue_meta
+                .and_then(|meta| meta.combined_texts)
+                .filter(|segments| segments.len() >= 2)
+                .unwrap_or_else(|| vec![extra.clone()]);
             if let Some(front) = pending.front_mut() {
                 front.input_ids.extend(next.input_ids);
-                Self::append_text_to_prompt(front, &extra);
+                Self::append_text_to_prompt(front, &extra, &extra_segments);
             }
         }
     }
 
     fn combine_gate(item: &InputItem) -> ::prompt_queue::CombineGate<'_> {
         let is_bash = Self::extract_bash_command(&item.prompt_blocks).is_some();
-        let is_plain_prompt =
-            item.queue_meta.as_ref().map(|m| m.kind.as_str()) == Some("prompt") && !is_bash;
+        // A structured-output contract belongs to this request alone. Merging
+        // would discard a follower's schema or apply the front's to other inputs.
+        let is_plain_prompt = item.queue_meta.as_ref().map(|m| m.kind.as_str()) == Some("prompt")
+            && !is_bash
+            && item.json_schema.is_none();
         let mut has_text = false;
         let mut has_images = false;
         let mut is_expanded_skill = false;
@@ -998,19 +1030,16 @@ impl SessionActor {
         }))
     }
 
-    fn append_text_to_prompt(item: &mut InputItem, extra: &str) {
+    fn append_text_to_prompt(item: &mut InputItem, extra: &str, extra_segments: &[String]) {
         use ::prompt_queue::TEXT_SEPARATOR;
 
         if extra.is_empty() {
             return;
         }
         if let Some(meta) = item.queue_meta.as_mut() {
-            match meta.combined_texts.as_mut() {
-                Some(segs) => segs.push(extra.to_string()),
-                None => {
-                    meta.combined_texts = Some(vec![meta.text.clone(), extra.to_string()]);
-                }
-            }
+            meta.combined_texts
+                .get_or_insert_with(|| vec![meta.text.clone()])
+                .extend_from_slice(extra_segments);
         }
         // Append to the LAST text block so a multi-text front stays ordered
         // (front text first, then the follower); `combined_texts` mirrors that.
@@ -1247,6 +1276,88 @@ mod follow_up_admission_tests {
     }
 
     #[test]
+    fn combining_prompts_preserves_verbatim_boundaries() {
+        for modes in [
+            [false, true, false],
+            [true, false, true],
+            [false, false, true],
+            [true, true, false],
+            [false, false, false],
+            [true, true, true],
+        ] {
+            let mut pending = modes
+                .iter()
+                .enumerate()
+                .map(|(index, &verbatim)| {
+                    let mut item = crate::session::actor::tests::support::user_item(
+                        &format!("prompt-{index}"),
+                        "client",
+                    );
+                    item.verbatim = verbatim;
+                    item
+                })
+                .collect::<std::collections::VecDeque<_>>();
+
+            SessionActor::combine_front_pending_inputs(&mut pending, &[]);
+
+            let merged_count = match modes {
+                [false, true, false] | [true, false, true] => 1,
+                [false, false, true] | [true, true, false] => 2,
+                _ => 3,
+            };
+            assert_eq!(pending.len(), 4 - merged_count, "modes: {modes:?}");
+            assert_eq!(pending[0].verbatim, modes[0]);
+            let expected_text = (0..merged_count)
+                .map(|index| format!("text for prompt-{index}"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            assert_eq!(
+                SessionActor::joined_text_blocks(&pending[0].prompt_blocks),
+                expected_text
+            );
+            for (offset, item) in pending.iter().skip(1).enumerate() {
+                let index = merged_count + offset;
+                assert_eq!(item.prompt_id, format!("prompt-{index}"));
+                assert_eq!(item.verbatim, modes[index]);
+                assert_eq!(
+                    SessionActor::joined_text_blocks(&item.prompt_blocks),
+                    format!("text for prompt-{index}")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn combining_prompts_preserves_structured_output_request_boundaries() {
+        for constrained_index in 0..3 {
+            let mut pending = (0..3)
+                .map(|index| {
+                    crate::session::actor::tests::support::user_item(
+                        &format!("prompt-{index}"),
+                        "client",
+                    )
+                })
+                .collect::<std::collections::VecDeque<_>>();
+            let schema = serde_json::json!({"type": "object", "required": ["answer"]});
+            pending[constrained_index].json_schema = Some(schema.clone());
+
+            SessionActor::combine_front_pending_inputs(&mut pending, &[]);
+
+            let expected_len = if constrained_index == 2 { 2 } else { 3 };
+            assert_eq!(pending.len(), expected_len, "schema at {constrained_index}");
+            let constrained = pending
+                .iter()
+                .find(|item| item.prompt_id == format!("prompt-{constrained_index}"))
+                .expect("structured output request must retain its own queue row");
+            assert_eq!(constrained.json_schema, Some(schema));
+            assert_eq!(
+                SessionActor::joined_text_blocks(&constrained.prompt_blocks),
+                format!("text for prompt-{constrained_index}")
+            );
+        }
+    }
+
+    #[test]
     fn combining_prompts_never_exceeds_the_timeline_input_batch_limit() {
         let mut pending = (0..=chat_state::MAX_TURN_INPUTS)
             .map(|index| {
@@ -1270,6 +1381,72 @@ mod follow_up_admission_tests {
             pending.back().unwrap().input_ids,
             vec![format!("input-{}", chat_state::MAX_TURN_INPUTS)]
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn combined_prompt_segments_survive_admission_recovery_and_recombining() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                for (id, segments) in [("first", ["一", "二"]), ("second", ["三", "四"])] {
+                    let segments = segments.map(str::to_owned);
+                    let mut blocks = text_blocks(&segments.join("\n\n"));
+                    let acp::ContentBlock::Text(text) = &mut blocks[0] else {
+                        unreachable!();
+                    };
+                    ::prompt_queue::stamp_combined_display_texts(
+                        text.meta.get_or_insert_with(acp::Meta::new),
+                        &segments,
+                    );
+                    actor
+                        .queue_input(
+                            blocks,
+                            id.into(),
+                            crate::session::PromptOrigin::User,
+                            crate::session::TurnKind::User,
+                            None,
+                            None,
+                            false,
+                            None,
+                            tokio::sync::oneshot::channel().0,
+                            None,
+                        )
+                        .await;
+                }
+                for restored in [false, true] {
+                    if restored {
+                        actor.state.lock().await.pending_inputs.clear();
+                        actor.restore_pending_human_inputs().await.unwrap();
+                    }
+                    let state = actor.state.lock().await;
+                    let wire = actor.build_queue_wire(&state);
+                    assert_eq!(wire.len(), 2);
+                    assert_eq!(wire[0].combined_texts, Some(vec!["一".into(), "二".into()]));
+                    assert_eq!(wire[1].combined_texts, Some(vec!["三".into(), "四".into()]));
+                }
+                let mut state = actor.state.lock().await;
+                SessionActor::combine_front_pending_inputs(&mut state.pending_inputs, &[]);
+                assert_eq!(state.pending_inputs.len(), 1);
+                let item = &state.pending_inputs[0];
+                let expected = vec!["一".into(), "二".into(), "三".into(), "四".into()];
+                assert_eq!(
+                    SessionActor::running_display_from_item(item).combined_texts,
+                    Some(expected)
+                );
+                assert_eq!(
+                    SessionActor::joined_text_blocks(&item.prompt_blocks),
+                    "一\n\n二\n\n三\n\n四"
+                );
+                let acp::ContentBlock::Text(text) = &item.prompt_blocks[0] else {
+                    unreachable!();
+                };
+                assert_eq!(
+                    text.meta.as_ref().unwrap()[::prompt_queue::COMBINED_DISPLAY_TEXTS_META],
+                    serde_json::json!(["一", "二", "三", "四"])
+                );
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]

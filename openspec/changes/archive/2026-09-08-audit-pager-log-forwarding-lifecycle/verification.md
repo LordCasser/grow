@@ -1,0 +1,2 @@
+# Verification
+Source inspection of pager unified_log.rs, app/mod.rs, root/event_loop.rs, headless.rs, slash/commands/debug.rs, dispatch/router.rs, ACP channel/message implementations and shell ext_notification ingestion. No executable reproduction or Rust change; no cargo build needed. Findings distinguish reachable mechanism failures from unverified production frequency. Strict OpenSpec validation is the documentation check, not runtime proof.

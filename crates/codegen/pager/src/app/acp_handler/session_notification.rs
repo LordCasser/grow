@@ -1209,9 +1209,14 @@ fn handle_session_notification_inner(
                 );
                 false
             } else {
-                app.notification_service.focus_tracker.mark_recap_shown();
                 let recap_block = RenderBlock::session_event(SessionEvent::Recap { summary, auto });
-                apply_recap_block(agent, auto, recap_block);
+                if meta.is_replay {
+                    // History restores display, not current request/away state.
+                    agent.scrollback.push_block(recap_block);
+                } else {
+                    app.notification_service.focus_tracker.mark_recap_shown(&session_notif.session_id.0);
+                    apply_recap_block(agent, auto, recap_block);
+                }
                 true
             }
         }

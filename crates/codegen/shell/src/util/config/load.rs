@@ -46,6 +46,37 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
             .unwrap_or_default(),
     }
 }
+/// Parse writable sections strictly before a settings edit can replace them.
+pub(super) fn load_config_for_update(root: &TomlValue) -> anyhow::Result<Config> {
+    fn section<T: serde::de::DeserializeOwned + Default>(
+        value: Option<&TomlValue>,
+        label: &str,
+    ) -> anyhow::Result<T> {
+        match value {
+            None => Ok(T::default()),
+            Some(value) => value.clone().try_into().map_err(|error| {
+                anyhow::anyhow!("invalid configuration section [{label}]: {error}")
+            }),
+        }
+    }
+    if root.get("toolset").is_some_and(|value| !value.is_table()) {
+        anyhow::bail!("invalid configuration section [toolset]: expected a table");
+    }
+    Ok(Config {
+        cli: section(root.get("cli"), "cli")?,
+        models: section(root.get("models"), "models")?,
+        ui: section(root.get("ui"), "ui")?,
+        skills: section(root.get("skills"), "skills")?,
+        session: section(root.get("session"), "session")?,
+        ask_user_question: section(
+            root.get("toolset")
+                .and_then(|value| value.get("ask_user_question")),
+            "toolset.ask_user_question",
+        )?,
+        ..load_config_from_toml(root)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

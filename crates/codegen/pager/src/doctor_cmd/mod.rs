@@ -1,9 +1,8 @@
 use std::io::{IsTerminal as _, Write};
-use std::path::Path;
 
 use anyhow::Result;
 
-use crate::diagnostics::{DiagnosticReport, FixActivation, FixPlan, ShellKind};
+use crate::diagnostics::{DiagnosticReport, FixActivation, FixPlan};
 
 mod human;
 mod json;
@@ -33,6 +32,9 @@ pub struct FixArgs {
     /// Apply the displayed changes without confirmation.
     #[arg(long, requires = "id")]
     pub yes: bool,
+    /// Explicit configuration file for a tmux fix.
+    #[arg(long, requires = "id")]
+    pub config: Option<std::path::PathBuf>,
 }
 
 pub fn run(args: DoctorArgs) -> Result<()> {
@@ -69,13 +71,7 @@ fn configured_report_for_terminal(
     report: DiagnosticReport,
     terminal: &crate::terminal::TerminalContext,
 ) -> DiagnosticReport {
-    if terminal.is_ssh || terminal.is_official_vscode_remote {
-        return report;
-    }
-    let configured = shell_home_and_kind().is_some_and(|(home, shell)| {
-        crate::diagnostics::managed_alias_configured(&shell.config_path(&home), shell)
-    });
-    crate::diagnostics::configured_report(report, configured)
+    crate::diagnostics::configure_doctor_report(report, terminal)
 }
 
 fn collect_report_with(
@@ -126,7 +122,10 @@ fn run_fix(
         )),
         &terminal,
     );
-    let request = crate::diagnostics::FixRequest::from_environment(id)?;
+    let mut request = crate::diagnostics::FixRequest::from_environment(id)?;
+    if let Some(path) = &args.config {
+        request = request.with_config_path(path.clone())?;
+    }
     let plan = crate::diagnostics::plan_fix(request, &report, &terminal)?;
     apply_fix_plan(args, stdin_is_terminal, input, writer, &terminal, plan)
 }
@@ -192,14 +191,6 @@ fn apply_fix_plan(
 
 fn write_fix_preview(plan: &FixPlan, writer: &mut impl Write) -> std::io::Result<()> {
     write!(writer, "{}", crate::diagnostics::format_fix_preview(plan))
-}
-
-fn shell_home_and_kind() -> Option<(std::path::PathBuf, ShellKind)> {
-    #[allow(deprecated)]
-    let home = std::env::home_dir()?;
-    let shell = std::env::var_os("SHELL")?;
-    let kind = ShellKind::from_shell_path(Path::new(&shell))?;
-    Some((home, kind))
 }
 
 #[cfg(test)]

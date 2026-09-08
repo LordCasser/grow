@@ -463,36 +463,42 @@ impl SessionActor {
     ///
     /// Post-handshake TOCTOU re-check: `ensure_initialized` can take
     /// several seconds, during which a `ConfigRemoved` / toggle-off can
-    /// evict or replace this client (the dispatcher evicts HTTP clients on
-    /// `ConfigRemoved`). If the looked-up client is no longer the live,
+    /// evict or replace this client through the configuration diff. If the looked-up client is no longer the live,
     /// enabled entry, tear down the watcher we just re-armed and report the
     /// race instead of a false success on a detached client.
-    pub(crate) async fn reset_http_client(&self, server: &str) -> Result<(), String> {
+    pub(crate) async fn reset_http_client(
+        &self,
+        server: &str,
+    ) -> Result<(), crate::session::mcp_restart::RecoveryError> {
         let client = {
             let mcp_state = self.mcp_state.lock().await;
             mcp_state.get_client(server).cloned()
         };
         let Some(client) = client else {
-            return Err(format!("no client for server '{server}'"));
+            return Err(crate::session::mcp_restart::RecoveryError::Superseded);
         };
         if !client.is_http() {
-            return Err(format!("server '{server}' is not an HTTP client"));
+            return Err(crate::session::mcp_restart::RecoveryError::Superseded);
         }
-        client.recover().await.map_err(|e| e.to_string())?;
-        let still_current = {
-            let mcp_state = self.mcp_state.lock().await;
-            mcp_state
-                .get_client(server)
-                .is_some_and(|c| std::sync::Arc::ptr_eq(c, &client))
-        };
-        if !still_current || !self.is_http_server_configured(server).await {
+        let recovered = client.recover().await;
+        let cwd = std::path::Path::new(&self.session_info.cwd);
+        let disabled = crate::util::config::disabled_mcp_server_names(cwd);
+        let mcp_state = self.mcp_state.lock().await;
+        let still_current = mcp_state
+            .get_client(server)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &client));
+        let configured = mcp_state.configs.iter().any(|config| {
+            matches!(config,
+                acp::McpServer::Http(acp::McpServerHttp { name, .. })
+                | acp::McpServer::Sse(acp::McpServerSse { name, .. }) if name == server)
+        });
+        if !still_current || !configured || disabled.contains(server) {
             client.set_liveness_handle(None);
-            return Err(format!(
-                "server '{server}' was removed or disabled during HTTP recovery"
-            ));
+            return Err(crate::session::mcp_restart::RecoveryError::Superseded);
         }
-        Ok(())
+        recovered.map(|_| ()).map_err(|error| error.to_string().into())
     }
+
     /// Unregister `server`'s tools from the bridge after stdio restart
     /// exhaustion, so the model stops calling a now-absent client.
     pub(crate) fn unregister_server_tools(&self, server: &str) {
@@ -520,7 +526,10 @@ impl SessionActor {
     /// [`Self::is_stdio_server_configured`] first — this function
     /// returns `Err` for HTTP or unknown servers.
     ///
-    /// Failure modes (returned as a stringified, sanitized `Err`):
+    /// Startup/handshake failures retain their diagnostic text; a missing or
+    /// changed configuration returns `RecoveryError::Superseded` so the old
+    /// recovery does not publish failure or unregister replacement tools.
+    /// Failure modes:
     /// - No matching stdio entry in `McpState::configs` (the entry
     ///   was removed mid-restart).
     /// - `start_mcp_server` failed (spawn or transport-build failure).
@@ -559,7 +568,10 @@ impl SessionActor {
     /// episode and inserting the client. On mismatch it drops the new
     /// `Arc<McpClient>` — `kill_on_drop(true)` then SIGKILLs the spawned child
     /// — and returns an explicit error.
-    pub(crate) async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
+    pub(crate) async fn respawn_stdio(
+        &self,
+        server: &str,
+    ) -> Result<(), crate::session::mcp_restart::RecoveryError> {
         let (server_config, meta_config, config_generation) = {
             let mcp_state = self.mcp_state.lock().await;
             let server_config = mcp_state
@@ -569,7 +581,7 @@ impl SessionActor {
                     matches!(c, acp::McpServer::Stdio(acp::McpServerStdio { name, .. }) if name == server)
                 })
                 .cloned()
-                .ok_or_else(|| format!("no stdio config entry for server '{server}'"))?;
+                .ok_or(crate::session::mcp_restart::RecoveryError::Superseded)?;
             let meta_config = mcp_state.meta_config_map.get(server).cloned();
             (server_config, meta_config, mcp_state.generation())
         };
@@ -585,20 +597,15 @@ impl SessionActor {
             meta_config.as_ref(),
             &ctx,
         )
-        .await
-        .map_err(|e| e.to_string())?;
+        .await;
         {
             let mcp_state = self.mcp_state.lock().await;
             if mcp_state.generation() != config_generation {
-                return Err(format!(
-                    "config for server '{server}' changed while respawn was starting"
-                ));
+                return Err(crate::session::mcp_restart::RecoveryError::Superseded);
             }
         }
-        new_client
-            .ensure_initialized()
-            .await
-            .map_err(|error| error.to_string())?;
+        let new_client = new_client.map_err(|error| error.to_string())?;
+        let initialized = new_client.ensure_initialized().await;
         let arc_client = std::sync::Arc::new(new_client);
         {
             let mut mcp_state = self.mcp_state.lock().await;
@@ -616,10 +623,9 @@ impl SessionActor {
             if !config_unchanged {
                 drop(mcp_state);
                 drop(arc_client);
-                return Err(format!(
-                    "server '{server}' was disabled or changed during respawn"
-                ));
+                return Err(crate::session::mcp_restart::RecoveryError::Superseded);
             }
+            initialized.map_err(|error| error.to_string())?;
             mcp_state.bind_client_events(&arc_client);
             mcp_state
                 .owned_clients
@@ -628,10 +634,18 @@ impl SessionActor {
         let _ = arc_client
             .arm_liveness_watcher(::mcp::liveness::DEFAULT_POLL_INTERVAL)
             .await;
-        self.mcp_state
-            .lock()
-            .await
-            .emit_current_tools_changed(server);
+        let mcp_state = self.mcp_state.lock().await;
+        // Arming the watcher awaited after installation. A config update may
+        // have replaced that client; never stamp its successor's episode onto
+        // this old recovery's catalog refresh or report it as a success.
+        if !mcp_state
+            .owned_clients
+            .get(server)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &arc_client))
+        {
+            return Err(crate::session::mcp_restart::RecoveryError::Superseded);
+        }
+        mcp_state.emit_current_tools_changed(server);
         Ok(())
     }
     pub(super) async fn maybe_inject_mcp_connecting_reminder(&self) {

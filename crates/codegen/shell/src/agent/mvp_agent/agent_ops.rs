@@ -1428,6 +1428,7 @@ impl MvpAgent {
             session_meta,
             persisted_agent_name,
             session_model_id,
+            session_sampling_config: sampling_config,
             session_permission_mode,
             prompt_display_cwd,
         } = spec;
@@ -1601,8 +1602,6 @@ impl MvpAgent {
         let support_permission = self.cfg.borrow().features.support_permission;
         let diagnostics_enabled = true;
         let origin_client = self.origin_client_info_from_meta(init.meta.as_ref());
-        let sampling_config = self
-            .resolve_sampling_config_for_model(&session_model_id, origin_client.clone());
         if self.auth_method_id.load().is_none() {
             return Err(acp::Error::auth_required().data("no auth method id provided"));
         }
@@ -1746,6 +1745,7 @@ impl MvpAgent {
                 .unzip();
             let sourced = tools::implementations::lsp::config::load_servers_with_plugins_sourced(
                 tool_ctx.cwd.as_path(),
+                folder_trust::project_scope_allowed(tool_ctx.cwd.as_path()),
                 &plugin_lsp_paths,
                 &plugin_inline_lsp,
                 &plugin_names,

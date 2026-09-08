@@ -290,17 +290,26 @@ impl SkillManager {
     /// Replace the startup baseline (plugin reload / bundle sync).
     ///
     /// Marks a pending baseline-change reconciliation only if the skill set
-    /// actually changed (by canonical path). This prevents duplicate
+    /// actually changed (including metadata and order). This prevents duplicate
     /// `<system-reminder>` injections when a bundle sync completes with the
     /// same skills that were already seeded at startup.
     ///
-    /// Dynamic discoveries are preserved.
+    /// Dynamic discoveries outside the refreshed baseline are preserved.
     pub fn update_startup_baseline(&mut self, new_skills: Vec<SkillInfo>) {
-        let old_paths: HashSet<String> =
-            self.startup_skills.iter().map(|s| s.path.clone()).collect();
+        // A refreshed baseline owns its paths, including skills now held behind
+        // a condition. Old dynamic copies must not shadow their updated metadata.
+        let incoming_paths: HashSet<_> = new_skills
+            .iter()
+            .map(|skill| canonical_path(&skill.path))
+            .collect();
+        let previous_discovered_count = self.discovered_skills.len();
+        self.discovered_skills
+            .retain(|skill| !incoming_paths.contains(&canonical_path(&skill.path)));
+        self.discovered_canonical_paths
+            .retain(|path| !incoming_paths.contains(path));
         let unconditional = self.conditional.take_unconditional(new_skills);
-        let new_paths: HashSet<String> = unconditional.iter().map(|s| s.path.clone()).collect();
-        let changed = old_paths != new_paths;
+        let changed = self.startup_skills != unconditional
+            || self.discovered_skills.len() != previous_discovered_count;
         self.startup_skills = unconditional;
         if changed {
             self.pending = Some(PendingKind::BaselineChange);
@@ -316,9 +325,19 @@ impl SkillManager {
         let mut any_new = false;
         for skill in skills {
             let canonical = canonical_path(&skill.path);
-            if self.discovered_canonical_paths.contains(&canonical) {
+            if self.discovered_canonical_paths.contains(&canonical)
+                || self
+                    .startup_skills
+                    .iter()
+                    .any(|known| canonical_path(&known.path) == canonical)
+            {
                 continue;
             }
+            let skill = self
+                .conditional
+                .known_skill(&canonical)
+                .cloned()
+                .unwrap_or(skill);
             if self.conditional.is_pending(&skill) {
                 self.conditional.hold_dynamic(skill);
                 continue;
@@ -897,12 +916,12 @@ mod tests {
         assert_eq!(slash[0].name, "new");
     }
 
-    /// When the startup baseline is replaced with the same set of skill
-    /// paths, no pending reconciliation should be queued.  This prevents
+    /// When the startup baseline is replaced with identical skill data,
+    /// no pending reconciliation should be queued.  This prevents
     /// duplicate `<system-reminder>` injections when a bundle sync completes
     /// with an unchanged skill set.
     #[test]
-    fn update_startup_baseline_same_paths_skips_pending() {
+    fn update_startup_baseline_identical_data_skips_pending() {
         let mut tracker = SkillManager::new();
         tracker.seed(
             None,
@@ -913,12 +932,135 @@ mod tests {
         );
         let _ = tracker.take_pending_reconciliation(); // drain startup
 
-        // Replace with the exact same path — should NOT queue a pending.
+        // Replace with identical data — should NOT queue a pending.
         tracker.update_startup_baseline(vec![make_skill("s1", "/s/SKILL.md")]);
         assert!(
             tracker.take_pending_reconciliation().is_none(),
-            "same paths must not produce a duplicate system-reminder"
+            "identical data must not produce a duplicate system-reminder"
         );
+    }
+
+    #[test]
+    fn baseline_same_path_metadata_changes_reach_runtime() {
+        for disable in [false, true] {
+            let mut tracker = SkillManager::new();
+            let original = make_skill("s1", "/s/SKILL.md");
+            tracker.seed(None, None, vec![original.clone()], None, None);
+            let _ = tracker.take_pending_reconciliation();
+            let mut updated = original;
+            if disable {
+                updated.enabled = false;
+            } else {
+                updated.description = "updated description".into();
+            }
+            tracker.update_startup_baseline(vec![updated.clone()]);
+            let result = tracker
+                .take_pending_reconciliation()
+                .expect("same-path metadata change must reach runtime");
+            assert_eq!(result.runtime_skills.len(), 1);
+            assert_eq!(result.runtime_skills[0].enabled, updated.enabled);
+            assert_eq!(result.runtime_skills[0].description, updated.description);
+            assert!(result.effects.send_available_commands);
+            if disable {
+                assert!(result.effects.system_reminder.is_none());
+            } else {
+                let reminder = result.effects.system_reminder.as_deref().unwrap();
+                assert!(reminder.contains("updated description"));
+            }
+            tracker.update_startup_baseline(vec![updated]);
+            assert!(tracker.take_pending_reconciliation().is_none());
+        }
+    }
+
+    #[test]
+    fn refreshed_baseline_supersedes_same_path_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("SKILL.md");
+        std::fs::write(&path, "skill").unwrap();
+        let mut tracker = SkillManager::new();
+        let old = make_skill("s1", path.to_str().unwrap());
+        tracker.add_discovered(vec![old.clone(), make_skill("other", "/other/SKILL.md")]);
+        let _ = tracker.take_pending_reconciliation();
+        let mut updated = old;
+        updated.description = "fresh baseline".into();
+        updated.enabled = false;
+        tracker.update_startup_baseline(vec![updated.clone()]);
+        let result = tracker.take_pending_reconciliation().unwrap();
+        let current = result
+            .runtime_skills
+            .iter()
+            .find(|s| s.name == "s1")
+            .unwrap();
+        assert_eq!(current, &updated);
+        assert!(result.runtime_skills.iter().any(|s| s.name == "other"));
+        assert!(
+            !tracker
+                .slash_skills()
+                .iter()
+                .find(|s| s.name == "s1")
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[test]
+    fn refreshed_baseline_rehides_newly_conditional_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let skill_path = root.join("SKILL.md");
+        std::fs::write(&skill_path, "skill").unwrap();
+        let mut tracker = SkillManager::new();
+        tracker.seed(Some(root.clone()), None, vec![], None, None);
+        let mut skill = make_skill("conditional", skill_path.to_str().unwrap());
+        tracker.add_discovered(vec![skill.clone()]);
+        let _ = tracker.take_pending_reconciliation();
+        skill.paths = Some(vec!["src/**".into()]);
+        tracker.update_startup_baseline(vec![skill.clone()]);
+        let result = tracker.take_pending_reconciliation().unwrap();
+        assert!(result.runtime_skills.is_empty());
+        assert!(tracker.slash_skills().is_empty());
+        assert!(result.effects.system_reminder.is_none());
+        assert!(
+            tracker.activate_conditional_skills_for_paths(&[root.join("src/main.rs").as_path()])
+        );
+        assert_eq!(tracker.slash_skills(), vec![skill]);
+    }
+
+    #[test]
+    fn rediscovery_cannot_reenable_baseline_skill() {
+        let mut tracker = SkillManager::new();
+        let raw = make_skill("disabled", "/known/SKILL.md");
+        let mut configured = raw.clone();
+        configured.enabled = false;
+        tracker.seed(None, None, vec![configured.clone()], None, None);
+        let _ = tracker.take_pending_reconciliation();
+        assert!(!tracker.add_discovered(vec![raw]));
+        assert_eq!(tracker.slash_skills(), vec![configured]);
+        assert!(tracker.take_pending_reconciliation().is_none());
+    }
+
+    #[test]
+    fn rediscovery_cannot_bypass_known_conditional_skill() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let raw = make_skill("gated", root.join("SKILL.md").to_str().unwrap());
+        let mut configured = raw.clone();
+        configured.paths = Some(vec!["src/**".into()]);
+        let mut tracker = SkillManager::new();
+        tracker.seed(
+            Some(root.clone()),
+            None,
+            vec![configured.clone()],
+            None,
+            None,
+        );
+        let _ = tracker.take_pending_reconciliation();
+        assert!(!tracker.add_discovered(vec![raw]));
+        assert!(tracker.slash_skills().is_empty());
+        assert!(
+            tracker.activate_conditional_skills_for_paths(&[root.join("src/main.rs").as_path()])
+        );
+        assert_eq!(tracker.slash_skills(), vec![configured]);
     }
 
     #[test]

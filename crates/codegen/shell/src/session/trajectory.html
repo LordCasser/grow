@@ -45,7 +45,7 @@ body{
   margin:0;height:100dvh;overflow:hidden;background:var(--bg);color:var(--text);
   font:13px/1.45 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   -webkit-font-smoothing:antialiased;
-  display:grid;grid-template-rows:58px auto auto minmax(0,1fr)
+  display:grid;grid-template-rows:58px auto auto auto minmax(0,1fr)
 }
 header,.controls,.overview,main{min-width:0}
 button,input,select{font:inherit}
@@ -84,10 +84,7 @@ header{
 .search-wrap{position:relative;flex:1 1 360px;min-width:240px}
 .search-wrap input{width:100%;padding-left:30px}
 .search-wrap::before{content:"/";position:absolute;left:11px;top:8px;color:var(--muted);font:12px ui-monospace,monospace}
-.filter-controls{display:flex;align-items:center;gap:8px;min-width:0}
 .control-kicker{color:var(--muted);font-size:9px;font-weight:700;letter-spacing:.1em}
-.controls select{min-width:112px}
-.controls .spacer{flex:1}
 .controls-actions{display:flex;align-items:center;gap:8px;margin-left:auto}
 .live-status{height:var(--control-height);display:inline-flex;align-items:center;gap:7px;padding:0 8px;color:var(--green);font-size:11px;font-weight:650}
 .follow{min-width:108px;display:inline-flex;align-items:center;justify-content:center;gap:7px;color:var(--primary-foreground);border-color:var(--primary);background:var(--primary)}
@@ -174,7 +171,7 @@ button.bin:hover:not(:disabled),.bin:focus-visible{background:color-mix(in oklch
 main{min-height:0;display:grid;grid-template-columns:minmax(0,1fr)}
 main.inspecting{grid-template-columns:minmax(0,1fr) clamp(360px,30vw,500px)}
 .ledger{min-width:0;overflow:auto;background:var(--background);scrollbar-color:var(--muted) transparent}
-table{width:100%;min-width:1080px;border-collapse:collapse;table-layout:fixed}
+table{width:100%;min-width:1280px;border-collapse:collapse;table-layout:fixed}
 thead{position:sticky;top:0;z-index:4;background:color-mix(in oklch,var(--card) 94%,var(--muted-surface));box-shadow:0 1px 0 var(--line)}
 th{
   height:35px;padding:0 9px;text-align:left;color:var(--muted);font-size:10px;
@@ -206,7 +203,7 @@ tbody tr.spacer td{height:auto;padding:0;border:0}
 .identity{width:224px}
 .kind{width:190px}
 .state{width:86px}
-.turn{width:62px}
+.turn{width:188px}
 .duration{width:82px;text-align:right;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}
 .summary{width:auto}
 .primary,.secondary{display:block;overflow:hidden;text-overflow:ellipsis}
@@ -293,13 +290,10 @@ main.inspecting .inspector{display:block}
 }
 @media(max-width:1100px){
   .controls{flex-wrap:wrap;overflow-x:hidden}
-  .controls .spacer{display:none}
-  .filter-controls{flex:1 1 100%;flex-wrap:wrap}
-  .filter-controls select{flex:1 1 112px}
   .controls-actions{margin-left:auto}
 }
 @media(max-width:760px){
-  body{grid-template-rows:52px auto auto minmax(0,1fr)}
+  body{grid-template-rows:52px auto auto auto minmax(0,1fr)}
   header{padding:0 11px}.stats #position{display:none}.brand{letter-spacing:.06em}
   .theme-toggle{min-width:32px;width:32px;padding:0}.theme-icon{margin:0}.theme-label{display:none}
   .controls{padding:8px 11px}.search-wrap{flex-basis:260px}
@@ -307,13 +301,48 @@ main.inspecting .inspector{display:block}
   .lane-label{padding:0 6px;grid-template-columns:10px 1fr}.lane-label em{display:none}
   .overview-head{padding:0 11px}.overview-head .hint,.overview-head .range{display:none}
   .view-control{margin-left:auto}.view-control span{display:none}.view-control select{min-width:124px}
-  table{min-width:820px}
-  .time,.class,.turn,.duration{display:none}
+  table{min-width:720px}
+  .time,.class,.duration,.seq,.identity,.state{display:none}
   .inspector{width:100vw;max-width:none}
 }
 @media(max-width:620px){
   .stats #counts{display:none}
   .session{flex-basis:120px}
+}
+.controls{overflow:visible}.controls .search-wrap{min-width:120px}
+.classification{min-width:0;border-bottom:1px solid var(--line);background:var(--card)}
+.category-bar{display:flex;align-items:center;gap:5px;padding:8px 18px;overflow-x:auto}
+.category-bar .control-kicker{margin-right:8px;white-space:nowrap}
+.category-bar button{flex:none;box-shadow:none;border-color:transparent;background:transparent;color:var(--muted)}
+.category-bar button[aria-pressed="true"]{background:var(--secondary);border-color:var(--line);color:var(--foreground);font-weight:650}
+.filter-panel{display:flex;flex-wrap:wrap;gap:12px;padding:4px 18px 12px}
+.filter-panel label{display:grid;gap:4px;flex:1 1 130px;color:var(--muted);font-size:11px}
+.filter-panel select{width:100%;min-width:0;color:var(--foreground)}
+.active-filters{display:flex;flex-wrap:wrap;gap:6px;padding:0 18px 9px}
+.active-filters button{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;height:28px;font-size:11px}
+.filter-panel[hidden],.active-filters[hidden]{display:none}
+.event-browser{min-height:0;min-width:0;display:grid;grid-template-rows:auto minmax(0,1fr)}
+.execution-nav{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;padding:10px 18px;border-bottom:1px solid var(--line);background:var(--card)}
+.jump-group{display:flex;align-items:center;gap:5px;min-width:0}
+.jump-group label{font-size:11px;font-weight:700;min-width:28px;color:var(--input)}
+.jump-group:nth-child(2) label{color:var(--model)}
+.jump-group button{padding:0 8px;height:32px;font-size:11px}
+.jump-group select{width:190px;height:32px;font-size:11px;min-width:0}
+#stepJump{width:96px}
+.nav-range{font-size:10px;color:var(--muted)}
+.scope-link{height:28px;padding:0 6px;max-width:102px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;white-space:nowrap;font:10px ui-monospace,monospace;color:var(--input);background:var(--turn-soft);box-shadow:none}
+.scope-link.step-link{margin-left:4px;color:var(--model);max-width:62px;background:color-mix(in oklch,var(--model) 6%,var(--background))}
+.turn-boundary .turn{box-shadow:inset 3px 0 var(--input)}
+.step-boundary .turn .step-link{border-color:var(--model)}
+.boundary-label{font-weight:700}
+.boundary-legend{font-size:10px;color:var(--input);white-space:nowrap}
+@media(max-width:1100px){.stats #position{display:none}}
+@media(max-width:900px){.stats #counts{display:none}}
+@media(max-width:760px){
+  .category-bar{padding:7px 11px}.category-bar .control-kicker{display:none}
+  .execution-nav{padding:8px 11px;gap:6px}.jump-group{flex:1 1 100%}.jump-group select{flex:1}
+  .nav-range{flex-basis:100%}.boundary-legend,.timeline-legend{display:none}.controls{flex-wrap:wrap}.controls-actions{margin-left:auto}
+  .filter-panel{max-height:180px;overflow:auto;padding-inline:11px}.active-filters{padding-inline:11px}
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
 </style>
@@ -330,27 +359,38 @@ main.inspecting .inspector{display:block}
 </header>
 <div class="controls">
   <label class="search-wrap"><span class="sr-only">Search trajectory</span><input id="search" type="search" autocomplete="off" spellcheck="false" placeholder="Search ID, event, summary"></label>
-  <div class="filter-controls" role="group" aria-label="Trajectory filters">
-    <span class="control-kicker" aria-hidden="true">FILTER</span>
-    <select id="layer" aria-label="Filter by layer"><option value="">All layers</option><option value="system">System</option><option value="user">User</option><option value="assistant">Assistant</option><option value="tool">Tool</option><option value="plugin">Plugin</option><option value="meta">Meta</option></select>
-    <select id="actor" aria-label="Filter by actor"><option value="">All actors</option><option value="main">Main</option><option value="subagent">Subagent</option><option value="workflow">Workflow</option><option value="sideband">Sideband</option></select>
-    <select id="class" aria-label="Filter by class"><option value="">All classes</option><option value="message">Message</option><option value="lifecycle">Lifecycle</option><option value="governance">Governance</option><option value="audit">Audit</option><option value="auxiliary">Auxiliary</option></select>
-    <select id="producer" aria-label="Filter by producer"><option value="">All producers</option><option value="core">Core</option><option value="model">Model</option><option value="tool">Tool</option><option value="workflow-host">Workflow host</option><option value="hook">Hook</option><option value="plugin">Plugin</option><option value="skill">Skill</option><option value="mcp">MCP</option><option value="user">User</option></select>
-    <select id="visibility" aria-label="Filter by surface visibility"><option value="">All surfaces</option><option value="current">Current</option><option value="shadowed">Shadowed</option><option value="log_only">Log only</option></select>
-    <select id="issue" aria-label="Filter by diagnostic outcome"><option value="">All outcomes</option><option value="any">Issues only</option><option value="error">Errors</option><option value="warning">Warnings</option></select>
-  </div>
+  <button id="filterToggle" aria-expanded="false" aria-controls="filterPanel">Filters <span id="filterCount"></span></button>
   <button class="relation-scope" id="relationScope" aria-label="Clear related event scope" hidden><span id="relationScopeLabel"></span><span aria-hidden="true">×</span></button>
-  <span class="spacer"></span>
   <div class="controls-actions" role="group" aria-label="Timeline navigation">
     <span class="live-status" id="liveStatus" role="status" aria-live="polite"><span class="live-dot" aria-hidden="true"></span>Live tail</span><button class="follow" id="follow" aria-label="Jump to the newest event and keep following" hidden><span class="live-dot" aria-hidden="true"></span><span id="followLabel">Jump to live</span></button>
   </div>
+</div>
+<div class="classification">
+  <div class="category-bar" role="group" aria-label="Event type">
+    <span class="control-kicker">EVENT TYPE</span>
+    <button data-category="" title="Show every event type">All events</button>
+    <button data-category="message" title="Messages, model requests and tool exchanges">Messages</button>
+    <button data-category="lifecycle" title="Turn, step and execution boundaries">Lifecycle</button>
+    <button data-category="governance" title="Changes to prompts and context">Context changes</button>
+    <button data-category="audit" title="Recorded checks and decisions">Audits</button>
+    <button data-category="auxiliary" title="Auxiliary work and observations">Auxiliary</button>
+  </div>
+<select id="class" hidden aria-label="Filter by class"><option value="">All classes</option><option value="message">Message</option><option value="lifecycle">Lifecycle</option><option value="governance">Governance</option><option value="audit">Audit</option><option value="auxiliary">Auxiliary</option></select>
+  <div id="filterPanel" class="filter-panel" hidden>
+    <label>Content layer<select id="layer" aria-label="Filter by layer"><option value="">All layers</option><option value="system">System</option><option value="user">User</option><option value="assistant">Assistant</option><option value="tool">Tool</option><option value="plugin">Plugin</option><option value="meta">Meta</option></select></label>
+    <label>Execution owner<select id="actor" aria-label="Filter by actor"><option value="">All actors</option><option value="main">Main</option><option value="subagent">Subagent</option><option value="workflow">Workflow</option><option value="sideband">Sideband</option></select></label>
+    <label>Produced by<select id="producer" aria-label="Filter by producer"><option value="">All producers</option><option value="sideband">Sideband</option><option value="core">Core</option><option value="model">Model</option><option value="tool">Tool</option><option value="workflow-host">Workflow host</option><option value="hook">Hook</option><option value="plugin">Plugin</option><option value="skill">Skill</option><option value="mcp">MCP</option><option value="user">User</option></select></label>
+    <label>Model context<select id="visibility" aria-label="Filter by surface visibility"><option value="">All surfaces</option><option value="current">Current</option><option value="shadowed">Shadowed</option><option value="log_only">Log only</option></select></label>
+    <label>Outcome<select id="issue" aria-label="Filter by diagnostic outcome"><option value="">All outcomes</option><option value="any">Issues only</option><option value="error">Errors</option><option value="warning">Warnings</option></select></label>
+  </div>
+  <div id="activeFilters" class="active-filters" aria-label="Active filters" hidden></div>
 </div>
 <section class="overview" aria-label="Trajectory activity density overview">
   <div class="overview-head">
     <strong>TIMELINE</strong>
     <label class="view-control"><span>VIEW BY</span><select id="overviewBy" aria-label="Timeline view"><option value="interaction">Interaction flow</option><option value="layer">Layer</option><option value="actor">Actor</option><option value="class">Class</option><option value="producer">Producer</option></select></label>
-    <span class="hint">equal-width event bins · intensity shows density</span>
-    <span class="timeline-legend">prompt context</span>
+    <span class="hint" title="Equal-width event bins; intensity shows density">Click the overview to locate events</span>
+    <span class="boundary-legend">┃ Turn · │ Step</span><span class="timeline-legend">prompt context</span>
     <span class="range" id="range">—</span>
   </div>
   <div class="overview-body">
@@ -359,11 +399,30 @@ main.inspecting .inspector{display:block}
   </div>
 </section>
 <main id="main">
+  <div class="event-browser">
+  <nav class="execution-nav" aria-label="Turn and step navigation">
+    <div class="jump-group">
+      <label for="turnJump">Turn</label>
+      <button id="prevTurn" aria-label="Previous loaded turn" title="Previous loaded turn">←</button>
+      <select id="turnJump" aria-label="Locate turn in loaded events"></select>
+      <button id="nextTurn" aria-label="Next loaded turn" title="Next loaded turn">→</button>
+      <button id="onlyTurn">Only this turn</button>
+    </div>
+    <div class="jump-group">
+      <label for="stepJump">Step</label>
+      <button id="prevStep" aria-label="Previous loaded step" title="Previous loaded step">←</button>
+      <select id="stepJump" aria-label="Locate step in current turn"></select>
+      <button id="nextStep" aria-label="Next loaded step" title="Next loaded step">→</button>
+      <button id="onlyStep">Only this step</button>
+    </div>
+    <span class="nav-range" id="navRange">Loaded events only</span>
+  </nav>
   <div class="ledger" id="ledger" tabindex="-1">
     <table id="table" aria-rowcount="1">
-      <thead><tr><th class="seq">causal path</th><th class="time">time</th><th class="class">class</th><th class="identity">layer / actor</th><th class="kind">event</th><th class="state">status</th><th class="turn">step</th><th class="duration">duration</th><th class="summary">summary</th></tr></thead>
+      <thead><tr><th class="turn">Turn / Step · filter</th><th class="seq">causal path</th><th class="time">time</th><th class="class">class</th><th class="identity">layer / actor</th><th class="kind">event</th><th class="state">status</th><th class="duration">duration</th><th class="summary">summary</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
+  </div>
   </div>
   <aside class="inspector" id="inspector" role="dialog" tabindex="-1" aria-labelledby="inspectorTitle" aria-describedby="inspectorId" aria-hidden="true">
     <div class="inspector-head">
@@ -395,7 +454,7 @@ let hasEarlier=false,hasLater=false,renderQueued=false,loadingEarlier=false,load
 let pollController=null,focusController=null,earlierController=null,laterController=null,pollRevision=0,viewRevision=0,focusRevision=0,earlierRevision=0,laterRevision=0;
 let ledgerMessage='Loading trajectory…',inspectorOpen=false,inspectorTriggerEntry=null;
 let explicitTheme=false,drawnOverview=null,drawnRows=null;
-let scopeCorrelation=null,scopeTurn=null,scopeStep=null;
+let scopeCorrelation=null,scopeTurn=null,scopeStep=null,scopeSource=null,scopeRelatedTo=null;
 explicitTheme=document.cookie.split('; ').some(value=>value.startsWith('grow_trajectory_theme='));
 
 function syncThemeToggle(){
@@ -415,21 +474,45 @@ function restoreUrlState(){
   $('search').value=params.get('search')??'';
   for(const id of FILTER_IDS){
     const value=params.get(id)??'';
-    if(Array.from($(id).options).some(option=>option.value===value))$(id).value=value
+    setFilterValue(id,value)
   }
   const overviewBy=params.get('overview_by')??'interaction';
   if(Array.from($('overviewBy').options).some(option=>option.value===overviewBy))$('overviewBy').value=overviewBy;
-  scopeCorrelation=params.get('correlation');
+  scopeSource=params.get('source');scopeRelatedTo=params.get('related_to');
+  scopeCorrelation=scopeRelatedTo?null:params.get('correlation');
   scopeTurn=params.get('turn');
   scopeStep=params.get('step');
   syncRelationScope()
+}
+function setFilterValue(id,value){
+  if(!Array.from($(id).options).some(option=>option.value===value))$(id).add(new Option(value,value));
+  $(id).value=value
+}
+function syncFilters(){
+  document.querySelectorAll('[data-category]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.category===$('class').value)));
+  const active=FILTER_IDS.filter(id=>$(id).value);
+  $('filterCount').textContent=active.length?'('+active.length+')':'';
+  const container=$('activeFilters');container.replaceChildren();
+  for(const id of active){
+    const button=document.createElement('button');
+    const label=id+': '+$(id).selectedOptions[0].textContent;
+    button.textContent=label+' ×';button.title='Remove '+label;button.setAttribute('aria-label',button.title);
+    button.onclick=()=>{$(id).value='';resetWindow()};container.append(button)
+  }
+  if(active.length||$('search').value){
+    const clear=document.createElement('button');clear.textContent='Clear filters';
+    clear.onclick=()=>{for(const id of FILTER_IDS)$(id).value='';$('search').value='';resetWindow()};container.append(clear)
+  }
+  container.hidden=!container.children.length
 }
 function urlStateParams(){
   const params=new URLSearchParams();
   if($('search').value)params.set('search',$('search').value);
   for(const id of FILTER_IDS)if($(id).value)params.set(id,$(id).value);
   if($('overviewBy').value!=='interaction')params.set('overview_by',$('overviewBy').value);
-  if(scopeCorrelation)params.set('correlation',scopeCorrelation);
+  if(scopeSource)params.set('source',scopeSource);
+  if(scopeRelatedTo)params.set('related_to',scopeRelatedTo);
+  else if(scopeCorrelation)params.set('correlation',scopeCorrelation);
   if(scopeTurn)params.set('turn',scopeTurn);
   if(scopeStep!=null)params.set('step',scopeStep);
   return params
@@ -441,15 +524,17 @@ function syncLocation(entry=selected){
 }
 function syncRelationScope(){
   let label='';
-  if(scopeCorrelation)label='pair '+scopeCorrelation;
-  else if(scopeTurn&&scopeStep!=null)label='turn '+scopeTurn+' · step '+scopeStep;
-  else if(scopeTurn)label='turn '+scopeTurn;
+  if(scopeRelatedTo)label='Related events';
+  else if(scopeCorrelation)label='Related · '+scopeCorrelation;
+  else if(scopeTurn)label='Turn '+shortTurn(scopeTurn)+(scopeStep!=null?' · Step '+scopeStep:'');
+  else if(scopeStep!=null)label='Step '+scopeStep;
+  else if(scopeSource)label='Source '+scopeSource;
   $('relationScopeLabel').textContent=label;
   $('relationScope').hidden=!label;
-  $('relationScope').title=label?'Clear '+label+' scope':''
+  $('relationScope').title=label?'Clear scope: '+[scopeSource,scopeTurn,scopeStep,scopeRelatedTo??scopeCorrelation].filter(value=>value!=null).join(' · '):''
 }
 function clearRelationScope(){
-  scopeCorrelation=null;scopeTurn=null;scopeStep=null;syncRelationScope()
+  scopeCorrelation=null;scopeTurn=null;scopeStep=null;scopeSource=null;scopeRelatedTo=null;syncRelationScope()
 }
 function esc(value){
   return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))
@@ -561,7 +646,6 @@ function annotateGroups(items){
 function rowMarkup(row,rowIndex){
   const depth=Math.max(0,row.nesting_path.length-1);
   const parent=row.parent_entry_id==null?'':' ← '+esc(row.parent_entry_id);
-  const internalTurn=row.turn_id==null?'':'internal turn id: '+row.turn_id;
   const isTurnStart=row.kind==='turn.started';
   const isTurnEnd=!isTurnStart&&row.layer==='meta'&&row.class==='lifecycle'&&String(row.kind).startsWith('turn.')&&row.state!=='started';
   const isStepStart=row.kind==='step.started',isStepEnd=row.kind==='step.ended';
@@ -574,17 +658,20 @@ function rowMarkup(row,rowIndex){
   const statusSecondary=row.outcome&&row.outcome!==row.state?'<span class="secondary">'+esc(row.outcome)+'</span>':'';
   const compactActor=actorLabel(row.actor);
   return '<tr tabindex="0" aria-rowindex="'+(rowIndex+2)+'" aria-selected="'+(selected===row.entry_id)+'" data-entry="'+esc(row.entry_id)+'" class="event-row '+esc(row.class)+' '+esc(row.state)+' '+esc(row.visibility)+groupClass+boundaryClass+pairClass+promptClass+issueClass+'"'+pairStyle+'>'+
+    '<td class="turn">'+(row.turn_id?'<button class="scope-link" data-scope="turn" title="Only turn '+esc(row.turn_id)+' · '+esc(row.actor)+'">Turn '+esc(shortTurn(row.turn_id))+'</button>':'<span class="secondary">No turn</span>')+(row.turn_id&&row.step_index!=null?'<button class="scope-link step-link" data-scope="step" title="Only step '+row.step_index+' in turn '+esc(row.turn_id)+'">Step '+row.step_index+'</button>':'')+'</td>'+
     '<td class="seq" title="'+esc(row.entry_id)+parent+'"><span style="padding-left:'+Math.min(depth*11,55)+'px">'+(depth?'↳ ':'')+row.nesting_path.join('·')+'</span></td>'+
     '<td class="time">'+time(row.at_ms)+'</td>'+
     '<td class="class"><span class="pill">'+esc(row.class)+'</span></td>'+
     '<td class="identity"><span class="primary" title="'+esc(row.layer)+' · '+esc(row.actor)+'">'+esc(row.layer)+' · '+esc(compactActor)+'</span><span class="secondary" title="'+esc(row.producer)+'">'+esc(row.producer)+'</span></td>'+
     '<td class="kind"><span class="primary">'+eventPrimary+'</span><span class="secondary">'+esc(row.kind)+' · '+esc(row.correlation_id??row.entry_id)+'</span></td>'+
-    '<td class="state"><span class="primary">'+esc(row.state)+'</span>'+statusSecondary+'</td><td class="turn" title="'+esc(internalTurn)+'">'+(row.step_index??'—')+'</td>'+
+    '<td class="state"><span class="primary">'+esc(row.state)+'</span>'+statusSecondary+'</td>'+
     '<td class="duration">'+duration(row.duration_ms)+'</td>'+
     '<td class="summary" title="'+esc(row.summary)+'">'+summaryMarkup(row)+'</td></tr>'
 }
 function renderLedger(){
-  renderQueued=false;
+  const focused=rows.contains(document.activeElement)?document.activeElement:null;
+  const focusEntry=focused?.closest('[data-entry]')?.dataset.entry,focusScope=focused?.dataset.scope;
+  renderQueued=false;syncNavigation();
   $('table').setAttribute('aria-rowcount',String(displayRows.length+1));
   if(!displayRows.length){
     rows.innerHTML='<tr class="empty-row"><td colspan="9" role="status">'+esc(ledgerMessage)+'</td></tr>';
@@ -598,10 +685,18 @@ function renderLedger(){
     displayRows.slice(start,end).map((row,index)=>rowMarkup(row,start+index)).join('')+
     '<tr class="spacer" aria-hidden="true"><td colspan="9" style="height:'+bottom+'px"></td></tr>';
   rows.querySelectorAll('tr.event-row').forEach(row=>{
-    row.onclick=()=>selectEntry(row.dataset.entry,false);
-    row.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();selectEntry(row.dataset.entry,false)}}
+    row.onclick=event=>{
+      const scope=event.target.closest('[data-scope]');
+      if(scope)scopeRelated(scope.dataset.scope,displayRows.find(item=>item.entry_id===row.dataset.entry));
+      else selectEntry(row.dataset.entry,false)
+    };
+    row.onkeydown=event=>{if(event.target!==row)return;if(event.key==='Enter'||event.key===' '){event.preventDefault();selectEntry(row.dataset.entry,false)}}
   });
-  if(selected!=null)rows.querySelector(selector(selected))?.classList.add('selected')
+  if(selected!=null)rows.querySelector(selector(selected))?.classList.add('selected');
+  if(focusEntry){
+    const row=rows.querySelector(selector(focusEntry));
+    (focusScope?row?.querySelector('[data-scope="'+focusScope+'"]'):row)?.focus({preventScroll:true})
+  }
 }
 function queueRender(){if(!renderQueued){renderQueued=true;requestAnimationFrame(renderLedger)}}
 function densityLevel(count,max){return count===0?0:.28+.72*Math.sqrt(count/Math.max(1,max))}
@@ -686,6 +781,42 @@ function drawOverview(overview){
     track.append(button)
   })
 }
+function shortTurn(id){return id.length>8?'…'+id.slice(-6):id}
+function sourceId(row){return row.entry_id.slice(2,row.entry_id.lastIndexOf('/'))}
+function turnKey(row){return JSON.stringify([sourceId(row),row.turn_id])}
+function navigationRows(){
+  const firstByTurn=new Map();
+  for(const row of displayRows)if(row.turn_id&&!firstByTurn.has(turnKey(row)))firstByTurn.set(turnKey(row),row);
+  const turns=Array.from(firstByTurn.values());
+  const current=displayRows.find(row=>row.entry_id===selected)??displayRows[Math.max(0,Math.floor(ledger.scrollTop/ROW_HEIGHT))];
+  const turn=turns.find(row=>current&&turnKey(row)===turnKey(current));
+  const steps=[],seen=new Set();
+  if(turn)for(const row of displayRows){
+    if(turnKey(row)===turnKey(turn)&&row.step_index!=null&&!seen.has(row.step_index)){seen.add(row.step_index);steps.push(row)}
+  }
+  return {turns,steps,current,turn}
+}
+function syncNavigation(){
+  const {turns,steps,current,turn}=navigationRows();
+  for(const [kind,items,active] of [['Turn',turns,turn],['Step',steps,steps.find(row=>row.step_index===current?.step_index)]]){
+    const select=$(kind.toLowerCase()+'Jump');
+    const options='<option value="">'+(items.length?'Locate '+kind.toLowerCase():'No '+kind.toLowerCase()+' in view')+'</option>'+items.map(row=>'<option value="'+esc(row.entry_id)+'">'+esc(kind==='Turn'?shortTurn(row.turn_id)+' · '+actorLabel(row.actor):'Step '+row.step_index)+'</option>').join('');
+    if(select.dataset.options!==options){select.innerHTML=options;select.dataset.options=options}
+    select.value=active?.entry_id??'';select.disabled=!items.length;
+    select.title=kind==='Turn'?(turn?.turn_id??'Turns in loaded events'):'Steps in the current turn';
+    const index=items.indexOf(active);
+    $('prev'+kind).disabled=index<=0;$('next'+kind).disabled=!items.length||index>=items.length-1;
+    $('only'+kind).disabled=!active
+  }
+  $('navRange').textContent=turns.length+' turns in loaded events'+(hasEarlier||hasLater?' · scroll to load more':'');
+}
+function locateLoaded(entry){
+  if(entry)selectEntry(entry,true,false,false)
+}
+function moveBoundary(kind,delta){
+  const select=$(kind+'Jump'),index=select.selectedIndex+delta;
+  if(index>0&&index<select.options.length)locateLoaded(select.options[index].value)
+}
 function renderData(data,scrollTail,renderRows=true){
   let rowsChanged=false;
   if(renderRows){
@@ -705,9 +836,10 @@ function renderData(data,scrollTail,renderRows=true){
     $('position').textContent=open.length?open.join(' · ')+' active':'idle';
     $('position').removeAttribute('title')
   }else{
-    $('position').textContent='active · step '+(data.activeStep??'—');
+    $('position').textContent='active · turn '+shortTurn(data.activeTurn)+' · step '+(data.activeStep??'—');
     $('position').title='internal turn id: '+data.activeTurn
   }
+  syncNavigation();
   if(rowsChanged)renderLedger();
   drawOverview(data.overview);
   if(scrollTail&&rowsChanged){
@@ -761,7 +893,7 @@ function invalidateView(){
   viewRevision++;invalidateFocus();invalidateEarlier();invalidateLater()
 }
 function setBackgroundInert(value){
-  for(const element of document.querySelectorAll('header,.controls,.overview,#ledger'))element.inert=value
+  for(const element of document.querySelectorAll('header,.controls,.classification,.overview,.event-browser'))element.inert=value
 }
 function syncInspectorMode(){
   const modal=inspectorOpen&&drawerMedia.matches;
@@ -780,9 +912,9 @@ function showRelations(row){
   if(row.repaired_by_seq!=null)actions.push(relationButton('Repair #'+row.repaired_by_seq,'Open the committed quarantine',()=>openRelatedEntry(relatedLedgerEntry(row,row.repaired_by_seq))));
   for(const seq of row.repair_source_seqs??[])actions.push(relationButton('Source #'+seq,'Open the protocol-invalid source event',()=>openRelatedEntry(relatedLedgerEntry(row,seq))));
   if(row.parent_entry_id)actions.push(relationButton('Parent','Open causal parent '+row.parent_entry_id,()=>openRelatedEntry(row.parent_entry_id)));
-  if(row.correlation_id)actions.push(relationButton('Pair','Show events with correlation '+row.correlation_id,()=>scopeRelated('correlation',row)));
-  if(row.turn_id)actions.push(relationButton('Turn','Show events in internal turn '+row.turn_id,()=>scopeRelated('turn',row)));
-  if(row.turn_id&&row.step_index!=null)actions.push(relationButton('Step','Show events in turn '+row.turn_id+', step '+row.step_index,()=>scopeRelated('step',row)));
+  if(row.correlation_id||row.relation_count||row.relation_ids?.length)actions.push(relationButton('Related events','Show all related events in this source, including every batch member',()=>scopeRelated('correlation',row)));
+  if(row.turn_id)actions.push(relationButton('Only this turn','Show events in turn '+row.turn_id,()=>scopeRelated('turn',row)));
+  if(row.turn_id&&row.step_index!=null)actions.push(relationButton('Only step '+row.step_index,'Show events in turn '+row.turn_id+', step '+row.step_index,()=>scopeRelated('step',row)));
   if(!actions.length)return;
   const label=document.createElement('span');label.className='relation-label';label.textContent='Related';
   relation.append(label,...actions)
@@ -799,7 +931,8 @@ function scopeRelated(kind,row){
   $('search').value='';
   for(const id of FILTER_IDS)$(id).value='';
   clearRelationScope();
-  if(kind==='correlation')scopeCorrelation=row.correlation_id;
+  scopeSource=sourceId(row);
+  if(kind==='correlation')scopeRelatedTo=row.entry_id;
   else{
     scopeTurn=row.turn_id;
     if(kind==='step')scopeStep=String(row.step_index)
@@ -811,7 +944,7 @@ function openRelatedEntry(entry){
   for(const id of FILTER_IDS)$(id).value='';
   clearRelationScope();invalidateView();pollRevision++;pollController?.abort();
   windowRows=[];displayRows=[];hasEarlier=false;hasLater=false;latestData=null;selected=null;drawnRows=null;
-  closeInspector(null);ledgerMessage='Loading related event…';renderLedger();drawOverview(null);
+  closeInspector(null);syncFilters();ledgerMessage='Loading related event…';renderLedger();drawOverview(null);
   syncLocation(entry);focusOrLoad(entry).finally(poll)
 }
 function showSummary(row){
@@ -848,7 +981,7 @@ async function loadDetail(entry,preserveContent=false){
     $('payloadStatus').textContent='Unable to load';$('details').textContent=error.message
   }finally{if(detailController===controller)detailController=null}
 }
-function selectEntry(entry,scroll,fromFocus=false){
+function selectEntry(entry,scroll,fromFocus=false,inspect=true){
   const index=displayRows.findIndex(row=>row.entry_id===entry);
   if(index<0){focusOrLoad(entry);return}
   if(!fromFocus){invalidateFocus();invalidateEarlier();invalidateLater()}
@@ -867,9 +1000,10 @@ function selectEntry(entry,scroll,fromFocus=false){
     const target=rows.querySelector(selector(entry));target?.classList.add('selected');target?.setAttribute('aria-selected','true')
   }
   drawOverview(latestData?.overview);
-  showSummary(displayRows[index]);
+  if(inspect)showSummary(displayRows[index]);else closeInspector(null);
+  syncNavigation();
   requestAnimationFrame(()=>{
-    if(drawerMedia.matches)$('closeInspector').focus();
+    if(inspect&&drawerMedia.matches)$('closeInspector').focus();
     else (rows.querySelector(selector(entry))||$('inspector')).focus({preventScroll:true})
   })
 }
@@ -919,9 +1053,11 @@ async function poll(){
         windowRows[index]=fresh;
         renderRows=true;
         const refreshDetail=$('payload').open&&detailEntry===selected&&detailRow&&detailController==null;
-        showSummary(fresh);
+        if(inspectorOpen)showSummary(fresh);
         if(refreshDetail)loadDetail(selected,true)
       }
+    }
+    if(!updateRows){
       const firstOrdinal=windowRows[0]?.ordinal,lastOrdinal=windowRows.at(-1)?.ordinal;
       if(Number.isInteger(firstOrdinal))hasEarlier=firstOrdinal>0;
       if(Number.isInteger(lastOrdinal))hasLater=lastOrdinal+1<data.matchingCount
@@ -985,12 +1121,13 @@ async function loadLater(){
   }
 }
 function resetWindow(){
+  clearTimeout(debounce);syncFilters();
   invalidateView();
   windowRows=[];displayRows=[];hasEarlier=false;hasLater=false;latestData=null;selected=null;drawnRows=null;
   closeInspector(null);
   syncLocation(null);
   $('hint').hidden=false;$('meta').hidden=true;$('payload').hidden=true;
-  ledgerMessage='Loading trajectory…';renderLedger();drawOverview(null);
+  ledgerMessage='Loading trajectory…';renderLedger();drawOverview(null);syncNavigation();
   follow=true;syncFollowControl();setHealth('Loading','--tools');poll()
 }
 function closeInspector(focusEntry=inspectorTriggerEntry){
@@ -1006,7 +1143,7 @@ function clearSelection(){
   invalidateFocus();invalidateEarlier();invalidateLater();
   selected=null;syncLocation(null);
   const selectedRow=rows.querySelector('.selected');selectedRow?.classList.remove('selected');selectedRow?.setAttribute('aria-selected','false');
-  closeInspector(previous);drawOverview(latestData?.overview)
+  closeInspector(previous);drawOverview(latestData?.overview);syncNavigation()
 }
 function moveSelection(delta){
   if(!displayRows.length)return;
@@ -1046,6 +1183,16 @@ $('copy').onclick=async()=>{
   }catch(error){if(error.name!=='AbortError'&&copyController===controller)$('payloadStatus').textContent=error.message||'Copy failed'}
   finally{if(selected===entry&&copyController===controller){$('copy').disabled=false;copyController=null}}
 };
+$('filterToggle').onclick=()=>{
+  const open=$('filterPanel').hidden;$('filterPanel').hidden=!open;$('filterToggle').setAttribute('aria-expanded',String(open))
+};
+document.querySelectorAll('[data-category]').forEach(button=>button.onclick=()=>{$('class').value=button.dataset.category;resetWindow()});
+for(const kind of ['turn','step']){
+  $(kind+'Jump').onchange=()=>locateLoaded($(kind+'Jump').value);
+  const title=titleCase(kind);
+  $('prev'+title).onclick=()=>moveBoundary(kind,-1);$('next'+title).onclick=()=>moveBoundary(kind,1);
+  $('only'+title).onclick=()=>{const row=displayRows.find(row=>row.entry_id===$(kind+'Jump').value);if(row)scopeRelated(kind,row)}
+}
 for(const id of FILTER_IDS)$(id).onchange=resetWindow;
 $('overviewBy').onchange=()=>{drawnOverview=null;syncLocation();setHealth('Changing timeline view','--tools');poll()};
 let debounce;
@@ -1082,7 +1229,7 @@ drawerMedia.addEventListener('change',()=>{
     else (rows.querySelector(selector(selected??''))||$('inspector')).focus({preventScroll:true})
   })
 });
-restoreUrlState();selected=hashEntry();syncThemeToggle();syncFollowControl();syncInspectorMode();renderLedger();
+restoreUrlState();syncFilters();syncNavigation();selected=hashEntry();syncThemeToggle();syncFollowControl();syncInspectorMode();renderLedger();
 if(selected)focusOrLoad(selected).finally(poll);else poll();
 </script>
 </body>

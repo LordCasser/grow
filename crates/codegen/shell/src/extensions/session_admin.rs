@@ -128,6 +128,9 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 
     let session_id = acp::SessionId::new(Arc::from(req.session_id.as_str()));
 
+    // Keep lookup and the live/dormant write decision atomic with load/delete.
+    let _lifecycle = agent.lock_session_lifecycle(&session_id).await;
+
     // Find the session info, scoping to cwd if provided
     let summaries = list_summaries(req.cwd.as_deref())
         .await
@@ -142,7 +145,9 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 
     let info = summary.info.clone();
 
-    let live_handle = agent.session_handle_waiting_for_load(&session_id).await;
+    // An announced loader may be queued behind our guard. Waiting for it here
+    // would wait on ourselves; residency is stable while this guard is held.
+    let live_handle = agent.get_session_handle(&session_id);
     let event = if let Some(handle) = live_handle {
         let (respond_to, response) = tokio::sync::oneshot::channel();
         handle

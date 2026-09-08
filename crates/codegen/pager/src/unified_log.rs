@@ -14,8 +14,18 @@ use diagnostics::unified_log::{
 };
 use tokio::runtime::Handle;
 
-static ACP_TX: OnceLock<AcpAgentTx> = OnceLock::new();
-static BUFFER: Mutex<Vec<ClientLogEntry>> = Mutex::new(Vec::new());
+struct DispatchOwner {
+    tx: AcpAgentTx,
+    runtime: Handle,
+}
+
+struct Forwarder {
+    owner: OnceLock<DispatchOwner>,
+    buffer: Mutex<Vec<ClientLogEntry>>,
+}
+
+static FORWARDER: Forwarder = Forwarder::new();
+const FLUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Initialize the unified log forwarder with the ACP sender.
 ///
@@ -24,7 +34,9 @@ static BUFFER: Mutex<Vec<ClientLogEntry>> = Mutex::new(Vec::new());
 /// seconds so events are delivered promptly without manual flush calls.
 /// Entries buffered before this call will be picked up on the first tick.
 pub fn init(tx: AcpAgentTx) {
-    let _ = ACP_TX.set(tx);
+    if !FORWARDER.initialize(tx) {
+        return;
+    }
     tokio::spawn(async {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -49,16 +61,7 @@ fn push_entry(lvl: LogLevel, msg: &str, sid: Option<&str>, ctx: Option<serde_jso
         msg: msg.into(),
         ctx,
     };
-    if let Ok(mut buf) = BUFFER.lock() {
-        buf.push(entry);
-        // Auto-flush when we have a reasonable batch, but only if the ACP
-        // sender is ready -- otherwise keep buffering until an explicit flush().
-        if buf.len() >= 16 && ACP_TX.get().is_some() {
-            let entries: Vec<ClientLogEntry> = buf.drain(..).collect();
-            drop(buf);
-            send_entries(entries);
-        }
-    }
+    FORWARDER.push(entry);
 }
 
 fn build_notification(entries: Vec<ClientLogEntry>) -> Option<acp::ExtNotification> {
@@ -73,51 +76,72 @@ fn build_notification(entries: Vec<ClientLogEntry>) -> Option<acp::ExtNotificati
     Some(acp::ExtNotification::new(LOG_METHOD, raw.into()))
 }
 
-fn send_entries(entries: Vec<ClientLogEntry>) {
-    let Some(tx) = ACP_TX.get() else { return };
-    let Some(notification) = build_notification(entries) else {
-        return;
-    };
-    // Guard against panic if called from a non-tokio thread (e.g., a
-    // tracing::Layer callback on a blocking thread).
-    let Ok(handle) = Handle::try_current() else {
-        return;
-    };
-    let tx = tx.clone();
-    handle.spawn(async move {
-        let _ = acp_transport::acp_send(notification, &tx).await;
-    });
+impl Forwarder {
+    const fn new() -> Self {
+        Self { owner: OnceLock::new(), buffer: Mutex::new(Vec::new()) }
+    }
+
+    /// Only the successful installer may start the periodic consumer.
+    fn initialize(&self, tx: AcpAgentTx) -> bool {
+        if self.owner.get().is_some() {
+            return false;
+        }
+        self.owner.set(DispatchOwner { tx, runtime: Handle::current() }).is_ok()
+    }
+
+    fn push(&self, entry: ClientLogEntry) {
+        let Ok(mut buffer) = self.buffer.lock() else { return; };
+        buffer.push(entry);
+        if buffer.len() >= 16 && let Some(owner) = self.owner.get() {
+            let entries = buffer.drain(..).collect();
+            drop(buffer);
+            Self::send_entries(owner, entries);
+        }
+    }
+
+    fn take_entries(&self) -> Option<(&DispatchOwner, Vec<ClientLogEntry>)> {
+        // No initialized owner means startup entries must stay buffered.
+        let owner = self.owner.get()?;
+        let mut buffer = self.buffer.lock().ok()?;
+        if buffer.is_empty() { return None; }
+        Some((owner, buffer.drain(..).collect()))
+    }
+
+    fn send_entries(owner: &DispatchOwner, entries: Vec<ClientLogEntry>) {
+        let Some(notification) = build_notification(entries) else { return; };
+        let tx = owner.tx.clone();
+        owner.runtime.spawn(async move {
+            let _ = acp_transport::acp_send(notification, &tx).await;
+        });
+    }
+
+    fn flush(&self) {
+        if let Some((owner, entries)) = self.take_entries() {
+            Self::send_entries(owner, entries);
+        }
+    }
+
+    async fn flush_blocking(&self) {
+        let Some((owner, entries)) = self.take_entries() else { return; };
+        let Some(notification) = build_notification(entries) else { return; };
+        // Bound shutdown latency. An enqueued notification may still be
+        // processed after this local wait expires; never retry it here.
+        let _ = tokio::time::timeout(
+            FLUSH_WAIT,
+            acp_transport::acp_send(notification, &owner.tx),
+        ).await;
+    }
 }
 
 /// Flush any buffered entries to the shell (fire-and-forget).
 pub fn flush() {
-    let entries = {
-        let Ok(mut buf) = BUFFER.lock() else { return };
-        if buf.is_empty() {
-            return;
-        }
-        buf.drain(..).collect::<Vec<_>>()
-    };
-    send_entries(entries);
+    FORWARDER.flush();
 }
 
-/// Flush buffered entries and await delivery.
-///
-/// Use this before process exit to ensure entries are delivered
-/// before the agent shuts down.
+/// Flush the currently buffered batch, waiting at most two seconds for delivery.
+/// Earlier fire-and-forget batches are not joined by this operation.
 pub async fn flush_blocking() {
-    let entries = {
-        let Ok(mut buf) = BUFFER.lock() else { return };
-        if buf.is_empty() {
-            return;
-        }
-        buf.drain(..).collect::<Vec<_>>()
-    };
-    let Some(tx) = ACP_TX.get() else { return };
-    let Some(notification) = build_notification(entries) else {
-        return;
-    };
-    let _ = acp_transport::acp_send(notification, tx).await;
+    FORWARDER.flush_blocking().await;
 }
 
 /// Log an info-level entry.
@@ -138,4 +162,98 @@ pub fn error(msg: &str, sid: Option<&str>, ctx: Option<serde_json::Value>) {
 /// Log a debug-level entry.
 pub fn debug(msg: &str, sid: Option<&str>, ctx: Option<serde_json::Value>) {
     push_entry(LogLevel::Debug, msg, sid, ctx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn entry(message: &str) -> ClientLogEntry {
+        ClientLogEntry { ts: now_ts(), pid: 1, ver: "test".into(),
+            lvl: LogLevel::Info, sid: None, msg: message.into(), ctx: None }
+    }
+
+    async fn receive(rx: &mut acp_transport::AcpAgentRx) -> LogNotificationParams {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await.expect("forwarding timeout").expect("channel closed");
+        let acp_transport::AcpAgentMessage::ExtNotification(args) = message else {
+            panic!("expected log notification");
+        };
+        assert_eq!(args.request.method.as_ref(), LOG_METHOD);
+        let params = serde_json::from_str(args.request.params.get()).unwrap();
+        let _ = args.response_tx.send(Ok(()));
+        params
+    }
+
+    #[tokio::test]
+    async fn unified_log_plain_thread_batch_uses_initialization_runtime() {
+        let forwarder = Arc::new(Forwarder::new());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(forwarder.initialize(tx));
+        let producer = Arc::clone(&forwarder);
+        std::thread::spawn(move || {
+            assert!(Handle::try_current().is_err());
+            for n in 0..16 { producer.push(entry(&n.to_string())); }
+        }).join().unwrap();
+        let params = receive(&mut rx).await;
+        assert_eq!(params.entries.len(), 16);
+        assert_eq!(params.entries[0].msg, "0");
+        assert_eq!(params.entries[15].msg, "15");
+        assert!(forwarder.buffer.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unified_log_preinit_flushes_preserve_entries_and_duplicate_init_keeps_owner() {
+        let forwarder = Forwarder::new();
+        forwarder.push(entry("startup"));
+        forwarder.flush();
+        forwarder.flush_blocking().await;
+        assert_eq!(forwarder.buffer.lock().unwrap().len(), 1);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(forwarder.initialize(tx));
+        let (other_tx, mut other_rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(!forwarder.initialize(other_tx));
+        let ((), params) = tokio::join!(forwarder.flush_blocking(), receive(&mut rx));
+        assert_eq!(params.entries[0].msg, "startup");
+        assert!(other_rx.try_recv().is_err());
+        assert!(forwarder.buffer.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unified_log_flush_releases_unacknowledged_batch_at_deadline() {
+        let forwarder = Arc::new(Forwarder::new());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(forwarder.initialize(tx));
+        forwarder.push(entry("held by peer"));
+        let task_forwarder = Arc::clone(&forwarder);
+        let started = tokio::time::Instant::now();
+        let flushing = tokio::spawn(async move { task_forwarder.flush_blocking().await });
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await.unwrap().unwrap();
+        let acp_transport::AcpAgentMessage::ExtNotification(args) = message else {
+            panic!("expected log notification");
+        };
+        // Keep the response sender alive: only the production deadline can
+        // release this wait, not channel closure or a fake acknowledgement.
+        tokio::time::timeout(FLUSH_WAIT + std::time::Duration::from_secs(2), flushing)
+            .await.expect("flush exceeded watchdog").unwrap();
+        assert!(started.elapsed() >= FLUSH_WAIT);
+        assert!(args.response_tx.is_closed());
+        assert!(args.response_tx.send(Ok(())).is_err());
+        assert!(forwarder.buffer.lock().unwrap().is_empty());
+        assert!(rx.try_recv().is_err(), "timeout must not retry");
+    }
+
+    #[tokio::test]
+    async fn unified_log_flush_closed_peer_finishes_without_deadline() {
+        let forwarder = Forwarder::new();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(forwarder.initialize(tx));
+        drop(rx);
+        forwarder.push(entry("disconnected"));
+        tokio::time::timeout(std::time::Duration::from_secs(1), forwarder.flush_blocking())
+            .await.expect("closed channel should finish promptly");
+    }
+
 }

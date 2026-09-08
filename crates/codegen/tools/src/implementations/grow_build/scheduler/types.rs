@@ -248,7 +248,7 @@ impl ScheduledTask {
             now
         };
         Self {
-            id: uuid::Uuid::now_v7().to_string().replace('-', "")[..12].to_string(),
+            id: uuid::Uuid::now_v7().to_string(),
             interval_secs,
             prompt,
             recurring,
@@ -331,6 +331,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn task_ids_preserve_uuid_entropy() {
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..1_000 {
+            let task = ScheduledTask::new(300, "check".into(), true, false);
+            let id = uuid::Uuid::parse_str(&task.id).expect("task identity is a complete UUID");
+            assert_eq!(id.get_version_num(), 7);
+            assert!(ids.insert(task.id), "distinct tasks shared an identity");
+        }
+    }
+
+    #[test]
     fn new_recurring_task_has_7_day_expiry() {
         let task = ScheduledTask::new(300, "check deploy".into(), true, false);
         assert!(task.expires_at.is_some());
@@ -386,12 +397,6 @@ mod tests {
                        "createdAt":"2026-01-01T00:00:00Z",
                        "lastFiredAt":null,"expiresAt":null}"#;
         assert!(serde_json::from_str::<ScheduledTask>(json).is_err());
-    }
-
-    #[test]
-    fn task_id_is_12_chars() {
-        let task = ScheduledTask::new(300, "test".into(), true, false);
-        assert_eq!(task.id.len(), 12);
     }
 
     #[test]

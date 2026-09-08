@@ -17,6 +17,11 @@ details such as notification focus tracking and sandbox profile conflicts.
 A report can contain issues or recommendations and still exit successfully.
 `grow doctor --json` reports the same color capability when piped.
 
+Both Doctor entry points check the current shell's configuration file before
+recommending local SSH alias setup. A valid managed alias suppresses the
+repeated setup recommendation; this does not prove that the running shell has
+loaded it. Remote reports do not use the remote alias to mark local setup done.
+
 Use `/doctor` for terminal diagnostics and fixes.
 
 When Doctor finds an explicit unhealthy tmux setting, `/doctor fix` lists the
@@ -28,16 +33,27 @@ Doctor can persist these three tmux options:
 - `terminal.dcs-passthrough` — `set -wg allow-passthrough on`
 - `terminal.tmux-extended-keys` — `set -g extended-keys on`
 
+For a custom tmux file, specify its absolute path with
+`grow doctor fix tmux-clipboard --config '/path/custom config.tmux'`, or
+`/doctor fix tmux-clipboard --config '/path/custom config.tmux'` in Grow.
+Review the displayed target before confirming. `--config` applies only to tmux
+fixes; SSH setup follows the selected shell's configuration directory.
+
 A tmux fix edits only the persistent config on the computer hosting the affected
-tmux server, including remote sessions. Plain tmux uses the real
-`$HOME/.tmux.conf`; Byobu-tmux uses its effective `BYOBU_CONFIG_DIR` and refuses
-to guess if that directory is unavailable or unsafe. Grow preserves the file's
+tmux server, including remote sessions. An explicit `--config` takes priority.
+Otherwise, plain tmux requires one safe absolute startup candidate from the
+server's `config_files` query; missing results or any comma require explicit
+selection. This query is not a complete log of successfully loaded or sourced
+files. Byobu-tmux uses its effective `BYOBU_CONFIG_DIR` and refuses to guess if
+that directory is unavailable or unsafe. Default paths in startup hints are
+labelled as candidates; confirm the effective file before editing or reloading. Grow preserves the file's
 line endings and mode, makes a backup when changing an existing file, and
 refuses conflicting or ambiguous direct assignments.
 
 Grow deliberately does **not** run `tmux source-file` or change the live tmux
-server. Reload with the exact command shown after apply, or detach and reattach,
-then run `/doctor` again. Until reload, the live finding is expected to remain.
+server. Reload with the exact command shown after apply, then run `/doctor`
+again. Detaching and reattaching alone does not reload the config. Until reload, the live finding is expected to remain.
+See the [reload guidance contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-tmux-reload-guidance-distinguishes-reattachment).
 The conservative config scan checks direct global assignments only; review
 sourced files, conditionals, plugins, and generated tmux setup yourself.
 
@@ -84,6 +100,21 @@ Grow writes through up to three routes, shown in `/doctor` under **Clipboard**:
 - **native** — the local operating-system clipboard.
 - **tmux** — the tmux paste buffer when Grow runs inside tmux.
 - **OSC 52** — an escape sequence that can cross tmux, containers, or SSH.
+
+On macOS, image and attachment fallback scripts return an error after five
+seconds if they stall. Grow also rejects excessive script output. This limit
+covers the AppleScript fallback, not native clipboard access or image decoding.
+Mac clipboard image reads reject encoded data larger than 50 MB. This is
+separate from the SSH transfer limit and does not limit decoded pixel dimensions.
+
+On Linux and Windows, malformed clipboard image dimensions or inconsistent
+pixel data produce an encoding error instead of being passed to the PNG encoder.
+
+Image files dropped or pasted by path also have a 50 MB read limit. Larger
+files remain ordinary path references instead of becoming image attachments.
+Each paste also limits retained image data to 50 MB in total. If a batch exceeds
+that total, the path classifier returns no attachments and leaves the original
+paste available to the existing text fallback.
 
 #### Wayland
 

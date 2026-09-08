@@ -595,6 +595,9 @@ impl SessionActor {
             return Ok(GoalUsageIncompleteApply::Ignored);
         }
         let already_recorded = previous.usage_incomplete && !previous.usage_incomplete_acknowledged;
+        let paused_at_boundary = previous.token_budget.is_some()
+            && previous.status == crate::session::goal_tracker::GoalStatus::Paused
+            && !self.events.has_active_step();
         let definition_revision = previous.definition_revision;
         if !already_recorded && !self.goal_tracker.lock().mark_usage_incomplete(goal_id) {
             return Ok(GoalUsageIncompleteApply::Ignored);
@@ -617,7 +620,9 @@ impl SessionActor {
                     .await;
                 return Ok(GoalUsageIncompleteApply::Stopped);
             }
-            if previous.status == crate::session::goal_tracker::GoalStatus::Paused {
+            // A stopped lifecycle is not proof that this new usage evidence
+            // was persisted. Only an already-recorded marker may short-circuit.
+            if paused_at_boundary && already_recorded {
                 return Ok(GoalUsageIncompleteApply::Stopped);
             }
         }
@@ -634,7 +639,11 @@ impl SessionActor {
         let tokens_used = self.goal_tokens_used();
         self.goal_notify_sender()
             .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
-        Ok(GoalUsageIncompleteApply::Recorded)
+        Ok(if paused_at_boundary {
+            GoalUsageIncompleteApply::Stopped
+        } else {
+            GoalUsageIncompleteApply::Recorded
+        })
     }
 
     /// Root-only, idempotent settlement authority for provider attempts. The
@@ -1787,6 +1796,186 @@ mod tests {
                     })
                     .unwrap();
                 assert!(step_end < terminal_control);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_goal_settlement_retains_attempt_and_retries_exactly_once() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for charge in [Some(41), None] {
+                    let (mut actor, _gateway_rx) = build_actor().await;
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .create_goal("goal-1".into(), "finish".into(), Some(100), "now".into())
+                        .unwrap();
+                    actor
+                        .behavior
+                        .lock()
+                        .select_behavior(tool_types::BehaviorId::Goal);
+                    actor.sync_goal_usage_window();
+                    let attempt = actor
+                        .goal_usage_window
+                        .begin_model_attempt(&actor.session_id_string(), 0, Some("goal-1"))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert!(
+                        actor
+                            .goal_usage_window
+                            .claim_attempt_settlement(&attempt, charge)
+                    );
+                    let original = std::mem::replace(
+                        &mut std::sync::Arc::get_mut(&mut actor)
+                            .unwrap()
+                            .chat_state_handle,
+                        chat_state::ChatStateHandle::noop(),
+                    );
+                    assert!(
+                        actor
+                            .settle_claimed_goal_usage_attempt(&attempt)
+                            .await
+                            .is_err()
+                    );
+                    assert_eq!(actor.goal_tracker.lock().tokens_used(), 0);
+                    assert!(
+                        !actor
+                            .goal_tracker
+                            .lock()
+                            .snapshot()
+                            .unwrap()
+                            .usage_incomplete
+                    );
+                    assert_eq!(
+                        actor.goal_usage_window.attempt_settlement(&attempt),
+                        Some(("goal-1".into(), charge))
+                    );
+                    std::sync::Arc::get_mut(&mut actor)
+                        .unwrap()
+                        .chat_state_handle = original;
+                    assert!(
+                        actor
+                            .settle_claimed_goal_usage_attempt(&attempt)
+                            .await
+                            .unwrap()
+                    );
+                    let before_retry = actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .unwrap()
+                        .len();
+                    assert!(
+                        !actor
+                            .settle_claimed_goal_usage_attempt(&attempt)
+                            .await
+                            .unwrap()
+                    );
+                    let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
+                    assert_eq!(
+                        timeline.len(),
+                        before_retry,
+                        "duplicate settlement must not append facts"
+                    );
+                    let durable = timeline
+                        .iter()
+                        .rev()
+                        .find_map(|event| match &event.kind {
+                            chat_state::TimelineEventKind::Control(control) => {
+                                control.snapshot.get("goal").cloned()
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    let goal: crate::session::goal_tracker::GoalState =
+                        serde_json::from_value(durable).unwrap();
+                    assert_eq!(goal.tokens_used, charge.unwrap_or(0));
+                    assert_eq!(goal.usage_incomplete, charge.is_none());
+                    assert!(
+                        actor
+                            .goal_usage_window
+                            .attempt_settlement(&attempt)
+                            .is_none()
+                    );
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn paused_goal_persists_late_incomplete_usage_before_settlement_finishes() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = build_actor().await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal("goal-1".into(), "finish".into(), Some(100), "now".into())
+                    .unwrap();
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
+                actor.sync_goal_usage_window();
+                let attempt = actor
+                    .goal_usage_window
+                    .begin_model_attempt(&actor.session_id_string(), 0, Some("goal-1"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let previous = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+                assert!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .pause(crate::session::goal_tracker::GoalPauseReason::User)
+                );
+                actor.commit_goal_stop_or_restore(previous).await.unwrap();
+                assert!(
+                    actor
+                        .goal_usage_window
+                        .claim_attempt_settlement(&attempt, None)
+                );
+                actor
+                    .settle_claimed_goal_usage_attempt(&attempt)
+                    .await
+                    .unwrap();
+                assert!(
+                    actor
+                        .goal_usage_window
+                        .attempt_settlement(&attempt)
+                        .is_none()
+                );
+
+                let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
+                let durable = timeline
+                    .iter()
+                    .rev()
+                    .find_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Control(control) => {
+                            control.snapshot.get("goal").cloned()
+                        }
+                        _ => None,
+                    })
+                    .expect("Goal control snapshot");
+                let goal: crate::session::goal_tracker::GoalState =
+                    serde_json::from_value(durable).unwrap();
+                assert!(
+                    goal.usage_incomplete,
+                    "settled unknown usage must survive reload"
+                );
+                assert_eq!(
+                    goal.status,
+                    crate::session::goal_tracker::GoalStatus::Paused
+                );
+                let mut restored =
+                    crate::session::goal_tracker::GoalTracker::from_snapshot(goal).unwrap();
+                assert!(
+                    !restored.restart(),
+                    "an unmetered budget cannot resume as exact after reload"
+                );
             })
             .await;
     }

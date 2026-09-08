@@ -39,15 +39,15 @@ impl FetchCache {
 
     /// Cache only inline text; path-bearing outputs must be materialized per call.
     pub(crate) fn insert_text(&mut self, url: String, output: WebFetchOutput, was_truncated: bool) {
-        if was_truncated {
+        if was_truncated || self.max_entries == 0 {
             return;
         }
-        if self.entries.len() >= self.max_entries {
+        if !self.entries.contains_key(&url) && self.entries.len() >= self.max_entries {
             // Evict oldest entry.
             let oldest_key = self
                 .entries
                 .iter()
-                .max_by_key(|(_, v)| v.inserted.elapsed())
+                .min_by_key(|(_, v)| v.inserted)
                 .map(|(k, _)| k.clone());
             if let Some(key) = oldest_key {
                 self.entries.remove(&key);
@@ -79,6 +79,39 @@ mod tests {
             inline_fallback: None,
             output_location: None,
         })
+    }
+
+    #[test]
+    fn zero_capacity_never_retains_text() {
+        let mut cache = FetchCache::new(Duration::from_secs(60), 0);
+        for url in ["a", "b", "a"] {
+            cache.insert_text(url.into(), output("page"), false);
+            assert!(cache.get(url).is_none());
+            assert!(cache.entries.is_empty());
+        }
+    }
+
+    #[test]
+    fn full_cache_updates_existing_url_without_evicting_other_pages() {
+        let mut cache = FetchCache::new(Duration::from_secs(60), 2);
+        cache.insert_text("a".into(), output("oldest"), false);
+        cache.insert_text("b".into(), output("old"), false);
+        let before_update = Instant::now();
+        cache.entries.get_mut("a").unwrap().inserted = before_update - Duration::from_secs(20);
+        cache.entries.get_mut("b").unwrap().inserted = before_update - Duration::from_secs(10);
+        cache.insert_text("b".into(), output("updated"), false);
+        assert!(cache.get("a").is_some(), "updating b must preserve a");
+        let WebFetchOutput::Content(updated) = cache.get("b").unwrap() else {
+            panic!("expected content")
+        };
+        assert_eq!(updated.content, "updated");
+        assert!(cache.entries["b"].inserted >= before_update);
+        assert_eq!(cache.entries.len(), 2);
+        cache.insert_text("c".into(), output("new"), false);
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_some());
+        assert!(cache.get("c").is_some());
+        assert_eq!(cache.entries.len(), 2);
     }
 
     #[test]

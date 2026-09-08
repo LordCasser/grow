@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
 use super::{ManagedConfigError, ManagedConfigPlan};
@@ -195,7 +196,7 @@ pub(super) struct FileIdentity {
 }
 
 impl FileIdentity {
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
+    pub(super) fn from_metadata(metadata: &fs::Metadata) -> Self {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
@@ -338,6 +339,28 @@ fn physicalize_parent(path: &Path) -> Result<PathBuf, ManagedConfigError> {
     }
 }
 
+pub(super) fn read_bounded(
+    reader: impl std::io::Read,
+    path: &Path,
+    limit: u64,
+) -> Result<Vec<u8>, ManagedConfigError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|source| ManagedConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if bytes.len() as u64 > limit {
+        return Err(ManagedConfigError::UnsafePath {
+            path: path.to_path_buf(),
+            reason: format!("file exceeds {limit} bytes"),
+        });
+    }
+    Ok(bytes)
+}
+
 pub(super) fn read_source(path: &Path) -> Result<SourceState, ManagedConfigError> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -362,16 +385,34 @@ pub(super) fn read_source(path: &Path) -> Result<SourceState, ManagedConfigError
             reason: "target is not a regular file".to_owned(),
         });
     }
+    let file = fs::File::open(path).map_err(|source| ManagedConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    read_source_file(path, file)
+}
+
+pub(super) fn read_source_file(
+    path: &Path,
+    file: fs::File,
+) -> Result<SourceState, ManagedConfigError> {
+    let metadata = file.metadata().map_err(|source| ManagedConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(ManagedConfigError::UnsafePath {
+            path: path.to_path_buf(),
+            reason: "target is not a regular file".to_owned(),
+        });
+    }
     if metadata.len() > MAX_CONFIG_BYTES {
         return Err(ManagedConfigError::UnsafePath {
             path: path.to_path_buf(),
             reason: format!("file exceeds {MAX_CONFIG_BYTES} bytes"),
         });
     }
-    let bytes = fs::read(path).map_err(|source| ManagedConfigError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let bytes = read_bounded(file, path, MAX_CONFIG_BYTES)?;
     if bytes.contains(&0) {
         return Err(ManagedConfigError::UnsafePath {
             path: path.to_path_buf(),

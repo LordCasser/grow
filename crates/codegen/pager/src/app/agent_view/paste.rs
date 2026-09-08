@@ -191,6 +191,14 @@ impl AgentView {
             file_urls.as_deref().and_then(|urls| {
                 self.try_handle_dropped_paths_paste(urls, effects)
                     .map(|(_, completion)| completion)
+                    .or_else(|| {
+                        ctx.source.file_url_text_on_miss(urls).map(|text| {
+                            match self.insert_prompt_text(Some(text), false, effects).1 {
+                                crate::app::actions::ClipboardTextInsertion::Inserted => ClipboardPasteCompletion::Handled,
+                                _ => ClipboardPasteCompletion::Failed(ClipboardPasteFailure::TargetInsertion),
+                            }
+                        })
+                    })
             })
         } else {
             None
@@ -2596,6 +2604,45 @@ pub(super) mod paste_key_tests {
             )
         );
     }
+    #[test]
+    fn agent_unclassified_file_urls_preserve_text_and_source_precedence() {
+        use crate::app::actions::{ClipboardPasteSource, ClipboardTextRead, ClipboardPasteCompletion, ProbedAttachment};
+        // Root URLs deliberately fail the shared drop classifier without
+        // allocating a large image batch to trigger the same miss branch.
+        let urls = "file:///";
+        for original in [ClipboardTextRead::Success(None), ClipboardTextRead::Success(Some(" \t".into())), ClipboardTextRead::Failed, ClipboardTextRead::Success(Some("caption".into()))] {
+            let mut agent = make_agent();
+            agent.force_active_pane(ActivePane::Prompt);
+            let expected = if original.as_deref() == Some("caption") { "caption" } else { urls };
+            let mut ctx = agent_completion_ctx(&agent, None);
+            ctx.source = ClipboardPasteSource::ClipboardKey { text: original, tip_showing: false };
+            let completion = agent.complete_clipboard_attachment_paste(ctx, ProbedAttachment::NoRaster, Some(urls.into()), &mut Vec::new());
+            assert_eq!(completion, ClipboardPasteCompletion::Handled);
+            assert_eq!(agent.prompt.text(), expected);
+            assert!(agent.prompt.images.is_empty());
+        }
+        let mut agent = make_agent();
+        agent.prompt.set_text("already inserted");
+        let mut ctx = agent_completion_ctx(&agent, None);
+        ctx.source = ClipboardPasteSource::BracketedInserted {
+            text: "already inserted".into(),
+            insertion: crate::app::actions::ClipboardTextInsertion::Inserted,
+        };
+        agent.complete_clipboard_attachment_paste(ctx, ProbedAttachment::NoRaster, Some(urls.into()), &mut Vec::new());
+        assert_eq!(agent.prompt.text(), "already inserted");
+    }
+
+    #[test]
+    fn agent_unclassified_file_urls_do_not_bypass_probe_errors() {
+        use crate::app::actions::ProbedAttachment;
+        for probe in [ProbedAttachment::ProbeDropped, ProbedAttachment::ProbeFailed, ProbedAttachment::PersistFailed("failed".into())] {
+            let mut agent = make_agent();
+            let ctx = agent_completion_ctx(&agent, None);
+            agent.complete_clipboard_attachment_paste(ctx, probe, Some("file:///".into()), &mut Vec::new());
+            assert!(agent.prompt.text().is_empty());
+        }
+    }
+
     #[test]
     fn agent_completion_inserts_unreadable_file_url_as_path_text() {
         let mut effects = Vec::new();

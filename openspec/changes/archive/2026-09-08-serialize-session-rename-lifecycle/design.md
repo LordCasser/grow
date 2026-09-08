@@ -1,0 +1,7 @@
+# Design
+Acquire the existing lifecycle guard before authoritative session lookup and keep it through title write. With the guard held, inspect the resident primary actor directly: a prior loader has completed and a later loader must wait. Do not call session_handle_waiting_for_load inside the guard because begin_session_load can announce a loader before it acquires the same lock. Retain live actor command path, dormant durable append and search notification. No new lock store or global serialization; this is same-agent lifecycle coordination only.
+
+Tests should deterministically show queued load/delete/second rename cannot cross a guarded rename and that a loader announced while waiting does not stall rename. Use temporary session storage or pure lifecycle fixtures; no real GROW_HOME mutation.
+
+# Implementation
+The handler takes lock_session_lifecycle immediately after validated session ID construction, before list_summaries, and uses existing get_session_handle under that guard. The guard remains through commit and response construction. No new actor lookup or lock abstraction. Test uses an exact child test with GROW_HOME set before startup and asserts config::grow_home equals its temporary root. Live actor reply is controlled through a channel to prove gate retention; dormant handler performs a real temporary title append with an announced loader and verifies the summary title. Initial compile was interrupted before editing to add the dormant case and child execution assertion.

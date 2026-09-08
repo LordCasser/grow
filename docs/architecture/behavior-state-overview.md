@@ -2,6 +2,8 @@
 
 Shell actor 是执行与控制权威，Pager 只消费结构化投影。核心不变量是：一个 foreground owner、一个用户 FIFO、一个 Behavior identity、一个原子 control snapshot。
 
+控制 worker 在 `ApplyingControl` 期间发布的 Behavior 可用性只是当时的投影。空闲 model/Agent 或 Behavior 控制完成并释放前台占用后，Shell 必须重新发布可用性，否则 Pager 会继续保留“Stop the active foreground work”的临时拒绝原因。验收契约见 [behavior-goal](../../openspec/specs/behavior-goal/spec.md)。
+
 ## Turn admission
 
 ```rust

@@ -579,7 +579,18 @@ fn announcements_hide_is_per_id_so_new_critical_reappears() {
         "hiding the shown critical must reveal the next one"
     );
     let effects = dispatch(Action::AnnouncementsHide, &mut app);
-    assert_eq!(effects.len(), 1);
+    assert!(
+        effects.is_empty(),
+        "second snapshot waits for the first write"
+    );
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AnnouncementsHiddenPersisted { result: Ok(()) }),
+        &mut app,
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::PersistAnnouncementsHidden { hidden_ids }]
+        if hidden_ids.contains("outage-a") && hidden_ids.contains("outage-b"))
+    );
     assert_eq!(shown_banner_id(&app), None, "all hidden closes the banner");
     let effects = dispatch(Action::AnnouncementsHide, &mut app);
     assert!(effects.is_empty(), "expected no effects, got {effects:?}");
@@ -620,7 +631,7 @@ fn announcements_show_clears_visible_critical_ids_only() {
     assert!(effects.is_empty(), "expected no effects, got {effects:?}");
 }
 /// Hide targets the banner-slot item: the critical while one owns the slot,
-/// then the promo the slot reveals — each per-ID with a persist effect.
+/// then the promo the slot reveals — each per-ID with serialized persistence.
 #[test]
 fn announcements_hide_targets_slot_owner_critical_then_promo() {
     let mut app = test_app();
@@ -646,7 +657,15 @@ fn announcements_hide_targets_slot_owner_critical_then_promo() {
         "hiding the critical hands the slot to the promo"
     );
     let effects = dispatch(Action::AnnouncementsHide, &mut app);
-    assert_eq!(effects.len(), 1);
+    assert!(effects.is_empty(), "second hide waits for the first write");
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AnnouncementsHiddenPersisted { result: Ok(()) }),
+        &mut app,
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::PersistAnnouncementsHidden { hidden_ids }]
+        if hidden_ids.contains("outage-a") && hidden_ids.contains("promo-a"))
+    );
     assert!(app.hidden_announcement_ids.contains("promo-a"));
     assert_eq!(shown_banner_id(&app), None, "all hidden closes the banner");
     let effects = dispatch(Action::AnnouncementsHide, &mut app);
@@ -1914,7 +1933,7 @@ fn pager_registry_default_matches_agent_view_new_initializer() {
 }
 /// If the user picks the regular "Yes, proceed" option (NOT
 /// enable-always-approve), the dispatcher must behave exactly as
-/// before — no PersistPermissionMode effect, no always-approve flip. This
+/// before — no permission-mode change effect, no always-approve flip. This
 /// ensures the new code path is gated strictly on the id check.
 #[test]
 fn regular_allow_once_does_not_trigger_always_approve_persist() {
@@ -1926,10 +1945,15 @@ fn regular_allow_once_does_not_trigger_always_approve_persist() {
         &mut app,
     );
     assert!(
-        !effects
-            .iter()
-            .any(|e| matches!(e, Effect::PersistPermissionMode { .. })),
-        "picking the regular AllowOnce option must NOT emit PersistPermissionMode — \
+        !effects.iter().any(|e| matches!(
+            e,
+            Effect::NotifySessionPermissionMode { .. }
+                | Effect::PersistSetting {
+                    key: "permission_mode",
+                    ..
+                }
+        )),
+        "picking the regular AllowOnce option must NOT emit permission-mode change — \
              the always-approve mode is opt-in via the dedicated option only",
     );
     assert!(
@@ -2449,4 +2473,46 @@ fn toggle_scroll_log_flips_recorder_and_reports_path() {
         texts.iter().any(|t| t == "scroll log: off"),
         "disable must be confirmed, got {texts:?}"
     );
+}
+
+#[test]
+fn announcements_writes_coalesce_until_completion_even_after_failure() {
+    for fail in [false, true] {
+        let mut app = test_app();
+        app.active_announcements = vec![critical_announcement("notice")];
+        let first = dispatch(Action::AnnouncementsHide, &mut app);
+        assert!(
+            matches!(first.as_slice(), [Effect::PersistAnnouncementsHidden { hidden_ids }]
+            if hidden_ids.contains("notice"))
+        );
+        for _ in 0..100 {
+            assert!(dispatch(Action::AnnouncementsShow, &mut app).is_empty());
+            assert!(dispatch(Action::AnnouncementsHide, &mut app).is_empty());
+        }
+        assert!(dispatch(Action::AnnouncementsShow, &mut app).is_empty());
+        assert!(app.hidden_announcement_ids.is_empty());
+        let next = dispatch(
+            Action::TaskComplete(TaskResult::AnnouncementsHiddenPersisted {
+                result: if fail {
+                    Err("write failed".into())
+                } else {
+                    Ok(())
+                },
+            }),
+            &mut app,
+        );
+        assert!(
+            matches!(next.as_slice(), [Effect::PersistAnnouncementsHidden { hidden_ids }] if hidden_ids.is_empty())
+        );
+        assert!(
+            dispatch(
+                Action::TaskComplete(TaskResult::AnnouncementsHiddenPersisted { result: Ok(()) }),
+                &mut app
+            )
+            .is_empty()
+        );
+        assert!(!app.announcement_write_in_flight);
+        assert!(!app.announcement_write_pending);
+        assert_eq!(dispatch(Action::AnnouncementsHide, &mut app).len(), 1);
+    }
 }

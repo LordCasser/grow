@@ -1,0 +1,3 @@
+- [x] Implement shared Dashboard mixed drop insertion across three entry paths.
+- [x] Verify dispatch/peek, bracketed/key/deferred, source order, cap behavior and question guards.
+- [x] Update developer documentation, validate and archive.

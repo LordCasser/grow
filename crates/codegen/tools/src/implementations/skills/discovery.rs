@@ -5,10 +5,10 @@
 //! frontmatter parsing) used by both startup and dynamic discovery.
 
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use super::skill::extract_skill_body;
+use super::skill::{extract_skill_body, split_skill_frontmatter};
 use super::types::{SkillInfo, SkillScope};
 
 pub const MAX_DESCRIPTION_LEN: usize = 1024;
@@ -82,6 +82,17 @@ pub fn find_skill_md_paths(dir: &Path) -> Vec<PathBuf> {
 /// filesystem-dependent, and name-collision handling downstream is
 /// first-seen-wins, so an unsorted walk picks a nondeterministic winner.
 pub fn walk_for_skill_md(dir: &Path, paths: &mut Vec<PathBuf>, depth: usize) {
+    let mut ancestors =
+        HashSet::from([dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())]);
+    walk_skill_descendants(dir, paths, depth, &mut ancestors);
+}
+
+fn walk_skill_descendants(
+    dir: &Path,
+    paths: &mut Vec<PathBuf>,
+    depth: usize,
+    ancestors: &mut HashSet<PathBuf>,
+) {
     if depth > MAX_SKILL_WALK_DEPTH {
         return;
     }
@@ -93,11 +104,16 @@ pub fn walk_for_skill_md(dir: &Path, paths: &mut Vec<PathBuf>, depth: usize) {
             .collect();
         dirs.sort();
         for path in dirs {
+            let identity = dunce::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !ancestors.insert(identity.clone()) {
+                continue;
+            }
             let skill_md_path = path.join("SKILL.md");
             if skill_md_path.is_file() {
                 paths.push(skill_md_path);
             }
-            walk_for_skill_md(&path, paths, depth + 1);
+            walk_skill_descendants(&path, paths, depth + 1, ancestors);
+            ancestors.remove(&identity);
         }
     }
 }
@@ -117,13 +133,22 @@ fn coerce_to_string(value: Option<&serde_yaml::Value>) -> Option<String> {
     }
 }
 
-/// Parse a boolean frontmatter value: only a YAML `true` or the string `"true"`
-/// is true; anything else (including absent) is false. Callers apply any
-/// field-specific default for the absent case.
-fn parse_boolean_frontmatter(value: Option<&serde_yaml::Value>) -> bool {
+/// Parse explicit invocation switches without treating invalid values as false.
+fn parse_boolean_frontmatter(
+    value: Option<&serde_yaml::Value>,
+    field: &str,
+    default: bool,
+) -> Result<bool, SkillParseError> {
     use serde_yaml::Value;
-    matches!(value, Some(Value::Bool(true)))
-        || matches!(value, Some(Value::String(s)) if s == "true")
+    match value {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(Value::String(value)) if value == "true" => Ok(true),
+        Some(Value::String(value)) if value == "false" => Ok(false),
+        _ => Err(SkillParseError::YamlError(format!(
+            "{field} must be true or false"
+        ))),
+    }
 }
 
 /// Coerce `allowed-tools`: a comma- or space-delimited string, or a YAML list.
@@ -176,21 +201,25 @@ fn split_top_level(input: &str, open: char, close: char, split_ws: bool) -> Vec<
     parts
 }
 
-/// Coerce `paths:` into split patterns (not yet normalized — see
-/// `normalize_skill_paths`). A string is comma-split outside brace groups, so
-/// `{a,b}` stays intact for the gitignore matcher to expand; a YAML list is
-/// split per item; a wrong type yields `None`.
-fn coerce_path_list(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
+/// Split `paths:` patterns without silently discarding invalid list items.
+fn coerce_path_list(
+    value: Option<&serde_yaml::Value>,
+) -> Result<Option<Vec<String>>, SkillParseError> {
     use serde_yaml::Value;
-    match value? {
-        Value::String(s) => Some(split_top_level(s, '{', '}', false)),
-        Value::Sequence(seq) => Some(
-            seq.iter()
-                .filter_map(|v| v.as_str())
-                .flat_map(|s| split_top_level(s, '{', '}', false))
-                .collect(),
-        ),
-        _ => None,
+    let invalid =
+        || SkillParseError::YamlError("paths must be a string or a list of strings".into());
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(split_top_level(s, '{', '}', false))),
+        Some(Value::Sequence(seq)) => {
+            let mut patterns = Vec::new();
+            for value in seq {
+                let text = value.as_str().ok_or_else(invalid)?;
+                patterns.extend(split_top_level(text, '{', '}', false));
+            }
+            Ok(Some(patterns))
+        }
+        _ => Err(invalid()),
     }
 }
 
@@ -212,8 +241,10 @@ fn normalize_skill_paths(patterns: Vec<String>) -> Option<Vec<String>> {
 
 /// Parse the `paths:` field into glob patterns: split (`coerce_path_list`) then
 /// normalize (`normalize_skill_paths`). `None` when absent or match-all.
-fn parse_skill_paths(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
-    coerce_path_list(value).and_then(normalize_skill_paths)
+fn parse_skill_paths(
+    value: Option<&serde_yaml::Value>,
+) -> Result<Option<Vec<String>>, SkillParseError> {
+    Ok(coerce_path_list(value)?.and_then(normalize_skill_paths))
 }
 
 /// Extract `short-description`, `author`, and the remaining string entries from
@@ -266,6 +297,7 @@ pub struct ParsedFrontmatter {
     pub allowed_tools: Option<Vec<String>>,
     pub model: Option<String>,
     pub effort: Option<String>,
+
     pub user_invocable: bool,
     pub disable_model_invocation: bool,
     pub when_to_use: Option<String>,
@@ -317,6 +349,7 @@ pub fn is_valid_skill_name(name: &str) -> bool {
 /// Wrap simple `key: value` values that contain YAML indicator characters in
 /// double quotes, so e.g. a description with a colon (`Deploy: prod`) or a
 /// `{`-leading value parses. Used only as a retry after the first parse fails.
+#[expect(dead_code, reason = "Legacy repair code awaits removal review R9")]
 fn quote_problematic_values(frontmatter: &str) -> String {
     fn needs_quoting(v: &str) -> bool {
         v.contains(|c| {
@@ -362,6 +395,7 @@ fn quote_problematic_values(frontmatter: &str) -> String {
 /// Frontmatter keys the line-based recovery will salvage. Restricted to the
 /// listing-relevant scalar fields so list/map fields (`allowed-tools`, `paths`,
 /// `metadata`, …) are never mangled into bogus strings on the recovery path.
+#[expect(dead_code, reason = "Legacy repair code awaits removal review R9")]
 const RECOVERABLE_KEYS: &[&str] = &["name", "description", "when-to-use", "when_to_use"];
 
 /// Best-effort recovery of a few top-level scalar fields when YAML parsing fails
@@ -370,6 +404,7 @@ const RECOVERABLE_KEYS: &[&str] = &["name", "description", "when-to-use", "when_
 /// and all). Only unindented lines for a [`RECOVERABLE_KEYS`] key are taken, and
 /// the body fallback still runs for anything not recovered. A multi-line value
 /// keeps only its first line; duplicate keys resolve first-wins.
+#[expect(dead_code, reason = "Legacy repair code awaits removal review R9")]
 fn recover_scalar_fields(yaml: &str) -> std::collections::HashMap<String, serde_yaml::Value> {
     let mut map = std::collections::HashMap::new();
     for line in yaml.lines() {
@@ -423,34 +458,15 @@ pub fn parse_skill_frontmatter(
     content: &str,
     fallback_name: Option<&str>,
 ) -> Result<ParsedFrontmatter, SkillParseError> {
-    let content = content.trim_start();
-    if !content.starts_with("---") {
-        return Err(SkillParseError::NoFrontmatter);
-    }
+    let (yaml_content, _) =
+        split_skill_frontmatter(content).ok_or(SkillParseError::NoFrontmatter)?;
+    let yaml_content = yaml_content.trim();
 
-    let after_first = content.get(3..).ok_or(SkillParseError::NoFrontmatter)?;
-    let closing_idx = after_first
-        .find("\n---")
-        .ok_or(SkillParseError::NoFrontmatter)?;
-    let yaml_content = after_first[..closing_idx].trim();
-
-    // Untyped map coerced per-field so one mistyped field never drops its siblings;
-    // the quoting retry recovers value-colon syntax errors; the final line-based
-    // recovery salvages top-level scalars when YAML fails outright (rather than
-    // dropping the whole frontmatter).
-    let frontmatter: std::collections::HashMap<String, serde_yaml::Value> = serde_yaml::from_str(
-        yaml_content,
-    )
-    .or_else(|_| serde_yaml::from_str(&quote_problematic_values(yaml_content)))
-    .unwrap_or_else(|err| {
-        let recovered = recover_scalar_fields(yaml_content);
-        tracing::debug!(
-            error = %err,
-            recovered = recovered.len(),
-            "skill frontmatter failed YAML parse; recovered top-level scalar fields line-by-line"
-        );
-        recovered
-    });
+    // Never repair malformed YAML into a partial set of metadata: that can
+    // discard structured restrictions while keeping the skill loadable.
+    let frontmatter: std::collections::HashMap<String, serde_yaml::Value> =
+        serde_yaml::from_str(yaml_content)
+            .map_err(|error| SkillParseError::YamlError(error.to_string()))?;
 
     // Prefer the frontmatter `name`, but fall back to the directory name when it
     // is absent or normalizes to an invalid slug, so one bad `name:` field
@@ -497,7 +513,7 @@ pub fn parse_skill_frontmatter(
     )
     .map(|w| cap_string(w, MAX_DESCRIPTION_LEN));
 
-    let paths = parse_skill_paths(frontmatter.get("paths"));
+    let paths = parse_skill_paths(frontmatter.get("paths"))?;
 
     let (short_description, author, metadata) = parse_metadata(frontmatter.get("metadata"));
 
@@ -513,13 +529,18 @@ pub fn parse_skill_frontmatter(
         allowed_tools: coerce_tool_list(frontmatter.get("allowed-tools")),
         model: coerce_to_string(frontmatter.get("model")),
         effort: coerce_to_string(frontmatter.get("effort")),
+
         // Absent `user-invocable` defaults to true; `disable-model-invocation` to false.
-        user_invocable: frontmatter
-            .get("user-invocable")
-            .is_none_or(|v| parse_boolean_frontmatter(Some(v))),
+        user_invocable: parse_boolean_frontmatter(
+            frontmatter.get("user-invocable"),
+            "user-invocable",
+            true,
+        )?,
         disable_model_invocation: parse_boolean_frontmatter(
             frontmatter.get("disable-model-invocation"),
-        ),
+            "disable-model-invocation",
+            false,
+        )?,
         when_to_use,
         has_user_specified_description,
         paths,
@@ -528,39 +549,53 @@ pub fn parse_skill_frontmatter(
 
 pub fn read_frontmatter_only(path: &Path) -> std::io::Result<(String, usize)> {
     let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(file.take((MAX_FRONTMATTER_BYTES + 1) as u64));
     let mut frontmatter = String::new();
     let mut total_bytes = 0usize;
     let mut found_opening = false;
-    let mut line_buf = String::new();
+    let mut line_buf = Vec::new();
 
     loop {
         line_buf.clear();
-        let bytes_read = reader.read_line(&mut line_buf)?;
+        let bytes_read = reader.read_until(b'\n', &mut line_buf)?;
         if bytes_read == 0 {
             break;
         }
         total_bytes += bytes_read;
         if total_bytes > MAX_FRONTMATTER_BYTES {
+            if found_opening {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "skill frontmatter exceeds the read limit",
+                ));
+            }
             break;
         }
 
-        let trimmed = line_buf.trim();
+        let line = std::str::from_utf8(&line_buf)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let trimmed = line.trim();
         if !found_opening {
             if trimmed == "---" {
                 found_opening = true;
-                frontmatter.push_str(&line_buf);
+                frontmatter.push_str(line);
             } else if !trimmed.is_empty() {
                 break;
             }
         } else {
-            frontmatter.push_str(&line_buf);
+            frontmatter.push_str(line);
             if trimmed == "---" {
                 return Ok((frontmatter, total_bytes));
             }
         }
     }
 
+    if found_opening {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "skill frontmatter is missing its closing fence",
+        ));
+    }
     Ok((frontmatter, total_bytes))
 }
 
@@ -621,6 +656,24 @@ fn extract_lead_block(body: &str, include_headings: bool) -> Option<String> {
     None
 }
 
+/// Read only the prefix needed for a fallback description.
+fn read_description_preview(reader: impl Read) -> std::io::Result<String> {
+    let limit = MAX_FRONTMATTER_BYTES + MAX_BODY_PEEK_BYTES;
+    let mut bytes = Vec::new();
+    reader.take((limit + 1) as u64).read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > limit;
+    bytes.truncate(limit);
+    if let Err(error) = std::str::from_utf8(&bytes) {
+        if truncated && error.error_len().is_none() {
+            bytes.truncate(error.valid_up_to());
+        } else {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+        }
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 /// Parse a list of `(path, scope)` pairs into `SkillInfo` values.
 ///
 /// This is the single chokepoint for all skill parsing (startup, dynamic, and
@@ -664,6 +717,8 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
                             allowed_tools: None,
                             model: None,
                             effort: None,
+
+
                             user_invocable: true,
                             disable_model_invocation: false,
                             when_to_use: None,
@@ -674,29 +729,8 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
                     }
                 }
                 Err(SkillParseError::YamlError(msg)) => {
-                    tracing::warn!("warning: failed to parse skill frontmatter {path_str}: {msg}, using fallback name");
-                    let name = fallback_name.map(normalize_skill_name);
-                    match name {
-                        Some(name) if is_valid_skill_name(&name) => ParsedFrontmatter {
-                            name,
-                            description: String::new(),
-                            license: None,
-                            compatibility: None,
-                            short_description: None,
-                            author: None,
-                            metadata: None,
-                            argument_hint: None,
-                            allowed_tools: None,
-                            model: None,
-                            effort: None,
-                            user_invocable: true,
-                            disable_model_invocation: false,
-                            when_to_use: None,
-                            has_user_specified_description: false,
-                            paths: None,
-                        },
-                        _ => return None,
-                    }
+                    tracing::warn!("failed to parse skill frontmatter {path_str}: {msg}; skipping skill");
+                    return None;
                 }
                 Err(SkillParseError::InvalidName(name)) => {
                     tracing::warn!(
@@ -719,7 +753,7 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
             }
 
             if parsed.description.is_empty() {
-                if let Ok(full) = std::fs::read_to_string(&path) {
+                if let Ok(full) = std::fs::File::open(&path).and_then(read_description_preview) {
                     let body = extract_skill_body(&full);
                     let peek = if body.len() > MAX_BODY_PEEK_BYTES {
                         let end = crate::util::floor_char_boundary(&body, MAX_BODY_PEEK_BYTES);
@@ -758,6 +792,8 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
                 allowed_tools: parsed.allowed_tools,
                 model: parsed.model,
                 effort: parsed.effort,
+
+
                 user_invocable: parsed.user_invocable,
                 disable_model_invocation: parsed.disable_model_invocation,
                 when_to_use: parsed.when_to_use,
@@ -862,6 +898,55 @@ pub fn discover_skills_for_paths(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frontmatter_reader_accepts_exact_limit_and_rejects_invalid_utf8() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("SKILL.md");
+        let prefix = "---\nname: bounded\ndescription: ";
+        let content = format!(
+            "{prefix}{}\n---",
+            "x".repeat(MAX_FRONTMATTER_BYTES - prefix.len() - 4)
+        );
+        std::fs::write(&path, format!("{content}\nbody")).unwrap();
+        // A closing line that exceeds the budget must reject the header,
+        // rather than expose a truncated header to the plain-body fallback.
+        assert_eq!(
+            read_frontmatter_only(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        std::fs::write(&path, &content).unwrap();
+        let (read, bytes) = read_frontmatter_only(&path).unwrap();
+        assert_eq!(bytes, MAX_FRONTMATTER_BYTES);
+        assert!(parse_skill_frontmatter(&read, Some("bounded")).is_ok());
+        std::fs::write(&path, b"---\nname: \xff\n---").unwrap();
+        assert_eq!(
+            read_frontmatter_only(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn frontmatter_reader_bounds_long_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("SKILL.md");
+        for content in [
+            "x".repeat(2 * 1024 * 1024),
+            format!("---\nkey: {}", "界".repeat(MAX_FRONTMATTER_BYTES)),
+        ] {
+            std::fs::write(&path, &content).unwrap();
+            if content.starts_with("---") {
+                assert_eq!(
+                    read_frontmatter_only(&path).unwrap_err().kind(),
+                    std::io::ErrorKind::InvalidData
+                );
+            } else {
+                let (frontmatter, bytes) = read_frontmatter_only(&path).unwrap();
+                assert!(bytes <= MAX_FRONTMATTER_BYTES + 1, "read {bytes} bytes");
+                assert!(frontmatter.len() <= MAX_FRONTMATTER_BYTES);
+            }
+        }
+    }
+
     use super::*;
 
     fn parse_one(dir_name: &str, content: &str) -> SkillInfo {
@@ -912,14 +997,18 @@ mod tests {
         assert_eq!(skill.description, "Only A Title");
     }
 
+    fn assert_malformed_skill_rejected(name: &str, content: &str) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(&path, content).unwrap();
+        assert!(parse_skill_files(vec![(path, SkillScope::User)]).is_empty());
+    }
+
     #[test]
-    fn recovers_frontmatter_description_when_a_field_is_accidentally_indented() {
-        // Real-world bug (cursorbench): a field accidentally indented under
-        // `description:` makes the whole frontmatter invalid YAML (a scanner
-        // error). The parser must still recover the frontmatter `description`
-        // rather than silently dropping the entire frontmatter and rendering a
-        // junk body-derived description in the skill listing.
-        let skill = parse_one(
+    fn rejects_recovers_frontmatter_description_when_a_field_is_accidentally_indented() {
+        assert_malformed_skill_rejected(
             "cb",
             concat!(
                 "---\n",
@@ -933,19 +1022,11 @@ mod tests {
                 "The flow body.\n",
             ),
         );
-        assert_eq!(
-            skill.description,
-            "Go from an EAPI deployment name to CursorBench metrics."
-        );
-        assert!(skill.has_user_specified_description);
     }
 
     #[test]
-    fn recovery_skips_bare_block_scalar_marker() {
-        // On the recovery path, a `description:` line that is
-        // only a block-scalar marker (`|` / `>`) must not become the description —
-        // otherwise it suppresses the body fallback and the listing shows "|".
-        let skill = parse_one(
+    fn rejects_recovery_skips_bare_block_scalar_marker() {
+        assert_malformed_skill_rejected(
             "bs",
             concat!(
                 "---\n",
@@ -959,16 +1040,11 @@ mod tests {
                 "Body paragraph wins.\n",
             ),
         );
-        assert_eq!(skill.description, "Body paragraph wins.");
-        assert!(!skill.has_user_specified_description);
     }
 
     #[test]
-    fn recovery_ignores_non_scalar_keys_like_allowed_tools() {
-        // Recovery is limited to known scalar keys, so a list
-        // field like `allowed-tools` on the recovery path is never salvaged as a
-        // mangled string (e.g. ["[Bash", "Edit]"]).
-        let skill = parse_one(
+    fn rejects_recovery_ignores_non_scalar_keys_like_allowed_tools() {
+        assert_malformed_skill_rejected(
             "at",
             concat!(
                 "---\n",
@@ -979,15 +1055,11 @@ mod tests {
                 "---\n\nBody.\n",
             ),
         );
-        assert_eq!(skill.description, "Real desc.");
-        assert!(skill.allowed_tools.is_none()); // not mangled from the broken list
     }
 
     #[test]
-    fn recovery_strips_inline_comment_from_unquoted_value() {
-        // An unquoted value drops its inline `# comment`,
-        // matching a real YAML parse.
-        let skill = parse_one(
+    fn rejects_recovery_strips_inline_comment_from_unquoted_value() {
+        assert_malformed_skill_rejected(
             "ic",
             concat!(
                 "---\n",
@@ -997,8 +1069,6 @@ mod tests {
                 "---\n\nBody.\n",
             ),
         );
-        assert_eq!(skill.description, "Does X");
-        assert!(skill.has_user_specified_description);
     }
 
     #[test]
@@ -1052,25 +1122,29 @@ mod tests {
 
     #[test]
     fn edge_frontmatter_parses_field_by_field() {
-        // A value colon (YAML syntax error) and non-string scalars survive via
-        // the quoting retry plus per-field coercion.
+        // Invalid value-colon syntax is rejected; valid quoting still allows
+        // the existing field-by-field scalar conversions.
+        assert_malformed_skill_rejected(
+            "d",
+            "---\nname: d\ndescription: Deploy: push to prod\n---\n",
+        );
         let skill = parse_one(
             "d",
-            "---\nname: d\ndescription: Deploy: push to prod\nwhen-to-use: trig\nuser-invocable: yes\nallowed-tools: bash, grep\neffort: 5\n---\n",
+            "---\nname: d\ndescription: \"Deploy: push to prod\"\nwhen-to-use: trig\nuser-invocable: false\nallowed-tools: bash, grep\neffort: 5\n---\n",
         );
         assert_eq!(skill.description, "Deploy: push to prod");
+        assert_eq!(skill.effort.as_deref(), Some("5"));
         assert_eq!(skill.when_to_use.as_deref(), Some("trig"));
-        assert!(!skill.user_invocable); // only literal `true` is true; `yes` → false
+        assert!(!skill.user_invocable);
         assert_eq!(
             skill.allowed_tools,
             Some(vec!["bash".into(), "grep".into()])
         );
-        assert_eq!(skill.effort.as_deref(), Some("5"));
     }
 
     #[test]
-    fn bool_fields_only_literal_true_is_true() {
-        // Only a YAML `true` / `"true"` is true; everything else is false.
+    fn bool_fields_validate_values_and_preserve_defaults() {
+        // Explicit YAML booleans retain their values.
         let explicit = parse_one(
             "d",
             "---\nname: d\ndescription: x\nuser-invocable: false\ndisable-model-invocation: true\n---\n",
@@ -1078,13 +1152,16 @@ mod tests {
         assert!(!explicit.user_invocable);
         assert!(explicit.disable_model_invocation);
 
-        // Non-`true` tokens (`yes`, numbers) are not truthy.
-        let yes = parse_one(
+        assert_malformed_skill_rejected(
             "e",
             "---\nname: e\ndescription: x\nuser-invocable: yes\ndisable-model-invocation: 1\n---\n",
         );
-        assert!(!yes.user_invocable);
-        assert!(!yes.disable_model_invocation);
+        let quoted = parse_one(
+            "e",
+            "---\nname: e\nuser-invocable: \"true\"\ndisable-model-invocation: \"false\"\n---\n",
+        );
+        assert!(quoted.user_invocable);
+        assert!(!quoted.disable_model_invocation);
 
         // Absent → field default (user-invocable true, disable false).
         let absent = parse_one("g", "---\nname: g\ndescription: x\n---\n");
@@ -1225,6 +1302,7 @@ model: test-model
         );
         assert_eq!(parsed.argument_hint.as_deref(), Some("PR number"));
         assert_eq!(parsed.model.as_deref(), Some("test-model"));
+
         assert_eq!(
             parsed.allowed_tools.as_deref(),
             Some(["grep".to_string(), "read".to_string()].as_slice())
@@ -1395,5 +1473,109 @@ model: test-model
                 "zeta/SKILL.md"
             ]
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn skill_walk_skips_ancestor_cycles_but_keeps_independent_aliases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(root.join("SKILL.md"), "root").unwrap();
+        std::fs::write(child.join("SKILL.md"), "child").unwrap();
+        std::os::unix::fs::symlink(&root, child.join("loop")).unwrap();
+        assert_eq!(
+            find_skill_md_paths(&root),
+            [root.join("SKILL.md"), child.join("SKILL.md")]
+        );
+        let aliases = tmp.path().join("aliases");
+        std::fs::create_dir(&aliases).unwrap();
+        std::os::unix::fs::symlink(&child, aliases.join("a")).unwrap();
+        std::os::unix::fs::symlink(&child, aliases.join("b")).unwrap();
+        // Remove the cycle so this checks independent alias policy alone.
+        std::fs::remove_file(child.join("loop")).unwrap();
+        assert_eq!(
+            find_skill_md_paths(&aliases),
+            [aliases.join("a/SKILL.md"), aliases.join("b/SKILL.md")]
+        );
+    }
+    #[test]
+    fn description_preview_bounds_reads_and_handles_utf8() {
+        let limit = MAX_FRONTMATTER_BYTES + MAX_BODY_PEEK_BYTES;
+        let mut reader = std::io::Cursor::new(vec![b'x'; limit * 10]);
+        let preview = read_description_preview(&mut reader).unwrap();
+        assert_eq!(preview.len(), limit);
+        assert_eq!(reader.position(), (limit + 1) as u64);
+        let mut bytes = vec![b'x'; limit - 1];
+        bytes.extend_from_slice("中tail".as_bytes());
+        let preview = read_description_preview(bytes.as_slice()).unwrap();
+        assert_eq!(preview.len(), limit - 1);
+        assert!(read_description_preview(&[b'x', 0xff][..]).is_err());
+        assert!(read_description_preview(&[b'x', 0xe4][..]).is_err());
+    }
+    #[test]
+    fn oversized_frontmatter_does_not_load_as_unrestricted_skill() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("bounded");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(&path, format!("---\nname: bounded\ndescription: {}\npaths: [src/**]\ndisable-model-invocation: true\n---\nbody", "x".repeat(MAX_FRONTMATTER_BYTES))).unwrap();
+        assert!(parse_skill_files(vec![(path.clone(), SkillScope::User)]).is_empty());
+        std::fs::write(&path, "x".repeat(MAX_FRONTMATTER_BYTES * 3)).unwrap();
+        assert_eq!(parse_skill_files(vec![(path, SkillScope::User)]).len(), 1);
+    }
+    #[test]
+    fn malformed_metadata_is_not_replaced_with_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("restricted");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        for content in [
+            "---\nname: restricted\npaths: [src/**]\ndisable-model-invocation: true\n",
+            "---\nname: restricted\npaths: [broken\ndisable-model-invocation: true\n---\nbody",
+        ] {
+            std::fs::write(&path, content).unwrap();
+            assert!(
+                parse_skill_files(vec![(path.clone(), SkillScope::User)]).is_empty(),
+                "{content}"
+            );
+        }
+        std::fs::write(&path, "# Ordinary skill\n\nHelpful instructions.").unwrap();
+        let skills = parse_skill_files(vec![(path, SkillScope::User)]);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "restricted");
+        assert_eq!(skills[0].description, "Helpful instructions.");
+    }
+    #[test]
+    fn paths_reject_wrong_types_without_losing_conditions() {
+        for value in ["42", "false", "{src: true}", "[src, 42]", "[[src]]"] {
+            assert_malformed_skill_rejected(
+                "typed",
+                &format!("---\nname: typed\npaths: {value}\n---\nbody"),
+            );
+        }
+        for value in ["null", "[]", "\"\"", "\"**\""] {
+            let skill = parse_one(
+                "typed",
+                &format!("---\nname: typed\npaths: {value}\n---\nbody"),
+            );
+            assert!(skill.paths.is_none());
+        }
+        let skill = parse_one(
+            "typed",
+            "---\nname: typed\npaths: [src/**, docs]\n---\nbody",
+        );
+        assert_eq!(skill.paths, Some(vec!["src".into(), "docs".into()]));
+    }
+    #[test]
+    fn invocation_switches_reject_invalid_values() {
+        for field in ["user-invocable", "disable-model-invocation"] {
+            for value in ["yes", "1", "null", "[]", "{value: true}"] {
+                assert_malformed_skill_rejected(
+                    "switch",
+                    &format!("---\nname: switch\n{field}: {value}\n---\nbody"),
+                );
+            }
+        }
     }
 }

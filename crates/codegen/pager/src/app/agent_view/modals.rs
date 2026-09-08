@@ -185,7 +185,7 @@ impl AgentView {
                     && let Some(idx) = state.selected_data_index()
                     && let Some(skill) = skills.get(idx)
                 {
-                    (Some(skill.name.clone()), next_enabled)
+                    (Some(skill.dedup_key()), next_enabled)
                 } else {
                     (None, None)
                 }
@@ -1508,7 +1508,7 @@ impl AgentView {
                         state.pending_action = Some("toggling...".into());
                         state.pending_entry_index = Some(state.picker_state.selected);
                         return InputOutcome::Action(Action::ToggleSkill {
-                            skill_name: skill.name.clone(),
+                            skill_name: skill.dedup_key(),
                             enabled: !skill.enabled,
                         });
                     }
@@ -2127,6 +2127,35 @@ mod extensions_action_target_tests {
             "toggle on a plugin row expands its detail fields"
         );
         assert!(state.plugins_collapsed_groups.is_empty());
+    }
+
+    #[test]
+    fn skills_toggle_dispatches_plugin_catalog_identity() {
+        let mut agent = super::test_fixtures::make_agent();
+        let mut modal = ExtensionsModalState::new(ExtensionsTab::Skills);
+        modal.skills_data =
+            TabDataState::Loaded(vec![tools::implementations::skills::types::SkillInfo {
+                name: "shared".into(),
+                plugin_name: Some("demo".into()),
+                ..Default::default()
+            }]);
+        modal.entry_data_indices = vec![Some(0)];
+        modal.entry_group_keys = vec![None];
+        modal.picker_state.selected = 0;
+        let (target, _) =
+            AgentView::extensions_action_target(&modal, &ButtonAction::ToggleSelectedSkill);
+        assert_eq!(target.as_deref(), Some("demo:shared"));
+        agent.extensions_modal = Some(modal);
+        match agent.execute_modal_button_action(ButtonAction::ToggleSelectedSkill) {
+            crate::app::root::InputOutcome::Action(crate::app::actions::Action::ToggleSkill {
+                skill_name,
+                enabled,
+            }) => {
+                assert_eq!(skill_name, "demo:shared");
+                assert!(!enabled);
+            }
+            other => panic!("expected skill toggle, got {other:?}"),
+        }
     }
 
     #[test]

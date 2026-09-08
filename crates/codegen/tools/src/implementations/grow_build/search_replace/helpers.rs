@@ -71,26 +71,86 @@ pub(crate) fn compute_line_range(text: &str, start_pos: usize, inserted_text: &s
     }
 }
 
-/// Replace text at specific positions and return new text with new positions.
-pub(crate) fn replace_using_positions(
+/// Normalize CRLF only for matching while retaining a byte-offset map into
+/// the original UTF-8 string. This lets callers preserve mixed line endings
+/// when they write the replacement back.
+pub(crate) fn normalize_line_endings_with_map(text: &str) -> (String, Vec<usize>) {
+    let bytes = text.as_bytes();
+    let mut normalized = String::with_capacity(text.len());
+    let mut offsets = vec![0];
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            normalized.push('\n');
+            index += 2;
+            offsets.push(index);
+            continue;
+        }
+        let character = text[index..]
+            .chars()
+            .next()
+            .expect("UTF-8 byte offset must begin a character");
+        let width = character.len_utf8();
+        normalized.push(character);
+        for step in 1..=width {
+            offsets.push(index + step);
+        }
+        index += width;
+    }
+    (normalized, offsets)
+}
+
+/// Replace disjoint byte ranges in the original text and return replacement
+/// positions in the resulting text for diff metadata.
+pub(crate) fn replace_at_ranges(
     text: &str,
-    match_positions: &[usize],
-    old_string: &str,
+    ranges: &[(usize, usize)],
     new_string: &str,
 ) -> (String, Vec<usize>) {
-    let mut new_text = String::new();
-    let mut new_positions: Vec<usize> = Vec::with_capacity(match_positions.len());
-    let mut last_end: usize = 0;
-
-    for &pos in match_positions {
-        new_text.push_str(&text[last_end..pos]);
-        new_positions.push(new_text.len());
-        new_text.push_str(new_string);
-        last_end = pos + old_string.len();
+    let mut result = String::with_capacity(text.len());
+    let mut positions = Vec::with_capacity(ranges.len());
+    let mut last_end = 0;
+    for &(start, end) in ranges {
+        result.push_str(&text[last_end..start]);
+        positions.push(result.len());
+        result.push_str(new_string);
+        last_end = end;
     }
+    result.push_str(&text[last_end..]);
+    (result, positions)
+}
 
-    new_text.push_str(&text[last_end..]);
-    (new_text, new_positions)
+/// Pick the line-ending convention nearest to a replacement range.
+pub(crate) fn line_ending_for_range(text: &str, start: usize, end: usize) -> &'static str {
+    let bytes = text.as_bytes();
+    let ending_at = |index: usize| {
+        (bytes.get(index) == Some(&b'\n')).then(|| {
+            if index > 0 && bytes[index - 1] == b'\r' {
+                "\r\n"
+            } else {
+                "\n"
+            }
+        })
+    };
+    (start..end)
+        .find_map(ending_at)
+        .or_else(|| (end..bytes.len()).find_map(ending_at))
+        .or_else(|| (0..start).rev().find_map(ending_at))
+        .unwrap_or("\n")
+}
+
+/// Convert a replacement's line endings to the convention of the matched
+/// region, without changing a replacement that has no line breaks.
+pub(crate) fn normalize_replacement_line_endings(replacement: &str, line_ending: &str) -> String {
+    if !replacement.contains('\n') {
+        return replacement.to_owned();
+    }
+    let normalized = replacement.replace("\r\n", "\n");
+    if line_ending == "\r\n" {
+        normalized.replace('\n', "\r\n")
+    } else {
+        normalized
+    }
 }
 
 /// Build edit details for each replacement.
@@ -237,31 +297,6 @@ pub(crate) fn find_normalized_match_positions(text: &str, pattern: &str) -> Norm
     NormalizedMatchResult::Matches(validated)
 }
 
-/// Replace text at normalized-match positions and return the new text with
-/// new byte offsets of each replacement.
-///
-/// Each `NormalizedMatch` specifies a region in the original text (which may
-/// contain Unicode confusables) to be replaced with `new_string`.
-pub(crate) fn replace_normalized_matches(
-    text: &str,
-    matches: &[NormalizedMatch],
-    new_string: &str,
-) -> (String, Vec<usize>) {
-    let mut result = String::new();
-    let mut new_positions: Vec<usize> = Vec::with_capacity(matches.len());
-    let mut last_end: usize = 0;
-
-    for m in matches {
-        result.push_str(&text[last_end..m.original_start]);
-        new_positions.push(result.len());
-        result.push_str(new_string);
-        last_end = m.original_start + m.original_len;
-    }
-
-    result.push_str(&text[last_end..]);
-    (result, new_positions)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,10 +398,10 @@ mod tests {
     }
 
     #[test]
-    fn test_replace_using_positions() {
+    fn replacement_ranges_report_post_edit_offsets() {
         let text = "hello world, hello again";
-        let positions = vec![0, 13];
-        let (new_text, new_positions) = replace_using_positions(text, &positions, "hello", "hi");
+        let ranges = [(0, 5), (13, 18)];
+        let (new_text, new_positions) = replace_at_ranges(text, &ranges, "hi");
         assert_eq!(new_text, "hi world, hi again");
         assert_eq!(new_positions, vec![0, 10]);
     }
@@ -491,42 +526,5 @@ mod tests {
         let text = "a\u{2026}b";
         let matches = unwrap_matches(find_normalized_match_positions(text, "..."));
         assert_eq!(matches.len(), 1);
-    }
-
-    // ── Replace with new return type ────────────────────────────────────
-
-    #[test]
-    fn replace_normalized_matches_basic() {
-        let text = "say \u{201C}hello\u{201D} world";
-        let matches = unwrap_matches(find_normalized_match_positions(text, "\"hello\""));
-        let (new_text, new_positions) = replace_normalized_matches(text, &matches, "\"goodbye\"");
-        assert_eq!(new_text, "say \"goodbye\" world");
-        assert_eq!(new_positions.len(), 1);
-    }
-
-    #[test]
-    fn replace_normalized_matches_preserves_surrounding() {
-        let text = "before \u{201C}target\u{201D} after";
-        let matches = unwrap_matches(find_normalized_match_positions(text, "\"target\""));
-        let (new_text, _) = replace_normalized_matches(text, &matches, "\"replaced\"");
-        assert!(new_text.starts_with("before "));
-        assert!(new_text.ends_with(" after"));
-        assert!(new_text.contains("\"replaced\""));
-    }
-
-    #[test]
-    fn replace_normalized_matches_at_end_of_string() {
-        let text = "prefix\u{2026}";
-        let matches = unwrap_matches(find_normalized_match_positions(text, "prefix..."));
-        let (new_text, _) = replace_normalized_matches(text, &matches, "done");
-        assert_eq!(new_text, "done");
-    }
-
-    #[test]
-    fn replace_normalized_result_is_valid_utf8() {
-        let text = "a\u{201C}b\u{2014}c\u{00A0}d";
-        let matches = unwrap_matches(find_normalized_match_positions(text, "\"b--c d"));
-        let (new_text, _) = replace_normalized_matches(text, &matches, "replaced");
-        assert_eq!(new_text, "areplaced");
     }
 }

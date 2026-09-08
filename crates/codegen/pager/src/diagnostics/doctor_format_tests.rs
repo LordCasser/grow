@@ -37,6 +37,7 @@ static TMUX_ROUTE: ClipboardRoute = ClipboardRoute {
 
 fn unavailable_tmux() -> TmuxProbeFacts {
     TmuxProbeFacts {
+        config_files: TmuxProbeResult::Unavailable,
         version: TmuxProbeResult::Unavailable,
         extended_keys: TmuxProbeResult::Unavailable,
         set_clipboard: TmuxProbeResult::Unavailable,
@@ -165,6 +166,7 @@ fn tmux_config_and_reload_notes_output_is_stable() {
     let output = build_doctor(snapshot(
         &terminal,
         TmuxProbeFacts {
+            config_files: TmuxProbeResult::Unavailable,
             version: TmuxProbeResult::Unavailable,
             extended_keys: TmuxProbeResult::Available("off".to_owned()),
             set_clipboard: TmuxProbeResult::Available("off".to_owned()),
@@ -202,17 +204,17 @@ fn tmux_config_and_reload_notes_output_is_stable() {
             "  ! terminal.tmux-clipboard  `set-clipboard` is off in tmux, so OSC 52 clipboard copies are blocked\n",
             "      Automatic setup: `grow doctor fix tmux-clipboard`\n",
             "      Add `set -g set-clipboard on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or detach and reattach.\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf` to apply this file to the running server. This path is a default candidate, not a detected server config. Confirm the effective config file before editing or reloading it.\n",
             "\n",
             "  ! terminal.dcs-passthrough  `allow-passthrough` is off in tmux, which can block clipboard copies in nested sessions\n",
             "      Automatic setup: `grow doctor fix dcs-passthrough`\n",
             "      Add `set -wg allow-passthrough on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or detach and reattach.\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf` to apply this file to the running server. This path is a default candidate, not a detected server config. Confirm the effective config file before editing or reloading it.\n",
             "\n",
             "  ! terminal.tmux-extended-keys  `extended-keys` is off in tmux, so some shortcuts may not work\n",
             "      Automatic setup: `grow doctor fix tmux-extended-keys`\n",
             "      Add `set -g extended-keys on` to ~/.byobu/.tmux.conf\n",
-            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf`, or detach and reattach.\n",
+            "      Note: Reload tmux with `tmux source-file ~/.byobu/.tmux.conf` to apply this file to the running server. This path is a default candidate, not a detected server config. Confirm the effective config file before editing or reloading it.\n",
         )
     );
 }
@@ -387,6 +389,7 @@ fn unavailable_and_error_probes_do_not_create_false_issues() {
     let output = build_doctor(snapshot(
         &terminal,
         TmuxProbeFacts {
+            config_files: TmuxProbeResult::Unavailable,
             version: TmuxProbeResult::Unavailable,
             extended_keys: TmuxProbeResult::Unavailable,
             set_clipboard: TmuxProbeResult::Error("tmux server unreachable".to_owned()),
@@ -482,6 +485,7 @@ fn runtime_merge_does_not_duplicate_view_findings() {
         snapshot(
             &terminal,
             TmuxProbeFacts {
+                config_files: TmuxProbeResult::Unavailable,
                 version: TmuxProbeResult::Available("tmux 3.4".to_owned()),
                 extended_keys: TmuxProbeResult::Available("off".to_owned()),
                 set_clipboard: TmuxProbeResult::Available("off".to_owned()),
@@ -616,6 +620,7 @@ fn keyboard_fact_formats_from_explicit_target_evidence() {
             byobu: None,
             ssh: false,
             tmux: crate::diagnostics::TmuxFacts {
+                config_files: None,
                 extended_keys: crate::diagnostics::TmuxOptionFact::Unavailable,
                 set_clipboard: crate::diagnostics::TmuxOptionFact::Unavailable,
                 allow_passthrough_support: crate::diagnostics::TmuxSupportFact::Unavailable,

@@ -2,6 +2,59 @@
 use super::*;
 
 #[test]
+fn live_image_loader_memory_and_file_sources_preserve_the_same_payload() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("saved %20 #? 图片.png");
+    let data = vec![1, 2, 3, 4]; // Transport is opaque; server validates image format.
+    std::fs::write(&path, &data).unwrap();
+    let mut memory = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+        data, mime_type: "image/png".into(),
+    });
+    memory.session_image_path = Some(path.clone());
+    let mut disk = memory.clone();
+    disk.encoded_bytes = None;
+    let seed = vec![acp::ContentBlock::Text(acp::TextContent::new("keep prompt"))];
+    let from_memory = append_prompt_images(seed.clone(), &[memory.clone()]).unwrap();
+    let from_disk = append_prompt_images(seed.clone(), &[disk.clone()]).unwrap();
+    assert_eq!(serde_json::to_value(&from_memory).unwrap(), serde_json::to_value(&from_disk).unwrap());
+    assert_eq!(from_memory.len(), 2);
+    let acp::ContentBlock::Image(image) = &from_memory[1] else { panic!("expected image"); };
+    assert_eq!(shell::session::placeholder_images::canonical_from_file_uri(image.uri.as_deref().unwrap()), Some(dunce::canonicalize(&path).unwrap()));
+    std::fs::remove_file(path).unwrap();
+    assert!(append_prompt_images(seed.clone(), &[memory]).is_ok());
+    assert!(append_prompt_images(seed, &[disk]).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn live_image_loader_rejects_symlink_directory_and_fifo_without_blocking() {
+    use std::os::unix::{ffi::OsStrExt, fs::symlink};
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source.png");
+    std::fs::write(&source, [1, 2, 3]).unwrap();
+    let link = root.path().join("link.png");
+    symlink(&source, &link).unwrap();
+    let fifo = root.path().join("pipe.png");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    for path in [link, root.path().to_path_buf(), fifo] {
+        let mut image = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+            data: vec![1], mime_type: "image/png".into(),
+        });
+        image.encoded_bytes = None;
+        image.session_image_path = Some(path.clone());
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let _ = sender.send(append_prompt_images(vec![], &[image]));
+        });
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(2))
+            .expect("image loader blocked on a special file");
+        worker.join().unwrap();
+        assert!(result.is_err(), "accepted {}", path.display());
+    }
+}
+
+#[test]
 fn failed_image_loader_rejects_missing_oversized_and_aggregate_before_encoding() {
     let mut image = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData { data: vec![1,2,3], mime_type: "image/png".into() });
     assert!(append_prompt_images(vec![], &vec![image.clone(); 17]).is_err());
@@ -406,7 +459,14 @@ fn session_load_does_not_adopt_an_id_without_structured_foreground() {
     let legacy = serde_json::json!({ "grow/runningPromptId": "opaque-turn-id" });
     assert!(parse_session_load_foreground(legacy.as_object()).is_none());
 }
-/// Unknown keys return a descriptive error.
+/// Invalid default-permission values are rejected before configuration I/O.
+#[tokio::test]
+async fn persist_default_permission_rejects_invalid_values_without_writing() {
+    use crate::settings::SettingValue;
+    assert!(persist_setting("permission_mode", SettingValue::String("ask".into())).await.is_err());
+    assert!(persist_setting("permission_mode", SettingValue::Enum("invalid")).await.is_err());
+}
+
 #[tokio::test]
 async fn persist_setting_unknown_key_returns_err() {
     use crate::settings::SettingValue;
@@ -1457,4 +1517,96 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
+}
+
+
+#[tokio::test]
+async fn recap_admission_effect_and_dispatch_handle_manual_and_auto_outcomes() {
+    use crate::app::actions::Action;
+    for auto in [false, true] {
+        for (payload, accepted) in [
+            (serde_json::json!({"ok":true}), true),
+            (serde_json::json!({"ok":true,"disabled":false}), true),
+            (serde_json::json!({"ok":true,"disabled":true}), false),
+            (serde_json::json!({"ok":false}), false),
+            (serde_json::json!({"ok":true,"disabled":"true"}), false),
+            (serde_json::json!({}), false),
+        ] {
+            let mut app = crate::app::root::tests::test_app_with_agent();
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            let session_id = agent.session.session_id.clone().unwrap();
+            agent.session.set_live_feedback("recap",
+                crate::scrollback::blocks::NoticeTone::Progress, "Manual recap pending");
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut tasks = JoinSet::new();
+            execute(Effect::SendRecap { session_id: session_id.clone(), auto },
+                &mut tasks, &tx, Path::new("."), &SessionFlags::default());
+            let request = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await.unwrap().unwrap();
+            let acp_transport::AcpAgentMessage::ExtMethod(args) = request else {
+                panic!("expected recap request");
+            };
+            assert_eq!(args.request.method.as_ref(), "grow/recap");
+            let request: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
+            assert_eq!(request["sessionId"], session_id.0.as_ref());
+            assert_eq!(request["auto"], auto);
+            args.response_tx.send(shell::extensions::to_ext_response(Ok(payload))).unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), tasks.join_next())
+                .await.unwrap().unwrap().unwrap();
+            assert!(matches!(&result, TaskResult::RecapRequested { error, .. } if error.is_none() == accepted));
+            super::dispatch::dispatch(Action::TaskComplete(result), &mut app);
+            let agent = &app.agents[&AgentId(0)];
+            assert_eq!(agent.session.live_status(100).is_some(), auto || accepted);
+            assert_eq!(agent.toast.is_some(), !auto && !accepted);
+        }
+    }
+}
+
+#[test]
+fn recap_admission_rejects_failed_or_malformed_envelope() {
+    for raw in ["{}", "null", "[]", r#"{"error":"failed"}"#,
+        r#"{"result":{"ok":true},"error":"partial failure"}"#] {
+        let response = acp::ExtResponse::new(
+            serde_json::value::RawValue::from_string(raw.into()).unwrap().into());
+        assert!(recap_admission_error(&response).is_some(), "{raw}");
+    }
+}
+
+
+#[tokio::test]
+async fn announcements_persistence_effect_reports_real_io_result() {
+    const CHILD: &str = "GROW_ANNOUNCEMENT_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "app::root::effects::tests::announcements_persistence_effect_reports_real_io_result", "--nocapture"])
+            .env(CHILD, "1").env("GROW_HOME", root.path()).output().unwrap();
+        assert!(result.status.success(), "{}\n{}",
+            String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        return;
+    }
+    let home = std::path::PathBuf::from(std::env::var_os("GROW_HOME").unwrap());
+    assert_eq!(tools::util::grow_home::grow_home(), home);
+    let path = home.join("announcements.json");
+    assert!(!path.exists(), "child must start with empty isolated state");
+    for fail in [false, true] {
+        if fail {
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join("keep"), "keep").unwrap();
+        }
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tasks = JoinSet::new();
+        let ids = std::collections::BTreeSet::from(["notice".to_owned()]);
+        execute(Effect::PersistAnnouncementsHidden { hidden_ids: ids.clone() },
+            &mut tasks, &tx, Path::new("."), &SessionFlags::default());
+        let result = tasks.join_next().await.unwrap().unwrap();
+        assert!(matches!(result, TaskResult::AnnouncementsHiddenPersisted { result } if result.is_err() == fail));
+        if fail {
+            assert_eq!(std::fs::read_to_string(path.join("keep")).unwrap(), "keep");
+        } else {
+            assert_eq!(announcements::parse_hidden_announcement_ids(
+                &std::fs::read_to_string(&path).unwrap()), ids);
+        }
+    }
 }

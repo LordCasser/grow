@@ -16,7 +16,11 @@ pub async fn save_config(config: &Config) -> Result<()> {
 /// [`save_config`] body; caller must hold [`SAVE_LOCK`].
 async fn save_config_locked(config: &Config) -> Result<()> {
     let path = user_config_path();
-    let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
+    save_config_at(config, &path).await
+}
+
+async fn read_config_for_save(path: &std::path::Path) -> Result<TomlValue> {
+    Ok(match tokio::fs::read_to_string(path).await {
         Ok(s) => match toml::from_str::<TomlValue>(&s) {
             Ok(v) => v,
             Err(parse_err) => {
@@ -28,8 +32,21 @@ async fn save_config_locked(config: &Config) -> Result<()> {
                 ));
             }
         },
-        Err(_) => TomlValue::Table(TomlMap::new()),
-    };
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TomlValue::Table(TomlMap::new()),
+        Err(e) => return Err(e.into()),
+    })
+}
+
+async fn save_config_at(config: &Config, path: &std::path::Path) -> Result<()> {
+    let root = read_config_for_save(path).await?;
+    save_config_root(config, path, root).await
+}
+
+async fn save_config_root(
+    config: &Config,
+    path: &std::path::Path,
+    mut root: TomlValue,
+) -> Result<()> {
     if !matches!(root, TomlValue::Table(_)) {
         root = TomlValue::Table(TomlMap::new());
     }
@@ -41,42 +58,31 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     merge_section(table, "session", &config.session);
     merge_ask_user_question_section(table, &config.ask_user_question);
     if config.skills == SkillsConfig::default() {
-        table.remove("skills");
+        let known_fields = TomlValue::try_from(&config.skills)?;
+        let empty = match table.get_mut("skills") {
+            Some(TomlValue::Table(existing)) => {
+                existing.retain(|key, _| known_fields.get(key).is_none());
+                existing.is_empty()
+            }
+            _ => true,
+        };
+        if empty {
+            table.remove("skills");
+        }
     } else {
         merge_section(table, "skills", &config.skills);
     }
     let toml_str = toml::to_string_pretty(&root)?;
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    #[cfg(unix)]
-    let prior_mode: Option<u32> = match tokio::fs::metadata(&path).await {
-        Ok(m) => {
-            use std::os::unix::fs::PermissionsExt;
-            Some(m.permissions().mode())
-        }
-        Err(_) => None,
-    };
-    #[cfg(not(unix))]
-    let prior_mode: Option<u32> = None;
-    let suffix = {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("toml.tmp.{}.{}", std::process::id(), nanos)
-    };
-    let tmp = path.with_extension(suffix);
-    tokio::fs::write(&tmp, toml_str).await?;
-    #[cfg(unix)]
-    if let Some(mode) = prior_mode {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode)).await;
-    }
-    let _ = prior_mode;
-    tokio::fs::rename(&tmp, &path).await?;
+    use tokio::io::AsyncWriteExt;
+    let temp = config_temp_file(path)?;
+    let mut file = tokio::fs::File::from_std(temp.as_file().try_clone()?);
+    file.write_all(toml_str.as_bytes()).await?;
+    file.flush().await?;
+    drop(file);
+    temp.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
+
 /// Never preserve retired `[ui]` aliases through the generic unknown-field
 /// merge. The current schema has one key for each setting.
 fn remove_retired_ui_keys(table: &mut TomlMap<String, TomlValue>) {
@@ -102,43 +108,36 @@ pub(crate) fn read_to_string_or_empty(path: &std::path::Path) -> std::io::Result
         Err(e) => Err(e),
     }
 }
-/// Atomic write via temp file + `rename` (mirrors [`save_config`]) so a crash
-/// mid-write can't truncate `config.toml`. Preserves the dest mode on unix.
+/// Create an exclusive sibling file with permissions set before content writes.
+fn config_temp_file(path: &std::path::Path) -> std::io::Result<tempfile::NamedTempFile> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    let prior_permissions = match std::fs::metadata(path) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let temp = tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
+    if let Some(permissions) = prior_permissions {
+        temp.as_file().set_permissions(permissions)?;
+    }
+    Ok(temp)
+}
+
+/// Atomically replace config, retaining Unix permissions and cleaning up on error.
 pub(crate) fn atomic_write_string(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    #[cfg(unix)]
-    let prior_mode: Option<u32> = match std::fs::metadata(path) {
-        Ok(m) => {
-            use std::os::unix::fs::PermissionsExt;
-            Some(m.permissions().mode())
-        }
-        Err(_) => None,
-    };
-    #[cfg(not(unix))]
-    let prior_mode: Option<u32> = None;
-    let suffix = {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("toml.tmp.{}.{}", std::process::id(), nanos)
-    };
-    let tmp = path.with_extension(suffix);
-    std::fs::write(&tmp, content)?;
-    #[cfg(unix)]
-    if let Some(mode) = prior_mode {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
-    }
-    let _ = prior_mode;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
+    use std::io::Write;
+    let mut temp = config_temp_file(path)?;
+    temp.write_all(content.as_bytes())?;
+    temp.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
+
 /// Merge `[toolset.ask_user_question]` into the root table. `[toolset]` is
 /// deliberately NOT merged wholesale — it carries runtime-only structs
 /// whose serialized defaults must never land in
@@ -208,11 +207,63 @@ where
     F: FnOnce(&mut Config),
 {
     let _guard = SAVE_LOCK.lock().await;
-    let root: TomlValue =
-        crate::config::load_from_disk().unwrap_or_else(|_| TomlValue::Table(TomlMap::new()));
-    let mut cfg = load_config_from_toml(&root);
+    update_config_at(&user_config_path(), f).await
+}
+
+async fn update_config_at<F>(path: &std::path::Path, f: F) -> Result<()>
+where
+    F: FnOnce(&mut Config),
+{
+    let root = read_config_for_save(path).await?;
+    let mut cfg = super::load::load_config_for_update(&root)?;
+    let before = cfg.clone();
     f(&mut cfg);
-    save_config_locked(&cfg).await
+    let mut root = read_config_for_save(path).await?;
+    remove_cleared_fields(root.get_mut("cli"), &before.cli, &cfg.cli)?;
+    remove_cleared_fields(root.get_mut("models"), &before.models, &cfg.models)?;
+    remove_cleared_fields(root.get_mut("ui"), &before.ui, &cfg.ui)?;
+    remove_cleared_fields(root.get_mut("skills"), &before.skills, &cfg.skills)?;
+    remove_cleared_fields(root.get_mut("session"), &before.session, &cfg.session)?;
+    remove_cleared_fields(
+        root.get_mut("toolset")
+            .and_then(|value| value.get_mut("ask_user_question")),
+        &before.ask_user_question,
+        &cfg.ask_user_question,
+    )?;
+    save_config_root(&cfg, path, root).await
+}
+
+fn remove_cleared_fields<T: serde::Serialize>(
+    existing: Option<&mut TomlValue>,
+    before: &T,
+    after: &T,
+) -> Result<()> {
+    fn prune(existing: &mut TomlValue, before: &TomlValue, after: Option<&TomlValue>) {
+        let (Some(existing), Some(before)) = (existing.as_table_mut(), before.as_table()) else {
+            return;
+        };
+        for (key, previous) in before {
+            let next = after.and_then(|value| value.get(key));
+            if previous.is_table() {
+                if let Some(value) = existing.get_mut(key) {
+                    prune(value, previous, next);
+                    if next.is_none() && value.as_table().is_some_and(|table| table.is_empty()) {
+                        existing.remove(key);
+                    }
+                }
+            } else if next.is_none() {
+                existing.remove(key);
+            }
+        }
+    }
+    if let Some(existing) = existing {
+        prune(
+            existing,
+            &TomlValue::try_from(before)?,
+            Some(&TomlValue::try_from(after)?),
+        );
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -220,6 +271,221 @@ mod tests {
     use super::*;
     use toml::Value as TomlValue;
     use toml::map::Map as TomlMap;
+
+    #[tokio::test]
+    async fn update_rejects_invalid_section_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (label, original) in [
+            ("skills", "[skills]\npaths = 123\ndisabled = ['keep']\n"),
+            ("cli", "cli = 123"),
+            ("models", "models = 123"),
+            ("ui", "ui = 123"),
+            ("session", "session = 123"),
+            ("toolset", "toolset = 123"),
+            (
+                "toolset.ask_user_question",
+                "[toolset]\nask_user_question = 123",
+            ),
+        ] {
+            std::fs::write(&path, original).unwrap();
+            let mut called = false;
+            let result = update_config_at(&path, |cfg| {
+                called = true;
+                cfg.ui.compact_mode = true;
+            })
+            .await;
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(label), "{error}");
+            assert!(!called);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[tokio::test]
+    async fn update_removes_explicitly_cleared_optional_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[ui]\nscreen_mode = 'minimal'\ncancel_subagents_on_turn_cancel = 'always_stop'\nfuture = 'keep'\n[ui.contextual_hints]\nundo = true\nfuture = 'nested'\n[models]\ndefault = 'old'\n").unwrap();
+        update_config_at(&path, |cfg| {
+            cfg.ui.screen_mode = None;
+            cfg.ui.cancel_subagents_on_turn_cancel = None;
+            cfg.ui.contextual_hints.undo = None;
+            cfg.models.default = None;
+        })
+        .await
+        .unwrap();
+        let saved: TomlValue = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved["ui"].get("screen_mode").is_none());
+        assert!(saved["ui"].get("cancel_subagents_on_turn_cancel").is_none());
+        assert!(saved["models"].get("default").is_none());
+        assert!(saved["ui"]["contextual_hints"].get("undo").is_none());
+        assert_eq!(saved["ui"]["future"].as_str(), Some("keep"));
+        assert_eq!(
+            saved["ui"]["contextual_hints"]["future"].as_str(),
+            Some("nested")
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn config_writers_preserve_modes_and_clean_failed_replacements() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for mode in [0o600, 0o640] {
+            std::fs::write(&path, "value = 'old'").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let temp = config_temp_file(&path).unwrap();
+            assert_eq!(
+                temp.as_file().metadata().unwrap().permissions().mode() & 0o777,
+                mode
+            );
+            drop(temp);
+            atomic_write_string(&path, "value = 'sync'").unwrap();
+            save_config_at(&Config::default(), &path).await.unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(atomic_write_string(&path, "value = 'rejected'").is_err());
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn config_writers_create_private_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        for asynchronous in [false, true] {
+            let path = dir.path().join(if asynchronous {
+                "async.toml"
+            } else {
+                "sync.toml"
+            });
+            if asynchronous {
+                save_config_at(&Config::default(), &path).await.unwrap();
+            } else {
+                atomic_write_string(&path, "value = 'private'").unwrap();
+            }
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "new config must not permit group/other access"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_skill_settings_preserve_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (original, expect_unknown) in [
+            ("[skills.future]\nvalue = 'keep'\n", true),
+            (
+                "[skills]\ndisabled = ['last']\n[skills.future]\nvalue = 'keep'\n",
+                true,
+            ),
+            ("[skills]\ndisabled = ['last']\n", false),
+        ] {
+            std::fs::write(&path, original).unwrap();
+            update_config_at(&path, |cfg| {
+                cfg.ui.compact_mode = true;
+                cfg.skills.disabled.clear();
+            })
+            .await
+            .unwrap();
+            let saved: TomlValue =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            if expect_unknown {
+                let skills = saved
+                    .get("skills")
+                    .expect("unknown skill fields must survive");
+                assert_eq!(skills["future"]["value"].as_str(), Some("keep"));
+                assert!(skills.get("disabled").is_none());
+                assert_eq!(skills.as_table().unwrap().len(), 1);
+            } else {
+                assert!(saved.get("skills").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn update_keeps_unknown_fields_in_valid_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[skills]\npaths = ['kept']\nfuture_field = 'preserved'\n",
+        )
+        .unwrap();
+        update_config_at(&path, |cfg| cfg.skills.disabled.push("test".into()))
+            .await
+            .unwrap();
+        let saved: TomlValue = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved["skills"]["future_field"].as_str(), Some("preserved"));
+        assert_eq!(saved["skills"]["disabled"][0].as_str(), Some("test"));
+    }
+
+    #[tokio::test]
+    async fn update_read_error_does_not_call_mutator() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for original in [b"\xff".as_slice(), b"[invalid".as_slice()] {
+            std::fs::write(&path, original).unwrap();
+            let result =
+                update_config_at(&path, |_| panic!("must not mutate after read failure")).await;
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+    }
+
+    #[tokio::test]
+    async fn update_preserves_raw_environment_references() {
+        assert!(
+            std::env::var_os("HOME").is_some(),
+            "test requires existing HOME"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[skills]\npaths = ['${HOME}/skills']\n").unwrap();
+        update_config_at(&path, |cfg| cfg.skills.disabled.push("disabled".into()))
+            .await
+            .unwrap();
+        let saved: TomlValue = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["skills"]["paths"][0].as_str(), Some("${HOME}/skills"));
+        assert_eq!(saved["skills"]["disabled"][0].as_str(), Some("disabled"));
+    }
+
+    #[tokio::test]
+    async fn save_preserves_unreadable_config_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = b"[ui]\n# invalid UTF-8: \xff\n";
+        std::fs::write(&path, original).unwrap();
+        let result = save_config_at(&Config::default(), &path).await;
+        assert!(result.is_err(), "must reject unreadable existing config");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn save_creates_missing_config_and_preserves_invalid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/config.toml");
+        save_config_at(&Config::default(), &path).await.unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(toml::from_str::<TomlValue>(&saved).is_ok());
+        let invalid = "[ui\ninvalid";
+        std::fs::write(&path, invalid).unwrap();
+        assert!(save_config_at(&Config::default(), &path).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+    }
     /// The `[toolset.ask_user_question]` settings write merges only that
     /// sub-table: the toggled field lands, hand-written sibling keys survive,
     /// and no other `[toolset]` defaults are splatted into

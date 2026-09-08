@@ -8,7 +8,6 @@ use crate::register_resource;
 
 // Safety-boundary constants. Not configurable.
 pub const MAX_URL_LENGTH: usize = 2_000;
-pub const MAX_REDIRECTS: usize = 10;
 pub const USER_AGENT_STRING: &str =
     "Mozilla/5.0 (compatible; grow-agent/1.0; +https://example.com)";
 
@@ -21,11 +20,11 @@ pub const USER_AGENT_STRING: &str =
 pub struct WebFetchParams {
     /// Cache time-to-live in seconds. Default: 900 (15 minutes).
     pub cache_ttl_secs: Option<u64>,
-    /// Maximum number of cached pages. Default: 128.
+    /// Maximum number of cached pages. Zero disables caching. Default: 128.
     pub max_cache_entries: Option<usize>,
     /// HTTP request timeout in seconds. Default: 60.
     pub timeout_secs: Option<u64>,
-    /// Maximum response body size in bytes. Default: 10 MB.
+    /// Maximum decoded response body size in bytes, enforced while reading. Default: 10 MB.
     pub max_content_length: Option<usize>,
     /// Maximum inline markdown output length in bytes. Default: 100,000.
     pub max_markdown_length: Option<usize>,

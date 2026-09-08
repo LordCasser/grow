@@ -1504,10 +1504,6 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             }
             Command::Trace(trace_args) => {
                 init_tracing_simple("cli");
-                let config = shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
                 return pager::trace_cmd::run(trace_args).await;
             }
             Command::Trajectory(trajectory_args) => {
@@ -1863,6 +1859,59 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trace_reaches_storage_with_invalid_model_config() {
+        const CHILD: &str = "GROW_TEST_TRACE_CONFIG_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            use clap::Parser;
+            assert!(shell::config::load_effective_config_disk_only().is_err());
+            let args = PagerArgs::try_parse_from([
+                "grow",
+                "trace",
+                "11111111-1111-4111-8111-111111111111",
+            ])
+            .unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let error = runtime.block_on(async_main(args)).unwrap_err();
+            assert!(
+                format!("{error:#}")
+                    .contains("Session '11111111-1111-4111-8111-111111111111' not found"),
+                "{error:#}"
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let grow = dir.path().join("grow");
+        std::fs::create_dir(&grow).unwrap();
+        std::fs::write(grow.join("config.toml"), "[invalid").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::trace_reaches_storage_with_invalid_model_config",
+                "--nocapture",
+            ])
+            .current_dir(dir.path())
+            .env("HOME", dir.path())
+            .env("GROW_HOME", &grow)
+            .env(CHILD, "1")
+            .env("GROW_CAMPAIGNS", "0")
+            .env_remove("GROW_DEBUG_LOG")
+            .env_remove("GROW_LOG_FILE")
+            .env_remove("GROW_LOG_SAMPLING")
+            .env_remove("GROW_HOOKS_LOG")
+            .env_remove("GROW_SANDBOX")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     #[test]
     fn default_caps_the_core_count() {
         let nz = |n| NonZeroUsize::new(n).unwrap();

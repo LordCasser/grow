@@ -68,6 +68,7 @@ pub struct DoctorProbeSnapshot<'a> {
 }
 
 pub struct TmuxProbeFacts {
+    pub config_files: TmuxProbeResult<String>,
     pub version: TmuxProbeResult<String>,
     pub extended_keys: TmuxProbeResult<String>,
     pub set_clipboard: TmuxProbeResult<String>,
@@ -181,6 +182,7 @@ fn collect_tmux_fix(
             (TmuxProbeResult::Unavailable, TmuxProbeResult::Unavailable)
         };
     TmuxProbeFacts {
+        config_files: if id == Some(crate::diagnostics::SSH_WRAP_ID) { TmuxProbeResult::Unavailable } else { tmux.config_files() },
         version: TmuxProbeResult::Unavailable,
         extended_keys,
         set_clipboard,
@@ -260,6 +262,7 @@ pub(crate) fn collect_standalone_from<'a>(
 
 fn unavailable_tmux() -> TmuxProbeFacts {
     TmuxProbeFacts {
+        config_files: TmuxProbeResult::Unavailable,
         version: TmuxProbeResult::Unavailable,
         extended_keys: TmuxProbeResult::Unavailable,
         set_clipboard: TmuxProbeResult::Unavailable,
@@ -321,6 +324,7 @@ fn collect_tmux(
 ) -> TmuxProbeFacts {
     if !terminal.is_tmux_backed() {
         return TmuxProbeFacts {
+            config_files: TmuxProbeResult::Unavailable,
             version: TmuxProbeResult::Unavailable,
             extended_keys: TmuxProbeResult::Unavailable,
             set_clipboard: TmuxProbeResult::Unavailable,
@@ -338,6 +342,7 @@ fn collect_tmux(
         TmuxProbeResult::Error(error) => TmuxProbeResult::Error(error.clone()),
     };
     TmuxProbeFacts {
+        config_files: tmux.config_files(),
         version: terminal
             .tmux_version
             .clone()
@@ -371,6 +376,8 @@ mod tests {
     }
 
     impl TmuxOptionQuery for FakeTmuxQuery {
+        fn config_files(&self) -> TmuxProbeResult<String> { self.show_option("config-files") }
+
         fn show_option(&self, option: &str) -> TmuxProbeResult<String> {
             self.calls.borrow_mut().push(option.to_owned());
             self.values
@@ -444,6 +451,7 @@ mod tests {
             fake.calls.into_inner(),
             [
                 "support:allow-passthrough",
+                "config-files",
                 "extended-keys",
                 "set-clipboard"
             ]
@@ -467,6 +475,7 @@ mod tests {
             fake.calls.into_inner(),
             [
                 "support:allow-passthrough",
+                "config-files",
                 "extended-keys",
                 "set-clipboard",
                 "control-mode",
@@ -509,4 +518,17 @@ mod tests {
         assert!(called.get());
         assert_eq!(native_tool, Some("fake-tool"));
     }
+    #[test]
+    fn configuration_candidates_flow_through_report_and_fix_collection() {
+        let terminal = TerminalContext { multiplexer: crate::terminal::MultiplexerKind::Tmux, ..Default::default() };
+        let mut fake = empty_fake();
+        let candidates = "/tmp/custom config,/tmp/other";
+        fake.values.insert("config-files", TmuxProbeResult::Available(candidates.into()));
+        assert_eq!(collect_common(&terminal, runtime(), None, &fake, false, None).tmux.config_files, TmuxProbeResult::Available(candidates.into()));
+        assert_eq!(collect_tmux_fix(&terminal, Some(crate::diagnostics::TMUX_CLIPBOARD_ID), &fake).config_files, TmuxProbeResult::Available(candidates.into()));
+        fake.calls.borrow_mut().clear();
+        assert_eq!(collect_tmux_fix(&terminal, Some(crate::diagnostics::SSH_WRAP_ID), &fake).config_files, TmuxProbeResult::Unavailable);
+        assert!(!fake.calls.borrow().iter().any(|call| call == "config-files"));
+    }
+
 }

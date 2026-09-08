@@ -36,3 +36,19 @@ fn announcements_update_prunes_hidden_state_for_removed_items() {
         |effect| matches!(effect, Effect::PersistAnnouncementsHidden { hidden_ids } if hidden_ids.contains("kept") && !hidden_ids.contains("old"))
     ));
 }
+
+
+#[test]
+fn announcements_pruning_waits_for_prior_snapshot_completion() {
+    let mut app = make_app_with_agent("session");
+    app.hidden_announcement_ids = ["old".into(), "kept".into()].into_iter().collect();
+    assert!(app.request_announcement_persistence().is_some());
+    assert!(handle_ext_notification(
+        &announcements_update_notif(&[critical_announcement("kept")]), &mut app));
+    assert!(!app.pending_effects.iter().any(|effect| matches!(effect, Effect::PersistAnnouncementsHidden { .. })));
+    let next = crate::app::root::dispatch::dispatch(
+        crate::app::actions::Action::TaskComplete(crate::app::actions::TaskResult::AnnouncementsHiddenPersisted { result: Ok(()) }),
+        &mut app);
+    assert!(matches!(next.as_slice(), [Effect::PersistAnnouncementsHidden { hidden_ids }]
+        if hidden_ids.len() == 1 && hidden_ids.contains("kept")));
+}

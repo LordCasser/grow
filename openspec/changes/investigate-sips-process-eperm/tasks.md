@@ -1,0 +1,3 @@
+- [x] Record the failure and bounded reproduction attempts without suppressing errors.
+- [ ] Attribute a reproduced error to spawn/detach, attachment or cleanup.
+- [ ] Implement a justified fix under an appropriate delta, or conclude with evidence if the failure is external; validate and archive.

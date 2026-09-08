@@ -17,10 +17,10 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,7 @@ use crate::util::grow_home;
 const RECENCY_HALF_LIFE_SECS: f64 = 7.0 * 86_400.0;
 const RECENCY_FLOOR: f64 = 0.1;
 const MAX_ENTRIES: usize = 256;
+const MAX_STORE_BYTES: u64 = 1_048_576;
 
 /// Canonical on-disk format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -112,8 +113,11 @@ impl SlashMru {
             }
             return;
         }
-        let path = Self::store_path();
-        match fs::read(&path) {
+        self.load_from_path(&Self::store_path());
+    }
+
+    fn load_from_path(&mut self, path: &std::path::Path) {
+        match read_store(path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 self.loaded = true;
             }
@@ -219,6 +223,31 @@ impl SlashMru {
     }
 }
 
+fn read_store(path: &std::path::Path) -> io::Result<Vec<u8>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_STORE_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "MRU store is not a regular file within the byte allowance"));
+    }
+    read_store_bytes(file, MAX_STORE_BYTES)
+}
+
+fn read_store_bytes(reader: impl Read, allowance: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(allowance + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > allowance {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "MRU store exceeds the byte allowance"));
+    }
+    Ok(bytes)
+}
+
 /// An owned, `Send` snapshot of the MRU ready to write to disk. Produced on
 /// the UI thread by [`SlashMru::take_persist_snapshot`]; written off-thread.
 #[derive(Debug)]
@@ -231,80 +260,295 @@ impl MruSnapshot {
     /// Atomic write (temp file + `fsync` + rename). Returns `true` on success.
     /// Safe on a worker thread.
     fn write(&self) -> bool {
-        if let Some(parent) = self.path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let tmp = self.path.with_extension("json.tmp");
         let write_ok = (|| -> io::Result<()> {
-            let mut f = fs::File::create(&tmp)?;
-            f.write_all(&self.bytes)?;
-            f.sync_all()?;
-            fs::rename(&tmp, &self.path)?;
+            let parent = self.path.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            fs::create_dir_all(parent)?;
+            let mut temp = tempfile::Builder::new().prefix(".slash-mru-").tempfile_in(parent)?;
+            temp.write_all(&self.bytes)?;
+            temp.as_file().sync_all()?;
+            temp.persist(&self.path).map_err(|error| error.error)?;
             Ok(())
         })();
         match write_ok {
             Ok(()) => true,
             Err(e) => {
                 tracing::debug!(error = %e, "slash MRU: persist failed");
-                let _ = fs::remove_file(&tmp);
                 false
             }
         }
     }
 }
 
-/// Persist a snapshot off the UI thread. Writes are serialized through a single
-/// long-lived background thread (created on first use), so concurrent accepts
-/// can never reorder or tear the on-disk file. The send is non-blocking; the
-/// `Rc<RefCell<SlashMru>>` never leaves the UI thread (only the `Send` snapshot
-/// does).
-///
-/// Returns `true` if the snapshot was handed to the writer thread or written
-/// synchronously; `false` only when no write could be attempted (so the caller
-/// can keep the store dirty and retry on the next record). If the writer thread
-/// can't be spawned, or its channel has hung up, this falls back to a
-/// best-effort synchronous write rather than silently dropping the update.
-///
-/// The off-thread write is itself best-effort: a transient disk failure is
-/// self-healing because each snapshot is the full command map (not a delta), so
-/// the next `record_command_use` re-persists everything.
-///
-/// The writer channel is the only process-global piece — write-only I/O
-/// plumbing, not shared ranking state — so it carries none of the
-/// singleton/test-seam baggage that an injected store avoids.
+/// One pending complete snapshot, plus a bounded notification channel.
+/// The worker never holds the pending lock during file IO.
+struct MruWriter {
+    wake: SyncSender<()>,
+    pending: Arc<Mutex<Option<MruSnapshot>>>,
+}
+
+impl MruWriter {
+    fn channel() -> (Self, Receiver<()>) {
+        let (wake, receiver) = mpsc::sync_channel(1);
+        (Self { wake, pending: Arc::new(Mutex::new(None)) }, receiver)
+    }
+
+    fn submit(&self, snapshot: MruSnapshot) -> bool {
+        let Ok(mut pending) = self.pending.lock() else {
+            return false;
+        };
+        *pending = Some(snapshot);
+        match self.wake.try_send(()) {
+            Ok(()) | Err(TrySendError::Full(())) => true,
+            Err(TrySendError::Disconnected(())) => {
+                *pending = None;
+                false
+            }
+        }
+    }
+}
+
+fn write_pending_snapshots(receiver: Receiver<()>, pending: Arc<Mutex<Option<MruSnapshot>>>) {
+    while receiver.recv().is_ok() {
+        let snapshot = match pending.lock() {
+            Ok(mut pending) => pending.take(),
+            Err(_) => return,
+        };
+        if let Some(snapshot) = snapshot {
+            snapshot.write();
+        }
+    }
+}
+
+/// Hand off a complete snapshot without doing file IO on the caller thread.
+/// At most one latest snapshot waits behind the current write. A failed
+/// handoff returns false so the controller can retain dirty state; an accepted
+/// write is best effort, as before. Later command use sends the complete map
+/// again, including entries from any failed write. Process exit does not flush.
 pub fn persist_async(snapshot: MruSnapshot) -> bool {
-    static WRITER: OnceLock<Option<Sender<MruSnapshot>>> = OnceLock::new();
-    let tx = WRITER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<MruSnapshot>();
+    static WRITER: OnceLock<Option<MruWriter>> = OnceLock::new();
+    let writer = WRITER.get_or_init(|| {
+        let (writer, receiver) = MruWriter::channel();
+        let pending = Arc::clone(&writer.pending);
         match std::thread::Builder::new()
             .name("slash-mru-writer".to_string())
-            .spawn(move || {
-                while let Ok(snapshot) = rx.recv() {
-                    snapshot.write();
-                }
-            }) {
-            Ok(_) => Some(tx),
+            .spawn(move || write_pending_snapshots(receiver, pending)) {
+            Ok(_) => Some(writer),
             Err(e) => {
-                tracing::debug!(error = %e, "slash MRU: writer thread spawn failed; writing synchronously");
+                tracing::debug!(error = %e, "slash MRU: writer thread spawn failed");
                 None
             }
         }
     });
-    match tx {
-        Some(tx) => match tx.send(snapshot) {
-            Ok(()) => true,
-            // Writer thread gone: best-effort synchronous write of the snapshot
-            // returned in the send error rather than dropping it.
-            Err(e) => e.0.write(),
-        },
-        // Writer thread never started: best-effort synchronous write.
-        None => snapshot.write(),
-    }
+    writer.as_ref().is_some_and(|writer| writer.submit(snapshot))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_snapshots_coalesce_and_worker_publishes_latest() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mru.json");
+        let (writer, receiver) = MruWriter::channel();
+        for timestamp in 1..=1000 {
+            let bytes = serde_json::to_vec(&MruFile {
+                by_command: HashMap::from([("model".to_string(), timestamp)]),
+            }).unwrap();
+            assert!(writer.submit(MruSnapshot { path: path.clone(), bytes }));
+        }
+        assert!(!path.exists(), "submission must not perform file IO");
+        let latest = writer.pending.lock().unwrap().as_ref().unwrap().bytes.clone();
+        assert_eq!(serde_json::from_slice::<MruFile>(&latest).unwrap().by_command["model"], 1000);
+        let pending = Arc::clone(&writer.pending);
+        drop(writer);
+        let worker = std::thread::spawn(move || write_pending_snapshots(receiver, pending));
+        worker.join().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), latest);
+    }
+
+    #[test]
+    fn in_flight_snapshot_does_not_block_or_replace_latest_pending() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mru.json");
+        let (writer, receiver) = MruWriter::channel();
+        assert!(writer.submit(MruSnapshot { path: path.clone(), bytes: b"first".to_vec() }));
+        receiver.recv().unwrap();
+        // Hold the snapshot as a worker does after taking it, before disk IO.
+        let in_flight = writer.pending.lock().unwrap().take().unwrap();
+        for bytes in [b"middle".as_slice(), b"latest".as_slice()] {
+            assert!(writer.submit(MruSnapshot { path: path.clone(), bytes: bytes.to_vec() }));
+        }
+        assert!(in_flight.write());
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        let pending = Arc::clone(&writer.pending);
+        drop(writer);
+        write_pending_snapshots(receiver, pending);
+        assert_eq!(fs::read(&path).unwrap(), b"latest");
+    }
+
+    #[test]
+    fn disconnected_writer_rejects_without_synchronous_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mru.json");
+        fs::write(&path, b"existing").unwrap();
+        let (writer, receiver) = MruWriter::channel();
+        drop(receiver);
+        assert!(!writer.submit(MruSnapshot { path: path.clone(), bytes: b"new".to_vec() }));
+        assert!(writer.pending.lock().unwrap().is_none());
+        assert_eq!(fs::read(&path).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn bounded_reader_handles_exact_limit_and_growth() {
+        for length in [0, 8, 9, 128] {
+            let mut reader = io::Cursor::new(vec![b' '; length]);
+            let result = read_store_bytes(&mut reader, 8);
+            assert_eq!(result.is_ok(), length <= 8);
+            assert_eq!(reader.position(), length.min(9) as u64);
+        }
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"1234").unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 4);
+        let mut other_handle = file.try_clone().unwrap();
+        other_handle.write_all(&[b'x'; 64]).unwrap();
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::Start(0)).unwrap();
+        assert!(read_store_bytes(&mut file, 4).is_err());
+        assert_eq!(file.stream_position().unwrap(), 5);
+    }
+
+    #[test]
+    fn oversized_store_disables_persistence_without_overwriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mru.json");
+        let mut bytes = br#"{"by_command":{"model":42}}"#.to_vec();
+        bytes.resize(MAX_STORE_BYTES as usize, b' ');
+        fs::write(&path, &bytes).unwrap();
+        let mut exact = SlashMru::new();
+        exact.load_from_path(&path);
+        assert_eq!(exact.last_used("", "model"), 42);
+        assert!(exact.persist_enabled);
+        bytes.push(b' ');
+        fs::write(&path, &bytes).unwrap();
+        let mut over = SlashMru::new();
+        over.load_from_path(&path);
+        assert!(over.loaded);
+        assert!(!over.persist_enabled);
+        over.touch("", "plan");
+        assert!(over.take_persist_snapshot().is_none());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn missing_corrupt_and_large_entry_count_keep_existing_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mru.json");
+        for bytes in [None, Some(b"invalid json".as_slice())] {
+            if let Some(bytes) = bytes { fs::write(&path, bytes).unwrap(); }
+            let mut store = SlashMru::new();
+            store.load_from_path(&path);
+            assert!(store.loaded && store.persist_enabled);
+            store.touch("", "plan");
+            assert!(store.take_persist_snapshot().is_some());
+        }
+        let entries = (0..300).map(|i| (format!("command-{i}"), i)).collect();
+        fs::write(&path, serde_json::to_vec(&MruFile { by_command: entries }).unwrap()).unwrap();
+        let mut store = SlashMru::new();
+        store.load_from_path(&path);
+        assert_eq!(store.by_command.len(), MAX_ENTRIES);
+        assert_eq!(store.last_used("", "command-299"), 299);
+        assert!(!store.by_command.contains_key("command-0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loader_accepts_regular_symlink_and_rejects_fifo_without_writer() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::ffi::OsStrExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mru.json");
+        let link = directory.path().join("link");
+        let fifo = directory.path().join("fifo");
+        fs::write(&path, br#"{"by_command":{"model":42}}"#).unwrap();
+        symlink(&path, &link).unwrap();
+        let mut store = SlashMru::new();
+        store.load_from_path(&link);
+        assert_eq!(store.last_used("", "model"), 42);
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir_path = directory.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            for path in [fifo, dir_path] {
+                let mut store = SlashMru::new();
+                store.load_from_path(&path);
+                assert!(store.loaded && !store.persist_enabled);
+                store.touch("", "plan");
+                assert!(store.take_persist_snapshot().is_none());
+            }
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn snapshot_write_leaves_legacy_temporary_path_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("slash-mru.json");
+        let legacy = path.with_extension("json.tmp");
+        fs::write(&legacy, b"unrelated writer data").unwrap();
+        let snapshot = MruSnapshot { path: path.clone(), bytes: br#"{"by_command":{"find":1}}"#.to_vec() };
+        assert!(snapshot.write());
+        assert_eq!(fs::read(&path).unwrap(), snapshot.bytes);
+        assert_eq!(fs::read(&legacy).unwrap(), b"unrelated writer data");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn snapshot_failure_cleans_only_its_owned_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("slash-mru.json");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), b"keep").unwrap();
+        let legacy = path.with_extension("json.tmp");
+        fs::write(&legacy, b"keep too").unwrap();
+        assert!(!MruSnapshot { path: path.clone(), bytes: b"snapshot".to_vec() }.write());
+        assert_eq!(fs::read(path.join("keep")).unwrap(), b"keep");
+        assert_eq!(fs::read(legacy).unwrap(), b"keep too");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn concurrent_snapshot_writers_publish_complete_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("slash-mru.json");
+        let snapshots: Vec<Vec<u8>> = (0..4).map(|index| {
+            serde_json::to_vec(&MruFile { by_command: HashMap::from([(format!("command-{index}-{}", "x".repeat(index * 512)), index as u64 + 1)]) }).unwrap()
+        }).collect();
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = snapshots.iter().map(|bytes| {
+                let path = &path;
+                let snapshots = &snapshots;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..12 {
+                        assert!(MruSnapshot { path: path.clone(), bytes: bytes.clone() }.write());
+                        let saved = fs::read(path).unwrap();
+                        assert!(snapshots.contains(&saved), "mixed or partial snapshot");
+                        assert!(serde_json::from_slice::<MruFile>(&saved).is_ok());
+                    }
+                })
+            }).collect();
+            for job in jobs { job.join().unwrap(); }
+        });
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn touch_is_flat_by_command() {

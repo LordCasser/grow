@@ -175,8 +175,10 @@ impl ClipboardFocusTipState {
         // Commit the classify-dedup now only for non-image content (nothing to
         // show, so it's fully handled). A fireable image waits for `note_fired`
         // so a refused show stays retryable.
-        if !outcome.has_image {
-            self.last_seen_change_count = change_count;
+        if !outcome.has_image && outcome.change_count.is_some() {
+            // Unknown (e.g. a busy native reader) is not a negative result.
+            // Classify may also observe a newer version than the cheap probe.
+            self.last_seen_change_count = outcome.change_count;
         }
         Some(outcome)
     }
@@ -238,6 +240,23 @@ mod tests {
             .expect("a changeCount delta should classify");
         assert!(state.should_fire(&got, now));
         state.note_fired(&got, now);
+    }
+
+    #[test]
+    fn unavailable_classification_retries_the_same_version() {
+        let mut state = ClipboardFocusTipState::default();
+        let now = Instant::now();
+        assert_eq!(state.poll(now, || Some(42), || outcome(None, false)), Some(outcome(None, false)));
+        let next = state.poll(now + POLL_INTERVAL, || Some(42), || outcome(Some(42), true));
+        assert_eq!(next, Some(outcome(Some(42), true)), "unknown classification must not consume the version");
+    }
+
+    #[test]
+    fn non_image_dedup_uses_the_classified_version() {
+        let mut state = ClipboardFocusTipState::default();
+        let now = Instant::now();
+        state.poll(now, || Some(41), || outcome(Some(42), false));
+        assert_eq!(state.poll(now + POLL_INTERVAL, || Some(42), || panic!("version 42 was already classified")), None);
     }
 
     #[test]

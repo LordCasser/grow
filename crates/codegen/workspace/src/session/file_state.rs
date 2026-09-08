@@ -192,17 +192,18 @@ fn read_rewind_jsonl_from_file<T: serde::de::DeserializeOwned>(
     let mut reader = io::BufReader::new(file);
     let mut out = Vec::new();
     let mut line = String::new();
+    let mut line_number = 0usize;
     while reader.read_line(&mut line)? != 0 {
+        line_number += 1;
         let trimmed = line.trim();
         if !trimmed.is_empty() {
-            match serde_json::from_str::<T>(trimmed) {
-                Ok(value) => out.push(value),
-                Err(error) => tracing::warn!(
-                    %error,
-                    path = %label.display(),
-                    "skipping malformed rewind_points.jsonl line"
-                ),
-            }
+            let value = serde_json::from_str::<T>(trimmed).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{line_number}: invalid rewind record: {error}", label.display()),
+                )
+            })?;
+            out.push(value);
         }
         line.clear();
     }
@@ -417,10 +418,10 @@ impl FileStateTracker {
     /// None` mid-merge and skip/truncate historical points. The source is consumed
     /// only on a SUCCESSFUL read, so a transient error leaves it set to retry
     /// (never operating on or persisting a partial set).
-    async fn ensure_historical_loaded(&self) {
+    async fn ensure_historical_loaded(&self) -> io::Result<()> {
         let mut source = self.lazy_source.lock().await;
         let Some(lazy_file) = source.as_ref() else {
-            return; // already loaded, or never lazy
+            return Ok(()); // already loaded, or never lazy
         };
         let loaded =
             match read_rewind_jsonl_from_file::<RewindPoint>(&lazy_file.file, &lazy_file.label) {
@@ -431,7 +432,7 @@ impl FileStateTracker {
                         path = %lazy_file.label.display(),
                         "deferred rewind-point load failed; leaving lazy source set to retry"
                     );
-                    return;
+                    return Err(e);
                 }
             };
         if !loaded.is_empty() {
@@ -442,6 +443,7 @@ impl FileStateTracker {
         }
         // Success: consume the source so subsequent calls are no-ops.
         *source = None;
+        Ok(())
     }
 
     /// Start tracking a new prompt
@@ -624,12 +626,12 @@ impl FileStateTracker {
     }
 
     /// Get all rewind points (materializes the deferred historical set).
-    pub async fn get_rewind_points(&self) -> Vec<RewindPoint> {
-        self.ensure_historical_loaded().await;
+    pub async fn get_rewind_points(&self) -> io::Result<Vec<RewindPoint>> {
+        self.ensure_historical_loaded().await?;
         let points = self.rewind_points.lock().await;
         let mut result: Vec<RewindPoint> = points.values().cloned().collect();
         result.sort_by_key(|p| p.prompt_index);
-        result
+        Ok(result)
     }
 
     /// Lightweight metadata for every known rewind point, for the rewind picker.
@@ -693,10 +695,11 @@ impl FileStateTracker {
 
     /// Clear all rewind points after (and including) the specified prompt index.
     /// This is used when rewinding to truncate future history.
-    pub async fn truncate_from(&self, prompt_index: usize) {
-        self.ensure_historical_loaded().await;
+    pub async fn truncate_from(&self, prompt_index: usize) -> io::Result<()> {
+        self.ensure_historical_loaded().await?;
         let mut points = self.rewind_points.lock().await;
         points.retain(|&idx, _| idx < prompt_index);
+        Ok(())
     }
 
     /// Merge rewind points at indices >= `target_index` into the previous point
@@ -711,14 +714,15 @@ impl FileStateTracker {
     ///
     /// For `target_index == 0` there is no previous point to merge into, so all
     /// points are simply cleared.
-    pub async fn merge_and_remove_from(&self, target_index: usize) {
-        self.ensure_historical_loaded().await;
+    pub async fn merge_and_remove_from(&self, target_index: usize) -> io::Result<()> {
+        self.ensure_historical_loaded().await?;
         let mut points = self.rewind_points.lock().await;
         // Move the points out (no clone), merge, then rebuild the map.
         let all: Vec<RewindPoint> = std::mem::take(&mut *points).into_values().collect();
         for p in merge_rewind_points_from(all, target_index) {
             points.insert(p.prompt_index, p);
         }
+        Ok(())
     }
 
     /// Install the already-persisted complete rewind projection.
@@ -735,10 +739,10 @@ impl FileStateTracker {
     }
 
     /// Get the maximum prompt index that has a rewind point
-    pub async fn max_prompt_index(&self) -> Option<usize> {
-        self.ensure_historical_loaded().await;
+    pub async fn max_prompt_index(&self) -> io::Result<Option<usize>> {
+        self.ensure_historical_loaded().await?;
         let points = self.rewind_points.lock().await;
-        points.keys().max().copied()
+        Ok(points.keys().max().copied())
     }
 }
 
@@ -759,7 +763,7 @@ pub struct FileRewindConflict {
     pub conflict_type: ConflictType,
 }
 
-/// Result of restoring the canonical shell-owned file checkpoints.
+/// Result of applying snapshots through the standalone workspace rewind helper.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileRewindResponse {
@@ -773,19 +777,20 @@ pub struct FileRewindResponse {
 
 /// Rewind files to the state before `target_prompt_index`.
 ///
-/// Shared implementation for local workspace and ACP session operations. Performs:
+/// Standalone tracker operation. Shell session rewind coordinates its own
+/// persisted transaction and compensation path. This helper performs:
 /// 1. Gather earliest before-snapshot per file from points >= target
 /// 2. Detect conflicts (external modifications since the agent's writes)
 /// 3. Revert files to their before-snapshot state
 /// 4. Truncate rewind points from the target onward
 ///
-/// Returns a `FileRewindResponse` with revert results.
+/// Returns revert results, or an error if complete checkpoint history cannot load.
 pub async fn rewind_files(
     tracker: &FileStateTracker,
     fs: &crate::file_system::AsyncFsWrapper,
     target_prompt_index: usize,
-) -> FileRewindResponse {
-    let all_points = tracker.get_rewind_points().await;
+) -> io::Result<FileRewindResponse> {
+    let all_points = tracker.get_rewind_points().await?;
 
     let mut reverted_files = Vec::new();
     let mut clean_files = Vec::new();
@@ -862,7 +867,7 @@ pub async fn rewind_files(
     // Truncate rewind points from the target index onward.
     // Skip truncation when errors occurred so retry data is preserved.
     if !had_errors {
-        tracker.truncate_from(target_prompt_index).await;
+        tracker.truncate_from(target_prompt_index).await?;
     }
 
     let error = if had_errors {
@@ -871,14 +876,14 @@ pub async fn rewind_files(
         None
     };
 
-    FileRewindResponse {
+    Ok(FileRewindResponse {
         success: !had_errors,
         target_prompt_index,
         reverted_files,
         clean_files,
         conflicts,
         error,
-    }
+    })
 }
 
 /// Handle for sending file state capture requests.
@@ -935,6 +940,47 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
+    async fn malformed_pinned_history_rejects_partial_load_and_retries() {
+        for bad in ["not json", r#"{"prompt_index":"invalid"}"#] {
+            let p0 = serde_json::to_string(&point_with_files(0, &[("a.rs", "old")])).unwrap();
+            let p2 = serde_json::to_string(&point_with_files(2, &[("c.rs", "later")])).unwrap();
+            let file = write_rewind_raw(&format!("\n  \n{p0}\n{bad}\n{p2}\n"));
+            let tracker = lazy_tracker(&file);
+            tracker.begin_prompt(5).await;
+            let error = tracker.get_rewind_points().await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains(":4:"), "{error}");
+            assert!(tracker.get_rewind_point(0).await.is_none(), "valid prefix must not leak into live state");
+            assert!(tracker.truncate_from(5).await.is_err());
+            assert!(tracker.merge_and_remove_from(5).await.is_err());
+            assert!(tracker.get_rewind_point(5).await.is_some());
+            assert_eq!(tracker.get_rewind_point_metas().await.iter().map(|p| p.prompt_index).collect::<Vec<_>>(), [5]);
+            assert!(tracker.lazy_source.lock().await.is_some());
+            // Repair the same inode; a valid final record without LF remains accepted.
+            std::fs::write(file.path(), format!("\n{p0}\n  \n{p2}")).unwrap();
+            assert_eq!(tracker.get_rewind_points().await.unwrap().iter().map(|p| p.prompt_index).collect::<Vec<_>>(), [0, 2, 5]);
+            assert!(tracker.lazy_source.lock().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_historical_load_preserves_live_points_for_retry() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), [0xff, b'\n']).unwrap();
+        let tracker = lazy_tracker(&file);
+        tracker.begin_prompt(5).await;
+        assert!(tracker.get_rewind_points().await.is_err());
+        assert!(tracker.max_prompt_index().await.is_err());
+        assert!(tracker.truncate_from(5).await.is_err());
+        assert!(tracker.merge_and_remove_from(5).await.is_err());
+        assert!(tracker.get_rewind_point(5).await.is_some(), "failed historical read must not truncate live points");
+        let historical = point_with_files(0, &[("old.rs", "history")]);
+        std::fs::write(file.path(), format!("{}\n", serde_json::to_string(&historical).unwrap())).unwrap();
+        let points = tracker.get_rewind_points().await.unwrap();
+        assert_eq!(points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(), [0, 5]);
+    }
+
+    #[tokio::test]
     async fn test_rewind_point_creation() {
         let tracker = FileStateTracker::new();
         let cwd = AbsPathBuf::new(PathBuf::from("/test")).unwrap();
@@ -971,14 +1017,14 @@ mod tests {
         }
 
         // Verify all points exist
-        let points = tracker.get_rewind_points().await;
+        let points = tracker.get_rewind_points().await.unwrap();
         assert_eq!(points.len(), 5);
 
         // Truncate from index 3
-        tracker.truncate_from(3).await;
+        tracker.truncate_from(3).await.unwrap();
 
         // Should only have points 0, 1, 2
-        let points = tracker.get_rewind_points().await;
+        let points = tracker.get_rewind_points().await.unwrap();
         assert_eq!(points.len(), 3);
         assert!(tracker.get_rewind_point(0).await.is_some());
         assert!(tracker.get_rewind_point(1).await.is_some());
@@ -1172,7 +1218,7 @@ mod tests {
         assert!(tracker.get_rewind_point(1).await.is_none());
 
         // A plural query (a rewind operation) loads the full set.
-        let points = tracker.get_rewind_points().await;
+        let points = tracker.get_rewind_points().await.unwrap();
         assert_eq!(points.len(), 2);
         assert_eq!(points[0].prompt_index, 0);
         assert_eq!(points[1].prompt_index, 1);
@@ -1199,7 +1245,7 @@ mod tests {
         // The metadata scan must NOT consume the lazy source: a later rewind
         // operation still gets the full file-content snapshots.
         assert!(tracker.get_rewind_point(0).await.is_none());
-        let points = tracker.get_rewind_points().await;
+        let points = tracker.get_rewind_points().await.unwrap();
         assert_eq!(points.len(), 3);
         assert_eq!(
             points[0]
@@ -1229,7 +1275,7 @@ mod tests {
 
         // Rewinding to a pre-resume prompt loads the historical set and keeps the
         // new in-memory point.
-        let all = tracker.get_rewind_points().await;
+        let all = tracker.get_rewind_points().await.unwrap();
         assert_eq!(all.len(), 3);
         assert_eq!(
             all.iter().map(|p| p.prompt_index).collect::<Vec<_>>(),
@@ -1237,8 +1283,8 @@ mod tests {
         );
 
         // truncate_from(1) keeps only the pre-resume prompt 0.
-        tracker.truncate_from(1).await;
-        let remaining = tracker.get_rewind_points().await;
+        tracker.truncate_from(1).await.unwrap();
+        let remaining = tracker.get_rewind_points().await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].prompt_index, 0);
         assert_eq!(
@@ -1264,7 +1310,7 @@ mod tests {
 
         // The on-rewind historical load must NOT clobber the in-memory point 0
         // (`or_insert` keeps the live capture).
-        let points = tracker.get_rewind_points().await;
+        let points = tracker.get_rewind_points().await.unwrap();
         assert_eq!(points.len(), 1);
         assert_eq!(
             points[0]
@@ -1296,7 +1342,7 @@ mod tests {
     #[tokio::test]
     async fn tracker_without_historical_file_is_empty() {
         let tracker = FileStateTracker::new();
-        assert!(tracker.get_rewind_points().await.is_empty());
+        assert!(tracker.get_rewind_points().await.unwrap().is_empty());
         assert!(tracker.get_rewind_point_metas().await.is_empty());
     }
 
@@ -1311,8 +1357,8 @@ mod tests {
         let tracker = lazy_tracker(&file);
 
         // Merge points >= 1 into point 0's predecessor (index 0).
-        tracker.merge_and_remove_from(1).await;
-        let points = tracker.get_rewind_points().await;
+        tracker.merge_and_remove_from(1).await.unwrap();
+        let points = tracker.get_rewind_points().await.unwrap();
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].prompt_index, 0);
         // Point 0 should now also carry the merged files from points 1 and 2.
@@ -1333,7 +1379,7 @@ mod tests {
     async fn lazy_get_rewind_points_loads_historical() {
         let file = write_rewind_file(&[point_with_files(0, &[("a.rs", "h0")])]);
         let tracker = lazy_tracker(&file);
-        let points = tracker.get_rewind_points().await;
+        let points = tracker.get_rewind_points().await.unwrap();
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].prompt_index, 0);
     }
@@ -1343,7 +1389,7 @@ mod tests {
     async fn lazy_max_prompt_index_loads_historical() {
         let file = write_rewind_file(&[point_with_files(0, &[]), point_with_files(4, &[])]);
         let tracker = lazy_tracker(&file);
-        assert_eq!(tracker.max_prompt_index().await, Some(4));
+        assert_eq!(tracker.max_prompt_index().await.unwrap(), Some(4));
     }
 
     /// Concurrent live capture + rewind query: must not deadlock, and the full set
@@ -1363,7 +1409,7 @@ mod tests {
                 .await;
         };
         let t2 = tracker.clone();
-        let query = async move { t2.get_rewind_points().await };
+        let query = async move { t2.get_rewind_points().await.unwrap() };
         let (_, points) = tokio::join!(capture, query);
 
         // The historical set is always visible to the query.
@@ -1371,7 +1417,7 @@ mod tests {
         assert!(points.iter().any(|p| p.prompt_index == 1));
 
         // After both complete, every point (historical + live) is present.
-        let final_all = tracker.get_rewind_points().await;
+        let final_all = tracker.get_rewind_points().await.unwrap();
         assert_eq!(
             final_all.iter().map(|p| p.prompt_index).collect::<Vec<_>>(),
             vec![0, 1, 2]
@@ -1487,10 +1533,10 @@ mod tests {
         assert_eq!(merged[0].prompt_index, 0);
     }
 
-    /// Blank/whitespace and malformed lines are skipped; both readers (full load +
-    /// meta scan) recover exactly the valid points.
+    /// Legacy test-only path readers remain lenient; active pinned history
+    /// rejects malformed records instead of accepting a partial projection.
     #[tokio::test]
-    async fn readers_recover_from_blank_and_malformed_lines() {
+    async fn path_fixture_leniency_does_not_apply_to_pinned_history() {
         let p0 = serde_json::to_string(&point_with_files(0, &[("a.rs", "v0")])).unwrap();
         let p2 = serde_json::to_string(&point_with_files(2, &[("c.rs", "v2")])).unwrap();
         let file = write_rewind_raw(&format!("\n   \n{p0}\ngarbage{{not json\n{p2}\n"));
@@ -1506,13 +1552,9 @@ mod tests {
             vec![0, 2]
         );
 
-        // Same via the tracker's lazy load.
         let tracker = lazy_tracker(&file);
-        let points = tracker.get_rewind_points().await;
-        assert_eq!(
-            points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(),
-            vec![0, 2]
-        );
+        assert_eq!(tracker.get_rewind_points().await.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(tracker.lazy_source.lock().await.is_some());
     }
 
     /// A zero-byte file (distinct from a missing file) is `Ok(empty)`.
@@ -1521,6 +1563,11 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         assert!(read_rewind_points_file(file.path()).unwrap().is_empty());
         assert!(scan_rewind_point_metas(file.path()).unwrap().is_empty());
+        for bytes in ["", "\n  \n\t\n"] {
+            std::fs::write(file.path(), bytes).unwrap();
+            assert!(read_rewind_jsonl_from_file::<RewindPoint>(file.as_file(), file.path()).unwrap().is_empty());
+            assert!(scan_rewind_point_metas_from_file(file.as_file(), file.path()).unwrap().is_empty());
+        }
     }
 
     /// Missing → `Ok(empty)` (fresh session), but a real I/O error (here: a

@@ -17,9 +17,12 @@ use crate::types::output::WebFetchOutput;
 /// Canonical form for domain comparison: trim whitespace, strip trailing
 /// slashes and dots, remove `www.` prefix, and lowercase.
 pub fn normalize_domain(raw: &str) -> String {
-    let s = raw.trim().trim_end_matches('/').trim_end_matches('.');
-    let s = s.strip_prefix("www.").unwrap_or(s);
-    s.to_lowercase()
+    let s = raw
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches('.')
+        .to_lowercase();
+    s.strip_prefix("www.").unwrap_or(&s).to_owned()
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -32,7 +35,7 @@ enum HostEntry {
     /// Any path on this host is allowed (host-only entry).
     AnyPath,
     /// Only paths matching one of these prefixes are allowed.
-    /// Each prefix is normalized (leading `/`, no trailing `/`, lowercased).
+    /// Each prefix is normalized (leading `/`, no trailing `/`, case preserved).
     PathPrefixes(Vec<String>),
 }
 
@@ -53,16 +56,15 @@ impl DomainMatcher {
         let mut entries: HashMap<String, HostEntry> = HashMap::new();
 
         for raw in raw_entries {
-            let normalized = normalize_domain(raw);
-            if normalized.is_empty() {
+            // Host normalization must not fold case or trailing dots in paths.
+            let raw = raw.trim();
+            let (host, path) = match raw.find('/') {
+                Some(i) => (normalize_domain(&raw[..i]), Some(&raw[i..])),
+                None => (normalize_domain(raw), None),
+            };
+            if host.is_empty() {
                 continue;
             }
-
-            // Split on first '/' to separate host from optional path.
-            let (host, path) = match normalized.find('/') {
-                Some(i) => (normalized[..i].to_owned(), Some(&normalized[i..])),
-                None => (normalized, None),
-            };
 
             match path {
                 None => {
@@ -116,7 +118,7 @@ impl DomainMatcher {
         match self.entries.get(&host) {
             Some(HostEntry::AnyPath) => None,
             Some(HostEntry::PathPrefixes(prefixes)) => {
-                let url_path = url.path().to_lowercase();
+                let url_path = url.path();
                 if prefixes.iter().any(|prefix| {
                     url_path == *prefix
                         || (url_path.starts_with(prefix.as_str())
@@ -273,10 +275,27 @@ mod tests {
     }
 
     #[test]
-    fn path_scoped_case_insensitive() {
-        let m = DomainMatcher::new(&["Vercel.COM/Docs".into()]);
-        assert!(m.check(&url("https://vercel.com/docs")).is_none());
-        assert!(m.check(&url("https://VERCEL.COM/DOCS/foo")).is_none());
+    fn path_scoped_preserves_case_and_trailing_dot() {
+        for prefix in ["Docs", "docs."] {
+            let m = DomainMatcher::new(&[format!("Example.COM/{prefix}")]);
+            assert!(
+                m.check(&url(&format!("https://example.com/{prefix}")))
+                    .is_none()
+            );
+            assert!(
+                m.check(&url(&format!("https://example.com/{prefix}/child")))
+                    .is_none()
+            );
+            assert!(m.check(&url("https://example.com/docs")).is_some());
+        }
+    }
+
+    #[test]
+    fn path_scoped_normalizes_only_host() {
+        let m = DomainMatcher::new(&["  WWW.Example.COM./Docs/  ".into()]);
+        assert!(m.check(&url("https://example.com/Docs/child")).is_none());
+        assert!(m.check(&url("https://example.com/docs/child")).is_some());
+        assert_eq!(normalize_domain("WWW.Example.COM."), "example.com");
     }
 
     #[test]

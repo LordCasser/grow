@@ -1026,29 +1026,66 @@ async fn completed_image_sideband_is_recoverable_before_parent_projection() {
     }
 
     let opened = adapter.open_session(&info).unwrap();
-    let recovered = JsonlStorageAdapter::recover_completed_image_description_from_directory(
-        opened.directory(),
-        &info.id.to_string(),
-        source_revision,
-        source,
-        prompt,
-    )
-    .unwrap()
-    .expect("completed orphan must be reusable");
-    assert_eq!(recovered.0, "visible error dialog");
-    assert_eq!(recovered.1.timeline_id, sideband_id);
-    assert!(
-        JsonlStorageAdapter::recover_completed_image_description_from_directory(
-            opened.directory(),
-            &info.id.to_string(),
-            source_revision + 1,
-            source,
-            prompt,
-        )
-        .unwrap()
-        .is_none(),
-        "a result from another Surface revision must not be reused"
-    );
+    let queries = vec![
+        (source, prompt.to_owned()),
+        (source, "wrong prompt".to_owned()),
+        (chat_state::SurfaceId { item: source.item + 1, ..source }, prompt.to_owned()),
+        (source, prompt.to_owned()),
+    ];
+    let recovered = JsonlStorageAdapter::recover_completed_image_descriptions_from_directory(
+        opened.directory(), &info.id.to_string(), source_revision, &queries,
+    ).unwrap();
+    assert_eq!(recovered.len(), 4);
+    assert_eq!(recovered[0].as_ref().unwrap().0, "visible error dialog");
+    assert_eq!(recovered[0].as_ref().unwrap().1.timeline_id, sideband_id);
+    assert!(recovered[1].is_none());
+    assert!(recovered[2].is_none());
+    assert_eq!(recovered[0], recovered[3]);
+    assert!(JsonlStorageAdapter::recover_completed_image_descriptions_from_directory(
+        opened.directory(), &info.id.to_string(), source_revision + 1, &queries,
+    ).unwrap().iter().all(Option::is_none));
+
+    // A later completed transcription for the same source wins by spawn order.
+    let newer_id = uuid::Uuid::now_v7().to_string();
+    timeline.record(chat_state::TimelineEventKind::Sideband(chat_state::SidebandSpawnEvent {
+        sideband_id: newer_id.clone(), purpose: chat_state::SidebandPurpose::ImageDescription,
+        source_refs: vec![chat_state::TimelineRangeRef {
+            timeline_id: info.id.to_string(), first_seq: source.event.get(), last_seq: source.event.get(),
+        }],
+    })).unwrap();
+    adapter.append_timeline_event(&info, timeline.events().last().unwrap()).await.unwrap();
+    for mut event in sideband.events().iter().cloned() {
+        event.sideband_id = newer_id.clone();
+        match &mut event.kind {
+            chat_state::SidebandEventKind::Request(request) => request.initiator_ref = format!("t:{}/sideband:{newer_id}", info.id),
+            chat_state::SidebandEventKind::Result(result) => result.raw_output = "newer description".into(),
+            _ => {}
+        }
+        adapter.append_sideband_event_durable(&info, &event).await.unwrap();
+    }
+    let newer = JsonlStorageAdapter::recover_completed_image_descriptions_from_directory(
+        opened.directory(), &info.id.to_string(), source_revision, &queries,
+    ).unwrap();
+    assert_eq!(newer[0].as_ref().unwrap().0, "newer description");
+    assert_eq!(newer[0].as_ref().unwrap().1.timeline_id, newer_id);
+
+    // An unrelated purpose must still participate in full integrity checking.
+    let unrelated_id = uuid::Uuid::now_v7().to_string();
+    timeline.record(chat_state::TimelineEventKind::Sideband(chat_state::SidebandSpawnEvent {
+        sideband_id: unrelated_id.clone(), purpose: chat_state::SidebandPurpose::SessionTitle,
+        source_refs: vec![],
+    })).unwrap();
+    adapter.append_timeline_event(&info, timeline.events().last().unwrap()).await.unwrap();
+    let unrelated_dir = adapter.session_dir(&info).join(crate::session::storage::SIDEBANDS_DIR).join(unrelated_id);
+    std::fs::create_dir(&unrelated_dir).unwrap();
+    std::fs::write(unrelated_dir.join(crate::session::storage::TIMELINE_FILE), b"invalid json\n").unwrap();
+    assert!(JsonlStorageAdapter::recover_completed_image_descriptions_from_directory(
+        opened.directory(), &info.id.to_string(), source_revision, &queries,
+    ).is_err());
+    assert!(JsonlStorageAdapter::recover_completed_image_descriptions_from_directory(
+        opened.directory(), &info.id.to_string(), source_revision, &[],
+    ).unwrap().is_empty(), "no-query lookup must skip even unreadable historical ledgers");
+
 }
 
 #[cfg(unix)]
@@ -1787,7 +1824,7 @@ async fn reads_never_modify_rewind_or_updates_files() {
         )
         .unwrap();
     let tracker = FileStateTracker::with_lazy_file(rewind_file, rewind_path.clone());
-    assert_eq!(tracker.get_rewind_points().await.len(), 2);
+    assert_eq!(tracker.get_rewind_points().await.unwrap().len(), 2);
     assert_eq!(
             std::fs::read(&rewind_path).unwrap(),
             rewind_before,
@@ -3680,7 +3717,7 @@ fn write_test_summary(
 #[test]
 fn scan_opened_sessions_returns_empty_for_explicit_mode() {
     let adapter = JsonlStorageAdapter::with_explicit_session_dir(PathBuf::from("/fake"));
-    assert!(adapter.scan_opened_sessions(None).unwrap().is_empty());
+    assert!(adapter.scan_opened_sessions(None, |opened| opened).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -3775,7 +3812,7 @@ async fn load_rejects_a_conflicting_title_projection_at_canonical_seq() {
 fn scan_opened_sessions_returns_empty_when_no_sessions_dir() {
     let tmp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
-    assert!(adapter.scan_opened_sessions(None).unwrap().is_empty());
+    assert!(adapter.scan_opened_sessions(None, |opened| opened).unwrap().is_empty());
 }
 #[test]
 fn scan_opened_sessions_finds_all_identity_checked_sessions() {
@@ -3785,7 +3822,7 @@ fn scan_opened_sessions_finds_all_identity_checked_sessions() {
     write_test_summary(tmp.path(), &cwd, "s1", now, None, None, None);
     write_test_summary(tmp.path(), &cwd, "s2", now, None, None, None);
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
-    let sessions = adapter.scan_opened_sessions(None).unwrap();
+    let sessions = adapter.scan_opened_sessions(None, |opened| opened).unwrap();
     assert_eq!(sessions.len(), 2);
 }
 #[test]
@@ -3798,11 +3835,11 @@ fn scan_opened_sessions_filters_by_cwd() {
     write_test_summary(tmp.path(), &cwd_b, "s2", now, None, None, None);
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
     let a_sessions = adapter
-        .scan_opened_sessions(Some("/home/user/project-a"))
+        .scan_opened_sessions(Some("/home/user/project-a"), |opened| opened)
         .unwrap();
     assert_eq!(a_sessions.len(), 1);
     assert_eq!(a_sessions[0].summary().info.id, acp::SessionId::new("s1"));
-    let all_sessions = adapter.scan_opened_sessions(None).unwrap();
+    let all_sessions = adapter.scan_opened_sessions(None, |opened| opened).unwrap();
     assert_eq!(all_sessions.len(), 2);
 }
 #[test]
@@ -3815,7 +3852,7 @@ fn scan_opened_sessions_skips_non_sessions_and_invalid_summaries() {
     std::fs::create_dir(cwd_dir.join("real-session")).unwrap();
     std::fs::write(cwd_dir.join("real-session/summary.json"), b"{}").unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
-    let sessions = adapter.scan_opened_sessions(None).unwrap();
+    let sessions = adapter.scan_opened_sessions(None, |opened| opened).unwrap();
     assert!(sessions.is_empty());
 }
 #[tokio::test]
@@ -4540,4 +4577,249 @@ async fn coordination_observer_preserves_live_sideband_and_new_writer_recovers_o
             ..
         }))
     ));
+}
+
+#[test]
+fn cleanup_ttl_invalid_cutoff_preserves_storage() {
+    let root = TempDir::new().unwrap();
+    // This is intentionally not a valid sessions directory. Invalid policy
+    // must fail before scanning it, and must not alter its bytes.
+    let sentinel = root.path().join("sessions");
+    std::fs::write(&sentinel, b"preserve history").unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    for ttl in [0, u32::MAX] {
+        let error = adapter.cleanup_stale_sessions_sync(ttl, None, |_| panic!("invalid policy must not delete")).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve history");
+    }
+    let empty_root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(empty_root.path().to_path_buf());
+    assert_eq!(adapter.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap(), (0, 0));
+}
+
+#[tokio::test]
+async fn cleanup_rechecks_activity_after_scan_under_writer_lease() {
+    for case in ["refreshed", "future", "hidden", "corrupt", "identity", "expired", "held", "skip"] {
+        let root = TempDir::new().unwrap();
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let info = create_test_info();
+        writer.init_session(&info, default_model_id()).await.unwrap();
+        let session_dir = writer.session_dir(&info);
+        let summary_path = session_dir.join(crate::session::storage::SUMMARY_FILE);
+        let mut old = writer.open_session(&info).unwrap().summary().clone();
+        old.created_at = chrono::Utc::now() - chrono::Duration::days(60);
+        old.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+        old.last_active_at = Some(old.updated_at);
+        std::fs::write(&summary_path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let retained_writer = if case == "held" { Some(writer) } else { drop(writer); None };
+        let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let candidate = cleaner.scan_opened_sessions(None, |opened| opened).unwrap().pop().unwrap();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        assert!(candidate.summary().last_active_at.unwrap() < cutoff);
+        let mut deleted_ids = Vec::new();
+        match case {
+            "refreshed" | "future" => {
+                let mut fresh = old.clone();
+                fresh.last_active_at = Some(chrono::Utc::now() + chrono::Duration::days(if case == "future" { 1 } else { 0 }));
+                std::fs::write(&summary_path, serde_json::to_vec(&fresh).unwrap()).unwrap();
+                assert!(!cleaner.delete_if_still_stale(candidate, cutoff).unwrap(), "{case}");
+                let loaded = cleaner.open_session(&info).unwrap();
+                assert_eq!(loaded.summary().last_active_at, fresh.last_active_at);
+            }
+            "hidden" => {
+                let mut hidden = old.clone();
+                hidden.hidden = Some(true);
+                std::fs::write(&summary_path, serde_json::to_vec(&hidden).unwrap()).unwrap();
+                assert!(!cleaner.delete_if_still_stale(candidate, cutoff).unwrap());
+            }
+            "corrupt" => {
+                std::fs::write(&summary_path, b"invalid json").unwrap();
+                assert!(cleaner.delete_if_still_stale(candidate, cutoff).is_err());
+                assert_eq!(std::fs::read(&summary_path).unwrap(), b"invalid json");
+            }
+            "identity" => {
+                let mut changed = old.clone();
+                changed.info.id = acp::SessionId::new("different-identity");
+                let bytes = serde_json::to_vec(&changed).unwrap();
+                std::fs::write(&summary_path, &bytes).unwrap();
+                assert!(cleaner.delete_if_still_stale(candidate, cutoff).is_err());
+                assert_eq!(std::fs::read(&summary_path).unwrap(), bytes);
+            }
+            "expired" => {
+                assert_eq!(cleaner.cleanup_stale_sessions_sync(30, None, |info| deleted_ids.push(info.id.clone())).unwrap(), (1, 0));
+                assert!(!session_dir.exists());
+            }
+            "held" => assert_eq!(cleaner.cleanup_stale_sessions_sync(30, None, |info| deleted_ids.push(info.id.clone())).unwrap(), (0, 0)),
+            "skip" => assert_eq!(cleaner.cleanup_stale_sessions_sync(30, Some(&session_dir), |info| deleted_ids.push(info.id.clone())).unwrap(), (0, 0)),
+            _ => unreachable!(),
+        }
+        assert_eq!(deleted_ids, if case == "expired" { vec![info.id.clone()] } else { Vec::new() }, "{case}");
+        if case != "expired" {
+            assert!(session_dir.is_dir(), "{case} must be retained");
+        }
+        drop(retained_writer);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cleanup_many_sessions_under_descriptor_limit() {
+    const CHILD: &str = "GROW_TEST_CLEANUP_FD_HOME";
+    const TEST: &str = "session::storage::jsonl::tests::cleanup_many_sessions_under_descriptor_limit";
+    let Ok(home) = std::env::var(CHILD) else {
+        let tmp = TempDir::new().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, tmp.path()).env("GROW_HOME", tmp.path())
+            .output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(stdout.contains("1 passed"), "child regression must run: {stdout}");
+        return;
+    };
+    let home = std::path::PathBuf::from(home);
+    assert_eq!(::config::grow_home(), home);
+    let root = home.join("fixture");
+    for i in 0..96 {
+        let writer = JsonlStorageAdapter::with_root(root.clone());
+        let info = Info { id: acp::SessionId::new(format!("cleanup-fd-{i}")), cwd: "/cleanup-fd".into() };
+        let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+        summary.created_at = chrono::Utc::now() - chrono::Duration::days(60);
+        summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+        summary.last_active_at = Some(summary.updated_at);
+        writer.write_summary_sync(&info, &summary).unwrap();
+    }
+    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // Never change the parent test process limit.
+    assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+    limit.rlim_cur = 64;
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+    let cleaner = JsonlStorageAdapter::with_root(root.clone());
+    let mut deleted = std::collections::BTreeSet::new();
+    assert_eq!(cleaner.cleanup_stale_sessions_sync(30, None, |info| { deleted.insert(info.id.to_string()); }).unwrap(), (96, 0));
+    assert_eq!(deleted.len(), 96);
+    assert!(cleaner.list_sessions_sync(None).unwrap().is_empty());
+    assert!(cleaner.opened_sessions.lock().unwrap().is_empty());
+    assert!(cleaner.writer_leases.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cleanup_preserves_callers_live_writer() {
+    let root = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+    summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+    summary.last_active_at = Some(summary.updated_at);
+    writer.write_summary_sync(&info, &summary).unwrap();
+    assert_eq!(writer.cleanup_stale_sessions_sync(30, None, |_| panic!("live writer must be preserved")).unwrap(), (0, 0));
+    assert!(writer.session_dir(&info).exists());
+    assert_eq!(writer.writer_leases.lock().unwrap().len(), 1);
+    let observer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    assert!(!observer.try_acquire_writer_lease(&info).unwrap());
+    drop(writer);
+    assert!(observer.try_acquire_writer_lease(&info).unwrap());
+}
+
+#[tokio::test]
+async fn cleanup_duplicate_discovery_preserves_all_candidates() {
+    let root = TempDir::new().unwrap();
+    let mut paths = Vec::new();
+    for (id, cwd) in [("ordinary", "/cleanup-a"), ("duplicate", "/cleanup-a"), ("duplicate", "/cleanup-b")] {
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let info = Info { id: acp::SessionId::new(id), cwd: cwd.into() };
+        let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+        summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+        summary.last_active_at = Some(summary.updated_at);
+        writer.write_summary_sync(&info, &summary).unwrap();
+        paths.push(writer.session_dir(&info));
+    }
+    let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let error = cleaner.cleanup_stale_sessions_sync(30, None, |_| panic!("discovery must finish before deletion")).unwrap_err();
+    assert!(error.to_string().contains("duplicate canonical session id"));
+    assert!(paths.iter().all(|path| path.is_dir()));
+    assert!(cleaner.opened_sessions.lock().unwrap().is_empty());
+    assert!(cleaner.writer_leases.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cleanup_refresh_after_discovery_releases_maintenance_leases() {
+    let root = TempDir::new().unwrap();
+    let mut fixtures = Vec::new();
+    for id in ["refresh-a", "refresh-b", "refresh-c"] {
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let info = Info { id: acp::SessionId::new(id), cwd: "/cleanup-refresh".into() };
+        let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+        summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+        summary.last_active_at = Some(summary.updated_at);
+        writer.write_summary_sync(&info, &summary).unwrap();
+        fixtures.push((info, writer.summary_file(&summary.info), summary));
+    }
+    let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let mut deleted = Vec::new();
+    let result = cleaner.cleanup_stale_sessions_sync(30, None, |removed| {
+        deleted.push(removed.id.clone());
+        assert_eq!(deleted.len(), 1, "refreshed candidates must not be deleted");
+        for (info, path, old) in &fixtures {
+            if info.id != removed.id {
+                let mut fresh = old.clone();
+                fresh.last_active_at = Some(chrono::Utc::now());
+                std::fs::write(path, serde_json::to_vec(&fresh).unwrap()).unwrap();
+            }
+        }
+    }).unwrap();
+    assert_eq!(result, (1, 0));
+    assert_eq!(deleted.len(), 1);
+    assert!(cleaner.writer_leases.lock().unwrap().is_empty());
+    assert!(cleaner.opened_sessions.lock().unwrap().is_empty());
+    for (info, path, _) in fixtures {
+        if info.id != deleted[0] {
+            assert!(path.exists());
+            let next_writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            assert!(next_writer.try_acquire_writer_lease(&info).unwrap(), "cleanup must release preserved candidate ownership");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn operational_scan_errors_preserve_cleanup_candidates() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("permission fixture requires a non-root Unix user");
+        return;
+    }
+    for case in ["cwd", "session", "summary", "marker"] {
+        let root = TempDir::new().unwrap();
+        let mut paths = Vec::new();
+        for (id, cwd) in [("readable", "/scan-good".to_string()), ("unreadable", if case == "marker" { "/long-scan".repeat(40) } else { "/scan-bad".into() })] {
+            let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            let info = Info { id: acp::SessionId::new(id), cwd };
+            let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+            summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+            summary.last_active_at = Some(summary.updated_at);
+            writer.write_summary_sync(&info, &summary).unwrap();
+            paths.push(writer.session_dir(&info));
+        }
+        let denied = match case {
+            "cwd" => paths[1].parent().unwrap().to_path_buf(),
+            "session" => paths[1].clone(),
+            "summary" => paths[1].join(crate::session::storage::SUMMARY_FILE),
+            "marker" => paths[1].parent().unwrap().join(".cwd"),
+            _ => unreachable!(),
+        };
+        let permissions = std::fs::metadata(&denied).unwrap().permissions();
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0)).unwrap();
+        let probe = std::fs::File::open(&denied);
+        let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let listing = cleaner.list_sessions_sync(None);
+        let mut callbacks = Vec::new();
+        let cleanup = cleaner.cleanup_stale_sessions_sync(30, None, |info| callbacks.push(info.id.clone()));
+        std::fs::set_permissions(&denied, permissions).unwrap();
+        assert_eq!(probe.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied, "fixture must deny access: {case}");
+        assert_eq!(listing.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied, "{case}");
+        assert_eq!(cleanup.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied, "{case}");
+        assert!(callbacks.is_empty(), "{case}: incomplete discovery must not delete");
+        assert!(paths.iter().all(|path| path.is_dir()), "{case}");
+    }
 }

@@ -49,8 +49,8 @@ pub struct InspectReport {
     pub channel: String,
     pub cwd: String,
     pub project_root: Option<String>,
-    /// Folder-trust verdict for `cwd`: when false, repo-local project hooks,
-    /// plugins, and MCP/LSP entries are gated out of the listings below.
+    /// Folder-trust verdict for `cwd`. Denied executable definitions can
+    /// remain visible with an untrusted marker for configuration diagnosis.
     pub project_trusted: bool,
     pub project_instructions: Vec<InstructionFile>,
     pub permissions: PermissionsReport,
@@ -176,7 +176,10 @@ pub struct LspServerEntry {
     pub args: Vec<String>,
     pub source: ConfigSource,
     pub extensions: Vec<String>,
-    /// True when this project-scoped server would be skipped (untrusted folder).
+    /// True when this plugin definition is disabled in the registry.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+    /// True when the project or plugin source is not trusted for execution.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub untrusted: bool,
 }
@@ -265,7 +268,7 @@ async fn build_report(cwd: &Path) -> InspectReport {
     let plugins = list_plugins(&discovered_plugins);
     let marketplaces = list_marketplaces();
     let mcp = list_mcp_servers(cwd, &plugin_registry);
-    let lsp = list_lsp_servers(cwd, &discovered_plugins);
+    let lsp = list_lsp_servers(cwd, &plugin_registry, project_trusted);
     let configs = list_config_sources(cwd);
     let config_warnings = parsed_config
         .as_ref()
@@ -658,25 +661,22 @@ fn list_mcp_servers(
 /// Wraps the production LSP loader (`load_servers_with_plugins_sourced`).
 fn list_lsp_servers(
     cwd: &Path,
-    discovered_plugins: &[agent::plugins::DiscoveredPlugin],
+    registry: &agent::plugins::PluginRegistry,
+    project_allowed: bool,
 ) -> Vec<LspServerEntry> {
-    let trusted: Vec<_> = discovered_plugins.iter().filter(|p| p.trusted).collect();
-    let plugin_lsp_paths: Vec<std::path::PathBuf> = trusted
+    let active = registry.active_plugins();
+    let plugin_lsp_paths: Vec<std::path::PathBuf> = active
         .iter()
         .filter_map(|p| p.lsp_config_path.clone())
         .collect();
-    let plugin_names: Vec<&str> = trusted
+    let plugin_names: Vec<&str> = active
         .iter()
         .filter(|p| p.lsp_config_path.is_some())
-        .map(|p| p.manifest.name.as_str())
+        .map(|p| p.name.as_str())
         .collect();
-    let plugin_inline_lsp: Vec<(&serde_json::Value, &str)> = trusted
+    let plugin_inline_lsp: Vec<(&serde_json::Value, &str)> = active
         .iter()
-        .filter_map(|p| {
-            p.manifest
-                .inline_lsp_servers()
-                .map(|v| (v, p.manifest.name.as_str()))
-        })
+        .filter_map(|p| p.inline_lsp_servers.as_ref().map(|v| (v, p.name.as_str())))
         .collect();
     let inline_values: Vec<&serde_json::Value> =
         plugin_inline_lsp.iter().map(|(v, _)| *v).collect();
@@ -684,33 +684,85 @@ fn list_lsp_servers(
 
     let servers = tools::implementations::lsp::config::load_servers_with_plugins_sourced(
         cwd,
+        project_allowed,
         &plugin_lsp_paths,
         &inline_values,
         &plugin_names,
         &inline_names,
     );
 
-    // Folder-trust gate (display-only): inspect never spawns servers, but mark the
-    // repo-local (project-scoped) entries a session would skip in an untrusted
-    // Clone so the listing matches the live gate. Standalone inspection has no
-    // live session state.
-    crate::agent::folder_trust::resolve_and_record(cwd, None, false);
-    let project_allowed = crate::agent::folder_trust::project_scope_allowed(cwd);
-
-    servers
+    let mut definitions: Vec<_> = servers.into_iter().collect();
+    for plugin in registry
+        .list()
+        .into_iter()
+        .filter(|p| !p.enabled || !p.trusted)
+    {
+        let names = [plugin.name.as_str()];
+        definitions.extend(
+            tools::implementations::lsp::config::load_plugin_servers_sourced(
+                plugin.lsp_config_path.as_slice(),
+                plugin.inline_lsp_servers.as_ref().as_slice(),
+                if plugin.lsp_config_path.is_some() {
+                    &names
+                } else {
+                    &[]
+                },
+                if plugin.inline_lsp_servers.is_some() {
+                    &names
+                } else {
+                    &[]
+                },
+            ),
+        );
+    }
+    if !project_allowed {
+        // Keep denied project definitions visible for diagnosis without
+        // replacing the permitted same-name fallback in the report.
+        let project_path = cwd.join(".grow/lsp.json");
+        definitions.extend(
+            tools::implementations::lsp::config::load_file(&project_path)
+                .into_iter()
+                .map(|(name, cfg)| {
+                    (
+                        name,
+                        (
+                            cfg,
+                            ConfigSource::Project {
+                                path: project_path.clone(),
+                            },
+                        ),
+                    )
+                }),
+        );
+    }
+    let mut entries: Vec<_> = definitions
         .into_iter()
         .map(|(name, (cfg, source))| {
-            let untrusted = !project_allowed && matches!(source, ConfigSource::Project { .. });
+            let plugin = match &source {
+                ConfigSource::Plugin { plugin_name, .. } => registry.get(plugin_name),
+                _ => None,
+            };
+            let disabled = plugin.is_some_and(|plugin| !plugin.enabled);
+            let untrusted = plugin.is_some_and(|plugin| !plugin.trusted)
+                || (!project_allowed && matches!(source, ConfigSource::Project { .. }));
             LspServerEntry {
                 name,
                 command: cfg.command,
                 args: cfg.args,
                 source,
                 extensions: cfg.extensions.keys().cloned().collect(),
+                disabled,
                 untrusted,
             }
         })
-        .collect()
+        .collect();
+    entries.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then((a.disabled || a.untrusted).cmp(&(b.disabled || b.untrusted)))
+            .then(a.source.display_label().cmp(&b.source.display_label()))
+    });
+    entries
 }
 
 /// Locates the global `config.toml` and project `.grow/config.toml` files. Only
@@ -961,7 +1013,12 @@ fn print_human(r: &InspectReport) {
         |l| format!("{} ({} {})", l.name, l.command, l.args.join(" ")),
         |l| {
             let untrusted = if l.untrusted { " [untrusted]" } else { "" };
-            format!("{}{}", l.source.display_label(), untrusted)
+            format!(
+                "{}{}{}",
+                l.source.display_label(),
+                disabled_tag(l.disabled),
+                untrusted
+            )
         },
     );
 
@@ -1021,6 +1078,171 @@ mod tests {
     use super::*;
     use agent::prompt::skills::{SkillInfo, SkillsConfig};
     use tools::implementations::skills::types::SkillScope;
+
+    #[test]
+    fn lsp_inspection_shows_fallback_and_untrusted_project_definition() {
+        use agent::plugins::discovery::PluginId;
+        use agent::plugins::{DiscoveredPlugin, PluginOrigin, PluginScope};
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        std::fs::create_dir(cwd.join(".grow")).unwrap();
+        let name = format!("inspect-lsp-{}", uuid::Uuid::new_v4());
+        let project_only = format!("{name}-project");
+        std::fs::write(
+            cwd.join(".grow/lsp.json"),
+            serde_json::json!({
+                (name.clone()): {"command": "project-command"},
+                (project_only.clone()): {"command": "project-only"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let plugin_path = cwd.join("plugin-lsp.json");
+        std::fs::write(
+            &plugin_path,
+            serde_json::json!({
+                (name.clone()): {"command": "plugin-command"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let plugin = DiscoveredPlugin {
+            manifest: serde_json::from_value(serde_json::json!({"name": "inspect-plugin"}))
+                .unwrap(),
+            id: PluginId::new(PluginScope::CliOverride, cwd, "inspect-plugin"),
+            root: cwd.to_path_buf(),
+            canonical_root: cwd.to_path_buf(),
+            scope: PluginScope::CliOverride,
+            origin: PluginOrigin::CliOverride,
+            trusted: true,
+            skill_dirs: vec![],
+            command_dirs: vec![],
+            agent_dirs: vec![],
+            hooks_path: None,
+            mcp_config_path: None,
+            lsp_config_path: Some(plugin_path),
+            conflict: None,
+        };
+        let registry = agent::plugins::PluginRegistry::from_discovered(
+            vec![plugin],
+            &[],
+            &["inspect-plugin".to_string()],
+        );
+        for trusted in [false, true] {
+            let entries = list_lsp_servers(cwd, &registry, trusted);
+            let shared: Vec<_> = entries.iter().filter(|entry| entry.name == name).collect();
+            assert_eq!(
+                shared.len(),
+                if trusted { 1 } else { 2 },
+                "inspection must not hide the permitted fallback"
+            );
+            if trusted {
+                assert_eq!(shared[0].command, "project-command");
+                assert!(!shared[0].untrusted);
+            } else {
+                assert_eq!(shared[0].command, "plugin-command");
+                assert!(!shared[0].untrusted);
+                assert!(matches!(shared[0].source, ConfigSource::Plugin { .. }));
+                assert_eq!(shared[1].command, "project-command");
+                assert!(shared[1].untrusted);
+                assert!(matches!(shared[1].source, ConfigSource::Project { .. }));
+            }
+            assert_eq!(
+                entries
+                    .iter()
+                    .find(|entry| entry.name == project_only)
+                    .unwrap()
+                    .untrusted,
+                !trusted
+            );
+            let json = serde_json::to_value(&entries).unwrap();
+            let shared_json: Vec<_> = json
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["name"] == name)
+                .collect();
+            assert_eq!(shared_json.len(), shared.len());
+            assert_eq!(
+                shared_json.last().unwrap()["untrusted"]
+                    .as_bool()
+                    .unwrap_or(false),
+                !trusted
+            );
+        }
+    }
+
+    #[test]
+    fn lsp_inspection_distinguishes_disabled_and_untrusted_plugins() {
+        use agent::plugins::discovery::PluginId;
+        use agent::plugins::{DiscoveredPlugin, PluginOrigin, PluginRegistry, PluginScope};
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let name = format!("inspect-status-{}", uuid::Uuid::new_v4());
+        let make_plugin = |plugin_name: &str, command: &str, trusted, inline| {
+            let config = serde_json::json!({ (name.clone()): {"command": command} });
+            let path = cwd.join(format!("{plugin_name}.json"));
+            std::fs::write(&path, config.to_string()).unwrap();
+            let mut manifest = serde_json::json!({"name": plugin_name});
+            if inline {
+                manifest["lspServers"] = config;
+            }
+            DiscoveredPlugin {
+                manifest: serde_json::from_value(manifest).unwrap(),
+                id: PluginId::new(PluginScope::CliOverride, cwd, plugin_name),
+                root: cwd.to_path_buf(),
+                canonical_root: cwd.to_path_buf(),
+                scope: PluginScope::CliOverride,
+                origin: PluginOrigin::CliOverride,
+                trusted,
+                skill_dirs: vec![],
+                command_dirs: vec![],
+                agent_dirs: vec![],
+                hooks_path: None,
+                mcp_config_path: None,
+                lsp_config_path: (!inline).then_some(path),
+                conflict: None,
+            }
+        };
+        for inline_disabled in [false, true] {
+            let registry = PluginRegistry::from_discovered(
+                vec![
+                    make_plugin("a-disabled", "disabled-command", true, inline_disabled),
+                    make_plugin("b-active", "active-command", true, !inline_disabled),
+                    make_plugin("c-untrusted", "untrusted-command", false, true),
+                ],
+                &["a-disabled".into()],
+                &["b-active".into(), "c-untrusted".into()],
+            );
+            let entries = list_lsp_servers(cwd, &registry, true);
+            let json = serde_json::to_value(entries).unwrap();
+            let shared: Vec<_> = json
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["name"] == name)
+                .collect();
+            assert_eq!(
+                shared.len(),
+                3,
+                "all inactive declarations must remain diagnostic, without shadowing the active source"
+            );
+            assert_eq!(shared[0]["command"], "active-command");
+            assert_eq!(shared[0]["disabled"].as_bool().unwrap_or(false), false);
+            let disabled = shared
+                .iter()
+                .find(|entry| entry["command"] == "disabled-command")
+                .unwrap();
+            assert_eq!(disabled["disabled"], true);
+            assert_eq!(disabled["untrusted"].as_bool().unwrap_or(false), false);
+            let untrusted = shared
+                .iter()
+                .find(|entry| entry["command"] == "untrusted-command")
+                .unwrap();
+            assert_eq!(untrusted["untrusted"], true);
+            assert_eq!(untrusted["disabled"].as_bool().unwrap_or(false), false);
+        }
+    }
 
     #[test]
     fn grow_home_nested_in_workspace_keeps_direct_surfaces_global() {

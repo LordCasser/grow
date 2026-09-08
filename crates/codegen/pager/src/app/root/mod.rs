@@ -183,7 +183,7 @@ impl WorktreeMode {
     }
 }
 use super::PagerTerminal;
-use super::actions::Action;
+use super::actions::{Action, Effect};
 use super::agent_view::{AgentView, AppRenderParams};
 use super::bundle::BundleState;
 use super::session::AgentId;
@@ -428,6 +428,8 @@ pub struct AppView {
     /// startup; updated synchronously by `set_X_inner` so dispatch
     /// stays sans-IO.
     pub current_ui: shell::agent::config::UiConfig,
+    pub(crate) setting_persistence: crate::app::setting_persistence::SettingPersistence,
+    pub(crate) transcript_file_writes: crate::app::transcript_file_writes::TranscriptFileWrites,
     /// Working directory.
     pub cwd: PathBuf,
     /// Whether the project picker question has already been shown this session.
@@ -489,6 +491,8 @@ pub struct AppView {
     /// Persisted hide keys, filtered at the banner selection gate — hiding one
     /// critical reveals the next unhidden one, and a NEW id re-arms the banner.
     pub hidden_announcement_ids: std::collections::BTreeSet<String>,
+    pub(crate) announcement_write_in_flight: bool,
+    pub(crate) announcement_write_pending: bool,
     /// Selected welcome announcement for this pager launch.
     pub announcement: Option<announcements::Announcement>,
     /// Cached changelog markdown (for `/release-notes`). Populated by
@@ -570,18 +574,15 @@ pub struct AppView {
     /// Both configuration-file and prompt-draft edits share the existing
     /// leave-raw-mode / child / restore handoff.
     pub(crate) pending_editor: Option<crate::app::external_editor::PendingEditorRequest>,
+    /// Limit actual interactive diagnostic collectors, including cancelled waiters.
+    pub(crate) doctor_collection: std::sync::Arc<tokio::sync::Semaphore>,
     /// Path to open in `$PAGER` (default `less`) after the current event cycle.
     /// Set by `Action::OpenTranscriptPager` (`/transcript`); consumed by the
     /// event loop which suspends the inline TUI, spawns the pager, then restores
-    /// and deletes the temp file. Primarily for minimal mode (no interactive
+    /// and releases the owned temp file, also cleaning up on errors or replacement.
+    /// Primarily for minimal mode (no interactive
     /// scrollback pane), but works in every mode.
-    pub pending_pager_path: Option<std::path::PathBuf>,
-    /// Whether [`pending_pager_path`](Self::pending_pager_path) holds an
-    /// ANSI-colored file (the minimal "full view" transcript). When true the
-    /// event loop ensures the pager renders raw control codes (`less -R`) so the
-    /// colors show instead of literal escapes. Plain-text transcripts (`/export`
-    /// markdown) leave this false.
-    pub pending_pager_ansi: bool,
+    pub(crate) pending_pager: Option<crate::app::external_pager::PendingPager>,
     /// Minimal mode only: the Ctrl+T **force-show** pin for the todo panel.
     /// Minimal-mode-only per-session state, consolidated into a single field so
     /// the central `AppView` isn't peppered with loose minimal flags. Default-
@@ -881,6 +882,8 @@ impl AppView {
             registry: ActionRegistry::defaults(),
             settings_registry: Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: shell::agent::config::UiConfig::default(),
+            setting_persistence: Default::default(),
+            transcript_file_writes: Default::default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             project_picker_shown: false,
             project_picker_disabled: false,
@@ -903,6 +906,8 @@ impl AppView {
             fps_hud: crate::views::fps_hud::FpsHud::new(),
             active_announcements: Vec::new(),
             hidden_announcement_ids: Default::default(),
+            announcement_write_in_flight: false,
+            announcement_write_pending: false,
             announcement: None,
             changelog_markdown: None,
             changelog_bullets: Vec::new(),
@@ -912,8 +917,8 @@ impl AppView {
             command_tags,
             pending_effects: Vec::new(),
             pending_editor: None,
-            pending_pager_path: None,
-            pending_pager_ansi: false,
+            doctor_collection: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            pending_pager: None,
             minimal_state: crate::minimal_api::MinimalState::default(),
             welcome_menu_index: None,
             welcome_menu_rects: Vec::new(),
@@ -1018,6 +1023,25 @@ impl AppView {
             dashboard.set_auto_mode_available(available);
         }
     }
+    /// Start one write, or defer to the latest in-memory state while busy.
+    pub(crate) fn request_announcement_persistence(&mut self) -> Option<Effect> {
+        if self.announcement_write_in_flight {
+            self.announcement_write_pending = true;
+            return None;
+        }
+        self.announcement_write_in_flight = true;
+        Some(Effect::PersistAnnouncementsHidden { hidden_ids: self.hidden_announcement_ids.clone() })
+    }
+
+    pub(crate) fn finish_announcement_persistence(&mut self) -> Option<Effect> {
+        self.announcement_write_in_flight = false;
+        if std::mem::take(&mut self.announcement_write_pending) {
+            self.request_announcement_persistence()
+        } else {
+            None
+        }
+    }
+
     /// Draw-time expiry can flip the live-announcement predicate between
     /// pushes; resync the slash gate only when it diverges from the stored
     /// flags (checked per frame, fan-out runs only on change).
@@ -1349,8 +1373,7 @@ impl AppView {
             top_offset,
         })
     }
-    /// Rows the dev `GROW_FPS` overlay occupies (0 in non-dev builds), so
-    /// runtime debug overlays stack below instead of overpainting it.
+    /// No separate dev profiler overlay is currently installed.
     fn dev_fps_rows(&self) -> u16 {
         0
     }
@@ -1745,9 +1768,6 @@ impl AppView {
                         let transcript_opened =
                             transcript_before.is_none() && agent.active_subagent.is_some();
                         let workflows_opened = !workflows_before && agent.show_workflows;
-                        if let Event::Key(key) = ev {
-                            agent.record_input(key, &outcome);
-                        }
                         if transcript_opened || workflows_opened {
                             self.scroll_state.cancel_stream();
                             self.last_scroll_pos = None;
@@ -1862,9 +1882,6 @@ impl AppView {
                             let transcript_opened =
                                 transcript_before.is_none() && agent.active_subagent.is_some();
                             let workflows_opened = !workflows_before && agent.show_workflows;
-                            if let Event::Key(key) = ev {
-                                agent.record_input(key, &outcome);
-                            }
                             if transcript_opened || workflows_opened {
                                 self.scroll_state.cancel_stream();
                                 self.last_scroll_pos = None;
@@ -2718,7 +2735,11 @@ impl AppView {
         self.resync_announcement_slash_gate_on_divergence();
         if self.screen_mode.is_minimal() {
             if let Some(hooks) = crate::minimal_hook::hooks() {
+                let started = self.fps_hud.enabled().then(std::time::Instant::now);
                 (hooks.draw)(self, terminal, frame_stamp);
+                if let Some(started) = started {
+                    self.fps_hud.record(started.elapsed());
+                }
             }
             return;
         }
@@ -3752,12 +3773,13 @@ impl AppView {
     ) -> Option<crate::app::actions::Effect> {
         let viewer = agent.image_viewer.as_mut()?;
         let owner_id = viewer.overlay_owner_id;
-        let path = viewer.take_source_path()?;
+        let (source, protocol) = viewer.take_load_request()?;
         Some(crate::app::actions::Effect::LoadImageViewer {
             agent_id,
             child_session_id,
             owner_id,
-            path,
+            source,
+            protocol,
         })
     }
     /// Block viewer streaming / follow-mode ticks (parent or subagent child).
@@ -4059,6 +4081,8 @@ pub(crate) mod tests {
             registry: ActionRegistry::defaults(),
             settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: shell::agent::config::UiConfig::default(),
+            setting_persistence: Default::default(),
+            transcript_file_writes: Default::default(),
             cwd: std::path::PathBuf::from("/tmp"),
             project_picker_shown: true,
             project_picker_disabled: false,
@@ -4076,6 +4100,8 @@ pub(crate) mod tests {
             deferred_notification: None,
             active_announcements: vec![],
             hidden_announcement_ids: Default::default(),
+            announcement_write_in_flight: false,
+            announcement_write_pending: false,
             announcement: None,
             changelog_markdown: None,
             changelog_bullets: Vec::new(),
@@ -4149,8 +4175,8 @@ pub(crate) mod tests {
             screen_mode: ScreenMode::Inline,
             pending_effects: Vec::new(),
             pending_editor: None,
-            pending_pager_path: None,
-            pending_pager_ansi: false,
+            doctor_collection: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            pending_pager: None,
             minimal_state: crate::minimal_api::MinimalState::default(),
             reconnect_pending: false,
             show_resolved_model: true,
@@ -4892,6 +4918,7 @@ pub(crate) mod tests {
         idle_agent_with_content(&mut app, id);
         app.minimal_state.transcript = Some(crate::minimal_api::TranscriptBuild {
             agent: id,
+            restart_after_reload: false,
             ids: Vec::new(),
             next: 0,
             out: String::new(),
@@ -5171,6 +5198,8 @@ pub(crate) mod tests {
     fn word_select_tip_retires_on_prompt_divergence_and_accepts_before() {
         use std::collections::HashMap;
         let mut app = test_app_with_agent();
+        // This lifecycle regression must not inspect the host pasteboard.
+        app.contextual_hints.image_input = false;
         let id = super::super::session::AgentId(0);
         {
             let agent = app.agents.get_mut(&id).unwrap();
@@ -5194,15 +5223,72 @@ pub(crate) mod tests {
             "Ctrl+Y after a prompt edit must not accept, got {out:?}"
         );
         app.tick();
-        assert!(
-            !app.agents[&id].ephemeral_tip.is_active(),
-            "prompt divergence must retire the word-select tip on tick"
+        assert_ne!(
+            app.agents[&id].ephemeral_tip.current_key(),
+            Some(crate::tips::word_select::WORD_SELECT_TIP_KEY),
+            "prompt divergence must retire the word-select tip, regardless of other hints"
         );
         assert!(
             app.agents[&id].word_select_tip_prompt_snapshot.is_none(),
             "snapshot must drop with the tip"
         );
     }
+    #[test]
+    fn image_viewer_real_prompt_entry_loads_owned_sources_and_rejects_old_results() {
+        use crate::prompt_images::{ImageLoadResult, ImageViewerLoadSource};
+        use crate::terminal::image::GraphicsProtocol;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut jpeg = Vec::new();
+        image::RgbImage::from_pixel(16, 12, image::Rgb([20, 40, 60]))
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
+        for memory in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("source.jpg");
+            std::fs::write(&path, &jpeg).unwrap();
+            let mut app = test_app_with_agent();
+            let id = super::super::session::AgentId(0);
+            idle_agent_with_content(&mut app, id);
+            let guard = crate::terminal::image::set_protocol_for_test(GraphicsProtocol::Kitty);
+            let mut pasted = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+                data: jpeg.clone(), mime_type: "image/jpeg".into(),
+            });
+            pasted.session_image_path = Some(if memory { dir.path().join("missing.jpg") } else { path });
+            if !memory { pasted.encoded_bytes = None; }
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("");
+            agent.prompt.insert_image(pasted).unwrap();
+            agent.prompt.textarea.set_cursor(0);
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut Vec::new());
+            let viewer = agent.image_viewer.as_ref().expect("real Enter opens the viewer");
+            assert!(viewer.loading && viewer.image_bytes.is_empty() && viewer.display_bytes.is_empty());
+            assert_eq!(viewer.display_number, 1);
+            let owner_id = viewer.overlay_owner_id;
+            drop(guard);
+            let _worker_context = crate::terminal::image::set_protocol_for_test(GraphicsProtocol::None);
+            app.tick();
+            let index = app.pending_effects.iter().position(|effect| matches!(effect, crate::app::actions::Effect::LoadImageViewer { .. })).unwrap();
+            let crate::app::actions::Effect::LoadImageViewer { source, protocol, .. } = app.pending_effects.remove(index) else { unreachable!() };
+            assert_eq!(protocol, GraphicsProtocol::Kitty);
+            assert_eq!(matches!(&source, ImageViewerLoadSource::Memory(_)), memory);
+            let result = std::thread::spawn(move || crate::prompt_images::load_image_data(source, protocol)).join().unwrap();
+            assert!(matches!(&result, ImageLoadResult::Loaded(data) if data.image_bytes == jpeg && crate::terminal::image::kitty_format_from_bytes(&data.display_bytes).is_some()));
+            let _ = crate::app::root::dispatch::dispatch(Action::TaskComplete(crate::app::actions::TaskResult::ImageViewerLoaded {
+                agent_id: id, child_session_id: None, owner_id, result,
+            }), &mut app);
+            assert!(!app.agents[&id].image_viewer.as_ref().unwrap().loading);
+            let _reopen_context = crate::terminal::image::set_protocol_for_test(GraphicsProtocol::Kitty);
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.image_viewer = None;
+            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut Vec::new());
+            let new_owner = agent.image_viewer.as_ref().unwrap().overlay_owner_id;
+            assert_ne!(new_owner, owner_id);
+            let _ = crate::app::root::dispatch::dispatch(Action::TaskComplete(crate::app::actions::TaskResult::ImageViewerLoaded {
+                agent_id: id, child_session_id: None, owner_id, result: ImageLoadResult::Failed,
+            }), &mut app);
+            assert_eq!(app.agents[&id].image_viewer.as_ref().unwrap().overlay_owner_id, new_owner);
+        }
+    }
+
     #[test]
     fn image_viewer_load_uses_task_completion_channel() {
         let mut app = test_app_with_agent();

@@ -235,7 +235,8 @@ async fn phase_breakdown_real_functions() {
         rewind_path.clone(),
     )
     .get_rewind_points()
-    .await;
+    .await
+    .expect("load complete rewind fixture");
     let lazy_full_load = t.elapsed();
     let num_rewind = lazy_points.len();
     assert_eq!(

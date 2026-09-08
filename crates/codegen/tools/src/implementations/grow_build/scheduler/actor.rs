@@ -1461,6 +1461,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_update_delete_targets_only_the_requested_task() {
+        let (handle, cancel, _notif_rx) = make_test_actor();
+        let mut first = ScheduledTask::new(300, "first prompt".into(), true, false);
+        first.id = "task-first".into();
+        let mut second = ScheduledTask::new(300, "second prompt".into(), true, false);
+        second.id = "task-second".into();
+
+        for task in [first.clone(), second.clone()] {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            handle
+                .0
+                .send(SchedulerCommand::Create { task, reply })
+                .unwrap();
+            response.await.unwrap().unwrap();
+        }
+
+        let (reply, response) = tokio::sync::oneshot::channel();
+        handle
+            .0
+            .send(SchedulerCommand::Update {
+                id: second.id.clone(),
+                prompt: Some("second prompt updated".into()),
+                interval_secs: None,
+                reply,
+            })
+            .unwrap();
+        let updated = response.await.unwrap().unwrap();
+        assert_eq!(updated.id, second.id);
+        assert_eq!(updated.prompt, "second prompt updated");
+
+        let (reply, response) = tokio::sync::oneshot::channel();
+        handle.0.send(SchedulerCommand::List { reply }).unwrap();
+        let snapshot = response.await.unwrap();
+        assert_eq!(snapshot.tasks.len(), 2);
+        assert_eq!(
+            snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == first.id)
+                .unwrap()
+                .prompt,
+            first.prompt
+        );
+        assert_eq!(
+            snapshot
+                .tasks
+                .iter()
+                .find(|task| task.id == second.id)
+                .unwrap()
+                .prompt,
+            "second prompt updated"
+        );
+
+        assert!(delete(&handle, &second.id).await.unwrap());
+        let (reply, response) = tokio::sync::oneshot::channel();
+        handle.0.send(SchedulerCommand::List { reply }).unwrap();
+        let snapshot = response.await.unwrap();
+        assert_eq!(snapshot.tasks.len(), 1);
+        assert_eq!(snapshot.tasks[0].id, first.id);
+        assert_eq!(snapshot.tasks[0].prompt, first.prompt);
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
     async fn delete_task_existing_then_absent_is_truthful() {
         let (handle, cancel, _notif_rx) = make_test_actor();
 

@@ -715,6 +715,9 @@ impl SessionActor {
                 }
                 pending.zip(projection)
             }) else {
+                // The transition's earlier projection was captured while the
+                // Behavior worker still owned foreground admission.
+                self.send_available_commands_update().await;
                 self.idle_arbiter.notify_waiters();
                 super::idle_arbitration::arbitrate_idle_wake(self.clone(), completion_tx.clone())
                     .await;

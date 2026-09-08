@@ -683,8 +683,9 @@ mod tests {
         // Embed the existing chunk.
         let existing_embedding = provider.embed_batch(&[content]).await.unwrap();
         let chunk_id = format!("{}:0", file_path.to_string_lossy());
+        let hash = index.get_chunk(&chunk_id).unwrap().unwrap().hash;
         index
-            .upsert_embedding(&chunk_id, &existing_embedding[0])
+            .upsert_embedding(&chunk_id, &hash, &existing_embedding[0])
             .unwrap();
 
         // Same content → identical embedding → distance 0 → similarity 1.0 → duplicate.
@@ -722,7 +723,8 @@ mod tests {
         index.reindex_file(&file_path, "session").unwrap();
         let emb = provider.embed_batch(&[existing]).await.unwrap();
         let chunk_id = format!("{}:0", file_path.to_string_lossy());
-        index.upsert_embedding(&chunk_id, &emb[0]).unwrap();
+        let hash = index.get_chunk(&chunk_id).unwrap().unwrap().hash;
+        index.upsert_embedding(&chunk_id, &hash, &emb[0]).unwrap();
 
         // Different content should not be flagged as duplicate.
         let novel = "## Architecture\n\nThe API uses Python FastAPI with async handlers.";

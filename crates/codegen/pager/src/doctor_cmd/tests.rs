@@ -70,6 +70,7 @@ fn tmux_facts(
     control_mode: TmuxProbeResult<bool>,
 ) -> TmuxProbeFacts {
     TmuxProbeFacts {
+        config_files: TmuxProbeResult::Unavailable,
         version: TmuxProbeResult::Unavailable,
         extended_keys: TmuxProbeResult::Unavailable,
         set_clipboard,
@@ -81,6 +82,7 @@ fn tmux_facts(
 
 fn unavailable_tmux_facts() -> TmuxProbeFacts {
     TmuxProbeFacts {
+        config_files: TmuxProbeResult::Unavailable,
         version: TmuxProbeResult::Unavailable,
         extended_keys: TmuxProbeResult::Unavailable,
         set_clipboard: TmuxProbeResult::Unavailable,
@@ -99,6 +101,7 @@ fn healthy_report() -> DiagnosticReport {
             byobu: None,
             ssh: false,
             tmux: crate::diagnostics::TmuxFacts {
+                config_files: None,
                 extended_keys: crate::diagnostics::TmuxOptionFact::Unavailable,
                 set_clipboard: crate::diagnostics::TmuxOptionFact::Unavailable,
                 allow_passthrough_support: crate::diagnostics::TmuxSupportFact::Unavailable,
@@ -561,6 +564,7 @@ fn decline_is_success_and_does_not_write() {
         FixArgs {
             id: Some("ssh-wrap".to_owned()),
             yes: false,
+            config: None,
         },
         true,
         &mut input,
@@ -591,6 +595,7 @@ fn non_tty_without_yes_fails_safely_before_write() {
         FixArgs {
             id: Some("terminal.ssh-wrap".to_owned()),
             yes: false,
+            config: None,
         },
         false,
         &mut std::io::Cursor::new(Vec::<u8>::new()),

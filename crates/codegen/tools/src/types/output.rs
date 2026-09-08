@@ -1,3 +1,4 @@
+use crate::implementations::skills::skill::SkillOutput;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use strip_ansi_escapes::strip_str;
@@ -56,7 +57,6 @@ impl From<serde_json::Value> for DynamicOutput {
     }
 }
 use crate::implementations::grow_build::todo::{TodoItem, TodoState};
-use crate::implementations::skills::skill::SkillOutput;
 use crate::util::truncate::{DEFAULT_SOFT_WRAP_WIDTH, soft_wrap_lines};
 /// Result of running a tool through the ToolRunner pipeline.
 ///
@@ -406,9 +406,9 @@ pub enum WebFetchOutput {
     Content(WebFetchContent),
     /// Domain is not in the allowed domains list.
     DomainNotAllowed(String),
-    /// Server redirected to a different host.
-    CrossHostRedirect {
-        original_host: String,
+    /// Server returned a redirect that requires a new authorized tool call.
+    RedirectRequired {
+        original_url: String,
         redirect_url: String,
     },
     /// Pre-formatted error message (returned without the `Tool \`X\` failed:`
@@ -428,13 +428,13 @@ impl WebFetchOutput {
                     domain
                 )
             }
-            Self::CrossHostRedirect {
-                original_host,
+            Self::RedirectRequired {
+                original_url,
                 redirect_url,
             } => {
                 format!(
-                    "Error: cross-host redirect from {} to {}. Make a new web_fetch call with the redirect URL if needed.",
-                    original_host, redirect_url
+                    "Redirect from {} to {} requires a new web_fetch call so the target can be authorized.",
+                    original_url, redirect_url
                 )
             }
             Self::Error {
@@ -531,10 +531,10 @@ impl ToolOutput {
             ToolOutput::ReadFile(
                 ReadFileOutput::FileContent(_) | ReadFileOutput::ImageContent(_),
             ) => false,
+            ToolOutput::Skill(s) => !s.success,
             ToolOutput::ReadFile(_) => true,
             ToolOutput::TaskOutput(TaskOutputOutput::TaskNotFound(_)) => true,
             ToolOutput::KillTask(KillTaskOutput::TaskNotFound(_)) => true,
-            ToolOutput::Skill(s) => !s.success,
             ToolOutput::WebFetch(WebFetchOutput::Content(_)) => false,
             ToolOutput::WebFetch(_) => true,
             ToolOutput::Todo(
@@ -895,7 +895,6 @@ impl tool_runtime::ToolOutput for ListDirOutput {}
 impl tool_runtime::ToolOutput for SearchReplaceOutput {}
 impl tool_runtime::ToolOutput for TodoWriteOutput {}
 impl tool_runtime::ToolOutput for WebFetchOutput {}
-impl tool_runtime::ToolOutput for SkillOutput {}
 impl tool_runtime::ToolOutput for SearchToolOutput {}
 impl tool_runtime::ToolOutput for PlanControlOutput {}
 impl tool_runtime::ToolOutput for AskUserQuestionOutput {}
@@ -1739,3 +1738,5 @@ mod tests {
         );
     }
 }
+
+impl tool_runtime::ToolOutput for SkillOutput {}

@@ -485,6 +485,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         session_meta: arguments.meta.as_ref(),
                         persisted_agent_name: None,
                         session_model_id,
+                        session_sampling_config: session_sampling,
                         session_permission_mode,
                         prompt_display_cwd: None,
             };
@@ -748,11 +749,6 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             drop(flush_timer);
         }
         let origin_client = self.origin_client_info_from_meta(request_meta.as_ref());
-        let load_session_sampling = self
-            .resolve_sampling_config_for_model(
-                &self.models_manager.current_model_id(),
-                origin_client.clone(),
-            );
         let mut persistence_timer = crate::instrumentation_timer!("session.load_light");
         persistence_timer.with_field("session_id", session_id.0.as_ref());
         let claim_writer = resident_actor.is_none();
@@ -864,6 +860,21 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 persisted_model_id.0
             ))
         })?;
+        // Hydrate before actor publication: a default -> saved-effort switch
+        // would fabricate a transition whose from side disagrees with replay.
+        if spawn_new_actor
+            && let Some(effort) = summary.reasoning_effort
+            && !self.models_manager.model_offers_reasoning_effort(summary.current_model_id.0.as_ref(), effort)
+        {
+            return Err(acp::Error::invalid_params().data(format!(
+                "Session model '{}' no longer admits persisted reasoning effort '{}'.",
+                summary.current_model_id.0, effort,
+            )));
+        }
+        let mut load_session_sampling = self.resolve_sampling_config_for_model(
+            &summary.current_model_id, origin_client.clone(),
+        );
+        load_session_sampling.reasoning_effort = summary.reasoning_effort;
         let restored_compaction_count = persisted_signals
             .as_ref()
             .map(|s| s.compaction_count as u64)
@@ -1108,6 +1119,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         session_meta: request_meta.as_ref(),
                         persisted_agent_name: persisted_agent_name.as_deref(),
                         session_model_id: summary.current_model_id.clone(),
+                        session_sampling_config: load_session_sampling,
                         session_permission_mode,
                         prompt_display_cwd,
                     },
@@ -1251,41 +1263,10 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 )
                 .await;
         }
-        let model_id = summary.current_model_id.clone();
         self.model_unavailable_sessions.borrow_mut().remove(session_id.0.as_ref());
-        tracing::debug!(
-            session_id = %session_id.0,
-            final_model_id = %model_id.0,
-            "load_session: resolved final model_id for set_session_model"
-        );
-        let enqueued_restore = {
-            let _timer = crate::instrumentation_timer!("session.restore_model");
-            let restore_meta = summary
-                .reasoning_effort
-                .map(|effort| {
-                    let mut map = acp::Meta::new();
-                    map.insert(
-                        REASONING_EFFORT_META_KEY.to_string(),
-                        reasoning_effort_meta_value(effort),
-                    );
-                    map
-                });
-            self.control_session_handle(&session_id)
-                .ok_or_else(|| acp::Error::internal_error().data("loaded session actor missing"))
-                .and_then(|handle| {
-                    crate::agent::handlers::model_switch::enqueue(
-                        self,
-                        &catalog_transaction,
-                        handle,
-                        crate::agent::handlers::model_switch::ModelSwitchRequest::new(session_id.to_owned(), model_id)
-                            .meta(restore_meta),
-                    )
-                })
-        };
+        // Cold actors already hold the replayed selection. Resident actors
+        // retain their live selection; reconnect is not a model-control request.
         drop(catalog_transaction);
-        if let Ok(enqueued) = enqueued_restore {
-            let _ = crate::agent::handlers::model_switch::finish(self, enqueued).await;
-        }
         let mut response_meta_map = serde_json::Map::new();
         response_meta_map.insert("sessionId".to_string(), serde_json::json!(session_id));
         if let Some(persist) = persist_data {

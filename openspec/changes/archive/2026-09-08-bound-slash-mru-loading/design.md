@@ -1,0 +1,4 @@
+# Design
+在ensure_loaded内调用接收路径的私有加载方法，以便无需修改GROW_HOME即可验证状态转换。文件读取用OpenOptions，Unix增加O_NONBLOCK；打开后的metadata必须为regular file且长度不超过1,048,576。同一File交给take(limit+1)读取，防止metadata之后增长绕过上限。拒绝结果走现有read error分支，loaded=true且persist_enabled=false；后续touch仍允许内存排名但无快照。缺失文件允许后续持久化，损坏JSON既有覆盖政策不变。
+
+1 MiB是编码输入预算，不是解析峰值或所有存储的总预算；256个常规命令远小于此值。仍为同步普通文件读取，不承诺慢文件系统的墙钟超时。Unix符号链接继续跟随，但目标必须为普通文件。不新增公共实体、依赖或配置项。

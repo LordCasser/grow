@@ -67,6 +67,7 @@ tikv-jemalloc-sys = { workspace = true, optional = true }
 tikv-jemalloc-ctl = { workspace = true, optional = true, features = ["stats", "use_std"] }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 serial_test = { workspace = true }
 # `PagerArgs::try_parse_from` in the CLI-parsing unit tests (needs the
 # `clap::Parser` trait in scope).

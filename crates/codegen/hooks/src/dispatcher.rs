@@ -675,6 +675,73 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn invalid_restored_matcher_respects_policy_without_match_value() {
+        for event in [HookEventName::SessionStart, HookEventName::Stop] {
+            let mut spec = make_command_spec("invalid-pattern", None, true, "exit 0");
+            spec.event = event;
+            spec.configured_matcher = Some("[invalid".into());
+            let mut registry = registry_from_specs(vec![spec]);
+            registry.recompile_matchers();
+            let mut envelope = if event == HookEventName::Stop {
+                stop_envelope()
+            } else {
+                session_start_envelope()
+            };
+            if let HookPayload::SessionStart { source, .. } = &mut envelope.payload {
+                source.clear();
+            }
+            assert!(envelope.payload.match_value().is_none());
+            let plan = plan_dispatch_with_policy(&registry, event, &envelope, |_| false);
+            if event == HookEventName::Stop {
+                assert!(matches!(plan[0].action, HookPlanAction::Execute(_)));
+            } else {
+                assert!(matches!(
+                    plan[0].action,
+                    HookPlanAction::Skip(HookSkipReason::MatcherMiss)
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_output_error_uses_configured_failure_policy() {
+        for policy in [OnFailure::Allow, OnFailure::Block] {
+            let mut spec = make_command_spec("schema", None, true, "echo '{\"decision\":false}'");
+            spec.on_failure = policy;
+            let result = dispatch_pre_tool_use(
+                &registry_from_specs(vec![spec]),
+                &pre_tool_use_envelope("read_file"),
+                &run_ctx(),
+            )
+            .await;
+            assert!(matches!(result.results[0], HookRunResult::Failed { .. }));
+            assert_eq!(
+                matches!(result.decision, HookDecision::Deny { .. }),
+                policy == OnFailure::Block
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn allow_output_does_not_bypass_failure_block_policy() {
+        let mut strict = make_command_spec(
+            "strict",
+            None,
+            true,
+            "echo '{\"decision\":\"allow\"}'; exit 1",
+        );
+        strict.on_failure = OnFailure::Block;
+        let result = dispatch_pre_tool_use(
+            &registry_from_specs(vec![strict]),
+            &pre_tool_use_envelope("read_file"),
+            &run_ctx(),
+        )
+        .await;
+        assert!(matches!(result.decision, HookDecision::Deny { .. }));
+        assert!(matches!(result.results[0], HookRunResult::Failed { .. }));
+    }
+
     #[tokio::test]
     async fn on_failure_block_is_decisive_and_marks_later_hooks_prior_block() {
         let mut strict = make_command_spec("strict", None, true, "exit 1");

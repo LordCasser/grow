@@ -1085,6 +1085,8 @@ pub struct AgentView {
     /// Set by the key/mouse handler, consumed by `do_cancel_turn` / the
     /// cancel-retry path so `session/cancel` carries `_meta.cancelTrigger`.
     pub(crate) cancel_trigger_hint: Option<crate::app::actions::CancelTrigger>,
+    /// Pending read identity and the session binding epoch that issued it.
+    pub(crate) rewind_read: Option<(uuid::Uuid, u32)>,
     pub(crate) rewind_state: Option<crate::views::rewind::RewindState>,
     pub(crate) rewind_points: Option<Vec<crate::views::rewind::RewindPointInfo>>,
     /// In-place edit of a previous user prompt. See `inline_edit.rs`.

@@ -338,6 +338,7 @@ fn doctor_planning_promotes_initial_session_binding() {
         .bind_session_id("bound".into());
     dispatch_task_result(
         TaskResult::DoctorFixPlanned {
+            report_only: false,
             target,
             result: Ok(crate::app::actions::DoctorPlanningOutcome::Plan(Box::new(
                 crate::diagnostics::test_fix_plan(temp.path()),
@@ -377,6 +378,7 @@ fn doctor_planning_rejects_bind_replace_and_unbind_rebind() {
         }
         dispatch_task_result(
             TaskResult::DoctorFixPlanned {
+            report_only: false,
                 target,
                 result: Ok(crate::app::actions::DoctorPlanningOutcome::Plan(Box::new(
                     crate::diagnostics::test_fix_plan(temp.path()),
@@ -403,6 +405,7 @@ fn doctor_planning_opens_refuses_remote_and_rejects_stale_identity() {
     let scrollback_len = app.agents[&id].scrollback.len();
     dispatch_task_result(
         TaskResult::DoctorFixPlanned {
+            report_only: false,
             target: target.clone(),
             result: Ok(crate::app::actions::DoctorPlanningOutcome::Plan(Box::new(
                 crate::diagnostics::test_fix_plan(temp.path()),
@@ -434,6 +437,7 @@ fn doctor_planning_opens_refuses_remote_and_rejects_stale_identity() {
 
     dispatch_task_result(
         TaskResult::DoctorFixPlanned {
+            report_only: false,
             target: target.clone(),
             result: Ok(crate::app::actions::DoctorPlanningOutcome::RunLocally(
                 "grow doctor fix ssh-wrap".to_owned(),
@@ -452,6 +456,7 @@ fn doctor_planning_opens_refuses_remote_and_rejects_stale_identity() {
         .bind_session_id("replacement".into());
     dispatch_task_result(
         TaskResult::DoctorFixPlanned {
+            report_only: false,
             target: target.clone(),
             result: Ok(crate::app::actions::DoctorPlanningOutcome::Plan(Box::new(
                 crate::diagnostics::test_fix_plan(temp.path()),
@@ -2962,4 +2967,53 @@ fn session_list_empty_without_partial_keeps_generic_toast() {
         &mut app,
     );
     assert!(read_toast(&app).contains("No sessions found"));
+}
+
+#[test]
+fn doctor_dispatch_defers_collection_and_limits_duplicate_requests() {
+    use crate::slash::command::DoctorRequest;
+    let mut app = test_app_with_agent();
+    let cwd = app.agents[&AgentId(0)].session.cwd.clone();
+    for request in [DoctorRequest::Report, DoctorRequest::ListFixes, DoctorRequest::Fix(crate::diagnostics::TMUX_CLIPBOARD_ID, None)] {
+        let effects = super::super::prompt::dispatch_doctor(request, &mut app);
+        assert!(matches!(effects.as_slice(), [Effect::PrepareDoctor { input, .. }] if input.workspace == cwd));
+        assert!(super::super::prompt::dispatch_doctor(DoctorRequest::Report, &mut app).is_empty());
+        assert_eq!(app.doctor_collection.available_permits(), 0);
+        drop(effects);
+        assert_eq!(app.doctor_collection.available_permits(), 1);
+    }
+}
+
+#[test]
+fn doctor_report_completion_stays_with_original_session() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let target = doctor_target(&app, id);
+    app.active_view = crate::app::root::ActiveView::Welcome;
+    dispatch_task_result(TaskResult::DoctorFixPlanned {
+        report_only: true, target: target.clone(),
+        result: Ok(crate::app::actions::DoctorPlanningOutcome::Report("original report".into())),
+    }, &mut app);
+    assert!(matches!(&app.agents[&id].scrollback.last().unwrap().block,
+        RenderBlock::Notice(block) if block.text == "original report"));
+    let count = app.agents[&id].scrollback.len();
+    app.agents.get_mut(&id).unwrap().bind_session_id("replacement".into());
+    for result in [Ok(crate::app::actions::DoctorPlanningOutcome::Report("stale report".into())), Err("old failure".into())] {
+        dispatch_task_result(TaskResult::DoctorFixPlanned { report_only: true, target: target.clone(), result }, &mut app);
+        assert_eq!(app.agents[&id].scrollback.len(), count);
+    }
+}
+
+#[test]
+fn doctor_report_from_removed_origin_does_not_fall_back_to_another_agent() {
+    let mut app = test_app_with_agent();
+    let target = doctor_target(&app, AgentId(0));
+    app.agents.shift_remove(&AgentId(0));
+    let other = AgentId(1);
+    app.agents.insert(other, crate::test_util::make_agent_view(Some("other"), "/tmp"));
+    app.active_view = crate::app::root::ActiveView::Agent(other);
+    for result in [Ok(crate::app::actions::DoctorPlanningOutcome::Report("removed report".into())), Err("removed error".into())] {
+        dispatch_task_result(TaskResult::DoctorFixPlanned { report_only: true, target: target.clone(), result }, &mut app);
+        assert!(app.agents[&other].scrollback.is_empty());
+    }
 }

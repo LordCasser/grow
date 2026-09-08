@@ -7,11 +7,22 @@ use agent::prompt::skills::{SkillInfo, SkillsConfig, list_skills_with_plugins};
 use super::ExtResult;
 
 /// Generic params for methods that only need an optional `cwd`.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 struct CwdParams {
-    #[serde(default)]
     cwd: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CwdParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Derived struct deserialization also accepts arrays; ACP params here
+        // must be an object, including when cwd is omitted.
+        let mut fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let cwd = serde_json::from_value::<Option<String>>(
+            fields.remove("cwd").unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(Self { cwd })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,7 +83,7 @@ pub struct SkillsResetResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsToggleRequest {
-    /// Skill name to toggle.
+    /// Catalog key to toggle: native name or plugin:name.
     pub name: String,
     /// Whether to enable (`true`) or disable (`false`) the skill.
     pub enabled: bool,
@@ -116,33 +127,97 @@ pub struct SkillsConfigResponse {
     pub skills: Vec<SkillInfo>,
 }
 
-/// Reload skills using the current config for the given working directory.
+/// Reload skills without running filesystem scans on the async request thread.
 #[tracing::instrument(skip_all, fields(cwd))]
 async fn reload_skills(
     cwd: &str,
     plugin_registry: Option<&agent::plugins::PluginRegistry>,
-) -> Vec<SkillInfo> {
-    let config = cli_config::load_config().await.skills;
-    let discovery = list_skills_with_plugins(Some(cwd), &config, plugin_registry);
-    match tokio::time::timeout(std::time::Duration::from_secs(5), discovery).await {
-        Ok(skills) => skills,
-        Err(_) => {
-            tracing::warn!("Skills reload timed out");
-            vec![]
-        }
+) -> Result<Vec<SkillInfo>, acp::Error> {
+    static SLOTS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+    let cwd = cwd.to_owned();
+    let registry = plugin_registry.cloned();
+    let runtime = tokio::runtime::Handle::current();
+    run_skill_reload(
+        SLOTS.clone(),
+        std::time::Duration::from_secs(5),
+        move || {
+            runtime.block_on(async {
+                let config = cli_config::load_config().await.skills;
+                list_skills_with_plugins(Some(&cwd), &config, registry.as_ref()).await
+            })
+        },
+    )
+    .await
+    .map_err(|error| acp::Error::internal_error().data(format!("Skills reload failed: {error}")))
+}
+
+async fn run_skill_reload(
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+    timeout: std::time::Duration,
+    scan: impl FnOnce() -> Vec<SkillInfo> + Send + 'static,
+) -> anyhow::Result<Vec<SkillInfo>> {
+    tokio::time::timeout(timeout, async move {
+        let permit = slots.acquire_owned().await?;
+        tokio::task::spawn_blocking(move || {
+            // Request cancellation cannot interrupt filesystem calls. Keep the
+            // slot until the worker actually exits, including after a timeout.
+            let _permit = permit;
+            scan()
+        })
+        .await
+        .map_err(anyhow::Error::from)
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out waiting for skill discovery"))?
+}
+
+fn saved_skill_reload_error(error: acp::Error) -> acp::Error {
+    acp::Error::internal_error().data(format!(
+        "Skill configuration was saved, but reloading skills failed: {error}"
+    ))
+}
+
+/// Count skills at or below the given path, respecting component boundaries.
+fn count_skills_from(skills: &[SkillInfo], dir: &std::path::Path) -> usize {
+    let dir = resolve_skill_path(&dir.to_string_lossy(), ".");
+    skills
+        .iter()
+        .filter(|s| std::path::Path::new(&resolve_skill_path(&s.path, ".")).starts_with(&dir))
+        .count()
+}
+
+fn add_skill_path(config: &mut SkillsConfig, p: String) {
+    config.ignore.retain(|i| {
+        let resolved = resolve_config_skill_path(i);
+        let ignored = std::path::Path::new(&resolved);
+        let added = std::path::Path::new(&p);
+        !(added.starts_with(ignored) || ignored.starts_with(added))
+    });
+    if !config
+        .paths
+        .iter()
+        .any(|i| resolve_config_skill_path(i) == p)
+    {
+        config.paths.push(p);
     }
 }
 
-/// Count how many skills have paths starting with the given prefix.
-fn count_skills_from(skills: &[SkillInfo], dir: &std::path::Path) -> usize {
-    let prefix = dir.to_str().unwrap_or("");
-    skills.iter().filter(|s| s.path.starts_with(prefix)).count()
+fn remove_skill_path(config: &mut SkillsConfig, path: &str) {
+    config
+        .paths
+        .retain(|i| resolve_config_skill_path(i) != path);
+}
+
+// Settings edits contain raw TOML strings; expand only their comparison values.
+fn resolve_config_skill_path(raw: &str) -> String {
+    resolve_skill_path(&crate::config::expand_env_vars_in_string(raw), ".")
 }
 
 /// Resolve a skill path to an absolute path.
 ///
 /// Handles `~` expansion and relative path resolution against `cwd`.
-/// Falls back to the original string if canonicalization fails.
+/// Keeps the anchored path when the target cannot be canonicalized.
 fn resolve_skill_path(raw: &str, cwd: &str) -> String {
     use std::path::PathBuf;
 
@@ -169,8 +244,10 @@ fn resolve_skill_path(raw: &str, cwd: &str) -> String {
         PathBuf::from(cwd).join(&expanded)
     };
 
-    // canonicalize resolves symlinks and `..` — fall back to the joined path if it fails
-    // (e.g. path doesn't exist yet)
+    // Anchor relative cwd even when the target does not exist. Do not collapse
+    // `..` lexically: its meaning can depend on an existing symlink.
+    let absolute = std::path::absolute(&absolute).unwrap_or(absolute);
+    // canonicalize resolves symlinks and `..`; missing targets keep the anchor.
     dunce::canonicalize(&absolute)
         .unwrap_or(absolute)
         .to_string_lossy()
@@ -265,12 +342,7 @@ pub async fn handle(
 
             let p = resolved.clone();
             if let Err(e) = cli_config::update_config(|cfg| {
-                cfg.skills.ignore.retain(|i| {
-                    !(i == &p || p.starts_with(i.as_str()) || i.starts_with(p.as_str()))
-                });
-                if !cfg.skills.paths.contains(&p) {
-                    cfg.skills.paths.push(p);
-                }
+                add_skill_path(&mut cfg.skills, p);
             })
             .await
             {
@@ -284,11 +356,10 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry).await;
-            let added_count = skills
-                .iter()
-                .filter(|s| s.path.starts_with(&resolved))
-                .count();
+            let skills = reload_skills(cwd, plugin_registry)
+                .await
+                .map_err(saved_skill_reload_error)?;
+            let added_count = count_skills_from(&skills, std::path::Path::new(&resolved));
             let total = skills.len();
             let message = format!(
                 "Added path {}. {} new skill{} found ({} total).",
@@ -321,7 +392,7 @@ pub async fn handle(
 
             let p = resolved.clone();
             if let Err(e) = cli_config::update_config(|cfg| {
-                cfg.skills.paths.retain(|i| i != &p);
+                remove_skill_path(&mut cfg.skills, &p);
             })
             .await
             {
@@ -333,7 +404,9 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry).await;
+            let skills = reload_skills(cwd, plugin_registry)
+                .await
+                .map_err(saved_skill_reload_error)?;
             let total = skills.len();
             let message = format!(
                 "Removed path {}. {} skill{} remaining.",
@@ -353,8 +426,7 @@ pub async fn handle(
         }
 
         "grow/skills/reset" => {
-            let params: CwdParams =
-                serde_json::from_str(args.params.get()).unwrap_or(CwdParams { cwd: None });
+            let params: CwdParams = super::parse_params(args)?;
             let cwd = params.cwd.as_deref().unwrap_or(".");
 
             if let Err(e) = cli_config::update_config(|cfg| {
@@ -367,7 +439,9 @@ pub async fn handle(
                 )));
             }
 
-            let skills = reload_skills(cwd, plugin_registry).await;
+            let skills = reload_skills(cwd, plugin_registry)
+                .await
+                .map_err(saved_skill_reload_error)?;
             let message = "Custom skills config reset".to_string();
 
             super::to_ext_response(Ok(SkillsResetResponse { skills, message }))
@@ -375,7 +449,7 @@ pub async fn handle(
 
         "grow/skills/list" => {
             let req: SkillsListRequest = serde_json::from_str(args.params.get())?;
-            let skills = reload_skills(&req.cwd, plugin_registry).await;
+            let skills = reload_skills(&req.cwd, plugin_registry).await?;
             super::to_ext_response(Ok(SkillsListResponse { skills }))
         }
 
@@ -399,15 +473,14 @@ pub async fn handle(
         }
 
         "grow/skills/config" => {
-            let params: CwdParams =
-                serde_json::from_str(args.params.get()).unwrap_or(CwdParams { cwd: None });
+            let params: CwdParams = super::parse_params(args)?;
             let cwd = params.cwd.as_deref().unwrap_or(".");
 
             let config = cli_config::load_config().await.skills;
             let paths = config.paths.clone();
             let ignore = config.ignore.clone();
 
-            let skills = reload_skills(cwd, plugin_registry).await;
+            let skills = reload_skills(cwd, plugin_registry).await?;
             let total_skills = skills.len();
 
             let auto_sources = discover_auto_sources(cwd, &skills);
@@ -430,10 +503,7 @@ pub async fn handle(
             if !paths.is_empty() {
                 msg.push_str("\nCustom paths:\n");
                 for p in &paths {
-                    let count = skills
-                        .iter()
-                        .filter(|s| s.path.starts_with(p.as_str()))
-                        .count();
+                    let count = count_skills_from(&skills, std::path::Path::new(p));
                     msg.push_str(&format!(
                         "  • {}  ({} skill{})\n",
                         p,
@@ -466,8 +536,8 @@ pub async fn handle(
             let cwd = req.cwd.as_deref().unwrap_or(".");
 
             // Validate the skill name exists before modifying config.
-            let current_skills = reload_skills(cwd, plugin_registry).await;
-            if !current_skills.iter().any(|s| s.name == req.name) {
+            let current_skills = reload_skills(cwd, plugin_registry).await?;
+            if !current_skills.iter().any(|s| s.dedup_key() == req.name) {
                 return super::to_ext_response(Err::<SkillsListResponse, _>(anyhow::anyhow!(
                     "Skill '{}' not found",
                     req.name
@@ -498,7 +568,7 @@ pub async fn handle(
             let skills: Vec<SkillInfo> = current_skills
                 .into_iter()
                 .map(|mut s| {
-                    s.enabled = !disabled_set.contains(s.name.as_str());
+                    s.enabled = !disabled_set.contains(s.dedup_key().as_str());
                     s
                 })
                 .collect();
@@ -637,5 +707,231 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["totalSkills"], 5);
         assert!(json["paths"].is_array());
+    }
+    #[test]
+    fn add_preserves_neighbor_ignore_paths() {
+        let mut config = SkillsConfig {
+            ignore: [
+                "/skills/foobar",
+                "/skills/foo",
+                "/skills/foo/child",
+                "/skills",
+                "/other",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            ..Default::default()
+        };
+        add_skill_path(&mut config, "/skills/foo".into());
+        add_skill_path(&mut config, "/skills/foo".into());
+        assert_eq!(config.ignore, ["/skills/foobar", "/other"]);
+        assert_eq!(config.paths, ["/skills/foo"]);
+    }
+
+    #[test]
+    fn count_excludes_neighbor_prefixes() {
+        let skills = [
+            "/skills/foo/SKILL.md",
+            "/skills/foobar/SKILL.md",
+            "/skills/foo/nested/SKILL.md",
+        ]
+        .map(|path| SkillInfo {
+            path: path.into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            count_skills_from(&skills, std::path::Path::new("/skills/foo")),
+            2
+        );
+        assert_eq!(
+            count_skills_from(&skills, std::path::Path::new("/skills/foo/SKILL.md")),
+            1
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn existing_symlink_alias_management() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let alias_text = alias.to_string_lossy().into_owned();
+        let resolved = resolve_skill_path(real.to_str().unwrap(), ".");
+        let mut config = SkillsConfig {
+            paths: vec![alias_text.clone()],
+            ignore: vec![alias_text.clone()],
+            ..Default::default()
+        };
+        add_skill_path(&mut config, resolved.clone());
+        assert!(config.ignore.is_empty());
+        assert_eq!(config.paths, [alias_text]);
+        remove_skill_path(&mut config, &resolved);
+        assert!(config.paths.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_count_resolves_existing_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("SKILL.md"), "body").unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let skills = [SkillInfo {
+            path: resolve_skill_path(real.join("SKILL.md").to_str().unwrap(), "."),
+            ..Default::default()
+        }];
+        assert_eq!(count_skills_from(&skills, &alias), 1);
+    }
+    #[test]
+    fn manages_environment_paths_without_rewriting_config() {
+        let home = std::env::var("HOME").expect("HOME available for read-only fixture");
+        let resolved = resolve_skill_path(&home, ".");
+        let mut config = SkillsConfig {
+            paths: vec!["${HOME}".into()],
+            ignore: vec!["${HOME}".into()],
+            ..Default::default()
+        };
+        add_skill_path(&mut config, resolved.clone());
+        assert!(config.ignore.is_empty());
+        assert_eq!(config.paths, ["${HOME}"]);
+        remove_skill_path(&mut config, &resolved);
+        assert!(config.paths.is_empty());
+    }
+
+    #[test]
+    fn request_path_keeps_environment_text_literal() {
+        let temp = tempfile::tempdir().unwrap();
+        let resolved = resolve_skill_path("${HOME}/skill", temp.path().to_str().unwrap());
+        assert!(resolved.contains("${HOME}"));
+    }
+    #[test]
+    fn missing_skill_path_is_anchored_with_relative_cwd() {
+        let current = std::env::current_dir().unwrap();
+        let name = format!("missing-skill-{}", uuid::Uuid::new_v4());
+        assert!(!current.join(&name).exists());
+        for cwd in [".", "relative-workspace"] {
+            let resolved = resolve_skill_path(&name, cwd);
+            assert!(std::path::Path::new(&resolved).is_absolute(), "{resolved}");
+            assert_eq!(
+                std::path::PathBuf::from(&resolved),
+                std::path::absolute(current.join(cwd).join(&name)).unwrap()
+            );
+            let mut config = SkillsConfig::default();
+            add_skill_path(&mut config, resolved.clone());
+            assert_eq!(config.paths, [resolved]);
+        }
+    }
+    #[test]
+    fn optional_cwd_rejects_invalid_params_and_accepts_defaults() {
+        for raw in [
+            "null",
+            "[]",
+            r#"["/project"]"#,
+            r#"{"cwd":1}"#,
+            r#"{"cwd":false}"#,
+        ] {
+            let error = super::super::parse_params_str::<CwdParams>(raw).unwrap_err();
+            assert_eq!(error.code, acp::Error::invalid_params().code, "{raw}");
+        }
+        for raw in ["{}", r#"{"cwd":null}"#] {
+            let params = super::super::parse_params_str::<CwdParams>(raw).unwrap();
+            assert!(params.cwd.is_none());
+        }
+        let params = super::super::parse_params_str::<CwdParams>(r#"{"cwd":"/project"}"#).unwrap();
+        assert_eq!(params.cwd.as_deref(), Some("/project"));
+    }
+    #[tokio::test]
+    async fn reload_timeout_retains_slot_until_worker_exits() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::time::Duration;
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let (started, start) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let first = tokio::spawn(run_skill_reload(
+            slots.clone(),
+            Duration::from_millis(50),
+            move || {
+                let _ = started.send(());
+                let _ = released.recv();
+                vec![]
+            },
+        ));
+        start.await.unwrap();
+        assert!(first.await.unwrap().is_err());
+        assert_eq!(slots.available_permits(), 0);
+        let ran = Arc::new(AtomicBool::new(false));
+        let observed = ran.clone();
+        assert!(
+            run_skill_reload(slots.clone(), Duration::from_millis(10), move || {
+                observed.store(true, Ordering::SeqCst);
+                vec![]
+            })
+            .await
+            .is_err()
+        );
+        assert!(!ran.load(Ordering::SeqCst));
+        release.send(()).unwrap();
+        let permit = tokio::time::timeout(Duration::from_secs(2), slots.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn reload_empty_success_and_worker_failure_are_distinct() {
+        use std::{sync::Arc, time::Duration};
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        assert!(
+            run_skill_reload(slots.clone(), Duration::from_secs(2), Vec::new)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            run_skill_reload(slots.clone(), Duration::from_secs(2), || panic!(
+                "scan failed"
+            ))
+            .await
+            .is_err()
+        );
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn canceled_reload_waiter_does_not_start_scan() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+            time::Duration,
+        };
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = slots.clone().acquire_owned().await.unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        let observed = ran.clone();
+        let waiter = tokio::spawn(run_skill_reload(
+            slots.clone(),
+            Duration::from_secs(2),
+            move || {
+                observed.store(true, Ordering::SeqCst);
+                vec![]
+            },
+        ));
+        tokio::task::yield_now().await;
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        drop(permit);
+        let permit = slots.acquire().await.unwrap();
+        assert!(!ran.load(Ordering::SeqCst));
+        drop(permit);
     }
 }

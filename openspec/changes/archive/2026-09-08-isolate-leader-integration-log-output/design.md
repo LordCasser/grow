@@ -1,0 +1,4 @@
+# Evidence and scope
+Full Rust symbol search finds snapshot_log consumed by diagnostics unit tests and shell leader stdio/soak tests. snapshot_session_log has no repository caller. Soak sets its own temporary GROW_HOME before agent use; no proven soak failure and it is not changed here. stdio integration has no home sandbox and explicitly documents real-home writes.
+
+Use existing diagnostics redirect_to_temp_for_tests in ctor, mirroring unit tests. Regression child starts with an explicit temporary GROW_HOME, emits marker, verifies snapshot contains it and the configured home logs/unified.jsonl was never created. No process-global environment changes after initialization. Parent/child ctor both route unified log to private process temporary paths. This only isolates unified logs, not every other integration test side effect.

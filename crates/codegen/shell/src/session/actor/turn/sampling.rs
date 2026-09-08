@@ -4,6 +4,19 @@
 use super::*;
 
 const IMAGE_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
+// Check the absolute deadline before polling a provider that may be immediately
+// ready. Tokio's timeout polls its inner future first, even after expiration.
+async fn image_description_before_deadline<F: std::future::Future>(
+    deadline: tokio::time::Instant,
+    provider: F,
+) -> Result<F::Output, ()> {
+    tokio::select! {
+        biased;
+        _ = tokio::time::sleep_until(deadline) => Err(()),
+        output = provider => Ok(output),
+    }
+}
+
 const PERMISSION_JUDGMENT_MAX_ATTEMPTS: usize = 2;
 const PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS: u32 = 1_024;
 const PERMISSION_JUDGMENT_RETRY_MESSAGE: &str = "The previous permission judgment attempt returned an empty or invalid structured response, timed out, or failed with a transient provider error. Retry once. Return exactly one JSON object with no Markdown or prose: {\"decision\":\"allow\"|\"deny\",\"reason\":\"brief explanation\"}.";
@@ -47,8 +60,10 @@ fn is_native_continuation_rejection(
     request_had_native_continuation: bool,
 ) -> bool {
     request_had_native_continuation
-        && matches!(error.kind, sampler::SamplingErrorKind::Api)
-        && error.status_code == Some(400)
+        && ((matches!(error.kind, sampler::SamplingErrorKind::Api)
+            && error.status_code == Some(400))
+            || (matches!(error.kind, sampler::SamplingErrorKind::Serialization)
+                && error.message.contains("missing field `signature`")))
 }
 
 fn sampler_model_image_input_key(
@@ -214,15 +229,7 @@ impl SessionActor {
             self.resolve_image_description_route(rejected_key).await
         {
             let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
-            for group in &groups {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    tracing::warn!(
-                        timeout_secs = IMAGE_RECOVERY_TIMEOUT.as_secs(),
-                        "image context recovery reached its total timeout"
-                    );
-                    break;
-                }
+            let prepared = groups.iter().map(|group| {
                 let source_kind = match group.source {
                     ConversationImageSource::User => "User",
                     ConversationImageSource::ToolResult => "ToolResult",
@@ -235,11 +242,6 @@ impl SessionActor {
                     "{source_kind} message with {} image attachment(s), in attachment order. Existing message text:\n{source_text}",
                     group.image_count(),
                 );
-                let source_ref = chat_state::TimelineRangeRef {
-                    timeline_id: materialized.source_ref.timeline_id.clone(),
-                    first_seq: materialized.transcript_ids[group.item_index].event.get(),
-                    last_seq: materialized.transcript_ids[group.item_index].event.get(),
-                };
                 let source = materialized.transcript_ids[group.item_index];
                 let source_key = format!("{}:{}", source.event.get(), source.item);
                 let cache_key = self.image_describe_cache.key_for_urls(
@@ -248,6 +250,50 @@ impl SessionActor {
                     &source_key,
                     materialized.surface_revision,
                 );
+                let prompt_text = crate::session::image_describe::build_describe_prompt(&source_context);
+                (group, source, cache_key, prompt_text)
+            }).collect::<Vec<_>>();
+            let uncached = prepared
+                .iter()
+                .filter(|(_, _, key, _)| self.image_describe_cache.get(key).is_none())
+                .collect::<Vec<_>>();
+            if !uncached.is_empty() {
+                let queries = uncached
+                    .iter()
+                    .map(|(_, source, _, prompt)| (*source, prompt.clone()))
+                    .collect();
+                match crate::session::image_describe::recover_completed_descriptions(
+                    self.session_directory.clone(),
+                    self.session_info.id.to_string(),
+                    materialized.surface_revision,
+                    queries,
+                )
+                .await
+                {
+                    Ok(recovered) => {
+                        for ((_, _, key, _), result) in uncached.into_iter().zip(recovered) {
+                            if let Some(result) = result {
+                                self.image_describe_cache.insert(
+                                    key.clone(),
+                                    result.description,
+                                    result.result_ref,
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to inspect durable image-description Sidebands")
+                    }
+                }
+            }
+            for (group, source, cache_key, prompt_text) in prepared {
+                if deadline <= tokio::time::Instant::now() {
+                    tracing::warn!(
+                        timeout_secs = IMAGE_RECOVERY_TIMEOUT.as_secs(),
+                        "image context recovery reached its total timeout"
+                    );
+                    break;
+                }
                 if let Some(cached) = self.image_describe_cache.get(&cache_key) {
                     shadows.push(chat_state::ImageShadow {
                         source,
@@ -262,48 +308,11 @@ impl SessionActor {
                     });
                     continue;
                 }
-                let prompt_text =
-                    crate::session::image_describe::build_describe_prompt(&source_context);
-                match crate::session::image_describe::recover_completed_description(
-                    self.session_directory.clone(),
-                    self.session_info.id.to_string(),
-                    materialized.surface_revision,
-                    source,
-                    prompt_text.clone(),
-                )
-                .await
-                {
-                    Ok(Some(recovered)) => {
-                        self.image_describe_cache.insert(
-                            cache_key,
-                            recovered.description.clone(),
-                            recovered.result_ref.clone(),
-                        );
-                        shadows.push(chat_state::ImageShadow {
-                            source,
-                            fingerprint: group.fingerprint.clone(),
-                            image_count: group.image_count(),
-                            replacement:
-                                crate::session::image_describe::render_image_description_block(
-                                    &recovered.description,
-                                ),
-                            provenance: chat_state::ImageShadowSource::Description {
-                                result_ref: recovered.result_ref,
-                            },
-                        });
-                        continue;
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            source_revision = materialized.surface_revision,
-                            source_event = source.event.get(),
-                            source_item = source.item,
-                            "failed to inspect durable image-description Sidebands"
-                        );
-                    }
-                }
+                let source_ref = chat_state::TimelineRangeRef {
+                    timeline_id: materialized.source_ref.timeline_id.clone(),
+                    first_seq: source.event.get(),
+                    last_seq: source.event.get(),
+                };
                 let request = crate::session::image_describe::build_describe_request(
                     &model,
                     prompt_text.clone(),
@@ -345,13 +354,16 @@ impl SessionActor {
                     tracing::warn!(%error, model, "failed to commit image description attempt");
                     continue;
                 }
-                let timeout = remaining.min(crate::session::image_describe::DESCRIBE_TIMEOUT);
+                let provider_started = tokio::time::Instant::now();
+                let provider_deadline = deadline
+                    .min(provider_started + crate::session::image_describe::DESCRIBE_TIMEOUT);
+                let timeout = provider_deadline.saturating_duration_since(provider_started);
                 let described: Result<
                     (String, chat_state::TimelineRangeRef),
                     crate::session::image_describe::DescribeError,
                 > = async {
-                    match tokio::time::timeout(
-                        timeout,
+                    match image_description_before_deadline(
+                        provider_deadline,
                         sideband.run_provider(client.conversation_collect(request)),
                     )
                     .await
@@ -1505,13 +1517,20 @@ impl SessionActor {
         &self,
         force_http1: bool,
     ) -> Result<sampler::SamplingClient, acp::Error> {
+        let full_config = self.prepare_chat_completion_config(force_http1).await;
+        sampler::SamplingClient::new(full_config).map_err(|e| self.to_acp_error(e))
+    }
+
+    /// Freeze the complete route and limits for callers that also build a request.
+    pub(in crate::session::actor) async fn prepare_chat_completion_config(
+        &self,
+        force_http1: bool,
+    ) -> SamplingConfig {
         self.refresh_byok_credential().await;
         let mut full_config = self.reconstruct_full_config().await;
         full_config.force_http1 = force_http1;
         full_config.idle_timeout_secs = Some(self.inference_idle_timeout.get().as_secs());
-        let sampling_client =
-            sampler::SamplingClient::new(full_config).map_err(|e| self.to_acp_error(e))?;
-        Ok(sampling_client)
+        full_config
     }
     /// Push a fresh `SamplerConfig` into the per-session sampler actor
     /// before each turn. Mirrors `prepare_chat_completion`'s
@@ -2307,6 +2326,23 @@ mod image_input_rejection_tests {
     }
 
     #[test]
+    fn missing_signature_recovery_requires_native_and_exact_field() {
+        for (message, expected) in [
+            ("serialization error: missing field `signature`", true),
+            ("missing field `signature` at line 1 column 80", true),
+            ("missing field `signature_delta`", false),
+            ("missing field `input`", false),
+            ("invalid type for signature", false),
+        ] {
+            let mut error = api_400(message);
+            error.kind = sampler::SamplingErrorKind::Serialization;
+            error.status_code = None;
+            assert_eq!(is_native_continuation_rejection(&error, true), expected);
+            assert!(!is_native_continuation_rejection(&error, false));
+        }
+    }
+
+    #[test]
     fn image_input_identity_includes_canonical_query_route() {
         let backend = sampling_types::ApiBackend::ChatCompletions;
         let left = indexmap::indexmap! {
@@ -2346,6 +2382,47 @@ mod image_input_rejection_tests {
         assert_ne!(
             left, text,
             "different routed deployments must not share state"
+        );
+    }
+}
+
+#[cfg(test)]
+mod image_description_deadline_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_preparation_does_not_poll_provider() {
+        let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
+        tokio::time::advance(IMAGE_RECOVERY_TIMEOUT).await;
+        let result = image_description_before_deadline(deadline, async {
+            panic!("expired recovery must not start a provider attempt");
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn preparation_consumes_provider_budget() {
+        let started = tokio::time::Instant::now();
+        let deadline = started + IMAGE_RECOVERY_TIMEOUT;
+        tokio::time::advance(std::time::Duration::from_secs(200)).await;
+        let result = image_description_before_deadline(deadline, async {
+            tokio::time::sleep(std::time::Duration::from_secs(100)).await;
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            IMAGE_RECOVERY_TIMEOUT
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_can_finish_before_deadline() {
+        let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
+        assert_eq!(
+            image_description_before_deadline(deadline, async { 42 }).await,
+            Ok(42)
         );
     }
 }

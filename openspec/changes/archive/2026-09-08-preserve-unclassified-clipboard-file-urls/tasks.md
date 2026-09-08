@@ -1,0 +1,3 @@
+- [x] Implement shared fallback selection and both target integrations.
+- [x] Verify missing/failed/whitespace original text, original-text precedence, successful files, and error/drop guards.
+- [x] Update documentation and backlog, validate and archive.

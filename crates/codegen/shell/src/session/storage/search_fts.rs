@@ -89,12 +89,14 @@ pub fn with_index<R>(
         Ok(value) => Ok(value),
         Err(e) if search_recovery::is_unusable_db_error(&e) => {
             drop(index);
-            search_recovery::heal_unusable(
+            if !search_recovery::heal_unusable(
                 db_path,
                 &e,
                 SessionSearchIndex::probe_usable,
                 SessionSearchIndex::recreate,
-            );
+            ) {
+                return Err(e);
+            }
             let index = SessionSearchIndex::open_or_create(db_path)?;
             op(&index)
         }
@@ -124,7 +126,10 @@ impl SessionSearchIndex {
         match Self::open_with_journal_mode(db_path, journal_mode) {
             Ok(index) => Ok(index),
             Err(e) if search_recovery::is_unusable_db_error(&e) => {
-                search_recovery::heal_unusable(db_path, &e, Self::probe_usable, Self::recreate);
+                if !search_recovery::heal_unusable(db_path, &e, Self::probe_usable, Self::recreate)
+                {
+                    return Err(e);
+                }
                 Self::open_with_journal_mode(db_path, journal_mode)
             }
             Err(e) => Err(e),
@@ -157,6 +162,14 @@ impl SessionSearchIndex {
     ) -> Result<Self, rusqlite::Error> {
         // busy_timeout + journal pragma live in the helper (see JournalMode::open).
         let db = journal_mode.open(db_path)?;
+        // An absent version row is valid for a new index. Query/decoding
+        // failures are not absence and must not lead to version restamping.
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );",
+        )?;
 
         let stored_version: Option<String> = db
             .query_row(
@@ -164,8 +177,7 @@ impl SessionSearchIndex {
                 [],
                 |row| row.get(0),
             )
-            .optional()
-            .unwrap_or(None);
+            .optional()?;
 
         // One-way ratchet: drop only on UPGRADE (stored < current). Multiple
         // grow generations share this DB (stable vs alpha); an equality check
@@ -215,11 +227,6 @@ impl SessionSearchIndex {
 
         db.execute_batch(
             "
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS session_docs (
                 session_id TEXT PRIMARY KEY,
                 cwd TEXT NOT NULL,
@@ -689,6 +696,63 @@ mod tests {
 
     fn open(tmp: &TempDir) -> SessionSearchIndex {
         SessionSearchIndex::open_or_create(&tmp.path().join("session_search.sqlite")).unwrap()
+    }
+
+    #[test]
+    fn test_version_read_error_preserves_existing_index() {
+        let tmp = TempDir::new().unwrap();
+        let index = open(&tmp);
+        index
+            .upsert_doc(&test_doc("kept", "retained", "content"))
+            .unwrap();
+        index.set_meta("last_bootstrap_at", "1700000000").unwrap();
+        index
+            .db
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'session_search_schema_version'",
+                params![vec![0xff_u8, 0x00]],
+            )
+            .unwrap();
+        let result = SessionSearchIndex::open_or_create(&tmp.path().join("session_search.sqlite"));
+        assert!(
+            matches!(result, Err(rusqlite::Error::InvalidColumnType(..))),
+            "invalid SQL type must not be treated as an absent version"
+        );
+        let saved: Vec<u8> = index
+            .db
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'session_search_schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(saved, [0xff, 0x00]);
+        assert_eq!(index.all_indexed_session_ids().unwrap(), ["kept"]);
+        assert_eq!(
+            index.get_meta("last_bootstrap_at").unwrap().as_deref(),
+            Some("1700000000")
+        );
+    }
+
+    #[test]
+    fn test_missing_version_row_initializes_without_discarding_docs() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let index = open(&tmp);
+            index
+                .upsert_doc(&test_doc("kept", "retained", "content"))
+                .unwrap();
+            index.delete_meta("session_search_schema_version").unwrap();
+        }
+        let index = open(&tmp);
+        assert_eq!(
+            index
+                .get_meta("session_search_schema_version")
+                .unwrap()
+                .as_deref(),
+            Some(SCHEMA_VERSION)
+        );
+        assert_eq!(index.all_indexed_session_ids().unwrap(), ["kept"]);
     }
 
     #[test]

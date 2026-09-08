@@ -15,20 +15,17 @@ pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// Plugin configs fill gaps (new server names) but never override user/project config.
 /// This is the canonical merge function — both session startup and `grow inspect` call it.
 /// Accepts both file-based `.lsp.json` paths and inline `lspServers` JSON values
-/// from plugin manifests (`plugin.json`).
+/// from plugin manifests (`plugin.json`). Execution callers must pass their
+/// project trust verdict; inspection can include excluded sources for display.
 pub fn load_servers_with_plugins_sourced(
     cwd: &Path,
+    include_project: bool,
     plugin_lsp_paths: &[PathBuf],
     plugin_inline_lsp: &[&serde_json::Value],
     plugin_names: &[&str],
     inline_plugin_names: &[&str],
 ) -> BTreeMap<String, (LspServerConfig, crate::types::config_source::ConfigSource)> {
     use crate::types::config_source::ConfigSource;
-
-    debug_assert!(
-        plugin_names.is_empty() || plugin_names.len() == plugin_lsp_paths.len(),
-        "plugin_names must be empty or parallel to plugin_lsp_paths"
-    );
 
     let user_path = crate::util::grow_home::grow_home().join("lsp.json");
     let project_path = cwd.join(".grow").join("lsp.json");
@@ -49,19 +46,49 @@ pub fn load_servers_with_plugins_sourced(
         })
         .collect();
 
-    // Project-level overrides
-    for (name, cfg) in load_file(&project_path) {
-        servers.insert(
-            name,
-            (
-                cfg,
-                ConfigSource::Project {
-                    path: project_path.clone(),
-                },
-            ),
-        );
+    // Excluded project sources must not shadow permitted user/plugin
+    // configs: filtering the merged map cannot recover those fallbacks.
+    if include_project {
+        for (name, cfg) in load_file(&project_path) {
+            servers.insert(
+                name,
+                (
+                    cfg,
+                    ConfigSource::Project {
+                        path: project_path.clone(),
+                    },
+                ),
+            );
+        }
     }
 
+    for (name, sourced) in load_plugin_servers_sourced(
+        plugin_lsp_paths,
+        plugin_inline_lsp,
+        plugin_names,
+        inline_plugin_names,
+    ) {
+        servers.entry(name).or_insert(sourced);
+    }
+
+    servers
+}
+
+/// Parse plugin-only LSP sources with the same file-before-inline precedence
+/// used by execution. Diagnostics can inspect inactive plugins independently
+/// without letting them shadow the permitted configuration.
+pub fn load_plugin_servers_sourced(
+    plugin_lsp_paths: &[PathBuf],
+    plugin_inline_lsp: &[&serde_json::Value],
+    plugin_names: &[&str],
+    inline_plugin_names: &[&str],
+) -> BTreeMap<String, (LspServerConfig, crate::types::config_source::ConfigSource)> {
+    use crate::types::config_source::ConfigSource;
+    debug_assert!(
+        plugin_names.is_empty() || plugin_names.len() == plugin_lsp_paths.len(),
+        "plugin_names must be empty or parallel to plugin_lsp_paths"
+    );
+    let mut servers = BTreeMap::new();
     // Plugin file-based configs
     for (i, lsp_path) in plugin_lsp_paths.iter().enumerate() {
         let pname = plugin_names.get(i).copied().unwrap_or("unknown");
@@ -317,6 +344,89 @@ mod tests {
     use crate::types::config_source::ConfigSource;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn untrusted_project_does_not_shadow_plugin_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        std::fs::create_dir(cwd.join(".grow")).unwrap();
+        let prefix = uuid::Uuid::new_v4().to_string();
+        let file_name = format!("{prefix}-file");
+        let inline_name = format!("{prefix}-inline");
+        let independent = format!("{prefix}-independent");
+        let project_only = format!("{prefix}-project");
+        let project = serde_json::json!({
+            (file_name.clone()): {"command": "project-file"},
+            (inline_name.clone()): {"command": "project-inline"},
+            (project_only.clone()): {"command": "project-only"}
+        });
+        std::fs::write(cwd.join(".grow/lsp.json"), project.to_string()).unwrap();
+        let plugin_path = cwd.join("plugin-lsp.json");
+        std::fs::write(
+            &plugin_path,
+            serde_json::json!({
+                (file_name.clone()): {"command": "plugin-file"},
+                (independent.clone()): {"command": "plugin-independent"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let inline = serde_json::json!({ (inline_name.clone()): {"command": "plugin-inline"} });
+        for trusted in [false, true] {
+            let sourced = super::load_servers_with_plugins_sourced(
+                cwd,
+                trusted,
+                std::slice::from_ref(&plugin_path),
+                &[&inline],
+                &["file-plugin"],
+                &["inline-plugin"],
+            );
+            let servers = filter_project_lsp_when_untrusted(sourced, trusted);
+            for (name, plugin_command, project_command) in [
+                (&file_name, "plugin-file", "project-file"),
+                (&inline_name, "plugin-inline", "project-inline"),
+            ] {
+                assert_eq!(
+                    servers.get(name).map(|cfg| cfg.command.as_str()),
+                    Some(if trusted {
+                        project_command
+                    } else {
+                        plugin_command
+                    }),
+                    "untrusted project cannot remove an allowed fallback"
+                );
+            }
+            assert_eq!(
+                servers.get(&independent).unwrap().command,
+                "plugin-independent"
+            );
+            assert_eq!(servers.contains_key(&project_only), trusted);
+        }
+    }
+
+    #[test]
+    fn plugin_only_loading_preserves_file_precedence_and_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.json");
+        let second = dir.path().join("second.json");
+        std::fs::write(&first, r#"{"shared":{"command":"first-file"}}"#).unwrap();
+        std::fs::write(&second, r#"{"shared":{"command":"second-file"}}"#).unwrap();
+        let inline = serde_json::json!({"shared":{"command":"inline"}, "inline-only":{"command":"inline-only"}});
+        let result = super::load_plugin_servers_sourced(
+            &[first.clone(), second],
+            &[&inline],
+            &["first", "second"],
+            &["inline"],
+        );
+        assert_eq!(result["shared"].0.command, "first-file");
+        assert!(
+            matches!(&result["shared"].1, ConfigSource::Plugin {plugin_name, path} if plugin_name == "first" && path == &first)
+        );
+        assert_eq!(result["inline-only"].0.command, "inline-only");
+        assert!(
+            matches!(&result["inline-only"].1, ConfigSource::Plugin {plugin_name, path} if plugin_name == "inline" && path.as_os_str().is_empty())
+        );
+    }
 
     fn sourced() -> BTreeMap<String, (LspServerConfig, ConfigSource)> {
         let mut m = BTreeMap::new();

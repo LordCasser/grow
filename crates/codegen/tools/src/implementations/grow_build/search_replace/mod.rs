@@ -29,7 +29,8 @@ use crate::util::truncate_str_with_marker;
 use crate::{notification::types::ToolNotificationHandle, register_resource};
 use helpers::{
     NormalizedMatchResult, build_edit_details, find_normalized_match_positions,
-    replace_normalized_matches, replace_using_positions,
+    line_ending_for_range, normalize_line_endings_with_map, normalize_replacement_line_endings,
+    replace_at_ranges,
 };
 pub(crate) const CONTEXT_LINES: usize = 3;
 /// Full description (for the non-concise toolset).
@@ -253,7 +254,15 @@ async fn handle_new_file_creation(
     hints_enabled: bool,
 ) -> Result<SearchReplaceOutput, tool_runtime::ToolError> {
     let old_text = match fs.read_file(path).await {
-        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
+        Ok(bytes) => Some(match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                return Ok(SearchReplaceOutput::InvalidInput(format!(
+                    "File {} is not valid UTF-8 and cannot be edited.",
+                    input.file_path
+                )));
+            }
+        }),
         Err(_) => None,
     };
     let file_exists = old_text.is_some();
@@ -505,26 +514,44 @@ async fn handle_replacement(
             return Ok(output);
         }
     };
-    let old_text = String::from_utf8_lossy(&bytes).into_owned();
-    let has_crlf = old_text.contains("\r\n");
-    let match_text: std::borrow::Cow<'_, str> = if has_crlf {
-        std::borrow::Cow::Owned(old_text.replace("\r\n", "\n"))
-    } else {
-        std::borrow::Cow::Borrowed(&old_text)
+    let old_text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            return Ok(SearchReplaceOutput::InvalidInput(format!(
+                "File {} is not valid UTF-8 and cannot be edited.",
+                input.file_path
+            )));
+        }
     };
-    let mut positions: Vec<usize> = match_text
-        .match_indices(&input.old_string)
-        .map(|(index, _)| index)
+    let has_crlf = old_text.contains("\r\n");
+    let (normalized_text, offset_map) = if has_crlf {
+        let (text, map) = normalize_line_endings_with_map(&old_text);
+        (text, Some(map))
+    } else {
+        (old_text.clone(), None)
+    };
+    let normalized_old_string = input.old_string.replace("\r\n", "\n");
+    let mut ranges: Vec<(usize, usize)> = normalized_text
+        .match_indices(&normalized_old_string)
+        .map(|(start, _)| {
+            let map = offset_map.as_ref();
+            (
+                map.map_or(start, |offsets| offsets[start]),
+                map.map_or(start + normalized_old_string.len(), |offsets| {
+                    offsets[start + normalized_old_string.len()]
+                }),
+            )
+        })
         .collect();
     let mut used_normalized_fallback = false;
-    if positions.is_empty() {
+    if ranges.is_empty() {
         let fallback_enabled = {
             let res = resources.lock().await;
             res.get::<Params<SearchReplaceParams>>()
                 .is_some_and(|p| p.0.unicode_normalized_fallback)
         };
         if fallback_enabled {
-            match find_normalized_match_positions(&match_text, &input.old_string) {
+            match find_normalized_match_positions(&normalized_text, &normalized_old_string) {
                 NormalizedMatchResult::Matches(normalized_matches) => {
                     if normalized_matches.len() > 1 && !input.replace_all {
                         let replace_all_name =
@@ -537,9 +564,19 @@ async fn handle_replacement(
                             replace_all_name
                         )));
                     }
-                    positions = normalized_matches
+                    ranges = normalized_matches
                         .iter()
-                        .map(|m| m.original_start)
+                        .map(|m| {
+                            let start = offset_map
+                                .as_ref()
+                                .map_or(m.original_start, |map| map[m.original_start]);
+                            let end = offset_map
+                                .as_ref()
+                                .map_or(m.original_start + m.original_len, |map| {
+                                    map[m.original_start + m.original_len]
+                                });
+                            (start, end)
+                        })
                         .collect();
                     used_normalized_fallback = true;
                 }
@@ -558,7 +595,7 @@ async fn handle_replacement(
             }
         }
     }
-    if positions.is_empty() {
+    if ranges.is_empty() {
         let (read_name, old_string_param, execute_name) = {
             let res = resources.lock().await;
             let renderer = res.require::<TemplateRenderer>()?;
@@ -573,9 +610,9 @@ async fn handle_replacement(
                 .map_err(|e| tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
             (read_name, old_string_param, execute_name)
         };
-        let hint = build_nearest_match_hint(&match_text, &input.old_string);
+        let hint = build_nearest_match_hint(&normalized_text, &input.old_string);
         let confusable_hint = build_confusable_hint(
-            &match_text,
+            &normalized_text,
             &input.old_string,
             crate::util::query_tools::QueryTools::detect(),
             &read_name,
@@ -599,7 +636,7 @@ async fn handle_replacement(
             },
         ));
     }
-    if positions.len() > 1 && !input.replace_all {
+    if ranges.len() > 1 && !input.replace_all {
         let replace_all_name =
             TemplateRenderer::resolve(&resources, "${{ params.edit.replace_all }}").await?;
         return Ok(SearchReplaceOutput::MultipleMatchesFound(format!(
@@ -607,36 +644,14 @@ async fn handle_replacement(
             replace_all_name
         )));
     }
-    let (new_text, new_positions) = if used_normalized_fallback {
-        let normalized_matches =
-            match find_normalized_match_positions(&match_text, &input.old_string) {
-                NormalizedMatchResult::Matches(m) => m,
-                _ => {
-                    return Ok(SearchReplaceOutput::NoMatchesFound(
-                        crate::types::output::NoMatchesFoundError {
-                            message:
-                                "Internal error: normalized match disappeared on re-evaluation"
-                                    .to_string(),
-                            file_path: path.to_path_buf(),
-                            file_snapshot_at_edit: None,
-                        },
-                    ));
-                }
-            };
-        replace_normalized_matches(&match_text, &normalized_matches, &input.new_string)
+    let replacement = if has_crlf {
+        let ending = line_ending_for_range(&old_text, ranges[0].0, ranges[0].1);
+        normalize_replacement_line_endings(&input.new_string, ending)
     } else {
-        replace_using_positions(
-            &match_text,
-            &positions,
-            &input.old_string,
-            &input.new_string,
-        )
+        input.new_string.clone()
     };
-    let write_text = if has_crlf {
-        new_text.replace("\r\n", "\n").replace('\n', "\r\n")
-    } else {
-        new_text.clone()
-    };
+    let (new_text, new_positions) = replace_at_ranges(&old_text, &ranges, &replacement);
+    let write_text = new_text.clone();
     if let Err(e) = fs.write_file(path, write_text.as_bytes()).await {
         return Ok(match e.io_error_kind() {
             Some(std::io::ErrorKind::AlreadyExists) => SearchReplaceOutput::InvalidInput(format!(
@@ -2172,6 +2187,27 @@ neutTest_set);
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
     }
+
+    #[tokio::test]
+    async fn explicit_crlf_query_matches_both_file_line_endings() {
+        for (original, expected) in [
+            ("hello\r\nworld\r\n", "goodbye\r\nearth\r\n"),
+            ("hello\nworld\n", "goodbye\nearth\n"),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("test.txt");
+            std::fs::write(&path, original).unwrap();
+            let result = tool_runtime::Tool::run(
+                &SearchReplaceTool,
+                test_ctx(test_resources(tmp.path()).into_shared()),
+                make_input("test.txt", "hello\r\nworld\r\n", "goodbye\nearth\n"),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+        }
+    }
     /// Single-line match within a CRLF file works and preserves CRLF.
     #[tokio::test]
     async fn crlf_single_line_match_preserves_line_endings() {
@@ -2243,10 +2279,8 @@ neutTest_set);
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
     }
-    /// Mixed line endings (\r\n and \n in the same file): CRLF normalization
-    /// kicks in because the file contains at least one \r\n, so all \n in the
-    /// result are converted to \r\n. This normalizes the file to consistent
-    /// CRLF endings, which is the expected behavior.
+    /// Mixed line endings (\r\n and \n in the same file) preserve the
+    /// original terminator of every untouched line.
     #[tokio::test]
     async fn crlf_mixed_line_endings() {
         let tmp = TempDir::new().unwrap();
@@ -2264,9 +2298,31 @@ neutTest_set);
         match result {
             SearchReplaceOutput::EditsApplied(_) => {
                 let written = std::fs::read(tmp.path().join("test.txt")).unwrap();
-                assert_eq!(written, b"line1\r\nREPLACED\r\nline4\r\n");
+                assert_eq!(written, b"line1\r\nREPLACED\r\nline4\n");
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_existing_file_is_rejected_without_write() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("invalid.txt");
+        let original = vec![b'a', 0xff, b'\n'];
+        std::fs::write(&path, &original).unwrap();
+
+        let result = tool_runtime::Tool::run(
+            &SearchReplaceTool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            make_input("invalid.txt", "a", "b"),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            result,
+            SearchReplaceOutput::InvalidInput(message) if message.contains("not valid UTF-8")
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 }

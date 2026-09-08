@@ -1,0 +1,3 @@
+- [x] Gate both conversion backends with a source pixel budget.
+- [x] Test actual JPEG headers at/over budget and existing valid conversions.
+- [x] Update docs/backlog, validate and archive.

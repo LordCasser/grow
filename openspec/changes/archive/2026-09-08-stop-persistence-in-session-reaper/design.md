@@ -1,0 +1,4 @@
+# Design
+Extend the existing reaper job with its weak persistence sender; the reaper still joins the dedicated thread off-runtime and then invokes the existing request_persistence_stop helper. Preserve the sender weakly so the job itself never prolongs admission. Joined state can request Stop immediately. Joining state is protected by the blocking join closure's Arc ownership and must not trigger Stop before join completion. Reaper-send failure retains the existing synchronous OS join fallback, then requests Stop; do not synchronously wait for persistence completion on a potential owner runtime.
+
+Keep explicit drain's completion observation unchanged. Destructor cleanup provides eventual shutdown, not a barrier permitting a replacement writer. Tests cover a blocked thread, an already-exited Running state, a Joined state, and non-final clone drop. Inspect actual parent teardown/cancel paths but do not claim every process-exit path is reproduced.

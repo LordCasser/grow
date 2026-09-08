@@ -59,9 +59,16 @@ impl HookMatcher {
 }
 
 /// Shared matcher-application rule: a missing matcher or missing value fires
-/// (fail-open); otherwise the compiled matcher decides.
+/// (fail-open); otherwise the compiled matcher decides. Never always rejects,
+/// including events without a match value.
 pub fn matcher_allows(matcher: Option<&HookMatcher>, value: Option<&str>) -> bool {
     match (matcher, value) {
+        (
+            Some(HookMatcher {
+                kind: MatcherKind::Never,
+            }),
+            _,
+        ) => false,
         (Some(matcher), Some(value)) => matcher.is_match(value),
         _ => true,
     }
@@ -143,6 +150,19 @@ mod tests {
     #[test]
     fn invalid_regex_errors() {
         assert!(HookMatcher::new("[invalid").is_err());
+    }
+
+    #[test]
+    fn never_is_not_bypassed_by_missing_event_value() {
+        let invalid = HookMatcher::never();
+        for value in [None, Some(""), Some("read_file")] {
+            assert!(!matcher_allows(Some(&invalid), value));
+        }
+        assert!(matcher_allows(
+            Some(&HookMatcher::new("read_file").unwrap()),
+            None
+        ));
+        assert!(matcher_allows(None, None));
     }
 
     #[test]

@@ -189,10 +189,13 @@ pub enum ManagedConfigError {
     },
     #[error("post-write verification failed for {path}: {reason}")]
     Verification { path: PathBuf, reason: String },
-    #[error("transaction failed: {primary}; recovery also failed: {recovery}")]
+    #[error(
+        "transaction failed: {primary}; recovery also failed: {recovery}; retained backup: {backup_path:?}"
+    )]
     Recovery {
         primary: Box<ManagedConfigError>,
         recovery: Box<ManagedConfigError>,
+        backup_path: Option<PathBuf>,
     },
     #[error("transaction phase {phase} failed: {source}")]
     Phase {
@@ -218,20 +221,6 @@ impl ManagedConfig {
         let parent_plan = ParentPlan::capture(parent)?;
         let original = source::read_source(&target_path)?;
         let text = original.text(&target_path)?;
-        let requested_items = request
-            .items
-            .iter()
-            .map(|item| {
-                format::item_state(
-                    text,
-                    &request.namespace,
-                    &request.owned_item_prefix,
-                    item,
-                    &request.comments,
-                    &target_path,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let rendered = format::render_update(
             text,
             &request.namespace,
@@ -240,10 +229,16 @@ impl ManagedConfig {
             &request.comments,
             &target_path,
         )?;
+        if rendered.updated.len() as u64 > source::MAX_CONFIG_BYTES {
+            return Err(ManagedConfigError::UnsafePath {
+                path: target_path,
+                reason: format!("planned config exceeds {} bytes", source::MAX_CONFIG_BYTES),
+            });
+        }
         let inspection = ManagedTextInspection {
             original_text: original.bytes.as_ref().map(|_| text.to_owned()),
             unmanaged_text: rendered.unmanaged_text,
-            requested_items,
+            requested_items: rendered.requested_items,
         };
         let updated = rendered.updated.into_bytes();
         let changes =

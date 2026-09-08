@@ -23,6 +23,14 @@ fn reset_permission_setting_changes_default_not_active_session() {
 
     setup_reset_confirm_open(&mut app, "permission_mode");
 
+    dispatch(
+        Action::TaskComplete(TaskResult::SettingPersisted {
+            key: "permission_mode",
+            value: crate::settings::SettingValue::Enum("always-approve"),
+        }),
+        &mut app,
+    );
+
     let effects = dispatch(
         Action::ConfirmResetSetting {
             choice: ResetSettingsResult::Reset,
@@ -32,9 +40,9 @@ fn reset_permission_setting_changes_default_not_active_session() {
 
     assert!(effects.iter().any(|e| matches!(
         e,
-        Effect::PersistPermissionMode {
-            canonical: "ask",
-            session_id: None,
+        Effect::PersistSetting {
+            key: "permission_mode",
+            value: crate::settings::SettingValue::Enum("ask"),
             ..
         }
     )));

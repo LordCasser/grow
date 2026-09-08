@@ -13,6 +13,7 @@ pub(super) fn report() -> DiagnosticReport {
             byobu: None,
             ssh: false,
             tmux: crate::diagnostics::TmuxFacts {
+                config_files: None,
                 extended_keys: crate::diagnostics::TmuxOptionFact::Unavailable,
                 set_clipboard: crate::diagnostics::TmuxOptionFact::Unavailable,
                 allow_passthrough_support: crate::diagnostics::TmuxSupportFact::Unavailable,
@@ -151,6 +152,7 @@ fn tmux_report(id: DiagnosticId, evidence: TmuxEvidence) -> DiagnosticReport {
     report.findings.clear();
     report.facts.multiplexer = MultiplexerKind::Tmux;
     report.facts.tmux = crate::diagnostics::TmuxFacts {
+        config_files: None,
         extended_keys: crate::diagnostics::TmuxOptionFact::Available(
             if evidence == TmuxEvidence::ExtendedKeys {
                 "off"
@@ -189,7 +191,12 @@ fn tmux_report(id: DiagnosticId, evidence: TmuxEvidence) -> DiagnosticReport {
 }
 
 fn tmux_request(home: &Path, id: DiagnosticId) -> FixRequest {
-    FixRequest::new_for_test(id, home, None, None, None).unwrap()
+    // Transaction/scanner tests select their isolated fixture explicitly.
+    // Automatic discovery is covered separately with raw server evidence.
+    FixRequest::new_for_test(id, home, None, None, None)
+        .unwrap()
+        .with_config_path(home.join(".tmux.conf"))
+        .unwrap()
 }
 
 #[test]
@@ -295,11 +302,11 @@ fn safe_absolute_directory_rejects_hostile_home_and_byobu_values() {
 fn reload_instruction_shell_quotes_and_markdown_escapes_paths() {
     assert_eq!(
         reload_instruction(Path::new("/tmp/a b/q'v.conf")),
-        "Reload tmux with `tmux source-file '/tmp/a b/q'\\''v.conf'`, or detach and reattach."
+        "Reload tmux with `tmux source-file '/tmp/a b/q'\\''v.conf'` to apply this file to the running server."
     );
     assert_eq!(
         reload_instruction(Path::new("/tmp/a`b.conf")),
-        "Reload tmux with ``tmux source-file '/tmp/a`b.conf'``, or detach and reattach."
+        "Reload tmux with ``tmux source-file '/tmp/a`b.conf'`` to apply this file to the running server."
     );
     assert_eq!(
         shell_quote_path(Path::new("/tmp/a`b.conf")).unwrap(),
@@ -307,7 +314,7 @@ fn reload_instruction_shell_quotes_and_markdown_escapes_paths() {
     );
     assert_eq!(
         reload_instruction(Path::new("/tmp/bad\npath")),
-        "Detach and reattach to activate the persistent tmux setting."
+        "Reload the changed config file in the running tmux server."
     );
     assert_eq!(markdown_code_path(Path::new("/tmp/a`b")), "``/tmp/a`b``");
 }
@@ -378,7 +385,7 @@ fn tmux_plain_byobu_and_custom_config_paths_are_physical() {
 
     assert!(matches!(
         plan_fix(
-            tmux_request(temp.path(), TMUX_CLIPBOARD_ID),
+            FixRequest::new_for_test(TMUX_CLIPBOARD_ID, temp.path(), None, None, None).unwrap(),
             &report,
             &tmux_terminal(true)
         ),
@@ -1188,4 +1195,372 @@ fn shell_aliases_expand_to_exact_argv_and_bypass_is_explicit() {
     } else {
         eprintln!("fish unavailable; fish runtime alias test skipped explicitly");
     }
+}
+
+#[test]
+fn ssh_fix_uses_custom_shell_config_directory() {
+    for (shell, relative) in [
+        ("/bin/zsh", ".zshrc"),
+        ("/usr/bin/fish", "fish/config.fish"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let custom = temp.path().join("custom config");
+        let mut input = request(&home, shell);
+        input.zdotdir = Some(custom.clone());
+        input.xdg_config_home = Some(custom.clone());
+        assert!(!input.ssh_alias_is_configured());
+        let configured_request = input.clone();
+        let plan = plan_fix(input, &report(), &terminal()).unwrap();
+        assert_eq!(plan.change().requested_path, custom.join(relative));
+        let outcome = apply_fix(plan).unwrap();
+        assert_eq!(outcome.changed_path(), custom.join(relative));
+        assert!(outcome.managed_alias_is_configured());
+        assert!(configured_request.ssh_alias_is_configured());
+        assert!(!home.exists());
+    }
+}
+
+#[test]
+fn ssh_fix_validates_only_relevant_config_override() {
+    let temp = tempfile::tempdir().unwrap();
+    for shell in ["/bin/zsh", "/usr/bin/fish"] {
+        let mut input = request(temp.path(), shell);
+        input.zdotdir = Some("relative".into());
+        input.xdg_config_home = Some("relative".into());
+        assert!(matches!(
+            plan_fix(input, &report(), &terminal()),
+            Err(FixError::UnsafeDirectory { .. })
+        ));
+    }
+    let mut bash = request(temp.path(), "/bin/bash");
+    bash.zdotdir = Some("relative".into());
+    bash.xdg_config_home = Some("relative".into());
+    assert_eq!(
+        plan_fix(bash, &report(), &terminal())
+            .unwrap()
+            .change()
+            .requested_path,
+        temp.path().join(".bashrc")
+    );
+    let mut fish = request(temp.path(), "/usr/bin/fish");
+    fish.xdg_config_home = Some(PathBuf::new());
+    assert_eq!(
+        plan_fix(fish, &report(), &terminal())
+            .unwrap()
+            .change()
+            .requested_path,
+        temp.path().join(".config/fish/config.fish")
+    );
+}
+
+#[test]
+fn ssh_configured_check_ignores_inactive_default_config() {
+    for shell in ["/bin/zsh", "/usr/bin/fish"] {
+        let temp = tempfile::tempdir().unwrap();
+        let input = request(temp.path(), shell);
+        apply_fix(plan_fix(input.clone(), &report(), &terminal()).unwrap()).unwrap();
+        assert!(input.ssh_alias_is_configured());
+        let mut custom = input;
+        custom.zdotdir = Some(temp.path().join("custom"));
+        custom.xdg_config_home = Some(temp.path().join("custom"));
+        assert!(!custom.ssh_alias_is_configured());
+    }
+}
+
+#[test]
+fn explicit_tmux_target_drives_preview_apply_and_verification() {
+    for byobu in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("custom config.tmux");
+        let input = tmux_request(temp.path(), TMUX_CLIPBOARD_ID)
+            .with_config_path(target.clone())
+            .unwrap();
+        let plan = plan_fix(
+            input,
+            &tmux_report(TMUX_CLIPBOARD_ID, TmuxEvidence::Clipboard),
+            &tmux_terminal(byobu),
+        )
+        .unwrap();
+        assert_eq!(plan.change().requested_path, target);
+        assert!(format_fix_preview(&plan).contains(&target.display().to_string()));
+        let outcome = apply_fix(plan).unwrap();
+        assert_eq!(outcome.changed_path(), target);
+        assert!(verify_persistent_fix(&outcome));
+        assert!(!temp.path().join(".tmux.conf").exists());
+    }
+}
+
+#[test]
+fn explicit_config_target_rejects_unsafe_or_unrelated_requests() {
+    let temp = tempfile::tempdir().unwrap();
+    for path in ["relative", "/", "/tmp/../config", "/tmp/config\n"] {
+        assert!(matches!(
+            tmux_request(temp.path(), TMUX_CLIPBOARD_ID).with_config_path(path.into()),
+            Err(FixError::InvalidConfigTarget(_))
+        ));
+    }
+    assert!(matches!(
+        request(temp.path(), "/bin/zsh").with_config_path(temp.path().join("config")),
+        Err(FixError::ConfigTargetNotApplicable)
+    ));
+}
+
+#[test]
+fn tmux_automatic_target_requires_unique_safe_server_evidence() {
+    let temp = tempfile::tempdir().unwrap();
+    let request =
+        FixRequest::new_for_test(TMUX_CLIPBOARD_ID, temp.path(), None, None, None).unwrap();
+    let terminal = tmux_terminal(false);
+    let mut report = tmux_report(TMUX_CLIPBOARD_ID, TmuxEvidence::Clipboard);
+    for raw in [
+        None,
+        Some(""),
+        Some("/tmp/a,/tmp/b"),
+        Some("/tmp/a,b"),
+        Some("relative.conf"),
+        Some("/tmp/a\n"),
+        Some("/tmp/../config"),
+        Some("/"),
+    ] {
+        report.facts.tmux.config_files = raw.map(str::to_owned);
+        let error = plan_fix(request.clone(), &report, &terminal)
+            .err()
+            .expect("ambiguous target rejected");
+        assert!(
+            matches!(error, FixError::TmuxConfigUnavailable),
+            "{raw:?}: {error}"
+        );
+        assert!(error.to_string().contains("--config /absolute/file"));
+        assert!(!temp.path().join(".tmux.conf").exists());
+    }
+    let target = temp.path().join("custom config ");
+    report.facts.tmux.config_files = Some(target.to_str().unwrap().to_owned());
+    let plan = plan_fix(request.clone(), &report, &terminal).unwrap();
+    assert_eq!(plan.change().requested_path, target);
+    let outcome = apply_fix(plan).unwrap();
+    assert_eq!(outcome.changed_path(), target);
+    assert!(!temp.path().join(".tmux.conf").exists());
+
+    // Explicit selection disambiguates even a literal comma in the filename.
+    let explicit = temp.path().join("selected,config");
+    report.facts.tmux.config_files = Some("/tmp/a,/tmp/b".to_owned());
+    let plan = plan_fix(
+        request.with_config_path(explicit.clone()).unwrap(),
+        &report,
+        &terminal,
+    )
+    .unwrap();
+    assert_eq!(plan.change().requested_path, explicit);
+}
+
+#[test]
+fn tmux_fixes_stay_discoverable_when_the_target_needs_selection() {
+    let temp = tempfile::tempdir().unwrap();
+    let report = tmux_report(TMUX_CLIPBOARD_ID, TmuxEvidence::Clipboard);
+    for byobu in [false, true] {
+        let choices = applicable_automatic_fixes_with(&report, &tmux_terminal(byobu), |id| {
+            FixRequest::new_for_test(id, temp.path(), None, None, None)
+        });
+        assert_eq!(
+            choices,
+            vec![(
+                TMUX_CLIPBOARD_ID,
+                "tmux-clipboard",
+                AutomaticFixAvailability::NeedsConfig
+            )]
+        );
+    }
+    let formatted = format_applicable_automatic_fixes(&report, &tmux_terminal(false));
+    assert!(formatted.contains("grow doctor fix tmux-clipboard --config /absolute/file"));
+    assert!(formatted.contains("/doctor fix tmux-clipboard --config /absolute/file"));
+    assert!(!temp.path().join(".tmux.conf").exists());
+}
+
+#[test]
+fn tmux_doctor_guidance_and_plan_share_the_selected_target() {
+    let temp = tempfile::tempdir().unwrap();
+    for (id, evidence) in [
+        (TMUX_CLIPBOARD_ID, TmuxEvidence::Clipboard),
+        (DCS_PASSTHROUGH_ID, TmuxEvidence::DcsPassthrough),
+        (TMUX_EXTENDED_KEYS_ID, TmuxEvidence::ExtendedKeys),
+    ] {
+        for byobu in [false, true] {
+            let terminal = tmux_terminal(byobu);
+            let config_dir = temp.path().join("custom ' config");
+            let target = config_dir.join(".tmux.conf");
+            let request =
+                FixRequest::new_for_test(id, temp.path(), None, None, Some(config_dir)).unwrap();
+            let mut report = tmux_report(id, evidence);
+            report.facts.tmux.config_files = Some(target.to_str().unwrap().to_owned());
+            let finding = report
+                .findings
+                .iter_mut()
+                .find(|finding| finding.id == id)
+                .unwrap();
+            finding.remediation = Some(ManualRemediation {
+                fix: "set -g example on".to_owned(),
+                config_path: Some(terminal.tmux_config_path()),
+            });
+            finding.note = Some(format!(
+                "{} OSC terminal notifications are also blocked.",
+                super::super::tmux_reload_note(&terminal.tmux_config_path())
+            ));
+            let report = configure_tmux_report_with(report, &terminal, Ok(request.clone()));
+            let finding = report
+                .findings
+                .iter()
+                .find(|finding| finding.id == id)
+                .unwrap();
+            assert_eq!(
+                finding.remediation.as_ref().unwrap().config_path.as_deref(),
+                target.to_str()
+            );
+            assert_eq!(
+                finding.note.as_deref(),
+                Some(
+                    format!(
+                        "{} OSC terminal notifications are also blocked.",
+                        reload_instruction(&target)
+                    )
+                    .as_str()
+                )
+            );
+            let plan = plan_fix(request, &report, &terminal).unwrap();
+            assert_eq!(plan.change().requested_path, target);
+        }
+    }
+}
+
+#[test]
+fn tmux_doctor_unknown_target_does_not_offer_a_guessed_file_or_shell_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let terminal = tmux_terminal(false);
+    let mut report = tmux_report(TMUX_CLIPBOARD_ID, TmuxEvidence::Clipboard);
+    let finding = report
+        .findings
+        .iter_mut()
+        .find(|finding| finding.id == TMUX_CLIPBOARD_ID)
+        .unwrap();
+    finding.remediation = Some(ManualRemediation {
+        fix: "set -g set-clipboard on".to_owned(),
+        config_path: Some(terminal.tmux_config_path()),
+    });
+    finding.note = Some(super::super::tmux_reload_note(&terminal.tmux_config_path()));
+    let request =
+        FixRequest::new_for_test(TMUX_CLIPBOARD_ID, temp.path(), None, None, None).unwrap();
+    let report = configure_tmux_report_with(report, &terminal, Ok(request));
+    let text = crate::diagnostics::format_doctor(&report);
+    assert!(text.contains("--config /absolute/file"), "{text}");
+    assert!(
+        text.contains("After selecting a config file, add `set -g set-clipboard on`."),
+        "{text}"
+    );
+    assert!(!text.contains("~/.tmux.conf"), "{text}");
+    assert!(!text.contains("One-off: `set -g"), "{text}");
+    assert!(!text.contains("tmux source-file"), "{text}");
+}
+
+#[test]
+fn manual_tmux_guidance_uses_known_target_or_labels_default_candidate() {
+    let temp = tempfile::tempdir().unwrap();
+    let terminal = tmux_terminal(false);
+    let target = temp.path().join("custom ' config");
+    for known in [false, true] {
+        let warning = crate::diagnostics::color_support_warning(
+            crate::theme::color_support::ColorLevel::Ansi256,
+            TerminalName::Ghostty,
+            true,
+            &terminal.tmux_config_path(),
+        )
+        .unwrap();
+        assert!(
+            warning
+                .note
+                .as_deref()
+                .unwrap()
+                .contains("default candidate")
+        );
+        let finding = crate::diagnostics::view::finding_from_warning(warning).unwrap();
+        let mut report = report();
+        report.findings.push(finding);
+        let mut request =
+            FixRequest::new_for_test(TMUX_CLIPBOARD_ID, temp.path(), None, None, None).unwrap();
+        if known {
+            request = request.with_config_path(target.clone()).unwrap();
+        }
+        let report = configure_tmux_report_with(report, &terminal, Ok(request));
+        let finding = report.findings.last().unwrap();
+        let note = finding.note.as_deref().unwrap();
+        assert!(note.contains("COLORTERM=truecolor") && note.contains("reattach the client"));
+        if known {
+            assert_eq!(
+                finding.remediation.as_ref().unwrap().config_path.as_deref(),
+                target.to_str()
+            );
+            assert!(note.contains(&commonmark_code_span(&format!(
+                "tmux source-file {}",
+                shell_quote_path(&target).unwrap()
+            ))));
+            assert!(!note.contains("default candidate") && !note.contains("~/.tmux.conf"));
+        } else {
+            assert!(note.contains("default candidate, not a detected server config"));
+        }
+    }
+    assert!(super::super::tmux_reload_note("~/.tmux.conf").contains("default candidate"));
+    assert!(super::super::tmux_reload_note("~/.byobu/.tmux.conf").contains("default candidate"));
+}
+
+#[test]
+fn shared_doctor_status_tracks_local_config_without_hiding_remote_recommendations() {
+    let temp = tempfile::tempdir().unwrap();
+    for shell in ["/bin/bash", "/bin/zsh", "/usr/bin/fish"] {
+        let input = request(temp.path(), shell);
+        let local = terminal();
+        let before = configure_doctor_report_with(report(), &local, Ok(input.clone()));
+        assert!(
+            before
+                .findings
+                .iter()
+                .any(|finding| finding.id == SSH_WRAP_ID)
+        );
+        apply_fix(plan_fix(input.clone(), &report(), &local).unwrap()).unwrap();
+        let after = configure_doctor_report_with(report(), &local, Ok(input.clone()));
+        assert!(
+            !after
+                .findings
+                .iter()
+                .any(|finding| finding.id == SSH_WRAP_ID)
+        );
+        assert_eq!(
+            after.facts.clipboard.delivery,
+            report().facts.clipboard.delivery
+        );
+        for (ssh, vscode, fact_ssh) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let mut remote = terminal();
+            remote.is_ssh = ssh;
+            remote.is_official_vscode_remote = vscode;
+            let mut remote_report = report();
+            remote_report.facts.ssh = fact_ssh;
+            let result = configure_doctor_report_with(remote_report, &remote, Ok(input.clone()));
+            assert!(
+                result
+                    .findings
+                    .iter()
+                    .any(|finding| finding.id == SSH_WRAP_ID)
+            );
+        }
+    }
+    let unavailable =
+        configure_doctor_report_with(report(), &terminal(), Err(FixError::HomeUnavailable));
+    assert!(
+        unavailable
+            .findings
+            .iter()
+            .any(|finding| finding.id == SSH_WRAP_ID)
+    );
 }

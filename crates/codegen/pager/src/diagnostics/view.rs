@@ -229,6 +229,7 @@ fn facts(
             byobu: ctx.byobu,
             ssh: ctx.is_ssh,
             tmux: TmuxFacts {
+                config_files: snapshot.common.tmux.config_files.clone().into_option(),
                 extended_keys: tmux_option_fact(&snapshot.common.tmux.extended_keys),
                 set_clipboard: tmux_option_fact(&snapshot.common.tmux.set_clipboard),
                 allow_passthrough_support: tmux_support_fact(

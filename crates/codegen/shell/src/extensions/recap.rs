@@ -50,9 +50,10 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     // Fire-and-forget: the recap is emitted later as a SessionRecap
     // notification. We only ack that the request was accepted.
-    let _ = session
+    session
         .cmd_tx
-        .send(SessionCommand::Recap { auto: req.auto });
+        .send(SessionCommand::Recap { auto: req.auto })
+        .map_err(|_| acp::Error::internal_error().data("session command channel closed"))?;
 
     to_ext_response(Ok(serde_json::json!({ "ok": true })))
 }

@@ -1,0 +1,13 @@
+# Evidence
+transfer_prompt_rpc_ownership通过Effect::prompt_rpc_identity涵盖文本/blocks变体；disarm_agent移除tracked，当前键与session键随后分别remove，失败只warn。capture_agent失败分支同样remove tracked后直接remove磁盘。next_deadline和flush_due只查看tracked.due，因此删除失败没有后续调度。重复不可保存内容则每次sync都重复remove，既不能稳定退避也没有独立所有权。
+
+# Design constraints
+删除意图与可恢复草稿不同：它不得restore，生命周期可能超出Agent/key路由，并且cwd->session绑定时要同时保留旧键与新键清理义务。优先考虑Runtime中的私有逐键deadline集合，复用既有backoff与timer入口，不创建通用作业框架或磁盘schema。实现前再次核对最小表示方式。
+
+删除成功或NotFound清意图；失败设置未来deadline。重复capture失败不得热循环或不断推迟deadline。所有权转移清除可恢复tracked并为涉及键建立删除意图。load前如果该键仍待删除，应抑制旧文件恢复。新有效有payload记录捕获后取消该键删除，再执行现有写入路径；空capture不能抢先覆盖delete deadline。关闭不能丢删除意图。rekey不能将待删除旧文件迁到新路径而忘记旧键：需显式跳过该迁移，保持两个删除键独立。
+
+# Tests required
+真实AppView/RPC文本和blocks清理失败->存储恢复->到期删除；重复capture错误期限不变；关闭/重开不恢复待删旧文件；新有效内容取消旧删除且后续timer不误删；绑定窗口cwd和session双键各自失败/重试；正常所有权与恢复全模块回归。用临时无效root或不可删除路径制造IO失败，不修改系统权限或真实GROW_HOME。
+
+# Limits
+内存意图不保证在进程死亡后恢复，也不解决多进程无锁覆盖。不能将本修复描述为磁盘失败情况下的跨重启绝对防恢复保证。

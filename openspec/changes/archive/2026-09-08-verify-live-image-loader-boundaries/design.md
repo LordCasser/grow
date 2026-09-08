@@ -1,0 +1,5 @@
+## Evidence
+helpers::append_prompt_images优先encoded_bytes，否则打开session_image_path；Unix设置O_NONBLOCK|O_NOFOLLOW，按同一文件句柄metadata拒绝非regular，检查总Base64预算，再take(length+1)读取。正常发送和interject均通过spawn_blocking调用，失败分别返回PromptResponse错误或InterjectFailed并携带原输入。
+## Verification design
+通过临时数据比较两种来源的完整ACP输出，检查移除文件后内存源仍能发送而文件源报错。Unix特殊文件测试使用tempdir与后台测试线程/接收时限，防止FIFO防护回归把整个测试卡住；它验证返回，不把限时等待包装当作产品代码的修复。
+同长度原地修改、Windows链接策略和系统级I/O卡死不在测试证明范围，不宣称不可变快照或所有平台行为已验证。

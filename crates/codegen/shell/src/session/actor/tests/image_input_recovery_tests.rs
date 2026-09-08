@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(32 * 1024 * 1024)
         .spawn(body)
         .unwrap()
         .join()

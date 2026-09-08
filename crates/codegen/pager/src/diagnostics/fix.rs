@@ -36,6 +36,9 @@ pub struct FixRequest {
     shell: Option<PathBuf>,
     validator: Option<PathBuf>,
     byobu_config_dir: Option<PathBuf>,
+    zdotdir: Option<PathBuf>,
+    xdg_config_home: Option<PathBuf>,
+    config_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,6 +81,9 @@ impl FixRequest {
             shell,
             validator,
             byobu_config_dir,
+            zdotdir: None,
+            xdg_config_home: None,
+            config_path: None,
         })
     }
 
@@ -93,7 +99,50 @@ impl FixRequest {
             shell,
             validator,
             byobu_config_dir,
+            zdotdir: std::env::var_os("ZDOTDIR").map(PathBuf::from),
+            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+            config_path: None,
         })
+    }
+
+    pub(crate) fn with_config_path(mut self, path: PathBuf) -> Result<Self, FixError> {
+        if !fix_spec(self.id).is_some_and(|spec| matches!(spec.kind, FixKind::TmuxOption(_))) {
+            return Err(FixError::ConfigTargetNotApplicable);
+        }
+        validate_config_target(&path)?;
+        self.config_path = Some(path);
+        Ok(self)
+    }
+
+    pub(crate) fn ssh_alias_is_configured(&self) -> bool {
+        self.shell
+            .as_deref()
+            .and_then(ShellKind::from_shell_path)
+            .is_some_and(|shell| {
+                self.shell_config_path(shell)
+                    .is_ok_and(|path| managed_alias_configured(&path, shell))
+            })
+    }
+
+    fn shell_config_path(&self, shell: ShellKind) -> Result<PathBuf, FixError> {
+        let custom = match shell {
+            ShellKind::Zsh => self
+                .zdotdir
+                .as_ref()
+                .map(|path| (path, "ZDOTDIR", ".zshrc")),
+            ShellKind::Fish => self
+                .xdg_config_home
+                .as_ref()
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(|path| (path, "XDG_CONFIG_HOME", "fish/config.fish")),
+            ShellKind::Bash => None,
+        };
+        match custom {
+            Some((path, label, name)) => {
+                Ok(SafeAbsoluteDirectory::parse(path.clone(), label)?.join(name))
+            }
+            None => Ok(shell.config_path(&self.home.0)),
+        }
     }
 }
 
@@ -288,6 +337,9 @@ impl FixOutcome {
 #[derive(Debug)]
 pub enum FixError {
     UnknownId(String),
+    ConfigTargetNotApplicable,
+    InvalidConfigTarget(PathBuf),
+    TmuxConfigUnavailable,
     PlatformUnsupported,
     HomeUnavailable,
     NotApplicable,
@@ -306,6 +358,11 @@ pub enum FixError {
 impl std::fmt::Display for FixError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ConfigTargetNotApplicable => formatter.write_str("--config is only supported for tmux fixes."),
+            Self::InvalidConfigTarget(path) => write!(formatter, "Invalid --config target `{}`. Use an absolute file path without control characters, `~`, `.` or `..` components.", path.display()),
+            Self::TmuxConfigUnavailable => formatter.write_str(
+                "Grow could not determine a unique tmux config target. Run the fix with --config /absolute/file.",
+            ),
             Self::UnknownId(id) => write!(
                 formatter,
                 "`{id}` is not an available Doctor fix. Run `grow doctor fix` to list available fixes."
@@ -326,7 +383,7 @@ impl std::fmt::Display for FixError {
                 "Automatic setup supports Bash, zsh, and fish. For another shell, run `{SSH_WRAP_ONE_OFF}` when needed."
             ),
             Self::ByobuConfigUnavailable => formatter.write_str(
-                "Grow could not determine Byobu's effective config directory. Keep `BYOBU_CONFIG_DIR` set in this session, then run the fix again.",
+                "Grow could not determine Byobu's effective config directory. Set `BYOBU_CONFIG_DIR` or run the fix with --config /absolute/file.",
             ),
             Self::UnsafeDirectory { label, path } => write!(
                 formatter,
@@ -382,6 +439,7 @@ impl From<config::managed_text::ManagedConfigError> for FixError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AutomaticFixAvailability {
     Here,
+    NeedsConfig,
     RunLocally,
 }
 
@@ -513,16 +571,24 @@ pub fn ssh_wrap_automatic_remediation() -> AutomaticRemediation {
 
 pub(crate) fn select_fix_plan(
     id: DiagnosticId,
+    config_path: Option<PathBuf>,
     report: &DiagnosticReport,
     terminal: &TerminalContext,
 ) -> Result<Option<FixPlan>, FixError> {
     let spec = fix_spec(id).ok_or_else(|| FixError::UnknownId(id.to_string()))?;
+    if config_path.is_some() && matches!(spec.kind, FixKind::SshWrap) {
+        return Err(FixError::ConfigTargetNotApplicable);
+    }
     if matches!(spec.kind, FixKind::SshWrap)
         && (terminal.is_ssh || terminal.is_official_vscode_remote || report.facts.ssh)
     {
         return Ok(None);
     }
-    plan_fix(FixRequest::from_environment(id)?, report, terminal).map(Some)
+    let mut request = FixRequest::from_environment(id)?;
+    if let Some(path) = config_path {
+        request = request.with_config_path(path)?;
+    }
+    plan_fix(request, report, terminal).map(Some)
 }
 
 pub(crate) fn applicable_automatic_fixes(
@@ -548,8 +614,15 @@ fn applicable_automatic_fixes_with(
             {
                 AutomaticFixAvailability::RunLocally
             } else {
-                plan_fix(request_for(automatic.fix_id).ok()?, report, terminal).ok()?;
-                AutomaticFixAvailability::Here
+                match plan_fix(request_for(automatic.fix_id).ok()?, report, terminal) {
+                    Ok(_) => AutomaticFixAvailability::Here,
+                    Err(FixError::TmuxConfigUnavailable | FixError::ByobuConfigUnavailable)
+                    | Err(FixError::UnsafeDirectory {
+                        label: "BYOBU_CONFIG_DIR",
+                        ..
+                    }) => AutomaticFixAvailability::NeedsConfig,
+                    Err(_) => return None,
+                }
             };
             Some((automatic.fix_id, spec.handle, availability))
         })
@@ -572,6 +645,9 @@ pub(crate) fn format_applicable_automatic_fixes(
         match availability {
             AutomaticFixAvailability::Here => output.push_str(&format!(
                 "    Run: grow doctor fix {handle}\n    In Grow: /doctor fix {handle}\n"
+            )),
+            AutomaticFixAvailability::NeedsConfig => output.push_str(&format!(
+                "    Select the config file explicitly.\n    Run: grow doctor fix {handle} --config /absolute/file\n    In Grow: /doctor fix {handle} --config /absolute/file\n"
             )),
             AutomaticFixAvailability::RunLocally => output.push_str(&format!(
                 "    On your local computer, run: grow doctor fix {handle}\n"
@@ -672,7 +748,7 @@ fn plan_ssh_wrap(
         .and_then(ShellKind::from_shell_path)
         .ok_or(FixError::UnsupportedShell)?;
     let managed = ManagedConfig::plan(ManagedConfigRequest {
-        path: shell.config_path(&request.home.0),
+        path: request.shell_config_path(shell)?,
         namespace: MANAGED_NAMESPACE.to_owned(),
         owned_item_prefix: "terminal.".to_owned(),
         items: vec![ManagedItem::new(request.id.to_string(), shell.alias())],
@@ -715,7 +791,11 @@ fn plan_tmux_option(
         return Err(FixError::TmuxNotApplicable);
     }
     let managed = ManagedConfig::plan(ManagedConfigRequest {
-        path: tmux_config_path(&request, terminal)?,
+        path: tmux_config_path(
+            &request,
+            terminal,
+            report.facts.tmux.config_files.as_deref(),
+        )?,
         namespace: MANAGED_NAMESPACE.to_owned(),
         owned_item_prefix: "terminal.".to_owned(),
         items: vec![ManagedItem::new(spec.id.to_string(), spec.line)],
@@ -746,7 +826,7 @@ fn plan_tmux_option(
         id: request.id,
         change,
         caveats: vec![
-            "The live tmux server is unchanged until you reload this config or detach and reattach.",
+            "The live tmux server is unchanged until you explicitly reload this config.",
             TMUX_SCANNER_CAVEAT,
         ],
         payload: FixPayload::TmuxOption(TmuxOptionPlan {
@@ -783,9 +863,41 @@ fn tmux_evidence_is_applicable(report: &DiagnosticReport, spec: &TmuxOptionSpec)
     }
 }
 
-fn tmux_config_path(request: &FixRequest, terminal: &TerminalContext) -> Result<PathBuf, FixError> {
+fn validate_config_target(path: &Path) -> Result<(), FixError> {
+    if !path.is_absolute()
+        || path.file_name().is_none()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+        || !path
+            .to_str()
+            .is_some_and(|value| !value.chars().any(char::is_control) && !value.contains('~'))
+    {
+        return Err(FixError::InvalidConfigTarget(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn tmux_config_path(
+    request: &FixRequest,
+    terminal: &TerminalContext,
+    config_files: Option<&str>,
+) -> Result<PathBuf, FixError> {
+    if let Some(path) = &request.config_path {
+        return Ok(path.clone());
+    }
     if terminal.byobu != Some(ByobuBackend::Tmux) {
-        return Ok(request.home.join(".tmux.conf"));
+        // tmux emits an unescaped comma-separated startup candidate list.
+        // A comma can also belong to one filename; neither case permits guessing.
+        let candidate = config_files
+            .filter(|value| !value.is_empty() && !value.contains(','))
+            .ok_or(FixError::TmuxConfigUnavailable)?;
+        let path = PathBuf::from(candidate);
+        validate_config_target(&path).map_err(|_| FixError::TmuxConfigUnavailable)?;
+        return Ok(path);
     }
     Ok(SafeAbsoluteDirectory::parse(
         request
@@ -796,6 +908,108 @@ fn tmux_config_path(request: &FixRequest, terminal: &TerminalContext) -> Result<
         "BYOBU_CONFIG_DIR",
     )?
     .join(".tmux.conf"))
+}
+
+/// Complete both Doctor surfaces with the same persistent configuration facts.
+/// Called after runtime findings have been merged.
+pub(crate) fn configure_doctor_report(
+    report: DiagnosticReport,
+    terminal: &TerminalContext,
+) -> DiagnosticReport {
+    configure_doctor_report_with(
+        report,
+        terminal,
+        FixRequest::from_environment(TMUX_CLIPBOARD_ID),
+    )
+}
+
+fn configure_doctor_report_with(
+    report: DiagnosticReport,
+    terminal: &TerminalContext,
+    request: Result<FixRequest, FixError>,
+) -> DiagnosticReport {
+    let configured = !terminal.is_ssh
+        && !terminal.is_official_vscode_remote
+        && !report.facts.ssh
+        && request
+            .as_ref()
+            .is_ok_and(|request| request.ssh_alias_is_configured());
+    configure_tmux_report_with(configured_report(report, configured), terminal, request)
+}
+
+fn configure_tmux_report_with(
+    mut report: DiagnosticReport,
+    terminal: &TerminalContext,
+    request: Result<FixRequest, FixError>,
+) -> DiagnosticReport {
+    if !terminal.is_tmux_backed() {
+        return report;
+    }
+    let target = request.and_then(|request| {
+        tmux_config_path(
+            &request,
+            terminal,
+            report.facts.tmux.config_files.as_deref(),
+        )
+    });
+    let old_reload = super::tmux_reload_note(&terminal.tmux_config_path());
+    for finding in &mut report.findings {
+        if !fix_spec(finding.id).is_some_and(|spec| matches!(spec.kind, FixKind::TmuxOption(_))) {
+            // Manual-only tmux guidance (such as truecolor) shares the known
+            // target. With no target, retain its explicitly labelled candidate.
+            if let Ok(path) = &target
+                && let Some(remediation) = &mut finding.remediation
+                && remediation.config_path.as_deref() == Some(terminal.tmux_config_path().as_str())
+            {
+                remediation.config_path = Some(path.display().to_string());
+                if let Some(note) = &mut finding.note {
+                    let old_command = commonmark_code_span(&format!(
+                        "tmux source-file {}",
+                        terminal.tmux_config_path()
+                    ));
+                    if let Some(quoted) = shell_quote_path(path) {
+                        let command = commonmark_code_span(&format!("tmux source-file {quoted}"));
+                        *note = note
+                            .replace(&old_command, &command)
+                            .replace(super::TMUX_DEFAULT_CANDIDATE_NOTE, "");
+                    }
+                }
+            }
+            continue;
+        }
+        let suffix = finding
+            .note
+            .take()
+            .unwrap_or_default()
+            .replace(&old_reload, "");
+        let note = match &target {
+            Ok(path) => {
+                if let Some(remediation) = &mut finding.remediation {
+                    remediation.config_path = Some(path.display().to_string());
+                }
+                reload_instruction(path)
+            }
+            Err(error) => {
+                // No known file means no actionable file-edit instruction yet.
+                // Keep the configuration line as guidance without presenting it
+                // as a shell command or asserting a guessed destination.
+                let line = finding
+                    .remediation
+                    .take()
+                    .map(|remediation| remediation.fix);
+                let mut note = format!("{error}");
+                if let Some(line) = line {
+                    note.push_str(&format!(
+                        " After selecting a config file, add {}.",
+                        commonmark_code_span(&line)
+                    ));
+                }
+                note
+            }
+        };
+        finding.note = Some(format!("{note}{suffix}"));
+    }
+    report
 }
 
 fn planned_change(managed: &ManagedConfigPlan) -> Result<PlannedChange, FixError> {
@@ -973,11 +1187,11 @@ fn shell_quote_path(path: &Path) -> Option<String> {
 
 fn reload_instruction(path: &Path) -> String {
     let Some(shell_path) = shell_quote_path(path) else {
-        return "Detach and reattach to activate the persistent tmux setting.".to_owned();
+        return "Reload the changed config file in the running tmux server.".to_owned();
     };
     let command = format!("tmux source-file {shell_path}");
     format!(
-        "Reload tmux with {}, or detach and reattach.",
+        "Reload tmux with {} to apply this file to the running server.",
         commonmark_code_span(&command)
     )
 }

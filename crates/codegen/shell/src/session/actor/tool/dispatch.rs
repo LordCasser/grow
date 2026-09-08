@@ -549,15 +549,15 @@ impl SessionActor {
             command, displayed_output, exit_code
         );
 
-        // Append it to the canonical Surface as a user message only.
-        if let Err(error) = self
+        // Keep the acknowledged input identity; later events may move the tail.
+        let input_event = self
             .chat_state_handle
             .push_user_message_durably(ConversationItem::user(&user_message))
             .await
-        {
-            return Err(acp::Error::internal_error()
-                .data(format!("direct command was not durably recorded: {error}")));
-        }
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("direct command was not durably recorded: {error}"))
+            })?;
         let title_source = prompt_blocks
             .iter()
             .filter_map(|block| match block {
@@ -566,7 +566,8 @@ impl SessionActor {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        self.schedule_session_title(title_source).await;
+        self.schedule_session_title(title_source, input_event.seq)
+            .await;
 
         self.chat_state_handle.flush();
 

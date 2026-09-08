@@ -5,6 +5,7 @@ edition.workspace = true
 license = "Apache-2.0"
 
 [dependencies]
+tempfile = { workspace = true }
 # TTY safety
 dunce = { workspace = true }
 tty-utils = { workspace = true }
@@ -99,7 +100,6 @@ windows-sys = { version = "0.59", features = ["Win32_Graphics_Gdi"] }
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 serial_test = { workspace = true }
-tempfile = { workspace = true }
 
 [features]
 # Exposes `#[cfg(test)]` test-only helpers (mock setters, test guards,

@@ -277,7 +277,34 @@ pub(crate) fn deliver_doctor_message(
 }
 /// Handle a completed async task result.
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
+    if !super::rewind::accept_rewind_read(app, &result) {
+        return vec![];
+    }
     match result {
+        TaskResult::TranscriptFileWritten {
+            id,
+            agent_id,
+            session_id,
+            result,
+        } => {
+            if !app.transcript_file_writes.finish(id) {
+                return vec![];
+            }
+            if let Some(agent) = app.agents.get_mut(&agent_id)
+                && agent.session.session_id == session_id
+            {
+                let message =
+                    result.unwrap_or_else(|error| format!("Failed to write file: {error}"));
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::notice(message));
+            }
+            app.transcript_file_writes
+                .start_next()
+                .into_iter()
+                .collect()
+        }
+
         TaskResult::SessionCreated {
             agent_id,
             session_id,
@@ -809,8 +836,15 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             vec![]
         }
         TaskResult::PromptImagePreviewPrepared => vec![],
-        TaskResult::DoctorFixPlanned { target, result } => {
+        TaskResult::DoctorFixPlanned {
+            report_only,
+            target,
+            result,
+        } => {
             let Some(target) = current_doctor_target(app, &target) else {
+                if report_only {
+                    return vec![];
+                }
                 deliver_doctor_message(
                     app,
                     target.agent_id,
@@ -821,6 +855,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 return vec![];
             };
             match result {
+                Ok(DoctorPlanningOutcome::Report(report)) => {
+                    if let Some(agent) = app.agents.get_mut(&target.agent_id) {
+                        agent
+                            .scrollback
+                            .push_block(crate::scrollback::block::RenderBlock::notice(report));
+                    }
+                }
                 Ok(DoctorPlanningOutcome::Listing(listing)) => {
                     deliver_doctor_message(app, target.agent_id, NoticeTone::Info, listing);
                 }
@@ -841,7 +882,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     app,
                     target.agent_id,
                     NoticeTone::Error,
-                    if error.starts_with("Could not prepare the fix:") {
+                    if report_only {
+                        if error.starts_with("Could not check diagnostics:") {
+                            error
+                        } else {
+                            format!("Could not check diagnostics: {error}")
+                        }
+                    } else if error.starts_with("Could not prepare the fix:") {
                         error
                     } else {
                         format!("Could not prepare the fix: {error}")
@@ -874,7 +921,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if let Err(e) = result {
                 tracing::warn!("Failed to persist announcements hidden state: {}", e);
             }
-            vec![]
+            app.finish_announcement_persistence().into_iter().collect()
         }
         TaskResult::PromptHistoryLoaded { agent_id, prompts } => {
             use tools::implementations::skills::skill::extract_skill_display_text;
@@ -1378,14 +1425,22 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::DeepSearchResults { results, seq } => {
             handle_deep_search_results(app, results, seq)
         }
-        TaskResult::RewindPointsLoaded { agent_id, points } => {
-            handle_rewind_points_loaded(app, agent_id, points)
-        }
-        TaskResult::RewindPointsFailed { agent_id, error } => {
+        TaskResult::RewindPointsLoaded {
+            agent_id, points, ..
+        } => handle_rewind_points_loaded(app, agent_id, points),
+        TaskResult::RewindPointsFailed {
+            agent_id, error, ..
+        } => {
             let Some(agent) = app.agents.get_mut(&agent_id) else {
                 return vec![];
             };
-            agent.rewind_state = None;
+            if let Some(draft) = agent
+                .rewind_state
+                .take()
+                .and_then(|state| state.stashed_draft)
+            {
+                agent.prompt.restore(draft);
+            }
             app.show_toast(&format!("Rewind failed: {error}"));
             vec![]
         }
@@ -1394,10 +1449,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             response,
             target_prompt_index,
             mode,
+            ..
         } => handle_rewind_preview_complete(app, agent_id, response, target_prompt_index, mode),
-        TaskResult::RewindPreviewFailed { agent_id, error } => {
-            handle_rewind_preview_failed(app, agent_id, error)
-        }
+        TaskResult::RewindPreviewFailed {
+            agent_id, error, ..
+        } => handle_rewind_preview_failed(app, agent_id, error),
         TaskResult::RewindExecuteComplete { agent_id, response } => {
             dispatch_rewind_success(app, agent_id, response)
         }
@@ -1454,13 +1510,23 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::SettingPersisted { key, value } => {
             tracing::trace!(target: "settings", ?key, ?value, "setting persisted");
-            vec![]
+            app.setting_persistence
+                .complete(key, true)
+                .0
+                .into_iter()
+                .collect()
         }
         TaskResult::SettingPersistFailed {
             key,
             rollback_value,
             error,
         } => {
+            let (next, confirmed_rollback) = app.setting_persistence.complete(key, false);
+            if let Some(next) = next {
+                tracing::warn!(target: "settings", ?key, %error, "setting persist failed; saving latest queued choice");
+                return vec![next];
+            }
+            let rollback_value = confirmed_rollback.unwrap_or(rollback_value);
             let rollback_effects = apply_setting_rollback(app, key, &rollback_value);
             tracing::warn!(target: "settings", ?key, ?rollback_value, %error, "setting persist failed; rolled back");
             let scrubbed = scrub_error_for_toast(&error);

@@ -71,8 +71,16 @@ pub(crate) fn parse_token_output(
     // (JWTs and opaque tokens never start with `{`), so an error object like
     // `{"error":"expired"}` can never be mistaken for a bearer.
     if stdout.starts_with('{') {
-        let parsed: ExternalAuthOutput = serde_json::from_str(stdout)
-            .map_err(|e| anyhow::anyhow!("produced JSON that is not a token payload: {e}"))?;
+        let parsed: ExternalAuthOutput = serde_json::from_str(stdout).map_err(|e| {
+            // Serde's Display can echo an invalid field value. Helper stdout
+            // may contain credentials, so keep only structural diagnostics.
+            anyhow::anyhow!(
+                "produced invalid JSON token payload ({:?}, line {}, column {})",
+                e.classify(),
+                e.line(),
+                e.column()
+            )
+        })?;
         let access_token = parsed.access_token.trim().to_owned();
         if access_token.is_empty() {
             anyhow::bail!("produced JSON with an empty access_token");

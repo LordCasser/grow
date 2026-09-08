@@ -133,8 +133,9 @@ fn rewind_point(
 }
 
 /// Points-loaded task result carrying the fixture's single rewind point.
-fn points_loaded(id: AgentId, has_file_changes: bool) -> Action {
+fn points_loaded(app: &AppView, id: AgentId, has_file_changes: bool) -> Action {
     Action::TaskComplete(TaskResult::RewindPointsLoaded {
+        request_id: app.agents[&id].rewind_read.as_ref().unwrap().0,
         agent_id: id,
         points: vec![rewind_point(0, has_file_changes)],
     })
@@ -169,7 +170,7 @@ fn drive_inline_submit_to_execute(app: &mut AppView) -> Vec<Effect> {
         matches!(&effects[0], Effect::FetchRewindPoints { .. }),
         "got {effects:?}"
     );
-    dispatch(points_loaded(id, false), app);
+    dispatch(points_loaded(&app, id, false), app);
     // Target 0 is the newest prompt: conversation-only inserts its
     // last-prompt confirm popup before executing, exactly like /rewind.
     dispatch(
@@ -235,7 +236,7 @@ fn inline_edit_points_loaded_opens_mode_select_over_open_editor() {
     let id = AgentId(0);
     dispatch(Action::InlineEditSubmit, &mut app);
 
-    dispatch(points_loaded(id, true), &mut app);
+    dispatch(points_loaded(&app, id, true), &mut app);
 
     let agent = &app.agents[&id];
     assert!(matches!(
@@ -274,7 +275,7 @@ fn classic_rewind_mode_select_keeps_files_only_row() {
         matches!(&effects[0], Effect::FetchRewindPoints { .. }),
         "got {effects:?}"
     );
-    dispatch(points_loaded(id, true), &mut app);
+    dispatch(points_loaded(&app, id, true), &mut app);
 
     assert!(matches!(
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
@@ -293,7 +294,7 @@ fn inline_edit_back_to_mode_select_preserves_hidden_files_only_row() {
     let mut app = app_mid_inline_edit("fix the bug properly");
     let id = AgentId(0);
     dispatch(Action::InlineEditSubmit, &mut app);
-    dispatch(points_loaded(id, true), &mut app);
+    dispatch(points_loaded(&app, id, true), &mut app);
     dispatch(
         Action::RewindSelectMode(crate::views::rewind::RewindMode::All, 0),
         &mut app,
@@ -302,6 +303,7 @@ fn inline_edit_back_to_mode_select_preserves_hidden_files_only_row() {
     preview.clean_files = vec!["src/main.rs".into()];
     dispatch(
         Action::TaskComplete(TaskResult::RewindPreviewComplete {
+            request_id: app.agents[&id].rewind_read.as_ref().unwrap().0,
             agent_id: id,
             response: preview,
             target_prompt_index: 0,
@@ -337,7 +339,7 @@ fn inline_edit_conversation_only_success_resubmits_and_closes_editor() {
     let mut app = app_mid_inline_edit("fix the bug properly");
     let id = AgentId(0);
     dispatch(Action::InlineEditSubmit, &mut app);
-    dispatch(points_loaded(id, false), &mut app);
+    dispatch(points_loaded(&app, id, false), &mut app);
     dispatch(
         Action::RewindSelectMode(crate::views::rewind::RewindMode::ConversationOnly, 0),
         &mut app,
@@ -410,7 +412,7 @@ fn inline_edit_all_mode_previews_confirms_and_resubmits() {
     let mut app = app_mid_inline_edit("fix the bug properly");
     let id = AgentId(0);
     dispatch(Action::InlineEditSubmit, &mut app);
-    dispatch(points_loaded(id, true), &mut app);
+    dispatch(points_loaded(&app, id, true), &mut app);
 
     let effects = dispatch(
         Action::RewindSelectMode(crate::views::rewind::RewindMode::All, 0),
@@ -430,6 +432,7 @@ fn inline_edit_all_mode_previews_confirms_and_resubmits() {
     preview.clean_files = vec!["src/main.rs".into()];
     dispatch(
         Action::TaskComplete(TaskResult::RewindPreviewComplete {
+            request_id: app.agents[&id].rewind_read.as_ref().unwrap().0,
             agent_id: id,
             response: preview,
             target_prompt_index: 0,
@@ -489,7 +492,7 @@ fn inline_edit_files_only_success_prefills_composer_without_resubmit() {
     dispatch(Action::InlineEditSubmit, &mut app);
     // No file changes recorded → FilesOnly skips the preview and executes
     // directly.
-    dispatch(points_loaded(id, false), &mut app);
+    dispatch(points_loaded(&app, id, false), &mut app);
     let effects = dispatch(
         Action::RewindSelectMode(crate::views::rewind::RewindMode::FilesOnly, 0),
         &mut app,
@@ -548,7 +551,7 @@ fn inline_edit_dismiss_from_mode_select_returns_to_editor() {
     let mut app = app_mid_inline_edit("fix the bug properly");
     let id = AgentId(0);
     dispatch(Action::InlineEditSubmit, &mut app);
-    dispatch(points_loaded(id, false), &mut app);
+    dispatch(points_loaded(&app, id, false), &mut app);
 
     dispatch(Action::RewindDismiss, &mut app);
 
@@ -1088,4 +1091,412 @@ fn fallback_path_returns_correct_idx_when_prompt_index_is_none() {
         find_user_prompt_entry_for_shell_index(&sb, 2),
         Some(charlie_idx)
     );
+}
+
+#[test]
+fn rewind_mode_eligibility_includes_later_checkpoints() {
+    for (points, target, expected) in [
+        (vec![rewind_point(2, true), rewind_point(0, false)], 0, true),
+        (
+            vec![rewind_point(0, true), rewind_point(2, false)],
+            2,
+            false,
+        ),
+        (vec![rewind_point(0, false), rewind_point(2, true)], 2, true),
+    ] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().rewind_points = Some(points);
+        dispatch(Action::RewindPickerSelect(target), &mut app);
+        for back in [false, true] {
+            if back {
+                dispatch(Action::RewindBackToModeSelect, &mut app);
+            }
+            match &app.agents[&id].rewind_state.as_ref().unwrap().phase {
+                crate::views::rewind::RewindPhase::ModeSelect {
+                    target_prompt_index,
+                    has_file_changes,
+                    offer_files_only,
+                    ..
+                } => {
+                    assert_eq!(*target_prompt_index, target);
+                    assert_eq!(*has_file_changes, expected, "target={target}, back={back}");
+                    assert!(*offer_files_only);
+                }
+                other => panic!("unexpected phase: {other:?}"),
+            }
+        }
+    }
+    let mut app = app_mid_inline_edit("edited prompt");
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().rewind_points =
+        Some(vec![rewind_point(0, false), rewind_point(1, true)]);
+    dispatch(Action::RewindPickerSelect(0), &mut app);
+    dispatch(Action::RewindBackToModeSelect, &mut app);
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::ModeSelect {
+            has_file_changes: true,
+            offer_files_only: false,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn rewind_back_from_confirmation_preserves_older_target() {
+    use crate::views::rewind::{RewindMode, RewindPhase};
+    for (mode, target, clear_points) in [
+        (RewindMode::All, 2, false),
+        (RewindMode::All, 2, true),
+        (RewindMode::ConversationOnly, 0, false),
+    ] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().rewind_points = Some(vec![
+            rewind_point(0, false),
+            rewind_point(2, true),
+            rewind_point(4, true),
+        ]);
+        dispatch(Action::RewindPickerSelect(target), &mut app);
+        let effects = dispatch(Action::RewindSelectMode(mode, target), &mut app);
+        if mode == RewindMode::All {
+            assert!(matches!(
+                &effects[0],
+                Effect::RewindPreview {
+                    target_prompt_index: 2,
+                    ..
+                }
+            ));
+            let mut response = rewind_success(target, "all", "older prompt");
+            response.clean_files = vec!["src/old.rs".into()];
+            dispatch(
+                Action::TaskComplete(TaskResult::RewindPreviewComplete {
+                    request_id: app.agents[&id].rewind_read.as_ref().unwrap().0,
+                    agent_id: id,
+                    response,
+                    target_prompt_index: target,
+                    mode,
+                }),
+                &mut app,
+            );
+            assert!(matches!(
+                app.agents[&id].rewind_state.as_ref().unwrap().phase,
+                RewindPhase::Confirm {
+                    target_prompt_index: 2,
+                    ..
+                }
+            ));
+        } else {
+            assert!(matches!(
+                app.agents[&id].rewind_state.as_ref().unwrap().phase,
+                RewindPhase::ConversationOnlyConfirm {
+                    target_prompt_index: 0,
+                    ..
+                }
+            ));
+        }
+        if clear_points {
+            app.agents.get_mut(&id).unwrap().rewind_points = None;
+        }
+        dispatch(Action::RewindBackToModeSelect, &mut app);
+        let state = app.agents[&id].rewind_state.as_ref().unwrap();
+        match state.phase {
+            RewindPhase::ModeSelect {
+                target_prompt_index,
+                ..
+            } => assert_eq!(target_prompt_index, target, "clear_points={clear_points}"),
+            ref other => panic!("unexpected phase: {other:?}"),
+        }
+        assert_eq!(state.selected_prompt_index, Some(target));
+    }
+}
+
+#[test]
+fn preselected_rewind_includes_later_file_changes() {
+    use crate::views::rewind::RewindPhase;
+    for inline in [false, true] {
+        for (points, target, resolved, expected) in [
+            (
+                vec![rewind_point(2, true), rewind_point(0, false)],
+                0,
+                0,
+                true,
+            ),
+            (
+                vec![rewind_point(0, false), rewind_point(2, false)],
+                0,
+                0,
+                false,
+            ),
+            (
+                vec![rewind_point(0, true), rewind_point(2, false)],
+                0,
+                0,
+                true,
+            ),
+            (
+                vec![rewind_point(0, true), rewind_point(2, false)],
+                2,
+                2,
+                false,
+            ),
+            (
+                vec![rewind_point(0, true), rewind_point(2, false)],
+                1,
+                2,
+                false,
+            ),
+        ] {
+            if inline && target != 0 {
+                continue;
+            }
+            let id = AgentId(0);
+            let mut app = if inline {
+                app_mid_inline_edit("edited")
+            } else {
+                let mut app = test_app_with_agent();
+                let agent = app.agents.get_mut(&id).unwrap();
+                for _ in 0..=target {
+                    agent
+                        .scrollback
+                        .push_block(RenderBlock::user_prompt("original"));
+                }
+                agent.scrollback.prepare_layout(80, 40);
+                agent.scrollback.set_selected(Some(target));
+                app
+            };
+            dispatch(
+                if inline {
+                    Action::InlineEditSubmit
+                } else {
+                    Action::Rewind
+                },
+                &mut app,
+            );
+            dispatch(
+                Action::TaskComplete(TaskResult::RewindPointsLoaded {
+                    request_id: app.agents[&id].rewind_read.as_ref().unwrap().0,
+                    agent_id: id,
+                    points,
+                }),
+                &mut app,
+            );
+            assert!(
+                matches!(app.agents[&id].rewind_state.as_ref().unwrap().phase,
+                    RewindPhase::ModeSelect { target_prompt_index, has_file_changes, offer_files_only, .. }
+                    if target_prompt_index == resolved && has_file_changes == expected && offer_files_only == !inline
+                ),
+                "inline={inline}, expected={expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dismissed_rewind_points_do_not_reopen_overlay() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
+    dispatch(Action::Rewind, &mut app);
+    let result = points_loaded(&app, id, true);
+    dispatch(Action::RewindDismiss, &mut app);
+    dispatch(result, &mut app);
+    let agent = &app.agents[&id];
+    assert!(agent.rewind_state.is_none());
+    assert!(agent.rewind_points.is_none());
+    assert_eq!(agent.prompt.text(), "draft");
+}
+
+fn begin_test_rewind_read(app: &mut AppView, preview: bool) -> uuid::Uuid {
+    let id = AgentId(0);
+    let effects = dispatch(Action::Rewind, app);
+    let Effect::FetchRewindPoints { request_id, .. } = &effects[0] else {
+        panic!("missing points request");
+    };
+    assert_eq!(*request_id, app.agents[&id].rewind_read.as_ref().unwrap().0);
+    if !preview {
+        return *request_id;
+    }
+    dispatch(points_loaded(app, id, true), app);
+    dispatch(Action::RewindPickerSelect(0), app);
+    let effects = dispatch(
+        Action::RewindSelectMode(crate::views::rewind::RewindMode::All, 0),
+        app,
+    );
+    let Effect::RewindPreview { request_id, .. } = &effects[0] else {
+        panic!("missing preview request");
+    };
+    assert_eq!(*request_id, app.agents[&id].rewind_read.as_ref().unwrap().0);
+    *request_id
+}
+
+fn test_rewind_read_result(request_id: uuid::Uuid, preview: bool, failure: bool) -> Action {
+    let agent_id = AgentId(0);
+    let error = "read failed".to_owned();
+    let result = match (preview, failure) {
+        (false, false) => TaskResult::RewindPointsLoaded {
+            request_id,
+            agent_id,
+            points: vec![rewind_point(0, true)],
+        },
+        (false, true) => TaskResult::RewindPointsFailed {
+            request_id,
+            agent_id,
+            error,
+        },
+        (true, false) => TaskResult::RewindPreviewComplete {
+            request_id,
+            agent_id,
+            response: rewind_success(0, "all", "original"),
+            target_prompt_index: 0,
+            mode: crate::views::rewind::RewindMode::All,
+        },
+        (true, true) => TaskResult::RewindPreviewFailed {
+            request_id,
+            agent_id,
+            error,
+        },
+    };
+    Action::TaskComplete(result)
+}
+
+#[test]
+fn obsolete_rewind_reads_preserve_current_interaction() {
+    for preview in [false, true] {
+        for failure in [false, true] {
+            for scenario in ["dismiss", "reopen", "session", "phase"] {
+                let mut app = test_app_with_agent();
+                let id = AgentId(0);
+                app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
+                let old = begin_test_rewind_read(&mut app, preview);
+                match scenario {
+                    "dismiss" | "reopen" => {
+                        dispatch(Action::RewindDismiss, &mut app);
+                        if scenario == "reopen" {
+                            begin_test_rewind_read(&mut app, preview);
+                        }
+                    }
+                    "session" => app
+                        .agents
+                        .get_mut(&id)
+                        .unwrap()
+                        .bind_session_id(acp::SessionId::new("replacement")),
+                    "phase" => {
+                        dispatch(Action::RewindPickerSelect(0), &mut app);
+                    }
+                    _ => unreachable!(),
+                }
+                let before_phase = format!(
+                    "{:?}",
+                    app.agents[&id].rewind_state.as_ref().map(|s| &s.phase)
+                );
+                let before_points = format!("{:?}", app.agents[&id].rewind_points);
+                let before_draft = app.agents[&id].prompt.text().to_owned();
+                let before_request = app.agents[&id].rewind_read.clone();
+                app.agents.get_mut(&id).unwrap().toast = None;
+                assert!(
+                    dispatch(test_rewind_read_result(old, preview, failure), &mut app).is_empty()
+                );
+                let agent = &app.agents[&id];
+                assert_eq!(
+                    format!("{:?}", agent.rewind_state.as_ref().map(|s| &s.phase)),
+                    before_phase,
+                    "{scenario}"
+                );
+                assert_eq!(format!("{:?}", agent.rewind_points), before_points);
+                assert_eq!(agent.prompt.text(), before_draft);
+                assert_eq!(agent.rewind_read, before_request);
+                assert!(agent.toast.is_none());
+                if scenario == "reopen" {
+                    let current = agent.rewind_read.as_ref().unwrap().0;
+                    assert_ne!(old, current);
+                    dispatch(test_rewind_read_result(current, preview, false), &mut app);
+                    assert!(app.agents[&id].rewind_read.is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn current_rewind_reads_complete_after_view_switch() {
+    use crate::views::rewind::RewindPhase;
+    for preview in [false, true] {
+        for failure in [false, true] {
+            let mut app = test_app_with_agent();
+            let id = AgentId(0);
+            app.agents.get_mut(&id).unwrap().prompt.set_text("draft");
+            let request_id = begin_test_rewind_read(&mut app, preview);
+            app.active_view = ActiveView::Welcome;
+            dispatch(
+                test_rewind_read_result(request_id, preview, failure),
+                &mut app,
+            );
+            let agent = &app.agents[&id];
+            assert!(agent.rewind_read.is_none());
+            match (preview, failure) {
+                (false, false) => assert!(matches!(
+                    agent.rewind_state.as_ref().unwrap().phase,
+                    RewindPhase::Picker { .. }
+                )),
+                (false, true) => {
+                    assert!(agent.rewind_state.is_none());
+                    assert_eq!(agent.prompt.text(), "draft");
+                    assert!(app.welcome_toast.is_some());
+                }
+                (true, false) => assert!(matches!(
+                    agent.rewind_state.as_ref().unwrap().phase,
+                    RewindPhase::Confirm { .. }
+                )),
+                (true, true) => assert!(matches!(
+                    agent.rewind_state.as_ref().unwrap().phase,
+                    RewindPhase::Error { .. }
+                )),
+            }
+            if preview {
+                app.active_view = ActiveView::Agent(id);
+                dispatch(Action::RewindDismiss, &mut app);
+                assert_eq!(app.agents[&id].prompt.text(), "draft");
+            }
+        }
+    }
+}
+
+#[test]
+fn rewind_reads_do_not_cross_session_rebinding() {
+    for preview in [false, true] {
+        for failure in [false, true] {
+            for rebind in [true, false] {
+                let mut app = test_app_with_agent();
+                let id = AgentId(0);
+                let request_id = begin_test_rewind_read(&mut app, preview);
+                let agent = app.agents.get_mut(&id).unwrap();
+                let session = agent.session.session_id.clone().unwrap();
+                if rebind {
+                    agent.unbind_session_id();
+                }
+                agent.bind_session_id(session);
+                let before = format!("{:?}", agent.rewind_state.as_ref().map(|s| &s.phase));
+                dispatch(
+                    test_rewind_read_result(request_id, preview, failure),
+                    &mut app,
+                );
+                let agent = &app.agents[&id];
+                if rebind {
+                    assert_eq!(
+                        format!("{:?}", agent.rewind_state.as_ref().map(|s| &s.phase)),
+                        before
+                    );
+                    assert!(agent.toast.is_none());
+                } else {
+                    assert!(agent.rewind_read.is_none());
+                    assert_ne!(
+                        format!("{:?}", agent.rewind_state.as_ref().map(|s| &s.phase)),
+                        before
+                    );
+                }
+            }
+        }
+    }
 }

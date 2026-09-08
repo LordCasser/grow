@@ -537,7 +537,8 @@ impl SessionActor {
             turn_start_ms,
             chrono::Utc::now().timestamp_millis(),
         );
-        let runtime_state = format_runtime_state_line(backing_task_count, turn_elapsed_seconds);
+        let runtime_state =
+            format_runtime_state_line(Some(backing_task_count), turn_elapsed_seconds);
 
         let items = vec![
             ConversationItem::System(sampling_types::SystemItem {

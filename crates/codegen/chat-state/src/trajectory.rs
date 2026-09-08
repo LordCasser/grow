@@ -16,7 +16,7 @@ use crate::{
 ///
 /// This is intentionally independent from the Timeline event schema: changing
 /// a debug projection must not pretend that the durable ledger format changed.
-pub const TRAJECTORY_SCHEMA_VERSION: u8 = 4;
+pub const TRAJECTORY_SCHEMA_VERSION: u8 = 5;
 
 /// Relations are summary metadata, never an unbounded copy of replacement refs.
 const MAX_REPAIR_SOURCE_LINKS: usize = 16;
@@ -66,6 +66,10 @@ pub struct TrajectoryRow {
     pub step_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+    /// All IDs carried by a batch event. `correlation_id` remains the
+    /// primary display key; relation queries use this complete set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relation_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -530,6 +534,7 @@ fn row(
         visibility,
         turn_id,
         step_index,
+        relation_ids: event_relation_ids(&event.kind, correlation_id.as_deref()),
         correlation_id,
         duration_ms,
         outcome,
@@ -540,6 +545,23 @@ fn row(
         summary,
         details: serde_json::Value::Null,
     }
+}
+
+fn event_relation_ids(kind: &TimelineEventKind, primary: Option<&str>) -> Vec<String> {
+    let ids = match kind {
+        TimelineEventKind::Notification(NotificationEvent::Consumed {
+            notification_ids, ..
+        })
+        | TimelineEventKind::Notification(NotificationEvent::Dismissed {
+            notification_ids, ..
+        }) => notification_ids,
+        TimelineEventKind::Input(InputEvent::Rerouted { input_ids, .. })
+        | TimelineEventKind::Input(InputEvent::Consumed { input_ids, .. })
+        | TimelineEventKind::Input(InputEvent::Handled { input_ids, .. })
+        | TimelineEventKind::Input(InputEvent::Dismissed { input_ids, .. }) => input_ids,
+        _ => return primary.map(str::to_owned).into_iter().collect(),
+    };
+    ids.clone()
 }
 
 fn dimensions(
@@ -912,6 +934,7 @@ fn describe(
             HookEvent::RunFinished {
                 occurrence_id,
                 run_id,
+                elapsed_ms,
                 outcome,
                 ..
             } => tuple(
@@ -921,7 +944,7 @@ fn describe(
                 None,
                 None,
                 Some(run_id.clone()),
-                None,
+                Some(*elapsed_ms),
                 format!("{occurrence_id} · {outcome:?}"),
             ),
             HookEvent::RunSkipped {
@@ -1803,6 +1826,17 @@ fn event_outcome(event: &TimelineEventKind) -> Option<String> {
             }
             .into(),
         ),
+        TimelineEventKind::Hook(HookEvent::RunFinished { outcome, .. }) => Some(
+            match outcome {
+                crate::timeline::HookRunOutcome::Success => "success",
+                crate::timeline::HookRunOutcome::Blocked => "blocked",
+                crate::timeline::HookRunOutcome::Failed { .. } => "failed",
+                crate::timeline::HookRunOutcome::TimedOut => "timed_out",
+                crate::timeline::HookRunOutcome::Cancelled => "cancelled",
+                crate::timeline::HookRunOutcome::InterruptedOutcomeUnknown => "outcome_unknown",
+            }
+            .into(),
+        ),
         _ => None,
     }
 }
@@ -1815,6 +1849,7 @@ pub fn trajectory_issue_severity(
     let outcome = outcome.unwrap_or_default().to_ascii_lowercase();
     if [
         "failed",
+        "timed_out",
         "error",
         "invalid_tool",
         "hook_denied",
@@ -2232,7 +2267,9 @@ mod tests {
                 run_id: "trajectory-run".into(),
                 handler_index: 0,
                 elapsed_ms: 7,
-                outcome: crate::HookRunOutcome::Success,
+                outcome: crate::HookRunOutcome::Failed {
+                    message: "boom".into(),
+                },
                 control: crate::HookRunControl::None,
             }))
             .unwrap();
@@ -2265,6 +2302,30 @@ mod tests {
                 .map(|row| row.state.as_str())
                 .collect::<Vec<_>>(),
             ["planned", "started", "finished", "completed"]
+        );
+        let finished = snapshot
+            .rows
+            .iter()
+            .find(|row| row.producer == "hook" && row.state == "finished")
+            .unwrap();
+        assert_eq!(finished.duration_ms, Some(7));
+        assert_eq!(finished.outcome.as_deref(), Some("failed"));
+        assert_eq!(
+            finished.issue_severity,
+            Some(TrajectoryIssueSeverity::Error)
+        );
+    }
+
+    #[test]
+    fn batch_notification_relations_retain_every_member() {
+        let event = TimelineEventKind::Notification(NotificationEvent::Consumed {
+            notification_ids: vec!["notification-a".into(), "notification-b".into()],
+            turn: crate::TurnId(1),
+            input: None,
+        });
+        assert_eq!(
+            event_relation_ids(&event, Some("notification-a")),
+            ["notification-a", "notification-b"]
         );
     }
 

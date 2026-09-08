@@ -105,6 +105,7 @@ pub fn draw_live(
         "/transcript"
     };
     let transcript_progress = minimal_api::minimal_transcript_progress(app);
+    let fps_overlay = minimal_api::minimal_fps_overlay(app);
     minimal_api::with_minimal_live_state(app, |cursor, mut agent, appearance| {
         let theme = Theme::current();
         let commit_app = super::commit::committed_appearance(appearance);
@@ -131,6 +132,11 @@ pub fn draw_live(
                 return (None, None);
             }
             Clear.render(area, frame.buffer_mut());
+            let area = if let Some(fps) = &fps_overlay {
+                fps.render_minimal(area, frame.buffer_mut())
+            } else {
+                area
+            };
             let Some(agent) = agent.as_deref_mut() else {
                 crate::startup::render_startup(frame.buffer_mut(), area, &theme, &auth_hint);
                 return (None, None);

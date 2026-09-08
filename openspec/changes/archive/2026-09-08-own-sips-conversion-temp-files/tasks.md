@@ -1,0 +1,3 @@
+- [x] Replace shared-root files with private owned directory and common cleanup lifetime.
+- [x] Test permissions, independent ownership, success and early failures.
+- [x] Validate, document and archive.

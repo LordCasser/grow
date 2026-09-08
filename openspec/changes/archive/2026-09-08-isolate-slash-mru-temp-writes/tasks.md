@@ -1,0 +1,3 @@
+- [x] Replace the shared temporary path with unique owned files.
+- [x] Verify legacy-path isolation, concurrent complete snapshots and failed publication cleanup.
+- [x] Document, validate and archive.

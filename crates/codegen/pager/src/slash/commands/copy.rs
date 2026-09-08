@@ -65,9 +65,13 @@ fn parse_copy_args(args: &str) -> Result<(usize, Option<PathBuf>), String> {
     let first = parts.next().unwrap_or("");
     let rest = parts.next().map(str::trim).filter(|s| !s.is_empty());
 
+    let digits = first.strip_prefix('+').or_else(|| first.strip_prefix('-')).unwrap_or(first);
+    let is_integer = !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit());
+    let usage = "Usage: /copy [N] [file] where N is 1 (latest), 2, 3, ... Use ./123 for a numeric filename.";
     match first.parse::<usize>() {
-        Ok(0) => Err("Usage: /copy [N] [file] where N is 1 (latest), 2, 3, ...".to_string()),
+        Ok(0) => Err(usage.to_string()),
         Ok(n) => Ok((n, rest.map(PathBuf::from))),
+        Err(_) if is_integer => Err(usage.to_string()),
         Err(_) => {
             // Non-numeric first token: treat the whole args string as a path.
             Ok((1, Some(PathBuf::from(trimmed))))
@@ -77,6 +81,22 @@ fn parse_copy_args(args: &str) -> Result<(usize, Option<PathBuf>), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invalid_numeric_indices_do_not_become_file_paths() {
+        let overflow = format!("{}0", usize::MAX);
+        for token in ["0".to_string(), "-1".to_string(), "+0".to_string(),
+            overflow.clone(), format!("+{overflow}"), format!("-{overflow}")] {
+            for input in [token.clone(), format!("{token} output.txt")] {
+                assert!(parse_copy_args(&input).is_err(), "{input:?} must not become a file path");
+            }
+        }
+        for path in ["./123", "./-1", "123.txt", "folder/my reply.txt"] {
+            assert_eq!(parse_copy_args(path).unwrap(), (1, Some(PathBuf::from(path))));
+        }
+        assert_eq!(parse_copy_args("+1").unwrap(), (1, None));
+        assert_eq!(parse_copy_args("2 out.txt").unwrap(), (2, Some(PathBuf::from("out.txt"))));
+    }
+
     use super::*;
     use crate::acp::model_state::ModelState;
     use crate::app::actions::Action;

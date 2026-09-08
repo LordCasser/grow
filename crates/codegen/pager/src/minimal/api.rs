@@ -91,13 +91,27 @@ pub fn app_pending_action(app: &AppView) -> &Option<crate::app::root::PendingAct
     &app.pending_action
 }
 
+pub fn minimal_fps_rows(app: &AppView, available: u16) -> u16 {
+    if app.fps_hud.enabled() {
+        crate::views::fps_hud::FpsOverlay::minimal_rows(available)
+    } else {
+        0
+    }
+}
+
+pub fn minimal_fps_overlay(app: &mut AppView) -> Option<crate::views::fps_hud::FpsOverlay> {
+    app.fps_hud.overlay(0)
+}
+
 pub fn app_cwd(app: &AppView) -> &std::path::Path {
     app.cwd.as_path()
 }
 
-pub fn app_set_pending_pager(app: &mut AppView, path: std::path::PathBuf, ansi: bool) {
-    app.pending_pager_path = Some(path);
-    app.pending_pager_ansi = ansi;
+pub fn app_set_pending_pager(app: &mut AppView, owner: AgentId, content: &str, ansi: bool) -> std::io::Result<()> {
+    let agent = app.agents.get(&owner).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "transcript owner removed"))?;
+    let path = crate::export_cmd::write_pager_transcript(content, ansi)?;
+    app.pending_pager = Some(crate::app::external_pager::PendingPager::new(path, ansi, owner, agent));
+    Ok(())
 }
 
 pub fn with_minimal_live_state<R>(
@@ -337,7 +351,7 @@ pub(crate) struct SuspendedMinimalBtwLifecycle {
 /// loop renders a **time-budgeted slice per frame**
 /// (`pager-minimal::full_view::pump_transcript`) — the same
 /// amortization the reference scrollback TUIs use for transcript-scale work —
-/// and arms `pending_pager_path` when done.
+/// and arms `pending_pager` when done.
 pub struct TranscriptBuild {
     /// The agent whose conversation this build snapshots. The pump resolves
     /// entries against THIS agent — never the active view: `EntryId`s are
@@ -347,6 +361,8 @@ pub struct TranscriptBuild {
     /// session's blocks. Keying by owner also keeps the build alive (and the
     /// pager opening) when the user tabs away mid-build.
     pub agent: crate::app::session::AgentId,
+    /// Reload invalidated the snapshot; refresh from final state before pumping.
+    pub restart_after_reload: bool,
     /// Snapshot of the entry IDs to render, in conversation order. IDs are
     /// re-resolved per slice, so entries removed mid-build (rewind / clear)
     /// are skipped instead of skewing positions.
@@ -414,7 +430,7 @@ pub fn requeue_minimal_pending_expand(app: &mut AppView, mut ids: Vec<EntryId>) 
 /// conversation. No-op when a build is already running (the in-flight one
 /// wins) — and pushes the "nothing to show" system block when the conversation
 /// is empty. The minimal draw loop pumps the build a slice per frame and arms
-/// `pending_pager_path` on completion.
+/// `pending_pager` on completion.
 pub fn request_minimal_transcript(app: &mut AppView) {
     if app.minimal_state.transcript.is_some() {
         return;
@@ -426,11 +442,17 @@ pub fn request_minimal_transcript(app: &mut AppView) {
     let Some(agent) = app.agents.get_mut(&id) else {
         return;
     };
+    if agent.session.loading_replay && agent.session_reload.is_none() {
+        agent.scrollback.push_block(crate::scrollback::block::RenderBlock::notice(
+            "Session history is still loading. Try /transcript again when loading finishes.",
+        ));
+        return;
+    }
     let sb = &agent.scrollback;
     let ids: Vec<EntryId> = (0..sb.len())
         .filter_map(|i| sb.entry(i).map(|e| e.id))
         .collect();
-    if ids.is_empty() {
+    if ids.is_empty() && agent.session_reload.is_none() {
         agent
             .scrollback
             .push_block(crate::scrollback::block::RenderBlock::notice(
@@ -440,6 +462,7 @@ pub fn request_minimal_transcript(app: &mut AppView) {
     }
     app.minimal_state.transcript = Some(TranscriptBuild {
         agent: id,
+        restart_after_reload: agent.session_reload.is_some(),
         ids,
         next: 0,
         out: String::new(),
@@ -451,7 +474,38 @@ pub fn request_minimal_transcript(app: &mut AppView) {
 /// double `&mut AppView` borrow). Put it back via [`set_minimal_transcript`]
 /// unless the slice finished it.
 pub fn take_minimal_transcript(app: &mut AppView) -> Option<TranscriptBuild> {
+    let build = app.minimal_state.transcript.as_mut()?;
+    if let Some(agent) = app.agents.get(&build.agent) {
+        if agent.session_reload.is_some() {
+            // Also cover requests created after the reconnect entry hook.
+            build.restart_after_reload = true;
+            build.ids.clear();
+            build.next = 0;
+            build.out.clear();
+            return None;
+        }
+        if build.restart_after_reload {
+            build.ids = (0..agent.scrollback.len())
+                .filter_map(|i| agent.scrollback.entry(i).map(|entry| entry.id))
+                .collect();
+            build.next = 0;
+            build.out.clear();
+            build.restart_after_reload = false;
+        }
+    }
     app.minimal_state.transcript.take()
+}
+
+/// Invalidate before replay can begin and finish between two render frames.
+pub(crate) fn restart_minimal_transcript_after_reload(app: &mut AppView, agents: &[AgentId]) {
+    if let Some(build) = app.minimal_state.transcript.as_mut()
+        && agents.contains(&build.agent)
+    {
+        build.restart_after_reload = true;
+        build.ids.clear();
+        build.next = 0;
+        build.out.clear();
+    }
 }
 
 /// Store the (still unfinished) transcript build back after a pump slice.

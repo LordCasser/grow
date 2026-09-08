@@ -1,5 +1,164 @@
 //! Tests for settings setters, toggles, resets, and rollback.
 use super::*;
+
+fn complete_setting_request(app: &mut AppView, effect: &Effect, success: bool) -> Vec<Effect> {
+    let Effect::PersistSetting {
+        key,
+        value,
+        rollback_value,
+    } = effect
+    else {
+        panic!("expected setting write");
+    };
+    let result = if success {
+        TaskResult::SettingPersisted {
+            key,
+            value: value.clone(),
+        }
+    } else {
+        TaskResult::SettingPersistFailed {
+            key,
+            rollback_value: rollback_value.clone(),
+            error: "test failure".into(),
+        }
+    };
+    dispatch(Action::TaskComplete(result), app)
+}
+
+#[test]
+fn recursive_settings_reset_registers_write_once() {
+    use crate::views::modal::ResetSettingsResult;
+    let mut app = test_app_with_agent();
+    let first = dispatch(Action::SetCompactMode(true), &mut app);
+    assert!(complete_setting_request(&mut app, &first[0], true).is_empty());
+    setup_reset_confirm_open(&mut app, "compact_mode");
+    let reset = dispatch(
+        Action::ConfirmResetSetting {
+            choice: ResetSettingsResult::Reset,
+        },
+        &mut app,
+    );
+    assert_eq!(reset.len(), 1);
+    assert!(!app.current_ui.compact_mode);
+    assert!(complete_setting_request(&mut app, &reset[0], true).is_empty());
+}
+
+#[test]
+fn queued_setting_failure_uses_last_confirmed_baseline() {
+    for first_succeeds in [false, true] {
+        let mut app = test_app_with_agent();
+        app.current_ui.screen_mode = None;
+        let first = dispatch(Action::SetScreenMode("minimal".into()), &mut app);
+        assert_eq!(first.len(), 1);
+        assert!(dispatch(Action::SetScreenMode("fullscreen".into()), &mut app).is_empty());
+        let next = complete_setting_request(&mut app, &first[0], first_succeeds);
+        assert_eq!(app.current_ui.screen_mode.as_deref(), Some("fullscreen"));
+        assert_eq!(next.len(), 1);
+        assert!(matches!(
+            &next[0],
+            Effect::PersistSetting {
+                value: crate::settings::SettingValue::Enum("fullscreen"),
+                ..
+            }
+        ));
+        assert!(complete_setting_request(&mut app, &next[0], false).is_empty());
+        assert_eq!(
+            app.current_ui.screen_mode.as_deref(),
+            first_succeeds.then_some("minimal")
+        );
+        assert_eq!(
+            dispatch(Action::SetScreenMode("fullscreen".into()), &mut app).len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn queued_setting_coalesces_aba_and_keeps_other_keys_independent() {
+    let mut app = test_app_with_agent();
+    app.current_ui.screen_mode = None;
+    let first = dispatch(Action::SetScreenMode("minimal".into()), &mut app);
+    assert!(dispatch(Action::SetScreenMode("fullscreen".into()), &mut app).is_empty());
+    assert!(dispatch(Action::SetScreenMode("minimal".into()), &mut app).is_empty());
+    let other = dispatch(Action::SetCompactMode(true), &mut app);
+    assert_eq!(other.len(), 1);
+    let next = complete_setting_request(&mut app, &first[0], false);
+    assert_eq!(next.len(), 1);
+    assert!(matches!(
+        &next[0],
+        Effect::PersistSetting {
+            value: crate::settings::SettingValue::Enum("minimal"),
+            ..
+        }
+    ));
+    assert!(complete_setting_request(&mut app, &next[0], false).is_empty());
+    assert!(app.current_ui.screen_mode.is_none());
+    assert!(app.current_ui.compact_mode);
+    assert!(complete_setting_request(&mut app, &other[0], true).is_empty());
+}
+
+#[test]
+fn earlier_setting_failure_keeps_newer_selection() {
+    let mut app = test_app_with_agent();
+    app.current_ui.screen_mode = None;
+    let first = dispatch(Action::SetScreenMode("minimal".into()), &mut app);
+    let rollback_value = first
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PersistSetting {
+                key: "screen_mode",
+                rollback_value,
+                ..
+            } => Some(rollback_value.clone()),
+            _ => None,
+        })
+        .unwrap();
+    dispatch(Action::SetScreenMode("fullscreen".into()), &mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::SettingPersistFailed {
+            key: "screen_mode",
+            rollback_value,
+            error: "first write failed".into(),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.current_ui.screen_mode.as_deref(), Some("fullscreen"));
+}
+
+#[test]
+fn screen_mode_failed_initial_save_can_retry() {
+    let mut app = test_app_with_agent();
+    app.current_ui.screen_mode = None;
+    let effects = dispatch(Action::SetScreenMode("fullscreen".into()), &mut app);
+    let rollback_value = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::PersistSetting {
+                key: "screen_mode",
+                rollback_value,
+                ..
+            } => Some(rollback_value.clone()),
+            _ => None,
+        })
+        .expect("initial selection must persist");
+    dispatch(
+        Action::TaskComplete(TaskResult::SettingPersistFailed {
+            key: "screen_mode",
+            rollback_value,
+            error: "disk full".into(),
+        }),
+        &mut app,
+    );
+    assert!(app.current_ui.screen_mode.is_none());
+    let retry = dispatch(Action::SetScreenMode("fullscreen".into()), &mut app);
+    assert!(retry.iter().any(|effect| matches!(
+        effect,
+        Effect::PersistSetting {
+            key: "screen_mode",
+            ..
+        }
+    )));
+}
 /// `Action::ToggleVimMode` flips the active agent's `vim_mode` field,
 /// updates the in-process pager cache so future agents pick it up
 /// via `load_vim_mode`, emits `Effect::PersistSetting` so the new
@@ -39,6 +198,13 @@ fn toggle_vim_mode_flips_state_and_persistence_cache() {
     assert!(
         crate::appearance::cache::load_vim_mode(),
         "pager cache must reflect new value so future agents pick it up"
+    );
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SettingPersisted {
+            key: "vim_mode",
+            value: crate::settings::SettingValue::Bool(true),
+        }),
+        &mut app,
     );
     let effects = dispatch(Action::ToggleVimMode, &mut app);
     assert!(
@@ -479,6 +645,13 @@ fn toggle_off_while_short_keeps_render_compact_and_persists_user_value() {
     use crossterm::event::Event;
     let mut app = test_app_with_agent();
     let _ = dispatch(Action::SetCompactMode(true), &mut app);
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SettingPersisted {
+            key: "compact_mode",
+            value: SettingValue::Bool(true),
+        }),
+        &mut app,
+    );
     let _ = app.handle_input(&Event::Resize(100, 14));
     let effects = dispatch(Action::SetCompactMode(false), &mut app);
     assert!(!app.current_ui.compact_mode, "user setting turned off");
@@ -1229,6 +1402,13 @@ fn pr13_set_show_tips_emits_persist_with_rollback() {
         other => panic!("expected PersistSetting effect, got {other:?}"),
     }
     assert_eq!(app.show_tips, Some(false));
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SettingPersisted {
+            key: "show_tips",
+            value: SettingValue::Bool(false),
+        }),
+        &mut app,
+    );
     let effects = dispatch(Action::SetShowTips(true), &mut app);
     assert_eq!(effects.len(), 1);
     match &effects[0] {
@@ -2726,8 +2906,7 @@ fn rollback_permission_mode_reverts_state_no_effect() {
 /// The reset-dispatch test asserts the typed Action lineage. The
 /// reset path dispatches `Action::SetDefaultPermissionMode(Ask)` (the
 /// registered default) rather than `Action::SetPermissionMode(PermissionModeKind::Ask)`.
-/// Both emit `Effect::PersistPermissionMode` so the `has_persist`
-/// assertion in the parent test holds; this test pins the typed
+/// The default setter emits ordinary `Effect::PersistSetting`; this pins the typed
 /// Action shape directly so a future refactor that drops the
 /// persistent-default mapping in `action_for_reset` is caught.
 #[test]
@@ -3199,13 +3378,12 @@ fn rollback_auto_dark_theme_with_auto_value_clears_to_none() {
         let mut app = test_app_with_agent();
         let _ = dispatch(Action::SetAutoDarkTheme("growday".into()), &mut app);
         assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("growday"));
-        let _ = dispatch(
-            Action::TaskComplete(TaskResult::SettingPersistFailed {
-                key: "auto_dark_theme",
-                rollback_value: SettingValue::Enum("auto"),
-                error: "disk full".into(),
-            }),
+        // Exercise the rollback arm's handling of a legacy invalid value,
+        // independently of the admitted request's authoritative baseline.
+        let _ = crate::app::root::dispatch::settings::ui::apply_setting_rollback(
             &mut app,
+            "auto_dark_theme",
+            &SettingValue::Enum("auto"),
         );
         assert_eq!(
             app.current_ui.auto_dark_theme, None,
@@ -3224,13 +3402,12 @@ fn rollback_auto_light_theme_with_auto_value_clears_to_none() {
             app.current_ui.auto_light_theme.as_deref(),
             Some("grownight"),
         );
-        let _ = dispatch(
-            Action::TaskComplete(TaskResult::SettingPersistFailed {
-                key: "auto_light_theme",
-                rollback_value: SettingValue::Enum("auto"),
-                error: "disk full".into(),
-            }),
+        // Exercise the rollback arm's handling of a legacy invalid value,
+        // independently of the admitted request's authoritative baseline.
+        let _ = crate::app::root::dispatch::settings::ui::apply_setting_rollback(
             &mut app,
+            "auto_light_theme",
+            &SettingValue::Enum("auto"),
         );
         assert_eq!(app.current_ui.auto_light_theme, None);
     });

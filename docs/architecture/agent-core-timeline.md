@@ -94,6 +94,8 @@ file 与 client handler 共同组成一条冻结的有序策略链。file handle
 
 `HookLifecycleProjection` 是 TUI、Trajectory 与 diagnostics 的共同读取模型。实时 `HookExecution` 只是在 durable `Completed` 之后按 `occurrence_id` 查询该投影得到的瞬态 transport，运行列表和阻断 annotation 都包含在同一投影中；它不写入 `updates.jsonl`，也不能再次触发 Notification Hook。handler 名称、typed outcome/control、skip reason 和准确 `elapsed_ms` 都来自 Timeline；实时 transport 丢失或 client 重连时，shell 重新查询所有已完成 occurrence，Pager 再按 `occurrence_id` 去重。diagnostics 只在 occurrence 首次完成时从相同投影生成，不在重连时重复记账。Stop continuation 达到上限也必须形成 `Triggered → RunSkipped(PolicyDisabled) → Completed(AllowStop)`，但不得调用外部 handler。child 内发生的 occurrence 只写 child Timeline，parent 只保留其自身的 subagent 生命周期，不复制 child Hook 细节。
 
+Control 的每条模型上下文使用 `(event_seq, 原始上下文索引)` 作为独立 SurfaceId。即使只有部分上下文在 step/turn 边界生效，或同层 pending 被后续控制替代，也不能重新从 0 编号；即时 Surface、pending 激活和 branch provenance 必须保留相同身份。恢复补入项目指令时，完整替换才能准确覆盖当前 Surface。验收契约见 [session-timeline](../../openspec/specs/session-timeline/spec.md)。
+
 `Replace` 的 `start`/`end` 引用当前 Surface 节点身份，不是 `Vec` 下标。接受替换前必须验证：
 
 1. 两端节点都仍在当前 Surface；
@@ -284,3 +286,13 @@ Grow 不为旧的可变 Chat 快照格式或旧 Timeline schema 保留执行兼�
 | Trajectory server | Timeline 查询、过滤与本地调试页面 | Chat snapshot、updates replay、会话写入 |
 
 架构来源为 `/Users/lordcasser/workspace/projects/solaris/docs/agent-core` 的 T/P/G 模型、`deepseek-harness` 的 session/surface fold，以及 Grow 已验证的 sampler、steering、权限与压缩策略。实现冲突时以本文模块边界和不变量为 Grow 的代码约束。
+
+冷恢复在发布 actor 前把持久化 effort 注入已解析的采样配置，恢复与驻留重连不通过模型切换命令补设 effort；不受当前模型支持的显式历史值在启动前报错。见 [session-timeline](../../openspec/specs/session-timeline/spec.md#requirement-hydrate-reasoning-effort-before-actor-publication)。已有断链仍严格拒绝加载，不自动改写历史。
+
+会话生命周期 drain 同时等待专属线程和持久化任务退出。线程退出后，通过弱 sender 关闭持久化接纳并排空已接纳消息，再以任务完成状态确认 writer lease 释放；FlushAndAck 不作为退出凭据。见 [session-timeline](../../openspec/specs/session-timeline/spec.md#requirement-drain-the-complete-session-writer-incarnation)。
+
+最后一个 SessionThread owner 的析构兜底把弱停机路由一并交给现有 reaper，在线程 join 后请求持久化 Stop；已经 Joined 的 owner 直接请求 Stop。析构不是 writer 释放确认，完整确认仍走显式 drain。见 [session-timeline](../../openspec/specs/session-timeline/spec.md#requirement-request-persistence-stop-during-final-thread-owner-cleanup)。
+
+Messages thinking 的起始 signature 可由后续 delta 补齐；完整响应仍未签名时，只保留可见事实，不保留该响应的 native continuation。携带 native 的请求遇到明确缺失 signature 的序列化错误时，Shell 确认清理后用 portable 上下文重试。见 [签名与恢复契约](../../openspec/specs/model-sampling/spec.md#requirement-proxy-thinking-signatures-recover-without-losing-portable-history)。
+
+模型选择与配置热重载由 `shell/session/actor/model_switch.rs` 分别处理；核对同 ID 路由变化时应查看 `apply_model_config_reload` 的 `replace_sampling_route`，不能只看用户选择的 `route_changed` 判定。测试入口为 `same_model_catalog_reload_discards_signed_native_history`。

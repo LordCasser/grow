@@ -178,11 +178,11 @@ impl SessionActor {
             .collect::<Vec<_>>();
         if notification_ids.is_empty() {
             return match input {
-                Some(input) => {
-                    self.chat_state_handle
-                        .push_user_message_durably(input)
-                        .await
-                }
+                Some(input) => self
+                    .chat_state_handle
+                    .push_user_message_durably(input)
+                    .await
+                    .map(|_| ()),
                 None => Ok(()),
             };
         }

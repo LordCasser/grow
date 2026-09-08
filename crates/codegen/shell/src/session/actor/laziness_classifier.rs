@@ -138,20 +138,14 @@ STRICT OUTPUT CONTRACT:\n\
 \n\
 The transcript starts with a `[runtime_state] ...` line emitted by \
 the harness (not by the agent). It carries TAMPER-PROOF facts:\n\
-- `outstanding_background_tasks_and_subagents=N` — the harness knows \
-  how many `spawn_subagent` / `background: true` tasks are live. The \
-  agent cannot fabricate this. If N = 0 AND the last assistant message \
-  claims to have launched a subagent or backgrounded work, that is \
-  strong evidence for `stalled_narration` regardless of the prose.\n\
-- `turn_elapsed_seconds=M` (optional) — wall-clock seconds elapsed in \
-  the current user turn. The agent cannot fabricate this either. A \
-  claim of \"overnight 8+ hour run\" or \"hours of work\" against a \
-  value of a few hundred seconds is strong evidence the prose is \
-  fabricated. Treat M as a LOWER bound on actual turn cost; offline \
-  replay derives M from the gap to the next turn (includes post-turn \
-  user think-time), while production measures from turn-start to the \
-  classifier fire (excludes user think-time). Either way, M cannot be \
-  larger than the wall-clock truth.\n\
+- `outstanding_background_tasks=N` (optional) — measured live terminal \
+tasks only; this count excludes subagents. Zero means no terminal task \
+was outstanding at the measurement, not that no task was ever launched.\n\
+- `turn_elapsed_seconds=M` (optional) — measured wall-clock duration \
+of the current turn. A claim of hours of work against a measured value \
+of a few hundred seconds is evidence of a discrepancy.\n\
+Missing runtime fields mean the harness has no measurement. Never \
+infer zero, a task completion, or elapsed work from an absent field.\n\
 \n\
 Claim-vs-evidence audit. The final assistant message often summarizes \
 \"what was delivered\". For EACH concrete claim it makes about work \
@@ -260,32 +254,22 @@ pub(crate) fn turn_elapsed_seconds_from_start_ms(
 /// observed. The trailing `\n` is included so callers can concat the
 /// transcript directly.
 ///
-/// Semantic note on `turn_elapsed_seconds`: the wire format is
-/// identical between the two call sites but the underlying
-/// measurement differs:
-/// - **Production**: `Utc::now() - turn_start_ms`, i.e. wall-clock
-///   from turn start to classifier-fire. Does NOT include post-turn
-///   user think-time (the classifier fires before the user replies).
-/// - **Replay**: `turn_{N+1}.turn_started_at - turn_N.turn_started_at`,
-///   i.e. turn duration PLUS the gap before the user re-engaged.
-///   Strictly a LOWER bound on classifier-relevant wall-clock.
-///
-/// Both numbers serve the same prompt purpose — flagging
-/// "claimed-hours-but-actually-minutes" fabrications — but operators
-/// diffing live vs replay JSONL should not expect bit-identical values
-/// for the same turn.
+/// Production supplies its live terminal-task count and measured elapsed time.
+/// Replay supplies only measurements present in its input; absent fields are
+/// unknown, not zero and not inferred from tool acknowledgements or user gaps.
 pub(crate) fn format_runtime_state_line(
-    backing_task_count: usize,
+    backing_task_count: Option<usize>,
     turn_elapsed_seconds: Option<u64>,
 ) -> String {
-    match turn_elapsed_seconds {
-        Some(secs) => format!(
-            "[runtime_state] outstanding_background_tasks_and_subagents={backing_task_count} turn_elapsed_seconds={secs}\n"
-        ),
-        None => format!(
-            "[runtime_state] outstanding_background_tasks_and_subagents={backing_task_count}\n"
-        ),
+    let mut line = String::from("[runtime_state]");
+    if let Some(count) = backing_task_count {
+        line.push_str(&format!(" outstanding_background_tasks={count}"));
     }
+    if let Some(seconds) = turn_elapsed_seconds {
+        line.push_str(&format!(" turn_elapsed_seconds={seconds}"));
+    }
+    line.push('\n');
+    line
 }
 
 /// Flatten a slice of conversation items into a plain-text transcript

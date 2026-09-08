@@ -358,7 +358,7 @@ pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> 
         // manual `/recap`).
         app.notification_service
             .focus_tracker
-            .note_auto_recap_attempt();
+            .note_auto_recap_attempt(&session_id.0);
     }
 
     vec![Effect::SendRecap { session_id, auto }]

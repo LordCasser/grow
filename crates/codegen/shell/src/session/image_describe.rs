@@ -160,26 +160,24 @@ impl ImageDescribeCache {
     }
 }
 
-pub async fn recover_completed_description(
+pub async fn recover_completed_descriptions(
     session: std::sync::Arc<crate::session::storage::ContainedDirectory>,
     parent_timeline_id: String,
     source_revision: u64,
-    source: chat_state::SurfaceId,
-    prompt: String,
-) -> std::io::Result<Option<CachedImageDescription>> {
+    queries: Vec<(chat_state::SurfaceId, String)>,
+) -> std::io::Result<Vec<Option<CachedImageDescription>>> {
     tokio::task::spawn_blocking(move || {
-        crate::session::storage::JsonlStorageAdapter::recover_completed_image_description_from_directory(
+        crate::session::storage::JsonlStorageAdapter::recover_completed_image_descriptions_from_directory(
             &session,
             &parent_timeline_id,
             source_revision,
-            source,
-            &prompt,
+            &queries,
         )
         .map(|recovered| {
-            recovered.map(|(description, result_ref)| CachedImageDescription {
+            recovered.into_iter().map(|entry| entry.map(|(description, result_ref)| CachedImageDescription {
                 description,
                 result_ref,
-            })
+            })).collect()
         })
     })
     .await
@@ -208,37 +206,126 @@ pub fn render_image_files_block(paths: &[String]) -> Option<String> {
 }
 /// Persist a batch of normalized images to `<session_dir>/assets/`.
 ///
-/// Each file is written as `image-<uuid>.<ext>` where `<ext>` is
-/// inferred from `mime_type` (falling back to `png`). Returns one
-/// path per input, in input order, so callers can render the `<image_files>`
-/// list deterministically.
+/// Ordered normalized bytes determine an immutable batch directory. Repeated
+/// preparation verifies and reuses it; only unpublished staging is rolled back.
 pub fn persist_user_images(
     session: &crate::session::storage::ContainedDirectory,
     images: &[ImageContent],
+) -> std::io::Result<Vec<PathBuf>> {
+    persist_user_images_with(session, images, |assets_dir, name, bytes| {
+        #[cfg(any(unix, windows))]
+        {
+            assets_dir.write_atomic(name, bytes, true, false)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "handle-relative image storage is unsupported on this platform",
+            ))
+        }
+    })
+}
+
+fn persist_user_images_with(
+    session: &crate::session::storage::ContainedDirectory,
+    images: &[ImageContent],
+    mut write: impl FnMut(
+        &crate::session::storage::ContainedDirectory,
+        &std::ffi::OsStr,
+        &[u8],
+    ) -> std::io::Result<()>,
 ) -> std::io::Result<Vec<PathBuf>> {
     if images.is_empty() {
         return Ok(Vec::new());
     }
     let assets_dir =
         session.open_relative(Path::new("assets"), "session image asset directory", true)?;
-    let mut out = Vec::with_capacity(images.len());
-    for img in images {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&img.data)
-            .map_err(|e| std::io::Error::other(format!("base64 decode: {e}")))?;
-        let ext = mime_to_extension(&img.mime_type);
-        let filename = format!("image-{}.{ext}", uuid::Uuid::new_v4());
-        #[cfg(any(unix, windows))]
-        assets_dir.write_atomic(std::ffi::OsStr::new(&filename), &bytes, true, false)?;
-        #[cfg(not(any(unix, windows)))]
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "handle-relative image storage is unsupported on this platform",
-        ));
-        out.push(assets_dir.display_path().join(filename));
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"grow-image-assets-v1");
+    hash.update(&(images.len() as u64).to_le_bytes());
+    let mut names = Vec::with_capacity(images.len());
+    for (index, image) in images.iter().enumerate() {
+        let bytes = decode_asset_bytes(image)?;
+        let ext = mime_to_extension(&image.mime_type);
+        hash.update(&(ext.len() as u64).to_le_bytes());
+        hash.update(ext.as_bytes());
+        hash.update(&(bytes.len() as u64).to_le_bytes());
+        hash.update(&bytes);
+        names.push(format!("image-{}.{}", index + 1, ext));
     }
-    Ok(out)
+    let batch_name = format!("images-{}", hash.finalize().to_hex());
+    let published_paths = || {
+        names
+            .iter()
+            .map(|name| assets_dir.display_path().join(&batch_name).join(name))
+            .collect()
+    };
+    let verify = || -> std::io::Result<Vec<PathBuf>> {
+        let batch = assets_dir.open_relative(Path::new(&batch_name), "image asset batch", false)?;
+        for (image, name) in images.iter().zip(&names) {
+            let expected = decode_asset_bytes(image)?;
+            let actual = batch.read_bounded(
+                std::ffi::OsStr::new(name),
+                "image asset",
+                expected.len() as u64,
+            )?;
+            if actual != expected {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "image asset batch content mismatch",
+                ));
+            }
+        }
+        Ok(published_paths())
+    };
+    match assets_dir.open_relative(Path::new(&batch_name), "image asset batch", false) {
+        Ok(_) => return verify(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let staging_name = format!(".images-{}.tmp", uuid::Uuid::new_v4());
+    let staging =
+        assets_dir.create_child(std::ffi::OsStr::new(&staging_name), "image asset staging")?;
+    let prepared = (|| {
+        for (image, name) in images.iter().zip(&names) {
+            let bytes = decode_asset_bytes(image)?;
+            write(&staging, std::ffi::OsStr::new(name), &bytes)?;
+        }
+        staging.sync()
+    })();
+    drop(staging);
+    let result = prepared.and_then(|()| {
+        match assets_dir.rename_child_no_replace(
+            std::ffi::OsStr::new(&staging_name),
+            std::ffi::OsStr::new(&batch_name),
+        ) {
+            Ok(()) => {
+                if let Err(error) = assets_dir.sync() {
+                    tracing::warn!(%error, "image asset batch published but directory sync failed");
+                }
+                Ok(published_paths())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => verify(),
+            Err(error) => Err(error),
+        }
+    });
+    // After publication this name is absent. Never remove the published batch:
+    // it may already be referenced by a successful or unacknowledged commit.
+    if let Err(error) = assets_dir.remove_tree_child(std::ffi::OsStr::new(&staging_name)) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, "failed to remove image asset staging directory");
+        }
+    }
+    result
 }
+
+fn decode_asset_bytes(image: &ImageContent) -> std::io::Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(&image.data)
+        .map_err(|error| std::io::Error::other(format!("base64 decode: {error}")))
+}
+
 fn mime_to_extension(mime: &str) -> &'static str {
     match mime {
         "image/png" => "png",
@@ -360,7 +447,15 @@ mod tests {
         let msg =
             persist_and_prepend_image_files(&test_session(dir.path()), &[img], "hello").unwrap();
         assert!(msg.contains("<image_files>"));
-        assert!(msg.contains("/assets/image-"));
+        let batch = std::fs::read_dir(dir.path().join("assets"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let image_path = batch.join("image-1.png");
+        assert!(image_path.is_file());
+        assert!(msg.contains(image_path.to_str().unwrap()));
         assert!(msg.ends_with("hello") || msg.contains("\n\nhello"));
         let assets = std::fs::read_dir(dir.path().join("assets")).unwrap();
         assert_eq!(assets.count(), 1);
@@ -523,6 +618,124 @@ mod tests {
         assert!(block.contains("First paragraph describing the image."));
         assert!(block.contains("\n\nSecond paragraph with more detail."));
     }
+    #[test]
+    fn image_asset_retry_reuses_verified_batch_and_preserves_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let image = ImageContent::new(
+            base64::engine::general_purpose::STANDARD.encode(b"first"),
+            "image/png",
+        );
+        let images = [image.clone()];
+        let first = persist_user_images(&session, &images).unwrap();
+        let retry = persist_user_images_with(&session, &images, |_, _, _| {
+            panic!("retry must reuse published files")
+        })
+        .unwrap();
+        assert_eq!(first, retry);
+        let mut count = 0;
+        let other = ImageContent::new(
+            base64::engine::general_purpose::STANDARD.encode(b"second"),
+            "image/png",
+        );
+        assert!(
+            persist_user_images_with(&session, &[image, other], |batch, name, bytes| {
+                count += 1;
+                if count == 2 {
+                    return Err(std::io::Error::other("injected"));
+                }
+                batch.write_atomic(name, bytes, true, false)
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&first[0]).unwrap(), b"first");
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("assets"))
+                .unwrap()
+                .count(),
+            1
+        );
+        std::fs::write(&first[0], b"wrong").unwrap();
+        assert!(persist_user_images(&session, &images).is_err());
+        assert_eq!(std::fs::read(&first[0]).unwrap(), b"wrong");
+    }
+
+    #[test]
+    fn concurrent_image_asset_batches_publish_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = std::sync::Arc::new(test_session(dir.path()));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let session = session.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let image = ImageContent::new(
+                        base64::engine::general_purpose::STANDARD.encode(b"same"),
+                        "image/png",
+                    );
+                    persist_user_images_with(&session, &[image], |batch, name, bytes| {
+                        barrier.wait();
+                        batch.write_atomic(name, bytes, true, false)
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        let mut results = handles.into_iter().map(|handle| handle.join().unwrap());
+        let first = results.next().unwrap();
+        assert_eq!(first, results.next().unwrap());
+        assert_eq!(std::fs::read(&first[0]).unwrap(), b"same");
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("assets"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_image_batch_reclaims_only_its_completed_assets() {
+        for invalid_encoding in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let session = test_session(dir.path());
+            std::fs::create_dir(dir.path().join("assets")).unwrap();
+            let preserved = dir.path().join("assets/existing.png");
+            std::fs::write(&preserved, b"keep").unwrap();
+            let first = ImageContent::new(
+                base64::engine::general_purpose::STANDARD.encode(b"image"),
+                "image/png",
+            );
+            let second = if invalid_encoding {
+                ImageContent::new("invalid!", "image/png")
+            } else {
+                first.clone()
+            };
+            let mut writes = 0;
+            let error =
+                persist_user_images_with(&session, &[first, second], |assets, name, bytes| {
+                    writes += 1;
+                    if writes == 2 {
+                        return Err(std::io::Error::other("injected second write failure"));
+                    }
+                    assets.write_atomic(name, bytes, true, false)
+                })
+                .unwrap_err();
+            if invalid_encoding {
+                assert!(error.to_string().starts_with("base64 decode:"));
+            } else {
+                assert_eq!(error.to_string(), "injected second write failure");
+            }
+            assert_eq!(std::fs::read(preserved).unwrap(), b"keep");
+            assert_eq!(
+                std::fs::read_dir(dir.path().join("assets"))
+                    .unwrap()
+                    .count(),
+                1
+            );
+        }
+    }
+
     #[test]
     fn persist_user_images_writes_files_and_returns_paths() {
         use base64::Engine as _;

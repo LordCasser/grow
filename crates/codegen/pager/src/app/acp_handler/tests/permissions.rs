@@ -369,3 +369,51 @@
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         ));
     }
+
+
+#[test]
+fn recap_replay_restores_display_without_consuming_current_feedback() {
+    for replay in [false, true] {
+        for auto in [false, true] {
+            let mut app = make_app_with_agent("recap-owner");
+            app.notification_service.focus_tracker =
+                crate::notifications::focus::FocusTracker::new(0, 0);
+            app.notification_service.focus_tracker.on_focus_lost();
+            assert!(app.notification_service.focus_tracker.recap_due("recap-owner"));
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.loading_replay = replay;
+            agent.session.set_live_feedback("recap",
+                crate::scrollback::blocks::NoticeTone::Progress, "Current manual request");
+            let before = agent.scrollback.len();
+            let update = GrowSessionUpdate::SessionRecap { summary: "Restored recap".into(), auto };
+            let msg = if replay {
+                make_replayed_ext_session_notification("recap-owner", "recap-history", update)
+            } else {
+                make_ext_session_notification("recap-owner", update)
+            };
+            assert!(handle(msg, &mut app));
+            let agent = &app.agents[&AgentId(0)];
+            assert_eq!(agent.scrollback.len(), before + 1);
+            assert_eq!(agent.session.live_status(100).is_some(), replay || auto);
+            assert_eq!(app.notification_service.focus_tracker.recap_due("recap-owner"), replay);
+        }
+    }
+}
+
+
+#[test]
+fn background_recap_does_not_consume_active_session_away_eligibility() {
+    let mut app = make_app_with_agent("foreground");
+    let mut background = make_agent(Some("background"));
+    background.session.id = AgentId(1);
+    app.agents.insert(AgentId(1), background);
+    app.notification_service.focus_tracker = crate::notifications::focus::FocusTracker::new(0, 0);
+    app.notification_service.focus_tracker.on_focus_lost();
+    // Background updates do not request an active-view repaint.
+    assert!(!handle(make_ext_session_notification("background",
+        GrowSessionUpdate::SessionRecap { summary: "Background result".into(), auto: true }), &mut app));
+    assert!(app.notification_service.focus_tracker.recap_due("foreground"));
+    assert!(!app.notification_service.focus_tracker.recap_due("background"));
+    assert_eq!(app.agents[&AgentId(1)].scrollback.len(), 1);
+    assert!(app.agents[&AgentId(0)].scrollback.is_empty());
+}

@@ -1,0 +1,3 @@
+- [x] Add opened-file and actual-byte output checks.
+- [x] Verify exact/over/empty/error consumption, sparse oversized cleanup and normal conversion.
+- [x] Document, validate and archive.

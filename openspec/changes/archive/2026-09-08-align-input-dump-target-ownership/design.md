@@ -1,0 +1,18 @@
+# Evidence
+AgentView::record_input位于agent_view/session.rs，mem::take self.prompt.last_input_delta后把自身pane/textarea变化写入self.input_log。全仓只有root/mod.rs两个生产调用：普通Agent页和dashboard attached popup处理后都调用根agent.record_input。
+
+agent_view/input.rs在active_subagent存在时调用child_view.handle_input_inner并直接返回，未调用child.record_input。dispatch/transcript.rs::dispatch_dump_input_log只匹配ActiveView::Agent(id)并get_mut根Agent，不用child-aware helper。ctx::get_active_agent_mut虽可解析一层child，但同样不覆盖dashboard，直接替换不足以完成修复。
+
+# Design constraints
+记录归属必须与实际输入委派一致，不能只按事件处理后的active_subagent猜测：Esc可能由父层消费并关闭child，权限/模态也可在委派前截获。要明确每层记录策略并在一个最小辅助入口捕获本层真正处理的delta，避免父级将child变化标成None或dump拿空child ring。导出选择须覆盖Agent tab、attached dashboard以及实际child层级，并复用真实输入所有权规则；不修改全局所有Action的路由框架。
+
+# Validation plan
+父子不同文本/光标/已记录键标记，输入child后导出结构验证child session/pane/delta且字符值仍脱敏；父层拦截Esc/permission不误归child；dashboard attached popup能得到正确dump模型；无active target/空ring无文件写入。用私有dump构建函数和临时writer测试，不访问真实GROW_HOME，不输出原始输入数据。
+
+# Existing safeguards
+InputRingBuffer容量200，snapshot_entries用sanitize_key_code隐藏Char值；writer独占tempfile、sync后keep，Unix0600，有同时间独立文件和失败清理测试。不要重复重写这些机制。存储读/审计过程中未触碰用户日志。
+
+# Implementation refinement
+Dashboard根处理会拦截Esc关闭popup，因此普通Esc→d在popup内不可直接触发。此前“popup能接受chord”的假定需收窄：验证附着目标解析/直接dump action，而非宣称真实快捷键端到端复现。
+
+记录移入AgentView shared router包装层，显式delegated标记由实际child委派分支设置；父层消费则记录父，委派则只记录child。minimal btw早返回补同层记录，移除root两个重复记录点。新key进入本层先清last_input_delta，避免继承上个非key操作的delta。导出使用诊断专用递归目标解析（permission父优先）及无文件IO的模型构建函数，不修改其他Action的通用路由。

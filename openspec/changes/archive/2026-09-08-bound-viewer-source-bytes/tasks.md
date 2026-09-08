@@ -1,0 +1,3 @@
+- [x] Share bounded file reading and gate viewer memory/file sources.
+- [x] Verify exact/over limits, growth, ordinary files, symlinks and FIFO rejection.
+- [x] Update docs/backlog, validate and archive.

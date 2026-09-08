@@ -1,0 +1,33 @@
+{
+  "path": "/Users/lordcasser/workspace/projects/grow/target/debug/grow",
+  "size_bytes": 459420736,
+  "sha256": "1f110ef0fb2f1ff087170c170ac194232b3d8bec53edb5618073d34671d82314",
+  "smoke": [
+    {
+      "args": [
+        "--version"
+      ],
+      "exit_code": 0,
+      "stdout_bytes": 31,
+      "stderr_bytes": 0
+    },
+    {
+      "args": [
+        "--help"
+      ],
+      "exit_code": 0,
+      "stdout_bytes": 6129,
+      "stderr_bytes": 0
+    },
+    {
+      "args": [
+        "export",
+        "--help"
+      ],
+      "exit_code": 0,
+      "stdout_bytes": 533,
+      "stderr_bytes": 0
+    }
+  ],
+  "version": "grow 2.1.4 (1e1fda6d) [stable]"
+}

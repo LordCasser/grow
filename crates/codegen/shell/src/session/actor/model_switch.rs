@@ -1822,6 +1822,10 @@ impl SessionActor {
                         admission.foreground = ForegroundState::Idle;
                     }
                     admission.applying_step_control = None;
+                    drop(admission);
+                    // Agent/model changes can advertise while the control owns
+                    // foreground. Replace that temporary busy client projection.
+                    self.send_available_commands_update().await;
                     return;
                 };
                 let preparation = admission.pending_step_controls.agent_preparation(key);
@@ -2608,6 +2612,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_model_catalog_reload_discards_signed_native_history() {
+        use sampling_types::messages::ContentBlock;
+        use sampling_types::{ConversationItem, NativeContinuationFragment};
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for change in ["endpoint", "query", "wire_model"] {
+                    let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                    let current = actor.model_route.snapshot();
+                    let mut sampling = current.sampling_config.clone();
+                    sampling.api_backend = sampling_types::ApiBackend::Messages;
+                    sampling.base_url = "http://localhost:1/v1".into();
+                    for initial in [true, false] {
+                        if !initial {
+                            match change {
+                                "endpoint" => sampling.base_url = "http://localhost:2/v1".into(),
+                                "query" => {
+                                    sampling
+                                        .query_params
+                                        .insert("deployment".into(), "replacement".into());
+                                }
+                                "wire_model" => sampling.model = "replacement-wire-model".into(),
+                                _ => unreachable!(),
+                            }
+                        }
+                        let catalog = SessionActor::published_catalog_for_test(
+                            current.model_id.clone(),
+                            sampling.clone(),
+                            None,
+                            actor.inference_idle_timeout.get(),
+                            actor.max_retries.get(),
+                            actor.compaction.threshold_percent.get(),
+                        );
+                        let mut workflow = actor.workflow_manager.lock().await;
+                        actor
+                            .apply_model_config_reload(
+                                &mut workflow,
+                                &catalog,
+                                current.model_id.clone(),
+                                sampling.clone(),
+                                None,
+                                actor.inference_idle_timeout.get(),
+                                actor.max_retries.get(),
+                                actor.compaction.threshold_percent.get(),
+                            )
+                            .await
+                            .unwrap();
+                        drop(workflow);
+                        if initial {
+                            actor
+                                .chat_state_handle
+                                .push_response_durably(
+                                    vec![ConversationItem::assistant("portable answer")],
+                                    Some(NativeContinuationFragment::Messages(vec![
+                                        ContentBlock::Thinking {
+                                            thinking: "native thought".into(),
+                                            signature: "old-route-signature".into(),
+                                        },
+                                        ContentBlock::Text {
+                                            text: "portable answer".into(),
+                                            cache_control: None,
+                                        },
+                                    ])),
+                                )
+                                .await
+                                .unwrap();
+                        } else {
+                            assert_eq!(actor.model_route.snapshot().model_id, current.model_id);
+                            break;
+                        }
+                        let before = actor
+                            .chat_state_handle
+                            .build_request("reload-before", vec![], None, None, None)
+                            .await
+                            .unwrap();
+                        assert!(
+                            before.has_native_continuation(),
+                            "signed precondition: {change}"
+                        );
+                    }
+                    let after = actor
+                        .chat_state_handle
+                        .build_request("reload-after", vec![], None, None, None)
+                        .await
+                        .unwrap();
+                    assert!(
+                        !after.has_native_continuation(),
+                        "old signature survived {change}"
+                    );
+                    let history = serde_json::to_string(&after.items).unwrap();
+                    assert!(history.contains("portable answer"));
+                    assert!(!history.contains("old-route-signature"));
+                    let config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                    assert_eq!(config.base_url, sampling.base_url);
+                    assert_eq!(config.query_params, sampling.query_params);
+                    assert_eq!(config.model, sampling.model);
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn effort_only_update_preserves_continuation_epoch() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -3001,6 +3106,142 @@ mod tests {
                     crate::session::DesiredStateOutcome::Applied(())
                 );
                 assert_eq!(actor.agent.borrow().name(), "final-agent");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn idle_controls_refresh_behavior_picker() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+                let (mut actor, mut event_rx) = super::super::tests::support::create_test_actor_ex(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                actor.goal_enabled = true;
+                actor.background_workflows_enabled = true;
+                let actor = std::sync::Arc::new(actor);
+                for switch_agent in [true, false] {
+                    if switch_agent {
+                        let mut agent = agent::AgentDefinition::default_grow_build();
+                        agent.name = "idle-picker-agent".into();
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        actor.admit_agent_selection(agent, None, tx).await;
+                        rx.await.unwrap().unwrap();
+                    } else {
+                        let route = SessionActor::selection_route_for_test(
+                            crate::agent::models::ModelId::new("provider/other"),
+                            actor.model_route.snapshot().sampling_config,
+                            85,
+                        );
+                        let catalog = SessionActor::published_catalog_for_test(
+                            route.model_id.clone(),
+                            route.sampling_config.clone(),
+                            None,
+                            route.inference_idle_timeout,
+                            route.max_retries,
+                            85,
+                        );
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        actor
+                            .admit_session_model_selection(route, Some(catalog), None, tx)
+                            .await;
+                        rx.await.unwrap().unwrap();
+                    }
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        actor.step_control_worker.take().unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                    assert!(actor.state.lock().await.foreground.is_idle());
+                    let mut last = None;
+                    while let Ok(event) = event_rx.try_recv() {
+                        let crate::session::replay_events::SessionEvent::Notification(
+                            crate::session::replay_events::SessionNotification::Acp(notification),
+                        ) = event
+                        else {
+                            continue;
+                        };
+                        if let acp::SessionUpdate::AvailableCommandsUpdate(update) =
+                            notification.update
+                        {
+                            last = update
+                                .meta
+                                .and_then(|meta| meta.get("grow/behaviorAvailability").cloned());
+                        }
+                    }
+                    let expected = actor.behavior_availability_projection().await;
+                    for behavior in [
+                        tool_types::BehaviorId::Goal,
+                        tool_types::BehaviorId::Workflow,
+                    ] {
+                        assert_eq!(
+                            expected.choice(behavior).unwrap().disposition,
+                            tool_types::BehaviorAvailabilityDisposition::Available
+                        );
+                    }
+                    assert_eq!(
+                        last,
+                        Some(serde_json::to_value(expected).unwrap()),
+                        "client must receive released foreground availability"
+                    );
+                    for target in ["goal", "workflow", "normal"] {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        assert!(
+                            actor
+                                .admit_behavior_selection(acp::SessionModeId::new(target), None, tx)
+                                .await
+                        );
+                        let (completion_tx, _completion_rx) =
+                            tokio::sync::mpsc::unbounded_channel();
+                        actor
+                            .clone()
+                            .drain_behavior_selections(completion_tx)
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            rx.await.unwrap().unwrap(),
+                            crate::session::behavior::BehaviorChangeOutcome::Applied
+                        );
+                        let mut last = None;
+                        while let Ok(event) = event_rx.try_recv() {
+                            let crate::session::replay_events::SessionEvent::Notification(
+                                crate::session::replay_events::SessionNotification::Acp(
+                                    notification,
+                                ),
+                            ) = event
+                            else {
+                                continue;
+                            };
+                            if let acp::SessionUpdate::AvailableCommandsUpdate(update) =
+                                notification.update
+                            {
+                                last = update.meta.and_then(|meta| {
+                                    meta.get("grow/behaviorAvailability").cloned()
+                                });
+                            }
+                        }
+                        assert_eq!(
+                            last,
+                            Some(
+                                serde_json::to_value(
+                                    actor.behavior_availability_projection().await
+                                )
+                                .unwrap()
+                            )
+                        );
+                    }
+                }
             })
             .await;
     }

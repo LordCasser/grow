@@ -158,7 +158,7 @@ impl SessionActor {
 
         // Collect files that would be reverted and detect conflicts.
         // This is read-only — no mutations happen here.
-        let all_points = self.file_state_tracker.get_rewind_points().await;
+        let all_points = self.file_state_tracker.get_rewind_points().await?;
         let mut files_to_revert: std::collections::BTreeMap<paths::RelPathBuf, Option<String>> =
             std::collections::BTreeMap::new();
         let mut current_files =
@@ -436,7 +436,7 @@ impl SessionActor {
         );
         let current_prompt_index = self.chat_state_handle.get_prompt_index().await;
         if wants_conversation && current_prompt_index == transaction.target_prompt_index {
-            self.file_state_tracker.get_rewind_points().await;
+            self.file_state_tracker.get_rewind_points().await?;
             self.clear_rewind_transaction().await?;
             return Ok(());
         }
@@ -449,7 +449,7 @@ impl SessionActor {
             );
         }
 
-        let all_points = self.file_state_tracker.get_rewind_points().await;
+        let all_points = self.file_state_tracker.get_rewind_points().await?;
         let mut desired = std::collections::BTreeMap::<paths::RelPathBuf, Option<String>>::new();
         let mut originals = std::collections::BTreeMap::<paths::RelPathBuf, Option<String>>::new();
         if wants_files {

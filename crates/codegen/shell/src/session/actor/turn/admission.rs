@@ -390,15 +390,15 @@ impl SessionActor {
                     .map(AdmittedTurnSuccess::Host);
             }
             let slash_skills = self.slash_skills_for_resolve().await;
-            let skill_rewrite = slash_commands::SkillSlashRewrite::RewriteToRun;
+
             let availability = self.command_availability().await;
             let mut pending_skill_information: Option<String> = None;
             let (_, named_workflows, _) = self.named_workflow_snapshot();
             let prompt_blocks = match slash_commands::resolve(
                 prompt_blocks,
                 &slash_skills,
-                availability,
-                skill_rewrite,
+                availability, slash_commands::SkillSlashRewrite::RewriteToRun,
+
                 &named_workflows,
             ) {
                 Ok(blocks) => blocks,
@@ -489,6 +489,14 @@ impl SessionActor {
                             skill_source = skill_source,
                         )
                         .in_scope(|| {});
+                    }
+                    let expansion = slash_commands::build_skill_information_for_refs(
+                        &parsed_skills,
+                        &slash_skills,
+                        &self.session_id_string(),
+                    )
+                    .await;
+                    for (sk, success) in parsed_skills.iter().zip(expansion.loaded) {
                         if let Some(ref pname) = sk.plugin_name {
                             ::diagnostics::session_ctx::log_event(
                                 ::diagnostics::events::PluginUsed {
@@ -496,23 +504,19 @@ impl SessionActor {
                                     plugin_name: pname.clone(),
                                     skill_name: Some(sk.name.clone()),
                                     hook_event: None,
-                                    success: true,
+                                    success,
                                 },
                             );
                             tracing::info_span!(
                                 "plugin.used",
                                 plugin_name = %pname,
                                 skill_name = %sk.name,
+                                success,
                             )
                             .in_scope(|| {});
                         }
                     }
-                    pending_skill_information = slash_commands::build_skill_information_for_refs(
-                        &parsed_skills,
-                        &slash_skills,
-                        &self.session_id_string(),
-                    )
-                    .await;
+                    pending_skill_information = expansion.information;
                     original_blocks
                 }
             };
@@ -749,7 +753,7 @@ impl SessionActor {
                     if notification_ids.is_empty() {
                         self.chat_state_handle
                             .push_user_message_durably(user_chat)
-                            .await
+                            .await.map(|_| ())
                             .map_err(|error| error.to_string())
                     } else {
                         let turn = self.events.current_turn().ok_or_else(|| {
@@ -822,7 +826,7 @@ impl SessionActor {
                 }
             }
             if matches!(origin, super::super::PromptOrigin::User) {
-                self.schedule_session_title(original_prompt_text.clone())
+                self.schedule_session_title_for_prompt(original_prompt_text.clone(), current_prompt_index)
                     .await;
             }
             turn_scope_guard = Some(TurnSubagentScopeGuard::new(

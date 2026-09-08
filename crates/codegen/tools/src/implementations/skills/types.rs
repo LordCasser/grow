@@ -37,7 +37,7 @@ const fn default_true() -> bool {
 }
 
 /// Skill info returned by the list extension method.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SkillInfo {
     /// Command identity: slash name, dedup key, listing label. Plugin skills
     /// and same-scope name-collision losers (`dedupe_skills` re-key) use the
@@ -97,10 +97,10 @@ pub struct SkillInfo {
     pub plugin_data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
-    /// Optional model override for skill execution.
+    /// Optional model metadata; currently not applied to session sampling.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Optional reasoning effort override.
+    /// Optional reasoning effort metadata; currently not applied to session sampling.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     /// Whether this skill can be invoked by the user via /skill-name.
@@ -117,7 +117,7 @@ pub struct SkillInfo {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Populated for agent definition `skills:` preloading.
+    /// Loaded body snapshot, including an empty body. None means not yet loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
 }
@@ -176,6 +176,7 @@ impl Default for SkillInfo {
             allowed_tools: None,
             model: None,
             effort: None,
+
             user_invocable: true,
             disable_model_invocation: false,
             enabled: true,

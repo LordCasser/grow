@@ -27,7 +27,7 @@ pub use fix::{
     verify_persistent_fix,
 };
 pub(crate) use fix::{
-    automatic_fix_choices, automatic_remediation_for, format_applicable_automatic_fixes,
+    automatic_fix_choices, automatic_remediation_for, configure_doctor_report, format_applicable_automatic_fixes,
     format_fix_preview, format_fix_success, human_fix_command, select_fix_plan,
 };
 pub(crate) use model::probe_requires_live_tui;
@@ -691,8 +691,14 @@ pub(crate) fn collect_agent_definition_findings(workspace: &Path) -> Vec<Diagnos
     }]
 }
 
+const TMUX_DEFAULT_CANDIDATE_NOTE: &str = " This path is a default candidate, not a detected server config. Confirm the effective config file before editing or reloading it.";
+
 fn tmux_reload_note(config_path: &str) -> String {
-    format!("Reload tmux with `tmux source-file {config_path}`, or detach and reattach.")
+    let mut note = format!("Reload tmux with `tmux source-file {config_path}` to apply this file to the running server.");
+    if matches!(config_path, "~/.tmux.conf" | "~/.byobu/.tmux.conf") {
+        note.push_str(TMUX_DEFAULT_CANDIDATE_NOTE);
+    }
+    note
 }
 
 fn diagnose_clipboard_from_facts(
@@ -986,8 +992,11 @@ pub fn color_support_warning(
         warning.note = Some(format!(
             "In the same tmux config, also add `set -g default-terminal \"tmux-256color\"`. Add \
              `export COLORTERM=truecolor` to your shell startup file. Then reload tmux with \
-             `tmux source-file {tmux_config_path}`, or detach and reattach, and restart Grow."
+             `tmux source-file {tmux_config_path}`, then reattach the client and restart Grow."
         ));
+        if matches!(tmux_config_path, "~/.tmux.conf" | "~/.byobu/.tmux.conf") {
+            warning.note.as_mut().unwrap().push_str(TMUX_DEFAULT_CANDIDATE_NOTE);
+        }
         return Some(warning);
     }
 
@@ -1124,6 +1133,7 @@ mod tests {
         probes::ProbeSnapshot {
             terminal: ctx,
             tmux: probes::TmuxProbeFacts {
+                config_files: probes::TmuxProbeResult::Unavailable,
                 version: probes::TmuxProbeResult::Unavailable,
                 extended_keys: probes::TmuxProbeResult::Unavailable,
                 set_clipboard: query.show_option("set-clipboard"),
@@ -2527,6 +2537,7 @@ mod tests {
         let mut terminal = plain_tmux_ctx();
         terminal.tmux_extended_keys = Some("off".to_owned());
         let tmux = probes::TmuxProbeFacts {
+            config_files: probes::TmuxProbeResult::Unavailable,
             version: probes::TmuxProbeResult::Available("tmux 3.4".to_owned()),
             extended_keys: probes::TmuxProbeResult::Available("off".to_owned()),
             set_clipboard: probes::TmuxProbeResult::Available("off".to_owned()),

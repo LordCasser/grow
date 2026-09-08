@@ -315,7 +315,7 @@ async fn rewind_persistence_failure_rolls_back_files_and_keeps_tracker() {
                 actor.tool_context.fs.read_to_string(&path).await.unwrap(),
                 "after"
             );
-            assert_eq!(actor.file_state_tracker.get_rewind_points().await.len(), 1);
+            assert_eq!(actor.file_state_tracker.get_rewind_points().await.unwrap().len(), 1);
         })
         .await;
 }
@@ -385,7 +385,7 @@ async fn pending_rewind_transaction_rolls_forward_before_session_use() {
                 actor
                     .file_state_tracker
                     .get_rewind_points()
-                    .await
+                    .await.unwrap()
                     .is_empty()
             );
         })

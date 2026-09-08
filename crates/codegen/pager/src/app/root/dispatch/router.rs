@@ -114,6 +114,12 @@ use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
 /// and start flowing through the tail. The fat inline arms stayed inline for
 /// this reason; audit an arm's `return`s before moving it.
 pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
+    app.setting_persistence.begin_dispatch();
+    let effects = dispatch_inner(action, app);
+    app.setting_persistence.finish_dispatch(effects)
+}
+
+fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
     let effects = match action {
         Action::Quit | Action::QuitConfirmed => {
             let mut effects = unregister_all_active_sessions(app);
@@ -533,12 +539,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::CopyAssistantMessage { n, file_path } => {
-            dispatch_copy_assistant_message(app, n, file_path);
-            vec![]
+            dispatch_copy_assistant_message(app, n, file_path)
         }
         Action::ExportConversation { file_path } => {
-            dispatch_export_conversation(app, file_path);
-            vec![]
+            dispatch_export_conversation(app, file_path)
         }
         Action::OpenTranscriptPager => {
             dispatch_open_transcript_pager(app);
@@ -868,9 +872,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             if let Some(key) = shown_key
                 && app.hidden_announcement_ids.insert(key)
             {
-                vec![Effect::PersistAnnouncementsHidden {
-                    hidden_ids: app.hidden_announcement_ids.clone(),
-                }]
+                app.request_announcement_persistence().into_iter().collect()
             } else {
                 vec![]
             }
@@ -883,9 +885,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 changed |= app.hidden_announcement_ids.remove(&key);
             }
             if changed {
-                vec![Effect::PersistAnnouncementsHidden {
-                    hidden_ids: app.hidden_announcement_ids.clone(),
-                }]
+                app.request_announcement_persistence().into_iter().collect()
             } else {
                 vec![]
             }

@@ -800,7 +800,7 @@ mod tests {
                 Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
                     json: false,
                     command: Some(crate::doctor_cmd::DoctorCommand::Fix(
-                        crate::doctor_cmd::FixArgs { id: Some(ref parsed), yes: true }
+                        crate::doctor_cmd::FixArgs { id: Some(ref parsed), yes: true, config: None }
                     )),
                 })) if parsed == id
             ));
@@ -814,7 +814,8 @@ mod tests {
                 command: Some(crate::doctor_cmd::DoctorCommand::Fix(
                     crate::doctor_cmd::FixArgs {
                         id: None,
-                        yes: false
+                        yes: false,
+                        config: None
                     }
                 )),
             }))
@@ -1170,4 +1171,13 @@ mod tests {
         };
         assert_eq!(agent.reasoning_effort.as_deref(), Some("max"));
     }
+    #[test]
+    fn doctor_fix_accepts_explicit_config_path() {
+        let args = PagerArgs::try_parse_from(["grow", "doctor", "fix", "tmux-clipboard", "--config", "/tmp/custom config.tmux"]).unwrap();
+        assert!(matches!(args.command, Some(Command::Doctor(crate::doctor_cmd::DoctorArgs {
+            command: Some(crate::doctor_cmd::DoctorCommand::Fix(crate::doctor_cmd::FixArgs { config: Some(path), .. })), ..
+        })) if path == std::path::Path::new("/tmp/custom config.tmux")));
+        assert!(PagerArgs::try_parse_from(["grow", "doctor", "fix", "--config", "/tmp/config"]).is_err());
+    }
+
 }

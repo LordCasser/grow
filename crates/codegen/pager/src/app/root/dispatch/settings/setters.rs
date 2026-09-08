@@ -111,10 +111,11 @@ pub(in crate::app::root::dispatch) fn set_screen_mode(
 ) -> Vec<Effect> {
     let canonical = crate::settings::canonical_screen_mode(Some(&value));
     let prev_raw = app.current_ui.screen_mode.as_deref();
-    let prev = crate::settings::canonical_screen_mode(prev_raw);
     if screen_mode_raw_matches_canonical(prev_raw, canonical) {
         return vec![];
     }
+    let rollback_value =
+        crate::settings::SettingValue::String(prev_raw.unwrap_or_default().to_owned());
     set_screen_mode_inner(app, canonical);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "screen_mode", value = canonical, "setting changed");
@@ -124,7 +125,7 @@ pub(in crate::app::root::dispatch) fn set_screen_mode(
     vec![Effect::PersistSetting {
         key: "screen_mode",
         value: crate::settings::SettingValue::Enum(canonical),
-        rollback_value: crate::settings::SettingValue::Enum(prev),
+        rollback_value,
     }]
 }
 

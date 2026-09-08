@@ -23,11 +23,15 @@ pub const PROMPT_IMAGES_TRACING_TARGET: &str = "prompt_images";
 // Scrollable image viewer state
 // -------------------------------------------------------------------------
 
-/// State for a modal image viewer.
-///
-/// Supports deferred loading: [`open_from_path_deferred`] returns instantly
-/// with `loading: true`; the pager consumes the source path once and delivers
-/// the load result back through its normal task-completion channel.
+/// Owned input to a background viewer load.
+#[derive(Debug)]
+pub enum ImageViewerLoadSource {
+    Memory(Arc<[u8]>),
+    Path(PathBuf),
+}
+
+/// State for a modal image viewer. Loading requests are consumed once and
+/// completed through the pager task-completion channel.
 pub struct ImageViewerState {
     /// Original encoded image bytes.
     pub image_bytes: Vec<u8>,
@@ -43,8 +47,9 @@ pub struct ImageViewerState {
     pub loading: bool,
     /// Identity used by the shared terminal overlay upload owner.
     pub overlay_owner_id: u64,
-    /// File path for deferred loading; consumed by [`finish_loading`].
-    source_path: Option<PathBuf>,
+    /// Source and protocol captured by the requesting UI thread.
+    source: Option<ImageViewerLoadSource>,
+    protocol: crate::terminal::image::GraphicsProtocol,
     /// Shared modal chrome state (close button hit-test, hover, etc.).
     pub modal_state: crate::modal_window_state::ModalWindowState,
 }
@@ -62,32 +67,26 @@ fn is_decodable_image(bytes: &[u8]) -> bool {
 }
 
 impl ImageViewerState {
-    /// Create a viewer for a prompt-side image. Loads synchronously since
-    /// prompt images already have bytes in memory.
+    /// Capture a prompt image source without file reads or format conversion.
     pub fn open(image: &PastedImage) -> Option<Self> {
-        let bytes = if let Some(ref b) = image.encoded_bytes {
-            b.to_vec()
-        } else if let Some(ref path) = image.session_image_path {
-            std::fs::read(path).ok()?
+        let source = if let Some(bytes) = &image.encoded_bytes {
+            ImageViewerLoadSource::Memory(bytes.clone())
         } else {
-            return None;
+            ImageViewerLoadSource::Path(image.session_image_path.as_ref()?.clone())
         };
-
-        let (w, h) = decode_image_dimensions(&bytes)?;
-        let display_bytes = crate::terminal::image::prepare_overlay_image_bytes(&bytes)
-            .unwrap_or_else(|| bytes.clone());
-
+        let (width, height) = image.dimensions.unwrap_or_default();
         Some(Self {
-            image_bytes: bytes,
-            display_bytes,
+            image_bytes: Vec::new(),
+            display_bytes: Vec::new(),
             mime_type: image.mime_type.clone(),
-            image_width: w,
-            image_height: h,
+            image_width: width,
+            image_height: height,
             display_number: image.display_number,
             title: None,
-            loading: false,
-            overlay_owner_id: image.preview.identity(),
-            source_path: None,
+            loading: true,
+            overlay_owner_id: crate::terminal::overlay::next_owner_id(),
+            source: Some(source),
+            protocol: crate::terminal::image::detect_graphics_protocol(),
             modal_state: Default::default(),
         })
     }
@@ -114,7 +113,8 @@ impl ImageViewerState {
             title: file_name,
             loading: false,
             overlay_owner_id: crate::terminal::overlay::next_owner_id(),
-            source_path: None,
+            source: None,
+            protocol: crate::terminal::image::detect_graphics_protocol(),
             modal_state: Default::default(),
         })
     }
@@ -135,23 +135,24 @@ impl ImageViewerState {
             title: path.file_name().map(|n| n.to_string_lossy().into_owned()),
             loading: true,
             overlay_owner_id: crate::terminal::overlay::next_owner_id(),
-            source_path: Some(path.to_path_buf()),
+            source: Some(ImageViewerLoadSource::Path(path.to_path_buf())),
+            protocol: crate::terminal::image::detect_graphics_protocol(),
             modal_state: Default::default(),
         }
     }
 
-    /// Take the source path for background loading. Returns `None` if
+    /// Take the source and protocol for background loading. Returns `None` if
     /// already taken or not in loading state.
-    pub fn take_source_path(&mut self) -> Option<PathBuf> {
+    pub fn take_load_request(&mut self) -> Option<(ImageViewerLoadSource, crate::terminal::image::GraphicsProtocol)> {
         if self.loading {
-            self.source_path.take()
+            self.source.take().map(|source| (source, self.protocol))
         } else {
             None
         }
     }
 
     pub fn has_deferred_source(&self) -> bool {
-        self.loading && self.source_path.is_some()
+        self.loading && self.source.is_some()
     }
 
     /// Apply loaded data from a background thread.
@@ -170,10 +171,10 @@ impl ImageViewerState {
         if !self.loading {
             return true;
         }
-        let Some(path) = self.source_path.take() else {
+        let Some((source, protocol)) = self.take_load_request() else {
             return false;
         };
-        match load_image_data(&path) {
+        match load_image_data(source, protocol) {
             ImageLoadResult::Loaded(data) => {
                 self.apply_loaded(data);
                 true
@@ -200,24 +201,34 @@ pub struct LoadedImageData {
     pub image_height: u32,
 }
 
-/// Load image data from a file path. This is the heavy work (file read,
+/// Load owned image data. This is the heavy work (file read or memory copy,
 /// decode, format conversion) that runs on a background thread.
-pub fn load_image_data(path: &std::path::Path) -> ImageLoadResult {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("image viewer: failed to read {}: {e}", path.display());
-            return ImageLoadResult::Failed;
-        }
+pub fn load_image_data(source: ImageViewerLoadSource, protocol: crate::terminal::image::GraphicsProtocol) -> ImageLoadResult {
+    load_image_data_with_limit(source, protocol, 50_000_000)
+}
+
+fn load_image_data_with_limit(
+    source: ImageViewerLoadSource,
+    protocol: crate::terminal::image::GraphicsProtocol,
+    limit: usize,
+) -> ImageLoadResult {
+    let bytes = match source {
+        ImageViewerLoadSource::Memory(bytes) if !bytes.is_empty() && bytes.len() <= limit => Some(bytes.to_vec()),
+        ImageViewerLoadSource::Memory(_) => None,
+        ImageViewerLoadSource::Path(path) => read_bounded_image_file(&path, limit),
+    };
+    let Some(bytes) = bytes else {
+        tracing::warn!(limit, "image viewer: source unavailable, empty or over byte allowance");
+        return ImageLoadResult::Failed;
     };
     let (w, h) = match decode_image_dimensions(&bytes) {
         Some(dims) => dims,
         None => {
-            tracing::warn!("image viewer: failed to decode {}", path.display());
+            tracing::warn!("image viewer: failed to decode source");
             return ImageLoadResult::Failed;
         }
     };
-    let display_bytes = crate::terminal::image::prepare_overlay_image_bytes(&bytes)
+    let display_bytes = crate::terminal::image::prepare_overlay_image_bytes_for_protocol(&bytes, protocol)
         .unwrap_or_else(|| bytes.clone());
     let mime_type = client_support::clipboard::mime_from_bytes(&bytes).to_owned();
 
@@ -628,6 +639,32 @@ fn token_to_path(token: &str) -> Option<PathBuf> {
     Some(PathBuf::from(unescaped.into_owned()))
 }
 
+const MAX_DROP_IMAGE_BYTES: usize = 50_000_000;
+
+fn read_bounded_image_bytes(reader: impl std::io::Read, limit: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut data = Vec::new();
+    reader.take((limit as u64).saturating_add(1)).read_to_end(&mut data).ok()?;
+    (!data.is_empty() && data.len() <= limit).then_some(data)
+}
+
+fn read_bounded_image_file(path: &std::path::Path, limit: usize) -> Option<Vec<u8>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > limit as u64 {
+        return None;
+    }
+    read_bounded_image_bytes(file, limit)
+
+}
+
 /// Validate that `path` points to a readable image file and load it as
 /// a [`PastedImage`]. Returns `None` if the extension isn't recognized,
 /// the file is missing, empty, or whose bytes don't sniff as an image.
@@ -640,10 +677,7 @@ fn read_image_at_path(path: &std::path::Path) -> Option<PastedImage> {
         return None;
     }
 
-    let data = std::fs::read(path).ok()?;
-    if data.is_empty() {
-        return None;
-    }
+    let data = read_bounded_image_file(path, MAX_DROP_IMAGE_BYTES)?;
 
     let mime_type = client_support::clipboard::mime_from_bytes(&data);
     if mime_type == "application/octet-stream" {
@@ -895,10 +929,18 @@ fn try_read_dropped_path(token: &str) -> Option<DroppedPath> {
 /// - If every non-empty line fully resolves, entries are emitted in
 ///   source order.
 ///
+/// Image payloads retained for one paste are limited to 50 MB. If a
+/// candidate would exceed that total, the entire paste falls through
+/// to text rather than returning a partial batch.
+///
 /// Returns an empty `Vec` when no token resolves to either an image
 /// or a recognised file path — callers should then treat the payload
 /// as a plain text paste.
 pub fn try_read_dropped_paths(text: &str) -> Vec<DroppedPath> {
+    try_read_dropped_paths_with_budget(text, MAX_DROP_IMAGE_BYTES)
+}
+
+fn try_read_dropped_paths_with_budget(text: &str, mut remaining: usize) -> Vec<DroppedPath> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Vec::new();
@@ -912,17 +954,20 @@ pub fn try_read_dropped_paths(text: &str) -> Vec<DroppedPath> {
             // Blank line — treat as separator.
             continue;
         }
-        let resolved: Vec<DroppedPath> = tokens
-            .iter()
-            .filter_map(|t| try_read_dropped_path(t))
-            .collect();
-        // Any-line-fails-falls-through: even a single-token line that
-        // doesn't resolve poisons the whole paste so the user's prose
-        // is preserved via the caller's plain-text-paste fallback.
-        if resolved.len() < tokens.len() {
-            return Vec::new();
+        for token in tokens {
+            // Preserve the whole paste if any token cannot be classified
+            // or its image would exceed the retained payload budget.
+            let Some(entry) = try_read_dropped_path(&token) else {
+                return Vec::new();
+            };
+            if let DroppedPath::Image(image) = &entry {
+                let Some(next_remaining) = remaining.checked_sub(image.byte_len) else {
+                    return Vec::new();
+                };
+                remaining = next_remaining;
+            }
+            result.push(entry);
         }
-        result.extend(resolved);
     }
     let (images, non_images) = result.iter().fold((0usize, 0usize), |(i, n), e| match e {
         DroppedPath::Image(_) => (i + 1, n),
@@ -1230,12 +1275,12 @@ pub fn build_content_blocks_with_prefixes_and_caps(
 
         // Canonicalize the display path only when no durable wire path exists.
         let uri = if let Some(path) = img.session_image_path.as_ref() {
-            Some(format!("file://{}", path.display()))
+            client_support::placeholder_images::file_uri_from_path(path)
         } else {
             img.source_path
                 .as_ref()
                 .and_then(|path| dunce::canonicalize(path).ok())
-                .map(|canonical| format!("file://{}", canonical.display()))
+                .and_then(|canonical| client_support::placeholder_images::file_uri_from_path(&canonical))
         };
 
         blocks.push(ContentBlock::Image(
@@ -1318,7 +1363,7 @@ fn resolve_orphan_placeholders(
                 let data = base64::engine::general_purpose::STANDARD.encode(&loaded.data);
                 let uri = dunce::canonicalize(std::path::Path::new(&ph.path))
                     .ok()
-                    .map(|p| format!("file://{}", p.display()));
+                    .and_then(|p| client_support::placeholder_images::file_uri_from_path(&p));
                 recovered.push(
                     ImageContent::new(data, loaded.mime_type)
                         .uri(uri)
@@ -2212,6 +2257,61 @@ mod tests {
     }
 
     // ----- file:// URL edge cases ----------------------------
+
+    #[test]
+    fn drop_image_reader_bounds_consumption_and_keeps_exact_data() {
+        for size in [0, 8, 9, 128] {
+            let mut reader = std::io::Cursor::new(vec![7; size]);
+            let result = read_bounded_image_bytes(&mut reader, 8);
+            assert_eq!(reader.position(), size.min(9) as u64);
+            if size == 8 { assert_eq!(result.unwrap(), vec![7; 8]); }
+            else { assert!(result.is_none()); }
+        }
+    }
+
+    #[test]
+    fn oversized_image_drop_remains_a_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.png");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_DROP_IMAGE_BYTES as u64 + 1).unwrap();
+        drop(file);
+        let dropped = try_read_dropped_path(path.to_str().unwrap()).unwrap();
+        assert!(matches!(dropped, DroppedPath::NonImage(ref resolved) if *resolved == dunce::canonicalize(&path).unwrap()));
+        assert!(try_read_image_from_path(path.to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn drop_batch_budget_preserves_exact_fit_and_path_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.png");
+        write_png(&path, 2, 2);
+        let size = std::fs::metadata(&path).unwrap().len() as usize;
+        let plain = dir.path().join("notes.txt");
+        std::fs::write(&plain, "notes").unwrap();
+        let text = format!("{}\n{}\n{}", path.display(), plain.display(), path.display());
+        let entries = try_read_dropped_paths_with_budget(&text, size * 2);
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(&entries[0], DroppedPath::Image(image) if image.byte_len == size));
+        assert!(matches!(&entries[1], DroppedPath::NonImage(p) if *p == dunce::canonicalize(&plain).unwrap()));
+        assert!(matches!(&entries[2], DroppedPath::Image(image) if image.byte_len == size));
+        assert_eq!(try_read_dropped_paths_with_budget(plain.to_str().unwrap(), 0).len(), 1);
+    }
+
+    #[test]
+    fn drop_batch_overflow_never_returns_a_partial_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.png");
+        write_png(&path, 2, 2);
+        let size = std::fs::metadata(&path).unwrap().len() as usize;
+        for separator in [" ", "\n", "\r\n"] {
+            let text = format!("{}{separator}{}", path.display(), path.display());
+            assert!(try_read_dropped_paths_with_budget(&text, size * 2 - 1).is_empty());
+            assert!(try_read_dropped_paths_with_budget(&text, 0).is_empty());
+        }
+        let with_prose = format!("{}\nplease inspect this", path.display());
+        assert!(try_read_dropped_paths_with_budget(&with_prose, size).is_empty());
+    }
 
     #[test]
     fn file_url_with_localhost_host() {
@@ -4315,6 +4415,96 @@ mod tests {
     }
 
     // ----- open_from_path ----------------------------------------------------
+
+    #[test]
+    fn viewer_source_budget_matches_memory_and_file_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("image.png");
+        let png = make_test_png(8, 8);
+        std::fs::write(&path, &png).unwrap();
+        for memory in [true, false] {
+            for limit in [0, png.len() - 1, png.len()] {
+                let source = if memory {
+                    ImageViewerLoadSource::Memory(Arc::from(png.clone()))
+                } else { ImageViewerLoadSource::Path(path.clone()) };
+                let result = load_image_data_with_limit(source, crate::terminal::image::GraphicsProtocol::None, limit);
+                if limit == png.len() {
+                    let ImageLoadResult::Loaded(data) = result else { panic!("exact fit rejected") };
+                    assert_eq!(data.image_bytes, png);
+                    assert_eq!((data.image_width, data.image_height), (8, 8));
+                } else { assert!(matches!(result, ImageLoadResult::Failed)); }
+            }
+        }
+        assert!(matches!(load_image_data(ImageViewerLoadSource::Memory(Arc::from([])), crate::terminal::image::GraphicsProtocol::None), ImageLoadResult::Failed));
+    }
+
+    #[test]
+    fn viewer_source_growth_stops_after_allowance_plus_one() {
+        use std::io::{Seek, Write};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("image.png");
+        std::fs::write(&path, b"1234").unwrap();
+        let mut reader = std::fs::File::open(&path).unwrap();
+        assert_eq!(reader.metadata().unwrap().len(), 4);
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[7; 64]).unwrap();
+        assert!(read_bounded_image_bytes(&mut reader, 4).is_none());
+        assert_eq!(reader.stream_position().unwrap(), 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn viewer_source_accepts_symlink_and_rejects_fifo() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.png");
+        let link = directory.path().join("link.png");
+        let png = make_test_png(8, 8);
+        std::fs::write(&target, &png).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(read_bounded_image_file(&link, png.len()).unwrap(), png);
+        assert!(read_bounded_image_file(directory.path(), 100).is_none());
+        let fifo = directory.path().join("fifo.png");
+        assert!(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo).status().unwrap().success());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender.send(load_image_data(ImageViewerLoadSource::Path(fifo), crate::terminal::image::GraphicsProtocol::None)).unwrap();
+        });
+        assert!(matches!(receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap(), ImageLoadResult::Failed));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn image_viewer_open_defers_invalid_memory_and_missing_file_sources() {
+        let mut image = from_clipboard_data(&crate::clipboard::ImageData {
+            data: b"invalid image".to_vec(), mime_type: "image/png".into(),
+        });
+        image.display_number = 7;
+        for memory in [true, false] {
+            if !memory {
+                image.encoded_bytes = None;
+                image.session_image_path = Some(PathBuf::from("/missing/viewer-source.png"));
+            }
+            let mut viewer = ImageViewerState::open(&image).unwrap();
+            assert!(viewer.loading);
+            assert_eq!(viewer.display_number, 7);
+            assert!(viewer.image_bytes.is_empty() && viewer.display_bytes.is_empty());
+            let (source, protocol) = viewer.take_load_request().unwrap();
+            assert!(!viewer.has_deferred_source());
+            assert!(viewer.take_load_request().is_none());
+            assert!(matches!(load_image_data(source, protocol), ImageLoadResult::Failed));
+        }
+        image.session_image_path = None;
+        assert!(ImageViewerState::open(&image).is_none());
+    }
+
+    #[test]
+    fn image_viewer_reopening_assigns_unique_owner() {
+        let image = from_clipboard_data(&crate::clipboard::ImageData {
+            data: make_test_png(2, 2), mime_type: "image/png".into(),
+        });
+        let first = ImageViewerState::open(&image).unwrap();
+        let second = ImageViewerState::open(&image).unwrap();
+        assert_ne!(first.overlay_owner_id, second.overlay_owner_id);
+    }
 
     #[test]
     fn open_from_path_valid_image() {

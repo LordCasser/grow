@@ -295,16 +295,13 @@ fn spawn_agent_thread_direct(
                         let agent = agent_rc.clone();
                         tokio::task::spawn_local(async move {
                             while let Some(change) = skills_rx.recv().await {
-                                let created_discovery_dir = watcher.refresh_new_discovery_dirs();
+                                watcher.refresh_new_discovery_dirs();
                                 match change {
                                     shell::config::watcher::DiscoveryChange::Skills => {
                                         tracing::info!(
                                             "skill directory changed on disk; reloading skills for all sessions"
                                         );
                                         agent.reload_skills_all_sessions();
-                                        if created_discovery_dir {
-                                            agent.advertise_commands_all_sessions();
-                                        }
                                     }
                                     shell::config::watcher::DiscoveryChange::Workflows => {
                                         tracing::info!(

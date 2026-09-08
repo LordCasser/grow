@@ -706,6 +706,9 @@ pub async fn run_dispatcher(
     // gateway that is already tearing down. Tasks select on this token
     // during their backoff (see `mcp_restart::auto_restart_stdio`).
     let restart_cancel = tokio_util::sync::CancellationToken::new();
+    // Fatal teardown and timeout aborts skip the normal cancel/drain below.
+    // Keep cancellation owned by this future, not by its detached recoveries.
+    let _cancel_on_exit = restart_cancel.clone().drop_guard();
     loop {
         let Some(mut win) = collect_window(&mut rx, COALESCE_WINDOW).await else {
             tracing::debug!(
@@ -1564,6 +1567,7 @@ mod tests {
     /// mock — mirroring how production `SessionRestartActions`
     /// reads from the same Arc.
     struct CountingActions {
+        claimed: tokio::sync::Notify,
         configured: std::cell::RefCell<HashSet<String>>,
         respawn_calls: std::cell::RefCell<Vec<String>>,
         shutdown: SharedShutdownState,
@@ -1572,6 +1576,7 @@ mod tests {
     impl CountingActions {
         fn new(shutdown: SharedShutdownState) -> Self {
             Self {
+                claimed: tokio::sync::Notify::new(),
                 configured: std::cell::RefCell::new(HashSet::new()),
                 respawn_calls: std::cell::RefCell::new(Vec::new()),
                 shutdown,
@@ -1587,6 +1592,16 @@ mod tests {
 
     #[async_trait::async_trait(?Send)]
     impl crate::session::mcp_restart::RestartActions for CountingActions {
+        fn begin_restart(&self, server: &str) -> bool {
+            let accepted = self.shutdown.lock().unwrap().begin_restart(server.into());
+            if accepted {
+                self.claimed.notify_one();
+            }
+            accepted
+        }
+        fn end_restart(&self, server: &str) {
+            self.shutdown.lock().unwrap().end_restart(server);
+        }
         async fn is_stdio_server_configured(&self, server: &str) -> bool {
             self.configured.borrow().contains(server)
         }
@@ -1596,11 +1611,60 @@ mod tests {
                 .expect("ShutdownState mutex poisoned")
                 .is_shutting_down(server)
         }
-        async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
+        async fn respawn_stdio(
+            &self,
+            server: &str,
+        ) -> Result<(), crate::session::mcp_restart::RecoveryError> {
             self.respawn_calls.borrow_mut().push(server.to_string());
             Ok(())
         }
         fn push_status(&self, _payload: &crate::session::mcp_dispatcher::McpServerStatusPayload) {}
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aborted_dispatcher_cancels_scheduled_restart() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let client = Arc::new(::mcp::servers::McpClient::stub("svr"));
+                let mut state = McpState::new(vec![]);
+                let episode = state.bind_client_events(&client);
+                state.owned_clients.insert("svr".into(), client);
+                let shutdown = new_shutdown_state();
+                let actions = Rc::new(CountingActions::new(shutdown.clone()));
+                actions.configure("svr");
+                let (tx, rx) = unbounded_channel();
+                let dispatcher = tokio::task::spawn_local(run_dispatcher(
+                    "session".into(),
+                    rx,
+                    discard_gateway(),
+                    Arc::new(TokioMutex::new(state)),
+                    shutdown.clone(),
+                    Some(actions.clone()),
+                    std::path::PathBuf::from("."),
+                ));
+                tx.send(McpClientEvent::TransportClosed {
+                    server: "svr".into(),
+                    episode,
+                })
+                .unwrap();
+                actions.claimed.notified().await;
+                dispatcher.abort();
+                assert!(dispatcher.await.unwrap_err().is_cancelled());
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    while shutdown.lock().unwrap().has_in_flight_restarts() {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                tokio::time::advance(Duration::from_secs(21)).await;
+                assert!(
+                    actions.respawn_calls().is_empty(),
+                    "aborted dispatcher left recovery running"
+                );
+            })
+            .await;
     }
 
     /// End-to-end: a `TransportClosed` event flowing through

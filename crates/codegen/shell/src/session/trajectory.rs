@@ -28,6 +28,7 @@ const TRAJECTORY_DETAIL_PREVIEW_CHARS: usize = 200_000;
 const TRAJECTORY_DETAIL_PREVIEW_NODES: usize = 4_000;
 const TRAJECTORY_DETAIL_PREVIEW_DEPTH: usize = 10;
 const TRAJECTORY_DETAIL_PREVIEW_ITEMS: usize = 80;
+const MAX_TRAJECTORY_RELATION_IDS: usize = 16;
 const MAX_TRAJECTORY_FULL_DETAIL_BYTES: usize = 4 * 1024 * 1024;
 const LEDGER_TAIL_CHECK_BYTES: u64 = 64 * 1024;
 
@@ -234,6 +235,10 @@ struct TrajectoryQuery {
     visibility: Option<String>,
     issue: Option<TrajectoryIssueFilter>,
     correlation: Option<String>,
+    /// Ledger source scope for relation, turn, and step queries.
+    source: Option<String>,
+    /// Entry whose complete relation set defines a scoped Pair query.
+    related_to: Option<String>,
     turn: Option<String>,
     step: Option<u32>,
     search: Option<String>,
@@ -279,6 +284,17 @@ impl std::fmt::Display for TrajectoryEntryNotFound {
 impl std::error::Error for TrajectoryEntryNotFound {}
 
 #[derive(Debug)]
+struct TrajectoryInvalidQuery(String);
+
+impl std::fmt::Display for TrajectoryInvalidQuery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TrajectoryInvalidQuery {}
+
+#[derive(Debug)]
 struct TrajectoryEventTooLarge;
 
 impl std::fmt::Display for TrajectoryEventTooLarge {
@@ -319,6 +335,9 @@ struct TrajectoryRowSummary {
     step_index: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     correlation_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    relation_ids: Vec<String>,
+    relation_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -352,6 +371,13 @@ impl From<&chat_state::TrajectoryRow> for TrajectoryRowSummary {
             turn_id: row.turn_id.as_deref().map(trajectory_wire_text),
             step_index: row.step_index,
             correlation_id: row.correlation_id.as_deref().map(trajectory_wire_text),
+            relation_ids: row
+                .relation_ids
+                .iter()
+                .take(MAX_TRAJECTORY_RELATION_IDS)
+                .map(|value| trajectory_wire_text(value))
+                .collect(),
+            relation_count: row.relation_ids.len(),
             duration_ms: row.duration_ms,
             outcome: row.outcome.as_deref().map(trajectory_wire_text),
             issue_severity: row.issue_severity,
@@ -385,6 +411,7 @@ impl TrajectoryRowSummary {
             turn_id: self.turn_id,
             step_index: self.step_index,
             correlation_id: self.correlation_id,
+            relation_ids: self.relation_ids,
             duration_ms: self.duration_ms,
             outcome: self.outcome,
             issue_severity: self.issue_severity,
@@ -581,6 +608,11 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
     {
         anyhow::bail!("after, before, and entry are mutually exclusive");
     }
+    if query.related_to.is_some() && query.correlation.is_some() {
+        return Err(anyhow::Error::new(TrajectoryInvalidQuery(
+            "related_to and correlation are mutually exclusive".into(),
+        )));
+    }
     let mut cache = state
         .cache
         .lock()
@@ -614,6 +646,28 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
         .correlation
         .as_deref()
         .filter(|value| !value.is_empty());
+    let source = query.source.as_deref().filter(|value| !value.is_empty());
+    let related = query
+        .related_to
+        .as_deref()
+        .map(|entry_id| {
+            let (related_source, _) = trajectory_entry_parts(entry_id).ok_or_else(|| {
+                anyhow::Error::new(TrajectoryInvalidQuery(
+                    "related_to must be a trajectory entry id".into(),
+                ))
+            })?;
+            if source.is_some_and(|value| value != related_source) {
+                return Err(anyhow::Error::new(TrajectoryInvalidQuery(
+                    "related_to entry belongs to a different ledger source".into(),
+                )));
+            }
+            let row = all_rows
+                .iter()
+                .find(|row| row.entry_id == entry_id)
+                .ok_or_else(|| anyhow::Error::new(TrajectoryEntryNotFound(entry_id.to_owned())))?;
+            Ok((related_source.to_owned(), row.relation_ids.clone()))
+        })
+        .transpose()?;
     let turn = query.turn.as_deref().filter(|value| !value.is_empty());
     let limit = query
         .limit
@@ -634,7 +688,19 @@ fn query_cached(state: &AppState, query: TrajectoryQuery) -> anyhow::Result<Traj
                     row.issue_severity == Some(chat_state::TrajectoryIssueSeverity::Error)
                 }
             })
-            && correlation.is_none_or(|value| row.correlation_id.as_deref() == Some(value))
+            && source.is_none_or(|value| {
+                trajectory_entry_parts(&row.entry_id)
+                    .is_some_and(|(row_source, _)| row_source == value)
+            })
+            && correlation.is_none_or(|value| row.relation_ids.iter().any(|id| id == value))
+            && related
+                .as_ref()
+                .is_none_or(|(related_source, relation_ids)| {
+                    trajectory_entry_parts(&row.entry_id).is_some_and(|(row_source, _)| {
+                        row_source == related_source
+                            && row.relation_ids.iter().any(|id| relation_ids.contains(id))
+                    })
+                })
             && turn.is_none_or(|value| row.turn_id.as_deref() == Some(value))
             && query.step.is_none_or(|value| row.step_index == Some(value))
             && search.as_ref().is_none_or(|needle| {
@@ -1370,6 +1436,9 @@ impl SessionTrajectoryCache {
     ) -> anyhow::Result<chat_state::TrajectoryRow> {
         let entry_id = format!("t:{timeline_id}/{}", projected.seq);
         let mut row = TrajectoryRowSummary::from(projected).into_row(serde_json::Value::Null);
+        // Keep the complete relation index in the materialized tree; only
+        // list summaries are bounded for wire transfer.
+        row.relation_ids = projected.relation_ids.clone();
         row.entry_id = entry_id;
         row.parent_entry_id = parent_entry_id.map(str::to_owned);
         row.nesting_path = path_prefix
@@ -2515,6 +2584,7 @@ fn workflow_row(
         turn_id: None,
         step_index: None,
         correlation_id: Some(entry.req_hash.clone()),
+        relation_ids: vec![entry.req_hash.clone()],
         duration_ms: None,
         issue_severity: chat_state::trajectory_issue_severity(state, outcome.as_deref()),
         repair_source_seqs: Vec::new(),
@@ -2999,6 +3069,7 @@ fn sideband_row(
         turn_id: None,
         step_index: None,
         correlation_id: Some(event.sideband_id.clone()),
+        relation_ids: vec![event.sideband_id.clone()],
         duration_ms,
         issue_severity,
         repair_source_seqs: Vec::new(),
@@ -3055,7 +3126,9 @@ fn internal_error(error: impl std::fmt::Display) -> HttpError {
 }
 
 fn query_error_response(error: anyhow::Error) -> HttpError {
-    if error.downcast_ref::<TrajectoryEntryNotFound>().is_some() {
+    if error.downcast_ref::<TrajectoryInvalidQuery>().is_some() {
+        http_error(StatusCode::BAD_REQUEST, error.to_string())
+    } else if error.downcast_ref::<TrajectoryEntryNotFound>().is_some() {
         http_error(StatusCode::NOT_FOUND, error.to_string())
     } else if error.downcast_ref::<TrajectoryEventTooLarge>().is_some() {
         http_error(StatusCode::PAYLOAD_TOO_LARGE, error.to_string())
@@ -4404,7 +4477,10 @@ mod tests {
             writeln!(file, "{}", serde_json::to_string(&event).unwrap()).unwrap();
         }
         let refreshed = query_cached(&state, TrajectoryQuery::default()).unwrap();
-        assert_eq!(refreshed.schema_version, 4);
+        assert_eq!(
+            refreshed.schema_version,
+            chat_state::TRAJECTORY_SCHEMA_VERSION
+        );
         let source = refreshed
             .rows
             .iter()
@@ -4732,7 +4808,8 @@ mod tests {
         assert!(PAGE.contains("<option value=\"actor\">Actor</option>"));
         assert!(PAGE.contains("<option value=\"class\">Class</option>"));
         assert!(PAGE.contains("<option value=\"producer\">Producer</option>"));
-        assert!(PAGE.contains("aria-label=\"Trajectory filters\""));
+        assert!(PAGE.contains("aria-controls=\"filterPanel\""));
+        assert!(PAGE.contains("id=\"filterPanel\""));
         assert!(PAGE.contains("id=\"layer\""));
         assert!(PAGE.contains("id=\"actor\""));
         assert!(PAGE.contains("id=\"class\""));
@@ -4766,7 +4843,135 @@ mod tests {
         assert!(PAGE.contains("urlStateParams"));
         assert!(PAGE.contains("actorLabel"));
         assert!(PAGE.contains("summaryCaption"));
-        assert!(PAGE.contains("active · step"));
+        assert!(PAGE.contains("active · turn "));
+    }
+
+    #[test]
+    fn relation_summary_is_bounded_but_keeps_total_count() {
+        let row = chat_state::TrajectoryRow {
+            entry_id: "t:session/7".into(),
+            seq: 7,
+            parent_entry_id: None,
+            nesting_path: vec![7],
+            at_ms: 0,
+            layer: "meta".into(),
+            actor: "main".into(),
+            class: "governance".into(),
+            producer: "core".into(),
+            kind: "input.consumed".into(),
+            state: "consumed".into(),
+            visibility: chat_state::SurfaceVisibility::LogOnly,
+            turn_id: None,
+            step_index: None,
+            correlation_id: Some("input-0".into()),
+            relation_ids: (0..17).map(|index| format!("input-{index}")).collect(),
+            duration_ms: None,
+            outcome: None,
+            issue_severity: None,
+            repair_source_seqs: Vec::new(),
+            repair_source_count: 0,
+            repaired_by_seq: None,
+            summary: "batch".into(),
+            details: serde_json::Value::Null,
+        };
+        let summary = TrajectoryRowSummary::from(&row);
+        assert_eq!(summary.relation_count, 17);
+        assert_eq!(summary.relation_ids.len(), MAX_TRAJECTORY_RELATION_IDS);
+        assert_eq!(summary.relation_ids[15], "input-15");
+    }
+
+    #[test]
+    fn related_to_uses_full_batch_relations_beyond_wire_preview_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.jsonl");
+        let mut timeline = chat_state::Timeline::default();
+        let ids = (0..17)
+            .map(|index| format!("notification-{index}"))
+            .collect::<Vec<_>>();
+        let mut received_ids = Vec::new();
+        for (index, task_id) in ids.iter().enumerate() {
+            let source = chat_state::NotificationSource::TaskCompleted {
+                task_id: task_id.clone(),
+                task_kind: chat_state::NotificationTaskKind::Task,
+                owner: chat_state::NotificationOwner::Session,
+            };
+            let source_version = chat_state::NotificationSourceVersion::Ordinal {
+                value: index as u64 + 1,
+            };
+            let id = chat_state::notification_id("session-1", &source, &source_version).unwrap();
+            received_ids.push(id.clone());
+            timeline
+                .record(chat_state::TimelineEventKind::Notification(
+                    chat_state::NotificationEvent::Received {
+                        id: id.clone(),
+                        owner_session_id: "session-1".into(),
+                        source,
+                        source_version,
+                        payload_ref: chat_state::NotificationPayloadRef {
+                            blake3: blake3::hash(b"done").to_hex().to_string(),
+                            bytes: 4,
+                        },
+                    },
+                ))
+                .unwrap();
+        }
+        let turn = chat_state::TurnId(1);
+        timeline
+            .record(chat_state::TimelineEventKind::Turn(
+                chat_state::TurnEvent::Started {
+                    id: turn,
+                    input_ids: Vec::new(),
+                    identity: chat_state::TurnIdentity {
+                        origin: "notification".into(),
+                        turn_kind: "internal".into(),
+                        goal_id: None,
+                        goal_definition_revision: None,
+                        stage_id: None,
+                    },
+                    model_id: "model".into(),
+                    input_message_count: 0,
+                    prompt_index: 0,
+                    prompt_text: "".into(),
+                    input_kind: chat_state::TurnInputKind::Prompt,
+                    redirect_kind: None,
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Consumed {
+                    notification_ids: received_ids.clone(),
+                    turn,
+                    input: None,
+                },
+            ))
+            .unwrap();
+        write_timeline(&path, &timeline);
+        let state = AppState {
+            session_id: "session".into(),
+            actor_ref: "main".into(),
+            session_dir: dir.path().to_owned(),
+            sessions_root: dir.path().join("sessions"),
+            cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
+        };
+        let all = query_cached(&state, TrajectoryQuery::default()).unwrap();
+        let consumed = all
+            .rows
+            .iter()
+            .find(|row| row.kind == "notification.admitted")
+            .unwrap();
+        assert_eq!(consumed.relation_count, 17);
+        assert_eq!(consumed.relation_ids.len(), MAX_TRAJECTORY_RELATION_IDS);
+        let related = query_cached(
+            &state,
+            TrajectoryQuery {
+                related_to: Some(consumed.entry_id.clone()),
+                source: Some("session".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(related.matching_count, 18);
     }
 
     #[test]
@@ -4990,6 +5195,52 @@ mod tests {
         .unwrap();
         assert_eq!(pair.rows.len(), 2);
 
+        let scoped_pair = query_cached(
+            &state,
+            TrajectoryQuery {
+                correlation: Some("call-1".into()),
+                source: Some("session".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(scoped_pair.rows.len(), 2);
+        let related_to = scoped_pair.rows[0].entry_id.clone();
+        let related = query_cached(
+            &state,
+            TrajectoryQuery {
+                related_to: Some(related_to.clone()),
+                source: Some("session".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(related.rows.len(), 2);
+        let conflict = query_cached(
+            &state,
+            TrajectoryQuery {
+                correlation: Some("call-1".into()),
+                related_to: Some(related_to.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        let conflict_response = query_error_response(conflict);
+        assert_eq!(conflict_response.0, StatusCode::BAD_REQUEST);
+        assert!(conflict_response.2.contains("mutually exclusive"));
+        let source_error = query_cached(
+            &state,
+            TrajectoryQuery {
+                related_to: Some(related_to),
+                source: Some("other".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        let source_response = query_error_response(source_error);
+        assert_eq!(source_response.0, StatusCode::BAD_REQUEST);
+        assert!(source_response.2.contains("different ledger source"));
+
         let exact_step = query_cached(
             &state,
             TrajectoryQuery {
@@ -5005,6 +5256,21 @@ mod tests {
                 .rows
                 .iter()
                 .all(|row| row.turn_id.as_deref() == Some("11") && row.step_index == Some(2))
+        );
+        assert_eq!(
+            query_cached(
+                &state,
+                TrajectoryQuery {
+                    turn: Some("11".into()),
+                    step: Some(2),
+                    source: Some("other".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .rows
+            .len(),
+            0
         );
 
         let all = query_cached(&state, TrajectoryQuery::default()).unwrap();

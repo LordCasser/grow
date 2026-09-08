@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tty_utils::ProcessGroup;
 
 use crate::config::HookSpec;
@@ -20,21 +20,50 @@ const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// or block (Stop/SubagentStop, with stderr as the feedback).
 const GATE_EXIT_CODE: i32 = 2;
 
-/// `None` when the group cannot be built, which only costs session reaping, so
-/// the hook still runs.
+/// If group setup fails, keep the direct-child kill_on_drop fallback.
 fn hook_process_group(child: &tokio::process::Child) -> Option<Arc<ProcessGroup>> {
     let mut group = ProcessGroup::new()
         .inspect_err(
-            |e| tracing::warn!(pid = child.id(), error = %e, "hook: no process group; not reaped on session close"),
+            |e| tracing::warn!(pid = child.id(), error = %e, "hook: no process group; only direct-child cleanup available"),
         )
         .ok()?;
     group
         .attach(child)
         .inspect_err(
-            |e| tracing::warn!(pid = child.id(), error = %e, "hook: process group attach failed; not reaped on session close"),
+            |e| tracing::warn!(pid = child.id(), error = %e, "hook: process group attach failed; only direct-child cleanup available"),
         )
         .ok()?;
     Some(Arc::new(group))
+}
+
+/// Own group cleanup across cancellation as well as ordinary error returns.
+struct HookProcessGuard(Option<Arc<ProcessGroup>>);
+
+impl Drop for HookProcessGuard {
+    fn drop(&mut self) {
+        if let Some(group) = &self.0 {
+            let _ = group.kill();
+        }
+    }
+}
+
+/// Retain a bounded prefix while draining the entire pipe. The extra byte
+/// lets truncate_output distinguish exact-limit output from truncated output.
+async fn capture_output<R: AsyncRead + Unpin>(reader: Option<R>) -> std::io::Result<Vec<u8>> {
+    let Some(mut reader) = reader else {
+        return Ok(Vec::new());
+    };
+    let limit = MAX_OUTPUT_BYTES + 1;
+    let mut captured = Vec::with_capacity(limit);
+    let mut chunk = [0u8; 8192];
+    loop {
+        let count = reader.read(&mut chunk).await?;
+        if count == 0 {
+            return Ok(captured);
+        }
+        let keep = count.min(limit - captured.len());
+        captured.extend_from_slice(&chunk[..keep]);
+    }
 }
 
 /// Run a single hook command.
@@ -78,18 +107,11 @@ pub async fn run_command_hook(
         );
     }
 
-    // Commands with shell metacharacters (spaces, pipes, &&, ||, redirects,
+    // Commands with shell metacharacters (space/tab/LF, pipes, &&, ||, redirects,
     // semicolons, env-var refs) or a leading `~` run through `sh -c` so shell
     // command strings from compatible configs work; everything else is a
     // direct executable path resolved from the hook file's directory.
-    let is_shell_command = command_str.contains(' ')
-        || command_str.contains('|')
-        || command_str.contains('&')
-        || command_str.contains(';')
-        || command_str.contains('>')
-        || command_str.contains('<')
-        || command_str.contains('$')
-        || command_str.starts_with('~');
+    let is_shell_command = crate::config::command_uses_shell(&command_str);
 
     let mut cmd = if is_shell_command {
         // Fail fast on env vars we can't resolve (runner vars, per-hook
@@ -182,22 +204,23 @@ pub async fn run_command_hook(
         }
     };
 
-    let mut hook_group = None;
+    let mut hook_group = HookProcessGuard(hook_process_group(&child));
     if let Some(scope) = ctx.process_scope.as_ref()
-        && let Some(group) = hook_process_group(&child)
+        && let Some(group) = &hook_group.0
     {
         // A closed scope means the session is gone and `register` already killed
         // the child, so stop rather than write stdin to a corpse.
-        if !scope.register(&group) {
+        if !scope.register(group) {
             return (HookRunnerResult::Cancelled, start.elapsed());
         }
-        hook_group = Some(group);
     }
 
     // Write stdin concurrently with draining output, under the timeout: a hook
     // that never reads stdin would otherwise block `write_all` on a full pipe
     // buffer, outside the deadline.
     let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
     let timeout = Duration::from_millis(spec.timeout_ms);
     let result = tokio::time::timeout(timeout, async move {
         let write = async {
@@ -205,19 +228,28 @@ pub async fn run_command_hook(
                 let _ = stdin.write_all(stdin_json.as_bytes()).await;
             }
         };
-        let (_, output) = tokio::join!(write, child.wait_with_output());
+        let read = async {
+            let (stdout, stderr, status) =
+                tokio::try_join!(capture_output(stdout), capture_output(stderr), child.wait(),)?;
+            Ok::<_, std::io::Error>(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        };
+        let (_, output) = tokio::join!(write, read);
         output
     })
     .await;
 
     let elapsed = start.elapsed();
 
-    // killpg takes grandchildren that kill_on_drop would miss.
-    if !matches!(result, Ok(Ok(_)))
-        && let Some(group) = &hook_group
-    {
-        let _ = group.kill();
+    // A normal completion needs no abnormal-exit cleanup. Every other return
+    // and a dropped execution future retain the guard's group-kill responsibility.
+    if matches!(result, Ok(Ok(_))) {
+        hook_group.0 = None;
     }
+    drop(hook_group);
 
     match result {
         Err(_) => (HookRunnerResult::TimedOut, elapsed),
@@ -444,7 +476,21 @@ fn parse_blocking_result(
     elapsed: Duration,
 ) -> (HookRunnerResult, Duration) {
     let json_decision = if !stdout.trim().is_empty() {
-        serde_json::from_str::<GateHookJson>(stdout.trim()).ok()
+        match super::parse_hook_json::<GateHookJson>(stdout.trim()) {
+            Ok(json) => Some(json),
+            Err(error)
+                if super::is_structured_output_error(stdout, &error)
+                    && exit_code != GATE_EXIT_CODE =>
+            {
+                return (
+                    HookRunnerResult::Failed(format!(
+                        "hook '{hook_name}' returned invalid decision JSON: {error}"
+                    )),
+                    elapsed,
+                );
+            }
+            Err(_) => None,
+        }
     } else {
         None
     };
@@ -474,12 +520,15 @@ fn parse_blocking_result(
                         hook_name,
                         "JSON decision is 'allow' but exit code is 2 — denying (stdout is ignored on exit 2)"
                     );
-                } else {
+                } else if exit_code == 0 {
                     return (HookRunnerResult::Decision(HookDecision::Allow), elapsed);
                 }
             }
             // Unknown decision value: failure so typos surface.
-            Err(err) => return (HookRunnerResult::Failed(err), elapsed),
+            Err(err) if exit_code != GATE_EXIT_CODE => {
+                return (HookRunnerResult::Failed(err), elapsed);
+            }
+            Err(_) => {}
         }
     }
 
@@ -523,7 +572,7 @@ fn parse_stop_result(
 ) -> (HookRunnerResult, Duration) {
     let trimmed = stdout.trim();
     if !trimmed.is_empty() {
-        match serde_json::from_str::<StopHookJson>(trimmed) {
+        match super::parse_hook_json::<StopHookJson>(trimmed) {
             Ok(json) => {
                 return match stop_json_to_outcome(json, hook_name) {
                     Ok(outcome) => (HookRunnerResult::Stop(outcome), elapsed),
@@ -531,7 +580,7 @@ fn parse_stop_result(
                 };
             }
             Err(err) => {
-                if trimmed.starts_with('{') {
+                if super::is_structured_output_error(trimmed, &err) {
                     return (
                         HookRunnerResult::Failed(format!(
                             "stop hook '{hook_name}' returned invalid decision JSON: {err}"
@@ -576,7 +625,7 @@ fn truncate_output(bytes: &[u8]) -> String {
         let mut truncated = String::from_utf8_lossy(&bytes[..MAX_OUTPUT_BYTES]).into_owned();
         truncated.push_str(" [truncated]");
         tracing::warn!(
-            total_bytes = bytes.len(),
+            captured_bytes = bytes.len(),
             max_bytes = MAX_OUTPUT_BYTES,
             "hook output truncated"
         );
@@ -900,6 +949,72 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn output_capture_limits_memory_and_drains_pipe() {
+        for size in [
+            0,
+            MAX_OUTPUT_BYTES,
+            MAX_OUTPUT_BYTES + 1,
+            MAX_OUTPUT_BYTES * 8,
+        ] {
+            let (mut writer, reader) = tokio::io::duplex(128);
+            let input = vec![b'x'; size];
+            let write = async {
+                writer.write_all(&input).await.unwrap();
+                drop(writer);
+            };
+            let (_, captured) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(write, capture_output(Some(reader)))
+            })
+            .await
+            .expect("capture must drain beyond its retained prefix");
+            let captured = captured.unwrap();
+            assert_eq!(captured.len(), size.min(MAX_OUTPUT_BYTES + 1));
+            assert!(captured.capacity() <= MAX_OUTPUT_BYTES + 1);
+            assert!(captured.iter().all(|byte| *byte == b'x'));
+            assert_eq!(
+                truncate_output(&captured).ends_with(" [truncated]"),
+                size > MAX_OUTPUT_BYTES
+            );
+        }
+    }
+
+    #[test]
+    fn structured_errors_are_not_command_log_noise() {
+        for body in [
+            r#"{"decision":false}"#,
+            r#"{"decision":"block","typo":1}"#,
+            "{\"decision\":",
+            "[]",
+        ] {
+            assert!(
+                matches!(
+                    parse_blocking_result(body, 0, "gate", Duration::ZERO).0,
+                    HookRunnerResult::Failed(_)
+                ),
+                "{body}"
+            );
+            assert!(
+                matches!(
+                    parse_stop_result(body, "", 0, "stop", Duration::ZERO).0,
+                    HookRunnerResult::Failed(_)
+                ),
+                "{body}"
+            );
+            assert!(
+                matches!(
+                    parse_blocking_result(body, 2, "gate", Duration::ZERO).0,
+                    HookRunnerResult::Decision(HookDecision::Deny { .. })
+                ),
+                "{body}"
+            );
+        }
+        assert!(matches!(
+            parse_blocking_result(r#"{"decision":"typo"}"#, 2, "gate", Duration::ZERO).0,
+            HookRunnerResult::Decision(HookDecision::Deny { .. })
+        ));
+    }
+
     /// Helper to build a HookSpec that runs a shell command.
     fn make_shell_spec(command: &str) -> HookSpec {
         HookSpec {
@@ -955,6 +1070,20 @@ mod tests {
         RunContext {
             process_scope: Some(scope),
             ..make_ctx()
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn shell_whitespace_commands_execute() {
+        for command in ["printf\tok", "cat\ntrue"] {
+            let spec = make_shell_spec(command);
+            let (result, _) =
+                run_command_hook(&spec, &make_envelope(), &make_ctx(), GateKind::Observe).await;
+            assert!(
+                matches!(result, HookRunnerResult::Success),
+                "{command:?}: {result:?}"
+            );
         }
     }
 
@@ -1370,6 +1499,50 @@ mod tests {
             "hook with parameter-expansion default must run, got {:?}",
             result
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_and_timed_out_hooks_reap_grandchildren_without_scope_dependency() {
+        for scoped in [false, true] {
+            for cancel in [true, false] {
+                let tmp = tempfile::tempdir().unwrap();
+                let ready = tmp.path().join("ready");
+                let marker = tmp.path().join("survived");
+                let mut spec = make_shell_spec(&format!(
+                    "sh -c 'echo ready > {}; sleep 0.5; echo alive > {}' & wait",
+                    ready.display(),
+                    marker.display(),
+                ));
+                spec.timeout_ms = if cancel { 5000 } else { 200 };
+                let ctx = if scoped {
+                    make_scoped_ctx(tty_utils::ProcessScope::new())
+                } else {
+                    make_ctx()
+                };
+                let hook = tokio::spawn(async move {
+                    run_command_hook(&spec, &make_envelope(), &ctx, GateKind::Observe).await
+                });
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !ready.exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("background child must start");
+                if cancel {
+                    hook.abort();
+                    assert!(hook.await.unwrap_err().is_cancelled());
+                } else {
+                    assert!(matches!(hook.await.unwrap().0, HookRunnerResult::TimedOut));
+                }
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                assert!(
+                    !marker.exists(),
+                    "grandchild survived: scoped={scoped}, cancelled={cancel}"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]

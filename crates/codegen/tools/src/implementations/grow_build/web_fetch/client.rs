@@ -8,7 +8,7 @@ use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, CONTENT_TYPE, USER_AGENT};
 use url::Url;
 
 use super::cache::FetchCache;
-use super::config::{MAX_REDIRECTS, MAX_URL_LENGTH, USER_AGENT_STRING, WebFetchParams};
+use super::config::{MAX_URL_LENGTH, USER_AGENT_STRING, WebFetchParams};
 use super::error::WebFetchError;
 use super::http::HttpClient;
 use super::overflow::{OverflowHandler, RecoveryTools, inline_budget};
@@ -79,7 +79,7 @@ impl WebFetchClient {
     /// Fetch a URL and return its content as markdown.
     ///
     /// Handles: validation, HTTPS upgrade, SSRF check, HTTP fetch with
-    /// same-host redirects, HTML-to-markdown conversion, truncation, and
+    /// redirect target reporting, HTML-to-markdown conversion, truncation, and
     /// caching. On transport errors, the HTTP client is invalidated so
     /// the next call gets a fresh connection pool (see [`HttpClient`]).
     pub async fn fetch(
@@ -94,13 +94,34 @@ impl WebFetchClient {
 
         let url_str = url.to_string();
 
-        // Check cache.
-        {
-            let cache = self.cache.read();
-            if let Some(cached) = cache.get(&url_str) {
-                tracing::debug!("web_fetch cache hit for {url_str}");
-                return Ok(cached.clone());
-            }
+        // Cache entries contain full inline text. Model routes can change while
+        // clones share this cache, so apply this call's budget after releasing
+        // the lock and keep any session-specific artifact out of the cache.
+        let cached = self.cache.read().get(&url_str).cloned();
+        if let Some(WebFetchOutput::Content(mut cached)) = cached {
+            tracing::debug!("web_fetch cache hit for {url_str}");
+            let overflow = self
+                .overflow
+                .process(
+                    cached.content,
+                    inline_budget(
+                        self.params.context_window_tokens(),
+                        self.params.max_markdown_length(),
+                    ),
+                    session_folder,
+                    &cached.content_type,
+                    RecoveryTools {
+                        read: read_tool_name,
+                        execute: execute_tool_name,
+                    },
+                )
+                .await;
+            cached.content = overflow.content;
+            cached.source_artifact = overflow
+                .artifact_path
+                .map(|path| WebFetchSourceArtifact { path });
+            cached.inline_fallback = overflow.path_free_content;
+            return Ok(WebFetchOutput::Content(cached));
         }
 
         // SSRF check (policy from tool params — not process env at call time).
@@ -131,12 +152,12 @@ impl WebFetchClient {
                 final_url,
                 status_code,
             } => (body, content_type, final_url, status_code),
-            FetchResult::CrossHostRedirect {
-                original_host,
+            FetchResult::RedirectRequired {
+                original_url,
                 redirect_url,
             } => {
-                return Ok(WebFetchOutput::CrossHostRedirect {
-                    original_host,
+                return Ok(WebFetchOutput::RedirectRequired {
+                    original_url,
                     redirect_url,
                 });
             }
@@ -356,104 +377,78 @@ enum FetchResult {
         final_url: String,
         status_code: u16,
     },
-    CrossHostRedirect {
-        original_host: String,
+    RedirectRequired {
+        original_url: String,
         redirect_url: String,
     },
 }
 
-/// Fetch a URL with manual same-host redirect handling.
-///
-/// Re-runs SSRF checks on every hop so DNS rebinding between redirects cannot
-/// sneak a previously-blocked address past the initial check (partial TOCTOU
-/// mitigation; peer IP on the live TCP connection is not available from reqwest).
+/// Fetch only the admitted URL. Redirect targets must pass through a new
+/// tool call and its normal authorization before any target request is sent.
 async fn fetch_url(
     client: &reqwest::Client,
     url: &Url,
     max_content_length: usize,
     allow_local: bool,
 ) -> Result<FetchResult, WebFetchError> {
-    let mut current_url = url.clone();
-    let mut hops = 0;
-
-    // Loop to follow redirects under the same host.
-    loop {
-        // Re-check on every hop (including the first) so a rebinding name that
-        // was public at the pre-fetch check cannot become loopback/private here.
-        ssrf::check_ssrf(&current_url, allow_local).await?;
-
-        let resp = client
-            .get(current_url.as_str())
-            .header(USER_AGENT, USER_AGENT_STRING)
-            .header(
-                ACCEPT,
-                "text/markdown,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            )
-            .header(ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-            .send()
-            .await?;
-
-        let status = resp.status();
-
-        if status.is_redirection() {
-            hops += 1;
-            if hops > MAX_REDIRECTS {
-                return Err(WebFetchError::TooManyRedirects { max: MAX_REDIRECTS });
-            }
-
-            // Follow same host; break on cross-host.
-            if let Some(location) = resp.headers().get("location") {
-                let location_str = location.to_str().unwrap_or("");
-                let mut next_url = current_url
-                    .join(location_str)
-                    .map_err(|e| WebFetchError::InvalidRedirect(format!("{e}")))?;
-                if is_same_host(&current_url, &next_url) {
-                    // Re-apply https upgrade on every hop: Location may be
-                    // absolute `http://…` and would otherwise silently
-                    // downgrade an https fetch. Local hosts still skip TLS.
-                    upgrade_to_https(&mut next_url);
-                    // check_ssrf runs at the top of the next loop iteration.
-                    current_url = next_url;
-                    continue;
-                }
-                return Ok(FetchResult::CrossHostRedirect {
-                    original_host: current_url.host_str().unwrap_or("unknown").to_string(),
-                    redirect_url: next_url.to_string(),
-                });
-            }
-        }
-
-        let content_type = resp
+    ssrf::check_ssrf(url, allow_local).await?;
+    let mut resp = client
+        .get(url.as_str())
+        .header(USER_AGENT, USER_AGENT_STRING)
+        .header(
+            ACCEPT,
+            "text/markdown,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .header(ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+        .send()
+        .await?;
+    let status = resp.status();
+    if status.is_redirection() {
+        let location = resp
             .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("text/html")
-            .to_string();
-        let final_url = resp.url().to_string();
-        let status_code = status.as_u16();
-
-        let body = resp.bytes().await?;
-
-        if body.len() > max_content_length {
+            .get("location")
+            .ok_or_else(|| WebFetchError::InvalidRedirect("missing Location header".into()))?
+            .to_str()
+            .map_err(|e| WebFetchError::InvalidRedirect(e.to_string()))?;
+        if location.trim().is_empty() {
+            return Err(WebFetchError::InvalidRedirect(
+                "empty Location header".into(),
+            ));
+        }
+        let target = url
+            .join(location)
+            .map_err(|e| WebFetchError::InvalidRedirect(e.to_string()))?;
+        let target = validate_url(target.as_str())
+            .map_err(|e| WebFetchError::InvalidRedirect(e.to_string()))?;
+        return Ok(FetchResult::RedirectRequired {
+            original_url: url.to_string(),
+            redirect_url: target.to_string(),
+        });
+    }
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("text/html")
+        .to_string();
+    let final_url = resp.url().to_string();
+    let status_code = status.as_u16();
+    // Check decoded chunks before accumulating them, without waiting for EOF.
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if chunk.len() > max_content_length - body.len() {
             return Err(WebFetchError::ResponseTooLarge {
                 max: max_content_length,
             });
         }
-
-        return Ok(FetchResult::Content {
-            body: body.to_vec(),
-            content_type,
-            final_url,
-            status_code,
-        });
+        body.extend_from_slice(&chunk);
     }
-}
-
-/// Exact host equality — no `www.` stripping. Distinct DNS labels (even when
-/// one is a `www` subdomain of the other) have independent A records and must
-/// surface as cross-host redirects rather than auto-follow.
-fn is_same_host(a: &Url, b: &Url) -> bool {
-    a.host_str() == b.host_str()
+    Ok(FetchResult::Content {
+        body,
+        content_type,
+        final_url,
+        status_code,
+    })
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -470,11 +465,21 @@ fn require_media_session_folder(session_folder: Option<&Path>) -> Result<&Path, 
 }
 
 fn is_html(content_type: &str) -> bool {
-    content_type.contains("text/html") || content_type.contains("application/xhtml")
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
+    mime.eq_ignore_ascii_case("text/html") || mime.eq_ignore_ascii_case("application/xhtml+xml")
 }
 
 fn is_pdf(content_type: &str) -> bool {
-    content_type.contains("application/pdf")
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .eq_ignore_ascii_case("application/pdf")
 }
 
 /// Returns `true` for image content types, excluding SVG (which can contain
@@ -857,6 +862,256 @@ fn strip_base64_data_uris(content: String) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn cached_text_follows_model_budget_without_losing_full_content() {
+        let mut client = WebFetchClient::new(&WebFetchParams::default()).unwrap();
+        let url = "https://example.com/";
+        let content = "recoverable line\n".repeat(200);
+        client.cache.write().insert_text(
+            url.to_owned(),
+            WebFetchOutput::Content(WebFetchContent {
+                url: url.to_owned(),
+                content: content.clone(),
+                content_type: "markdown".into(),
+                status_code: 200,
+                bytes: content.len(),
+                source_artifact: None,
+                inline_fallback: None,
+                output_location: None,
+            }),
+            false,
+        );
+        let original_route = client.clone();
+        client.set_context_window_tokens(100);
+        let dir = tempfile::tempdir().unwrap();
+        let WebFetchOutput::Content(small) = client
+            .fetch(url, Some(dir.path()), Some("ReadAsset"), None)
+            .await
+            .unwrap()
+        else {
+            panic!("expected content")
+        };
+        assert!(small.content.len() < content.len());
+        let artifact = small
+            .source_artifact
+            .expect("full cached content must remain recoverable");
+        assert_eq!(
+            tokio::fs::read_to_string(artifact.path).await.unwrap(),
+            content
+        );
+        let WebFetchOutput::Content(large) =
+            original_route.fetch(url, None, None, None).await.unwrap()
+        else {
+            panic!("expected content")
+        };
+        assert_eq!(large.content, content);
+        assert!(large.source_artifact.is_none());
+        client.set_context_window_tokens(128_000);
+        let WebFetchOutput::Content(restored) = client.fetch(url, None, None, None).await.unwrap()
+        else {
+            panic!("expected content")
+        };
+        assert_eq!(restored.content, content);
+        assert!(restored.source_artifact.is_none());
+    }
+
+    #[tokio::test]
+    async fn response_limit_stops_unfinished_stream_and_allows_exact_boundary() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (limit, body, finished) in [
+            (4, "abcde", false),
+            (4, "abcd", true),
+            (0, "", true),
+            (0, "x", false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+            let (release, wait) = tokio::sync::oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                socket.read(&mut request).await.unwrap();
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+                if !body.is_empty() {
+                    socket
+                        .write_all(format!("{:x}\r\n{}\r\n", body.len(), body).as_bytes())
+                        .await
+                        .unwrap();
+                }
+                if finished {
+                    socket.write_all(b"0\r\n\r\n").await.unwrap();
+                }
+                let _ = wait.await;
+            });
+            let http = reqwest::Client::builder().no_proxy().build().unwrap();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                fetch_url(&http, &url, limit, true),
+            )
+            .await;
+            let _ = release.send(());
+            server.await.unwrap();
+            let result =
+                result.expect("must finish without waiting for the server to close the response");
+            if body.len() > limit {
+                assert!(
+                    matches!(result, Err(WebFetchError::ResponseTooLarge { max }) if max == limit)
+                );
+            } else {
+                let FetchResult::Content { body: actual, .. } = result.unwrap() else {
+                    panic!("expected content")
+                };
+                assert_eq!(actual, body.as_bytes());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn same_host_redirect_requires_new_call_before_target_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut paths = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                let n = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..n]);
+                paths.push(request.lines().next().unwrap().to_owned());
+                let response = if paths.len() == 1 {
+                    "HTTP/1.1 302 Found\r\nLocation: /private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                };
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            paths
+        });
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let source = Url::parse(&format!("{base}/docs")).unwrap();
+        let first = fetch_url(&http, &source, 100, true).await.unwrap();
+        if !matches!(first, FetchResult::RedirectRequired { .. }) {
+            server.abort();
+            panic!("redirect must return without requesting the target");
+        }
+        let FetchResult::RedirectRequired { redirect_url, .. } = first else {
+            unreachable!()
+        };
+        assert_eq!(redirect_url, format!("{base}/private"));
+        let second = fetch_url(&http, &Url::parse(&redirect_url).unwrap(), 100, true)
+            .await
+            .unwrap();
+        assert!(matches!(second, FetchResult::Content { body, .. } if body == b"ok"));
+        assert_eq!(
+            server.await.unwrap(),
+            ["GET /docs HTTP/1.1", "GET /private HTTP/1.1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_reports_other_port_without_connecting_and_rejects_invalid_targets() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let target_url = format!("http://{}/target", target.local_addr().unwrap());
+        for location in [
+            Some(target_url.as_str()),
+            None,
+            Some(""),
+            Some("ftp://example.com/file"),
+            Some("http://user:secret@example.com/"),
+            Some("http://[bad"),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let source =
+                Url::parse(&format!("http://{}/docs", listener.local_addr().unwrap())).unwrap();
+            let header = location
+                .map(|l| format!("Location: {l}\r\n"))
+                .unwrap_or_default();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                socket.read(&mut request).await.unwrap();
+                socket.write_all(format!("HTTP/1.1 302 Found\r\n{header}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            });
+            let http = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap();
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                fetch_url(&http, &source, 100, true),
+            )
+            .await
+            .unwrap();
+            server.await.unwrap();
+            if location == Some(target_url.as_str()) {
+                assert!(
+                    matches!(result, Ok(FetchResult::RedirectRequired { original_url, redirect_url }) if original_url == source.as_str() && redirect_url == target_url)
+                );
+            } else {
+                assert!(matches!(result, Err(WebFetchError::InvalidRedirect(_))));
+            }
+            assert_eq!(
+                target.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn content_type_classification_ignores_case_but_not_type_boundaries() {
+        for mime in ["TEXT/HTML", "Application/XHTML+XML; charset=utf-8"] {
+            assert!(is_html(mime));
+            let client = WebFetchClient::new(&WebFetchParams::default()).unwrap();
+            let processed = client
+                .process_text_content(
+                    b"<h1>Heading</h1>",
+                    mime,
+                    None,
+                    RecoveryTools {
+                        read: None,
+                        execute: None,
+                    },
+                )
+                .await;
+            assert_eq!(processed.content_type, "markdown");
+            assert!(processed.content.contains("# Heading"));
+            assert!(!processed.content.contains("<h1>"));
+        }
+        assert!(is_pdf(" APPLICATION/PDF ; version=1.7"));
+        for mime in ["text/plain; note=application/pdf", "application/pdf-extra"] {
+            assert!(!is_pdf(mime));
+        }
+        for mime in [
+            "text/plain; note=text/html",
+            "text/html-extra",
+            "application/xhtml-other",
+        ] {
+            assert!(!is_html(mime));
+        }
+        let client = WebFetchClient::new(&WebFetchParams::default()).unwrap();
+        let processed = client
+            .process_text_content(
+                b"<h1>literal</h1>",
+                "text/plain; note=text/html",
+                None,
+                RecoveryTools {
+                    read: None,
+                    execute: None,
+                },
+            )
+            .await;
+        assert_eq!(processed.content, "<h1>literal</h1>");
+        assert_eq!(processed.content_type, "text/plain; note=text/html");
+    }
+
     fn test_converter() -> htmd::HtmlToMarkdown {
         htmd::HtmlToMarkdown::builder()
             .skip_tags(vec![
@@ -979,41 +1234,6 @@ mod tests {
     }
 
     // ── Same-host redirect check ────────────────────────────────────────
-
-    #[test]
-    fn same_host_exact_match() {
-        let a = Url::parse("https://example.com/a").unwrap();
-        let b = Url::parse("https://example.com/b").unwrap();
-        assert!(is_same_host(&a, &b));
-    }
-
-    #[test]
-    fn www_subdomain_is_cross_host() {
-        let a = Url::parse("https://example.com/a").unwrap();
-        let c = Url::parse("https://www.example.com/a").unwrap();
-        assert!(!is_same_host(&a, &c));
-        assert!(!is_same_host(&c, &a));
-    }
-
-    #[test]
-    fn different_host_rejected() {
-        let a = Url::parse("https://example.com/a").unwrap();
-        let d = Url::parse("https://other.com/a").unwrap();
-        assert!(!is_same_host(&a, &d));
-    }
-
-    #[test]
-    fn same_host_redirect_location_reupgrades_http() {
-        // Absolute http Location on an https origin must not stay http when
-        // followed as a same-host hop (upgrade_to_https reapplied each hop).
-        let origin = Url::parse("https://example.com/start").unwrap();
-        let mut next = origin.join("http://example.com/next").unwrap();
-        assert_eq!(next.scheme(), "http");
-        assert!(is_same_host(&origin, &next));
-        upgrade_to_https(&mut next);
-        assert_eq!(next.scheme(), "https");
-        assert_eq!(next.as_str(), "https://example.com/next");
-    }
 
     // ── Content type detection ──────────────────────────────────────────
 

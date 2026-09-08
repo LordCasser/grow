@@ -13,9 +13,10 @@ pub use types::{HashlineEditInput, HashlineEditOutput, HashlineOp};
 
 use super::config::HashlineSchemeParams;
 
+use crate::notification::types::FileWritten;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::{
-    Cwd, DisplayCwd, FileSystem, Params, PathNotFoundHints, display_cwd_or_cwd,
+    Cwd, DisplayCwd, FileSystem, NotificationHandle, Params, PathNotFoundHints, display_cwd_or_cwd,
 };
 use crate::types::tool::{ToolKind, ToolNamespace};
 
@@ -283,6 +284,7 @@ impl tool_runtime::Tool for HashlineEditTool {
     ) -> Result<crate::types::output::SearchReplaceOutput, tool_runtime::ToolError> {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
+        let tool_call_id = ctx.call_id.as_str().to_owned();
 
         if input.edits.is_empty() {
             return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(
@@ -290,7 +292,7 @@ impl tool_runtime::Tool for HashlineEditTool {
             ));
         }
 
-        let (cwd, display_cwd, fs, scheme, hints_enabled) = {
+        let (cwd, display_cwd, fs, notification_handle, scheme, hints_enabled) = {
             let res = resources.lock().await;
             let cwd = match ctx.extensions.get::<tool_runtime::Cwd>() {
                 Some(dir) => dir.0.clone(),
@@ -302,12 +304,20 @@ impl tool_runtime::Tool for HashlineEditTool {
                 .cloned()
                 .unwrap_or_default();
             let fs = res.require::<FileSystem>()?.0.clone();
+            let notification_handle = res.require::<NotificationHandle>()?.0.clone();
             let scheme = params
                 .0
                 .build_scheme()
                 .map_err(tool_runtime::ToolError::invalid_arguments)?;
             let hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
-            (cwd, display_cwd, fs, scheme, hints_enabled)
+            (
+                cwd,
+                display_cwd,
+                fs,
+                notification_handle,
+                scheme,
+                hints_enabled,
+            )
         };
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
@@ -326,7 +336,14 @@ impl tool_runtime::Tool for HashlineEditTool {
                     if input.edits.len() == 1
                         && let HashlineOp::Write { ref content } = input.edits[0]
                     {
-                        if let Err(e) = fs.write_file(&joined_path, content.as_bytes()).await {
+                        let abs =
+                            crate::util::fs::canonicalize_with_timeout(joined_path.clone()).await;
+                        let r = apply::apply_edits(content, &input.edits, &abs, &*scheme);
+                        let edit_details = r.edit_details;
+                        let Some(new_content) = r.new_content else {
+                            return Ok(to_search_replace(r.output, &abs, "", None, edit_details));
+                        };
+                        if let Err(e) = fs.write_file(&joined_path, new_content.as_bytes()).await {
                             let display_path = display_dcwd.join(&input.file_path);
                             return Ok(match e.io_error_kind() {
                                 Some(std::io::ErrorKind::NotFound) => {
@@ -344,14 +361,18 @@ impl tool_runtime::Tool for HashlineEditTool {
                                 ),
                             });
                         }
-                        let abs = crate::util::fs::canonicalize_with_timeout(joined_path).await;
-                        let r = apply::apply_edits(content, &input.edits, &abs, &*scheme);
-                        let edit_details = r.edit_details;
+                        notification_handle.send_file_written(FileWritten {
+                            tool_call_id: tool_call_id.clone(),
+                            absolute_path: abs.clone(),
+                            content: new_content.clone(),
+                            previous_content: None,
+                            is_new_file: true,
+                        });
                         return Ok(to_search_replace(
                             r.output,
                             &abs,
                             "",
-                            r.new_content.as_deref(),
+                            Some(&new_content),
                             edit_details,
                         ));
                     }
@@ -391,7 +412,17 @@ impl tool_runtime::Tool for HashlineEditTool {
                 });
             }
         };
-        let old_content = String::from_utf8_lossy(&file_bytes).into_owned();
+        let old_content = match String::from_utf8(file_bytes) {
+            Ok(content) => content,
+            Err(_) => {
+                return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(
+                    format!(
+                        "File {} is not valid UTF-8 and cannot be edited.",
+                        input.file_path
+                    ),
+                ));
+            }
+        };
 
         let apply_result = apply::apply_edits(&old_content, &input.edits, &path, &*scheme);
 
@@ -418,6 +449,16 @@ impl tool_runtime::Tool for HashlineEditTool {
             ));
         }
 
+        if let Some(ref new_content) = apply_result.new_content {
+            notification_handle.send_file_written(FileWritten {
+                tool_call_id,
+                absolute_path: path.clone(),
+                content: new_content.clone(),
+                previous_content: Some(old_content.clone()),
+                is_new_file: false,
+            });
+        }
+
         let edit_details = apply_result.edit_details;
         Ok(to_search_replace(
             apply_result.output,
@@ -432,7 +473,7 @@ impl tool_runtime::Tool for HashlineEditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::tool_metadata::test_ctx;
+    use crate::types::tool_metadata::{test_ctx, test_ctx_with_call_id};
 
     use crate::computer::local::LocalFs;
     use crate::notification::types::ToolNotificationHandle;
@@ -521,6 +562,204 @@ mod tests {
                 assert!(msg.contains("current working directory"), "msg: {msg}");
             }
             other => panic!("Expected FileNotFound, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_existing_file_is_rejected_without_write() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("invalid.txt");
+        let original = vec![b'a', 0xff, b'\n'];
+        std::fs::write(&path, &original).unwrap();
+
+        let result = tool_runtime::Tool::run(
+            &HashlineEditTool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            HashlineEditInput {
+                file_path: "invalid.txt".into(),
+                edits: vec![HashlineOp::Replace {
+                    anchor: "1:abc:rst".into(),
+                    end_anchor: None,
+                    content: "changed".into(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            result,
+            SearchReplaceOutput::InvalidInput(message) if message.contains("not valid UTF-8")
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn cpp_content_is_allowed_but_anchor_prefix_is_rejected_without_write() {
+        let tmp = TempDir::new().unwrap();
+        let existing = tmp.path().join("existing.cpp");
+        let original = "int main() {\n  return 0;\n}\n";
+        std::fs::write(&existing, original).unwrap();
+        let anchors = anchors_for(original);
+
+        // Ordinary C++ scope/member syntax is valid edit content for all
+        // operation kinds; it must not be mistaken for an anchor prefix.
+        for (edit, expected) in [
+            (
+                HashlineOp::Write {
+                    content: "ns::get()->run();".into(),
+                },
+                "ns::get()->run();",
+            ),
+            (
+                HashlineOp::Replace {
+                    anchor: anchors[1].clone(),
+                    end_anchor: None,
+                    content: "ns::get()->run();".into(),
+                },
+                "int main() {\nns::get()->run();\n}\n",
+            ),
+            (
+                HashlineOp::InsertAfter {
+                    anchor: anchors[0].clone(),
+                    content: "ns::get()->run();".into(),
+                },
+                "int main() {\nns::get()->run();\n  return 0;\n}\n",
+            ),
+        ] {
+            std::fs::write(&existing, original).unwrap();
+            let result = tool_runtime::Tool::run(
+                &HashlineEditTool,
+                test_ctx(test_resources(tmp.path()).into_shared()),
+                HashlineEditInput {
+                    file_path: "existing.cpp".into(),
+                    edits: vec![edit],
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+            assert_eq!(std::fs::read_to_string(&existing).unwrap(), expected);
+        }
+
+        // A genuine generated anchor prefix is rejected before touching an
+        // existing file or creating a new one.
+        std::fs::write(&existing, original).unwrap();
+        let copied_anchor = format!("{}→int main() {{", anchors[0]);
+        let existing_result = tool_runtime::Tool::run(
+            &HashlineEditTool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            HashlineEditInput {
+                file_path: "existing.cpp".into(),
+                edits: vec![HashlineOp::Replace {
+                    anchor: anchors[1].clone(),
+                    end_anchor: None,
+                    content: copied_anchor.clone(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            existing_result,
+            SearchReplaceOutput::InvalidInput(_)
+        ));
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), original);
+
+        let new_result = tool_runtime::Tool::run(
+            &HashlineEditTool,
+            test_ctx(test_resources(tmp.path()).into_shared()),
+            HashlineEditInput {
+                file_path: "new.cpp".into(),
+                edits: vec![HashlineOp::Write {
+                    content: copied_anchor,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(new_result, SearchReplaceOutput::InvalidInput(_)));
+        assert!(!tmp.path().join("new.cpp").exists());
+    }
+
+    #[tokio::test]
+    async fn crlf_edit_preserves_line_endings_and_emits_file_written() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("crlf.txt");
+        let original = b"one\r\ntwo\r\nthree\r\n";
+        std::fs::write(&path, original).unwrap();
+        let anchors = anchors_for("one\ntwo\nthree\n");
+        let (handle, mut receiver) = ToolNotificationHandle::channel();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(NotificationHandle(handle));
+
+        let result = tool_runtime::Tool::run(
+            &HashlineEditTool,
+            test_ctx_with_call_id(resources.into_shared(), "hashline-crlf"),
+            HashlineEditInput {
+                file_path: "crlf.txt".into(),
+                edits: vec![HashlineOp::Replace {
+                    anchor: anchors[1].clone(),
+                    end_anchor: None,
+                    content: "changed\nsecond".into(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"one\r\nchanged\r\nsecond\r\nthree\r\n"
+        );
+        match receiver.try_recv().unwrap() {
+            crate::notification::types::ToolNotification::FileWritten(file) => {
+                assert_eq!(file.tool_call_id, "hashline-crlf");
+                assert_eq!(
+                    file.previous_content.as_deref(),
+                    Some("one\r\ntwo\r\nthree\r\n")
+                );
+                assert_eq!(file.content, "one\r\nchanged\r\nsecond\r\nthree\r\n");
+            }
+            other => panic!("expected FileWritten, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn new_file_write_emits_file_written_after_validation() {
+        let tmp = TempDir::new().unwrap();
+        let (handle, mut receiver) = ToolNotificationHandle::channel();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(NotificationHandle(handle));
+        let content = "int main() {\n  return 0;\n}\n";
+
+        let result = tool_runtime::Tool::run(
+            &HashlineEditTool,
+            test_ctx_with_call_id(resources.into_shared(), "hashline-new"),
+            HashlineEditInput {
+                file_path: "new.cpp".into(),
+                edits: vec![HashlineOp::Write {
+                    content: content.into(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(result, SearchReplaceOutput::EditsApplied(_)));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("new.cpp")).unwrap(),
+            content
+        );
+        match receiver.try_recv().unwrap() {
+            crate::notification::types::ToolNotification::FileWritten(file) => {
+                assert_eq!(file.tool_call_id, "hashline-new");
+                assert_eq!(file.content, content);
+                assert!(file.previous_content.is_none());
+                assert!(file.is_new_file);
+            }
+            other => panic!("expected FileWritten, got {other:?}"),
         }
     }
 

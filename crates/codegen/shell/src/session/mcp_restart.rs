@@ -163,6 +163,20 @@ impl SkipReason {
     }
 }
 
+/// Configuration replacement is not a transport failure and must not publish
+/// failure status or remove tools belonging to the replacement.
+#[derive(Debug)]
+pub enum RecoveryError {
+    Failed(String),
+    Superseded,
+}
+
+impl From<String> for RecoveryError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
 /// Side effects that the auto-restart task needs. Abstracted as a trait so
 /// unit tests can plug in a mock — the production binding lives next to
 /// the dispatcher wiring in the actor's `SessionRestartActions` implementation.
@@ -209,7 +223,10 @@ pub trait RestartActions {
     ///    dropped on the floor, `kill_on_drop` SIGKILLs the spawned
     ///    child, and an explicit "raced with config change" error
     ///    bubbles up.
-    async fn respawn_stdio(&self, server: &str) -> Result<(), String>;
+    async fn respawn_stdio(
+        &self,
+        server: &str,
+    ) -> Result<(), crate::session::mcp_restart::RecoveryError>;
 
     /// Push an already-built `grow/mcp/server_status` payload to the
     /// pager. The production impl wraps the dispatcher's gateway
@@ -247,8 +264,11 @@ pub trait RestartActions {
     /// re-arm liveness. The `Arc<McpClient>` stays in `owned_clients` (tools
     /// stay valid). Status is emitted by `ensure_initialized`, not here.
     /// Default `Err` for mocks.
-    async fn reset_http_client(&self, _server: &str) -> Result<(), String> {
-        Err("reset_http_client not implemented".to_string())
+    async fn reset_http_client(
+        &self,
+        _server: &str,
+    ) -> Result<(), crate::session::mcp_restart::RecoveryError> {
+        Err("reset_http_client not implemented".to_string().into())
     }
 
     /// Drop `server`'s tools from the bridge after stdio restart exhaustion,
@@ -290,7 +310,12 @@ pub async fn maybe_schedule_restart(
     // returns false for non-stdio entries). A server removed from
     // `configs` between the event firing and us checking also lands
     // here.
-    if !actions.is_stdio_server_configured(&server).await {
+    let configured = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return false,
+        configured = actions.is_stdio_server_configured(&server) => configured,
+    };
+    if !configured {
         record_skipped(&server, SkipReason::NotConfigured);
         return false;
     }
@@ -306,14 +331,17 @@ pub async fn maybe_schedule_restart(
         return false;
     }
 
+    // Capture ownership before spawning: an unpolled future can be dropped
+    // during LocalSet teardown and must still release its claimed slot.
+    let in_flight = RestartInFlightGuard {
+        actions: Rc::clone(&actions),
+        server: server.clone(),
+    };
     let task_actions = Rc::clone(&actions);
     tokio::task::spawn_local(async move {
         // RAII: release the in-flight claim taken above when the task
         // exits for any reason.
-        let _in_flight = RestartInFlightGuard {
-            actions: Rc::clone(&task_actions),
-            server: server.clone(),
-        };
+        let _in_flight = in_flight;
         auto_restart_stdio(task_actions, session_id, server, cancel).await;
     });
     true
@@ -392,7 +420,12 @@ pub async fn auto_restart_stdio(
         // HTTP/HttpAuth are filtered at schedule time, so the
         // `Reason::Disabled` push below only fires for user-driven
         // removal (toggle-off / config diff).
-        if !actions.is_stdio_server_configured(&server).await {
+        let configured = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            configured = actions.is_stdio_server_configured(&server) => configured,
+        };
+        if !configured {
             tracing::info!(
                 server = %server,
                 attempt,
@@ -444,7 +477,8 @@ pub async fn auto_restart_stdio(
                 );
                 return;
             }
-            Err(reason) => {
+            Err(RecoveryError::Superseded) => return,
+            Err(RecoveryError::Failed(reason)) => {
                 tracing::warn!(
                     server = %server,
                     attempt,
@@ -501,7 +535,12 @@ pub async fn maybe_schedule_http_recovery(
     }
 
     // Guard: must still be an enabled HTTP/SSE entry.
-    if !actions.is_http_server_configured(&server).await {
+    let configured = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return false,
+        configured = actions.is_http_server_configured(&server) => configured,
+    };
+    if !configured {
         record_http_recovery_skipped(&server, SkipReason::NotConfigured);
         return false;
     }
@@ -513,13 +552,16 @@ pub async fn maybe_schedule_http_recovery(
         return false;
     }
 
+    // Capture ownership before spawning: an unpolled future can be dropped
+    // during LocalSet teardown and must still release its claimed slot.
+    let in_flight = RestartInFlightGuard {
+        actions: Rc::clone(&actions),
+        server: server.clone(),
+    };
     let task_actions = Rc::clone(&actions);
     tokio::task::spawn_local(async move {
         // RAII: release the in-flight claim on every exit path.
-        let _in_flight = RestartInFlightGuard {
-            actions: Rc::clone(&task_actions),
-            server: server.clone(),
-        };
+        let _in_flight = in_flight;
         http_recovery_loop(task_actions, server, cancel).await;
     });
     true
@@ -560,7 +602,12 @@ async fn http_recovery_loop(
             record_http_recovery_skipped(&server, SkipReason::ShuttingDown);
             return;
         }
-        if !actions.is_http_server_configured(&server).await {
+        let configured = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            configured = actions.is_http_server_configured(&server) => configured,
+        };
+        if !configured {
             record_http_recovery_skipped(&server, SkipReason::Disabled);
             return;
         }
@@ -581,7 +628,8 @@ async fn http_recovery_loop(
                 record_http_recovery_succeeded(&server);
                 return;
             }
-            Err(reason) => {
+            Err(RecoveryError::Superseded) => return,
+            Err(RecoveryError::Failed(reason)) => {
                 // Keep retrying; the `Pending` client keeps lazy recovery alive.
                 tracing::warn!(
                     server = %server,
@@ -707,6 +755,9 @@ mod tests {
     #[derive(Default)]
     struct MockActions {
         configured: RefCell<HashSet<String>>,
+        block_probe_after: std::cell::Cell<Option<usize>>,
+        probe_calls: std::cell::Cell<usize>,
+        probe_started: tokio::sync::Notify,
         shutting_down: RefCell<HashSet<String>>,
         /// Scripted respawn outcomes. `pop_front` per attempt; if the
         /// deque empties before the loop completes, attempts past the
@@ -714,6 +765,8 @@ mod tests {
         /// test bug rather than silently passing).
         respawn_outcomes: RefCell<std::collections::VecDeque<Result<(), String>>>,
         respawn_calls: RefCell<Vec<String>>,
+        supersede_on_attempt: std::cell::Cell<Option<usize>>,
+        supersede_http_on_attempt: std::cell::Cell<Option<usize>>,
         pushes: RefCell<Vec<McpServerStatusPayload>>,
         /// Servers with an in-flight restart claim (mirrors the
         /// production `ShutdownState::in_flight_restart` set) so the
@@ -731,7 +784,159 @@ mod tests {
         unregister_calls: RefCell<Vec<String>>,
     }
 
+    #[tokio::test]
+    async fn unpolled_recovery_tasks_release_claims_on_localset_drop() {
+        for http in [false, true] {
+            let actions = Rc::new(MockActions::new());
+            actions.configure("server");
+            actions.configure_http("server");
+            let local = tokio::task::LocalSet::new();
+            local
+                .run_until(async {
+                    let erased: Rc<dyn RestartActions> = actions.clone();
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    let scheduled = if http {
+                        maybe_schedule_http_recovery(erased, "server".into(), cancel).await
+                    } else {
+                        maybe_schedule_restart(
+                            erased,
+                            "session".into(),
+                            "server".into(),
+                            McpClientEventKind::TransportClosed,
+                            cancel,
+                        )
+                        .await
+                    };
+                    assert!(scheduled);
+                    assert!(actions.in_flight.borrow().contains("server"));
+                })
+                .await;
+            assert_eq!(actions.respawn_call_count(), 0);
+            assert!(actions.reset_calls().is_empty());
+            drop(local);
+            assert!(
+                actions.in_flight.borrow().is_empty(),
+                "unpolled recovery leaked claim, http={http}"
+            );
+            assert!(actions.pushes().is_empty());
+            assert!(actions.begin_restart("server"));
+            actions.end_restart("server");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_interrupts_configuration_probes() {
+        for http in [false, true] {
+            for during_loop in [false, true] {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async {
+                        let actions = Rc::new(MockActions::new());
+                        actions.configure("server");
+                        actions.configure_http("server");
+                        actions
+                            .block_probe_after
+                            .set(Some(usize::from(during_loop)));
+                        let cancel = tokio_util::sync::CancellationToken::new();
+                        let task_actions: Rc<dyn RestartActions> = actions.clone();
+                        let task_cancel = cancel.clone();
+                        let scheduled = tokio::task::spawn_local(async move {
+                            if http {
+                                maybe_schedule_http_recovery(
+                                    task_actions,
+                                    "server".into(),
+                                    task_cancel,
+                                )
+                                .await
+                            } else {
+                                maybe_schedule_restart(
+                                    task_actions,
+                                    "session".into(),
+                                    "server".into(),
+                                    McpClientEventKind::TransportClosed,
+                                    task_cancel,
+                                )
+                                .await
+                            }
+                        });
+                        actions.probe_started.notified().await;
+                        cancel.cancel();
+                        let accepted = tokio::time::timeout(StdDuration::from_secs(1), scheduled)
+                            .await
+                            .expect("cancel must interrupt scheduling probe")
+                            .unwrap();
+                        assert_eq!(accepted, during_loop);
+                        tokio::time::timeout(StdDuration::from_secs(1), async {
+                            while !actions.in_flight.borrow().is_empty() {
+                                tokio::time::sleep(StdDuration::from_millis(1)).await;
+                            }
+                        })
+                        .await
+                        .expect("cancel must release loop probe claim");
+                        assert_eq!(actions.respawn_call_count(), 0);
+                        assert!(actions.reset_calls().is_empty());
+                        assert!(actions.pushes().is_empty());
+                    })
+                    .await;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn superseded_http_recovery_does_not_retry_replacement() {
+        for attempt in [1, 3] {
+            let actions = Rc::new(MockActions::new());
+            actions.configure_http("server");
+            actions.supersede_http_on_attempt.set(Some(attempt));
+            for _ in 1..attempt {
+                actions.script_reset("server", Err("transport failed".into()));
+            }
+            http_recovery_loop(actions.clone(), "server".into(), never_cancel()).await;
+            assert_eq!(actions.reset_calls().len(), attempt);
+            assert!(actions.pushes().is_empty());
+            assert!(actions.unregister_calls().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn superseded_final_respawn_does_not_publish_or_unregister() {
+        for attempt in [1, 3] {
+            let actions = Rc::new(MockActions::new());
+            actions.configure("server");
+            for _ in 1..attempt {
+                actions.script_outcome(Err("failed".into()));
+            }
+            actions.supersede_on_attempt.set(Some(attempt));
+            auto_restart_stdio(
+                actions.clone(),
+                "session".into(),
+                "server".into(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(actions.respawn_call_count(), attempt);
+            assert_eq!(
+                actions.pushes().len(),
+                attempt - 1,
+                "superseded attempt published failure/exhaustion"
+            );
+            assert!(actions.unregister_calls().is_empty());
+        }
+    }
+
     impl MockActions {
+        async fn probe(&self) {
+            let count = self.probe_calls.get();
+            self.probe_calls.set(count + 1);
+            if self
+                .block_probe_after
+                .get()
+                .is_some_and(|limit| count >= limit)
+            {
+                self.probe_started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        }
         fn new() -> Self {
             Self::default()
         }
@@ -774,17 +979,25 @@ mod tests {
     #[async_trait(?Send)]
     impl RestartActions for MockActions {
         async fn is_stdio_server_configured(&self, server: &str) -> bool {
+            self.probe().await;
             self.configured.borrow().contains(server)
         }
         fn is_in_shutting_down(&self, server: &str) -> bool {
             self.shutting_down.borrow().contains(server)
         }
-        async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
+        async fn respawn_stdio(
+            &self,
+            server: &str,
+        ) -> Result<(), crate::session::mcp_restart::RecoveryError> {
             self.respawn_calls.borrow_mut().push(server.to_string());
+            if self.supersede_on_attempt.get() == Some(self.respawn_call_count()) {
+                return Err(RecoveryError::Superseded);
+            }
             self.respawn_outcomes
                 .borrow_mut()
                 .pop_front()
                 .unwrap_or_else(|| Err("not scripted".to_string()))
+                .map_err(Into::into)
         }
         fn push_status(&self, payload: &McpServerStatusPayload) {
             self.pushes.borrow_mut().push(payload.clone());
@@ -796,15 +1009,23 @@ mod tests {
             self.in_flight.borrow_mut().remove(server);
         }
         async fn is_http_server_configured(&self, server: &str) -> bool {
+            self.probe().await;
             self.http_configured.borrow().contains(server)
         }
-        async fn reset_http_client(&self, server: &str) -> Result<(), String> {
+        async fn reset_http_client(
+            &self,
+            server: &str,
+        ) -> Result<(), crate::session::mcp_restart::RecoveryError> {
             self.reset_calls.borrow_mut().push(server.to_string());
+            if self.supersede_http_on_attempt.get() == Some(self.reset_calls.borrow().len()) {
+                return Err(RecoveryError::Superseded);
+            }
             self.reset_outcomes
                 .borrow_mut()
                 .get_mut(server)
                 .and_then(|q| q.pop_front())
                 .unwrap_or_else(|| Err("not scripted".to_string()))
+                .map_err(Into::into)
         }
         fn unregister_server_tools(&self, server: &str) {
             self.unregister_calls.borrow_mut().push(server.to_string());

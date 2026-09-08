@@ -1,0 +1,9 @@
+# Verification
+- main; locked/offline shell --lib with incremental/dev-debug/test-debug off, jobs 2, RUST_MIN_STACK=16777216.
+- session_rename_lifecycle_is_serialized passed (parent 1 and exact isolated child 1), 0.24 s. Child environment is set before process startup; config::grow_home equality asserted before storage writes and parent verifies child ran a test.
+- Real rename handler cannot send a title command before obtaining an existing lifecycle guard. While waiting for a controlled live actor response, competing load guard, delete teardown and another rename remain pending. Guard releases after reply. Fake live actor only acknowledges a prepared title event; no real live actor persistence is claimed in this phase.
+- Dormant phase releases initializer's writer lease, announces a load without completing it, performs real rename handler call within 3 s and verifies temporary summary title. No real user session changed/deleted.
+- session_lifecycle_gate_serializes_close_behind_load_incarnation: 1 passed, 0.05 s. session_delete_tears_down_resident_actor_before_releasing_lifecycle: 1 passed, 0.05 s.
+- Initial compile deliberately interrupted to add dormant coverage. First completed compile failed on config module name shadowing; fixed explicit ::config reference. First runtime reached dormant write but correctly failed because test initializer retained its writer lease; dropping initializer corrected the fixture, final regression passed.
+- Storage writer leases already reject competing writers. This change serializes same-agent lifecycle decisions, not a claim of previously reproduced corruption or a new cross-process guarantee. No Windows run. Existing linker compact-unwind warning observed.
+- Strict all 16 / archived 238 passed. cargo clean removed 7,373 files / 2.7 GiB; final available disk 64 GiB.

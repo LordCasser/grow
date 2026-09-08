@@ -244,8 +244,10 @@ name = "announcements"
 version = "2.1.4"
 dependencies = [
  "chrono",
+ "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tools",
 ]
@@ -1450,6 +1452,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "shell",
+ "tempfile",
  "tikv-jemalloc-ctl",
  "tikv-jemalloc-sys",
  "tikv-jemallocator",
@@ -1486,7 +1489,7 @@ dependencies = [
  "tools",
  "tracing",
  "tty-utils",
- "urlencoding",
+ "url",
  "uuid",
  "wl-clipboard-rs",
 ]
@@ -8115,6 +8118,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "version",
 ]
@@ -8678,6 +8682,7 @@ dependencies = [
  "ring",
  "rusqlite",
  "rustls",
+ "same-file",
  "sampler",
  "sampling-types",
  "sandbox",

@@ -1,0 +1,4 @@
+# Verification
+- main. Low-disk `cargo test --locked --offline -p diagnostics --lib debug_log::tests`: 23 passed, 0 failed/ignored, 0.01s; exact child subprocess test 1 passed. CARGO_INCREMENTAL=0, dev/test debug=0, jobs=2, RUST_MIN_STACK=16777216.
+- Child process isolates global guard registry; explicit temporary directories only. Sixteen barrier-start threads per session/fallback sink leave exactly two additional parked guards total; after flush both files contain each of sixteen expected lines once. Existing route/filter/latest/retention regressions pass. Barrier induces contention but does not force every thread through first-open simultaneously.
+- File creation and loser guard drop stay outside routing lock; no live reentrant logging test. Concurrent transient duplicate opens remain possible. No bound on distinct session sink count or guarantee for concurrent shutdown/installation. No real user debug paths or installed binary replacement.

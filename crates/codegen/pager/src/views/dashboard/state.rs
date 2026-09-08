@@ -2273,15 +2273,7 @@ impl DashboardState {
         // before deferring the clipboard probe, so a path paste is not ALSO
         // attached as the clipboard raster (no double insert).
         if !text.trim().is_empty() {
-            let images = crate::prompt_images::try_read_images_from_paste(text);
-            if !images.is_empty() {
-                for img in images {
-                    if peek {
-                        self.attach_peek_pasted_image(img, effects);
-                    } else {
-                        self.attach_pasted_image(img, effects);
-                    }
-                }
+            if self.insert_dropped_paths(text, peek, effects).is_some() {
                 return InputOutcome::Changed;
             }
         }
@@ -2343,6 +2335,44 @@ impl DashboardState {
             }
         };
         (InputOutcome::Changed, completion)
+    }
+
+    /// Insert recognized image and ordinary path entries without filtering
+    /// either kind out of a mixed paste. Callers own target/question guards.
+    fn insert_dropped_paths(
+        &mut self,
+        text: &str,
+        peek: bool,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) -> Option<crate::app::actions::ClipboardPasteCompletion> {
+        use crate::app::actions::{ClipboardPasteCompletion, ClipboardPasteFailure, ClipboardTextInsertion};
+        let entries = crate::prompt_images::try_read_dropped_paths(text);
+        if entries.is_empty() {
+            return None;
+        }
+        let mut completion = ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported);
+        for entry in entries {
+            let inserted = match entry {
+                crate::prompt_images::DroppedPath::Image(image) => {
+                    if peek {
+                        self.attach_peek_pasted_image(image, effects).1
+                    } else {
+                        self.attach_pasted_image(image, effects).1
+                    }
+                }
+                crate::prompt_images::DroppedPath::NonImage(path) => {
+                    let text = format!("{} ", path.display());
+                    match self.insert_pasted_caption(Some(&text), peek).1 {
+                        ClipboardTextInsertion::Inserted => ClipboardPasteCompletion::Handled,
+                        _ => ClipboardPasteCompletion::Failed(ClipboardPasteFailure::TargetInsertion),
+                    }
+                }
+            };
+            if completion != ClipboardPasteCompletion::Handled {
+                completion = inserted;
+            }
+        }
+        Some(completion)
     }
 
     /// Insert a plain-text (caption) paste into the dispatch input (`peek =
@@ -2481,15 +2511,7 @@ impl DashboardState {
         if let Some(text) = clipboard_text.as_deref()
             && !text.trim().is_empty()
         {
-            let images = crate::prompt_images::try_read_images_from_paste(text);
-            if !images.is_empty() {
-                for img in images {
-                    if peek {
-                        self.attach_peek_pasted_image(img, effects);
-                    } else {
-                        self.attach_pasted_image(img, effects);
-                    }
-                }
+            if self.insert_dropped_paths(text, peek, effects).is_some() {
                 return InputOutcome::Changed;
             }
         }
@@ -2591,23 +2613,15 @@ impl DashboardState {
         }
         let file = if attachment == ClipboardPasteCompletion::FullMiss {
             file_urls.and_then(|urls| {
-                let images = crate::prompt_images::try_read_images_from_paste(&urls);
-                if images.is_empty() {
-                    return None;
-                }
-                let mut completion =
-                    ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported);
-                for img in images {
-                    let (_, inserted) = if peek {
-                        self.attach_peek_pasted_image(img, effects)
-                    } else {
-                        self.attach_pasted_image(img, effects)
-                    };
-                    if inserted == ClipboardPasteCompletion::Handled {
-                        completion = ClipboardPasteCompletion::Handled;
-                    }
-                }
-                Some(completion)
+                self.insert_dropped_paths(&urls, peek, effects)
+                    .or_else(|| {
+                        ctx.source.file_url_text_on_miss(&urls).map(|text| {
+                            match self.insert_pasted_caption(Some(text), peek).1 {
+                                crate::app::actions::ClipboardTextInsertion::Inserted => ClipboardPasteCompletion::Handled,
+                                _ => ClipboardPasteCompletion::Failed(ClipboardPasteFailure::TargetInsertion),
+                            }
+                        })
+                    })
             })
         } else {
             None
@@ -8945,6 +8959,80 @@ mod tests {
     }
 
     #[test]
+    fn mixed_drop_paths_preserve_order_across_dashboard_entrypoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = write_test_png(dir.path());
+        let before = dir.path().join("before.txt");
+        let after = dir.path().join("after.txt");
+        std::fs::write(&before, "before").unwrap();
+        std::fs::write(&after, "after").unwrap();
+        let payload = format!("{}\n{}\n{}", before.display(), png.display(), after.display());
+        for peek in [false, true] {
+            for entry in 0..3 {
+                let mut state = if peek { state_with_open_peek() } else { DashboardState::new() };
+                let mut effects = Vec::new();
+                match entry {
+                    0 => { state.handle_bracketed_paste(&payload, peek, false, &mut effects); }
+                    1 => {
+                        state.handle_paste_key_deferred(
+                            crate::app::actions::ClipboardTextRead::Success(Some(payload.clone())),
+                            peek,
+                            &mut effects,
+                        );
+                    }
+                    _ => {
+                        state.paste_probe_in_flight = 1;
+                        let result = state.complete_clipboard_attachment_paste(
+                            completion_ctx(None, peek),
+                            crate::app::actions::ProbedAttachment::NoRaster,
+                            Some(payload.clone()),
+                            &mut effects,
+                        );
+                        assert_eq!(result, crate::app::actions::ClipboardPasteCompletion::Handled);
+                        assert_eq!(state.paste_probe_in_flight, 0);
+                    }
+                }
+                let (target, other) = if peek {
+                    (&state.peek_reply, &state.dispatch)
+                } else {
+                    (&state.dispatch, &state.peek_reply)
+                };
+                assert_eq!(target.images.len(), 1, "peek={peek}, entry={entry}");
+                let text = target.text();
+                let first = text.find("before.txt").unwrap();
+                let image = text.find("[Image #1]").unwrap();
+                let last = text.find("after.txt").unwrap();
+                assert!(first < image && image < last, "{text}");
+                assert!(other.images.is_empty());
+                assert!(other.text().is_empty());
+                assert!(deferred_probe_target(&effects).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_drop_paths_survive_image_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = write_test_png(dir.path());
+        let plain = dir.path().join("keep.txt");
+        std::fs::write(&plain, "keep").unwrap();
+        for peek in [false, true] {
+            let mut state = if peek { state_with_open_peek() } else { DashboardState::new() };
+            let target = if peek { &mut state.peek_reply } else { &mut state.dispatch };
+            for _ in 0..crate::views::prompt_widget::PromptWidget::IMAGE_CAP {
+                target.insert_image(completion_pasted_image()).unwrap();
+            }
+            let payload = format!("{}\n{}", png.display(), plain.display());
+            let result = state.insert_dropped_paths(&payload, peek, &mut Vec::new());
+            assert_eq!(result, Some(crate::app::actions::ClipboardPasteCompletion::Handled));
+            let target = if peek { &state.peek_reply } else { &state.dispatch };
+            assert_eq!(target.images.len(), crate::views::prompt_widget::PromptWidget::IMAGE_CAP);
+            assert!(target.text().contains("keep.txt"));
+            assert!(state.feedback.is_some());
+        }
+    }
+
+    #[test]
     fn dispatch_path_paste_attaches_inline_without_deferring() {
         let dir = tempfile::tempdir().unwrap();
         let png = write_test_png(dir.path());
@@ -9235,21 +9323,60 @@ mod tests {
     }
 
     #[test]
-    fn completion_reports_full_miss_for_unreadable_file_url() {
+    fn dashboard_unclassified_file_urls_preserve_text_and_source_precedence() {
+        use crate::app::actions::{ClipboardPasteSource, ClipboardTextRead, ClipboardPasteCompletion, ProbedAttachment};
+        for peek in [false, true] {
+            for original in [ClipboardTextRead::Success(None), ClipboardTextRead::Success(Some(" \t".into())), ClipboardTextRead::Failed, ClipboardTextRead::Success(Some("caption".into()))] {
+                let mut state = if peek { state_with_open_peek() } else { DashboardState::new() };
+                let expected = if original.as_deref() == Some("caption") { "caption" } else { "file:///" };
+                let mut ctx = completion_ctx(None, peek);
+                ctx.source = ClipboardPasteSource::ClipboardKey { text: original, tip_showing: false };
+                let result = state.complete_clipboard_attachment_paste(ctx, ProbedAttachment::NoRaster, Some("file:///".into()), &mut Vec::new());
+                assert_eq!(result, ClipboardPasteCompletion::Handled);
+                let target = if peek { &state.peek_reply } else { &state.dispatch };
+                assert_eq!(target.text(), expected);
+                assert!(target.images.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn dashboard_unclassified_file_urls_do_not_bypass_guards() {
+        use crate::app::actions::ProbedAttachment;
+        for probe in [ProbedAttachment::ProbeDropped, ProbedAttachment::ProbeFailed, ProbedAttachment::PersistFailed("failed".into())] {
+            let mut state = DashboardState::new();
+            state.complete_clipboard_attachment_paste(completion_ctx(None, false), probe, Some("file:///".into()), &mut Vec::new());
+            assert!(state.dispatch.text().is_empty());
+        }
+        for question in [false, true] {
+            let mut state = state_with_open_peek();
+            let ctx = completion_ctx(None, true);
+            if question { state.peek.as_mut().unwrap().question = Some("Allow?".into()); }
+            else { state.peek = None; }
+            state.complete_clipboard_attachment_paste(ctx, ProbedAttachment::NoRaster, Some("file:///".into()), &mut Vec::new());
+            assert!(state.peek_reply.text().is_empty());
+        }
+    }
+
+    #[test]
+    fn completion_preserves_unreadable_file_url_as_path_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.png");
+        let uri = url::Url::from_file_path(&missing).unwrap().to_string();
         let mut state = DashboardState::new();
         let mut effects = Vec::new();
         let completion = state.complete_clipboard_attachment_paste(
             completion_ctx(None, false),
             crate::app::actions::ProbedAttachment::NoRaster,
-            Some("file:///definitely/missing/grow-primary-paste.png".to_owned()),
+            Some(uri),
             &mut effects,
         );
 
         assert_eq!(
             completion,
-            crate::app::actions::ClipboardPasteCompletion::FullMiss
+            crate::app::actions::ClipboardPasteCompletion::Handled
         );
-        assert!(state.dispatch.text().is_empty());
+        assert_eq!(state.dispatch.text(), format!("{} ", missing.display()));
         assert!(state.dispatch.images.is_empty());
     }
 

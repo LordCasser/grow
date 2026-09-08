@@ -572,6 +572,122 @@ mod sampler_retry_policy_tests {
     }
 }
 
+pub(super) fn start_user_question_worker(
+    session: &Arc<SessionActor>,
+    user_question_rx: tokio::sync::mpsc::UnboundedReceiver<
+        tools::implementations::grow_build::ask_user_question::UserQuestionRequest,
+    >,
+) {
+    use acp_transport::AcpClientHandler as _;
+    use tools::implementations::grow_build::ask_user_question::{
+        AskUserQuestionExtRequest, AskUserQuestionExtResponse, UserQuestionError,
+        UserQuestionResponse,
+    };
+    let gateway = session.notifications.gateway.clone();
+    let session_id = session.session_info.id.clone();
+    let behavior = session.behavior.clone();
+    let pending_interactions = session.pending_interactions.clone();
+    let weak_session = Arc::downgrade(&session);
+    let shutdown = session.background_service_shutdown.clone();
+    let mut user_question_rx = user_question_rx;
+    let worker = tokio::task::spawn_local(async move {
+        loop {
+            let mut request = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => break,
+                request = user_question_rx.recv() => {
+                    let Some(request) = request else { break };
+                    request
+                }
+            };
+            use tools::implementations::grow_build::ask_user_question::AskUserQuestionMode;
+            let mode = match behavior.lock().behavior() {
+                tool_types::BehaviorId::Plan => AskUserQuestionMode::Plan,
+                _ => AskUserQuestionMode::Default,
+            };
+            let ext_req = AskUserQuestionExtRequest {
+                session_id: session_id.0.to_string(),
+                tool_call_id: request.tool_call_id.clone(),
+                questions: request.questions.clone(),
+                mode,
+            };
+            debug_assert!(
+                !ext_req.session_id.is_empty(),
+                "ask_user_question reverse-request must carry a non-empty sessionId (design §5.4)"
+            );
+            let ext_request = agent_client_protocol::schema::v1::ExtRequest::new(
+                "grow/ask_user_question",
+                serde_json::value::to_raw_value(&ext_req)
+                    .expect("AskUserQuestionExtRequest serialization should not fail")
+                    .into(),
+            );
+            let questions_for_response = request.questions.clone();
+            let tool_call_id = request.tool_call_id.clone();
+            let _pending_guard = crate::session::pending_interaction::PendingInteractionGuard::new(
+                pending_interactions.clone(),
+                gateway.clone(),
+                session_id.clone(),
+                tool_call_id.clone(),
+                crate::session::pending_interaction::PendingKind::Question,
+            );
+            let hook_completed = if let Some(session) = weak_session.upgrade() {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => false,
+                    () = request.result_tx.closed() => continue,
+                    result = session.dispatch_notification_hook(
+                        "elicitation_dialog",
+                        Some("User question requested".into()),
+                        None,
+                        Some("info".into()),
+                    ) => result.is_ok(),
+                }
+            } else {
+                false
+            };
+            if !hook_completed {
+                let _ = request.result_tx.send(Ok(UserQuestionResponse::Cancelled));
+                break;
+            }
+            let result = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    Ok(UserQuestionResponse::Cancelled)
+                }
+                () = request.result_tx.closed() => {
+                    tracing::info!(
+                        %tool_call_id,
+                        "ask_user_question tool receiver closed (timeout or cancel); abandoning ACP wait"
+                    );
+                    Ok(UserQuestionResponse::Cancelled)
+                }
+                acp_result = gateway.ext_method(ext_request) => {
+                    match acp_result {
+                        Ok(raw) => {
+                            match serde_json::from_str::<AskUserQuestionExtResponse>(
+                                raw.0.get(),
+                            ) {
+                                Ok(typed) => {
+                                    Ok(typed.into_response(questions_for_response))
+                                }
+                                Err(e) => Err(UserQuestionError::MalformedResponse(
+                                    e.to_string(),
+                                )),
+                            }
+                        }
+                        Err(e) => Err(UserQuestionError::TransportError(e.to_string())),
+                    }
+                }
+            };
+            let _ = request.result_tx.send(result);
+            if shutdown.is_cancelled() {
+                break;
+            }
+        }
+    });
+    session.user_question_worker.arm(worker);
+}
+
 #[tracing::instrument(
     name = "session.spawn",
     skip_all,
@@ -2492,7 +2608,7 @@ pub(crate) async fn spawn_session_actor(
         sampler_event_drainer: TaskSlot::new(),
         rebuild_spec: rebuild_spec.clone(),
         image_description_model: parking_lot::RwLock::new(image_description_model),
-        session_title_route: std::cell::RefCell::new(session_title_route),
+        session_title_route: std::cell::RefCell::new(session_title_route.into()),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         workspace_ops: workspace_ops.clone(),
     });
@@ -2799,7 +2915,9 @@ pub(crate) async fn spawn_session_actor(
                     if reindex_shutdown.is_cancelled() {
                         break;
                     }
-                    let source = reindex_storage.classify_source(file);
+                    let Some(source) = reindex_storage.classify_source(file) else {
+                        continue;
+                    };
                     if let Ok(stats) = index.reindex_file(file, source) {
                         added += stats.added;
                         updated += stats.updated;
@@ -2885,117 +3003,7 @@ pub(crate) async fn spawn_session_actor(
         });
         session.memory_reindex_worker.arm(worker);
     }
-    {
-        use acp_transport::AcpClientHandler as _;
-        use tools::implementations::grow_build::ask_user_question::{
-            AskUserQuestionExtRequest, AskUserQuestionExtResponse, UserQuestionError,
-            UserQuestionResponse,
-        };
-        let gateway = session.notifications.gateway.clone();
-        let session_id = session.session_info.id.clone();
-        let behavior = session.behavior.clone();
-        let pending_interactions = session.pending_interactions.clone();
-        let weak_session = Arc::downgrade(&session);
-        let shutdown = session.background_service_shutdown.clone();
-        let mut user_question_rx = user_question_rx;
-        let worker = tokio::task::spawn_local(async move {
-            loop {
-                let mut request = tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => break,
-                    request = user_question_rx.recv() => {
-                        let Some(request) = request else { break };
-                        request
-                    }
-                };
-                use tools::implementations::grow_build::ask_user_question::AskUserQuestionMode;
-                let mode = match behavior.lock().behavior() {
-                    tool_types::BehaviorId::Plan => AskUserQuestionMode::Plan,
-                    _ => AskUserQuestionMode::Default,
-                };
-                let ext_req = AskUserQuestionExtRequest {
-                    session_id: session_id.0.to_string(),
-                    tool_call_id: request.tool_call_id.clone(),
-                    questions: request.questions.clone(),
-                    mode,
-                };
-                debug_assert!(
-                    !ext_req.session_id.is_empty(),
-                    "ask_user_question reverse-request must carry a non-empty sessionId (design §5.4)"
-                );
-                let ext_request = agent_client_protocol::schema::v1::ExtRequest::new(
-                    "grow/ask_user_question",
-                    serde_json::value::to_raw_value(&ext_req)
-                        .expect("AskUserQuestionExtRequest serialization should not fail")
-                        .into(),
-                );
-                let questions_for_response = request.questions.clone();
-                let tool_call_id = request.tool_call_id.clone();
-                let _pending_guard =
-                    crate::session::pending_interaction::PendingInteractionGuard::new(
-                        pending_interactions.clone(),
-                        gateway.clone(),
-                        session_id.clone(),
-                        tool_call_id.clone(),
-                        crate::session::pending_interaction::PendingKind::Question,
-                    );
-                let hook_completed = if let Some(session) = weak_session.upgrade() {
-                    tokio::select! {
-                        biased;
-                        _ = shutdown.cancelled() => false,
-                        () = request.result_tx.closed() => false,
-                        result = session.dispatch_notification_hook(
-                            "elicitation_dialog",
-                            Some("User question requested".into()),
-                            None,
-                            Some("info".into()),
-                        ) => result.is_ok(),
-                    }
-                } else {
-                    false
-                };
-                if !hook_completed {
-                    let _ = request.result_tx.send(Ok(UserQuestionResponse::Cancelled));
-                    break;
-                }
-                let result = tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => {
-                        Ok(UserQuestionResponse::Cancelled)
-                    }
-                    () = request.result_tx.closed() => {
-                        tracing::info!(
-                            %tool_call_id,
-                            "ask_user_question tool receiver closed (timeout or cancel); abandoning ACP wait"
-                        );
-                        Ok(UserQuestionResponse::Cancelled)
-                    }
-                    acp_result = gateway.ext_method(ext_request) => {
-                        match acp_result {
-                            Ok(raw) => {
-                                match serde_json::from_str::<AskUserQuestionExtResponse>(
-                                    raw.0.get(),
-                                ) {
-                                    Ok(typed) => {
-                                        Ok(typed.into_response(questions_for_response))
-                                    }
-                                    Err(e) => Err(UserQuestionError::MalformedResponse(
-                                        e.to_string(),
-                                    )),
-                                }
-                            }
-                            Err(e) => Err(UserQuestionError::TransportError(e.to_string())),
-                        }
-                    }
-                };
-                let _ = request.result_tx.send(result);
-                if shutdown.is_cancelled() {
-                    break;
-                }
-            }
-        });
-        session.user_question_worker.arm(worker);
-    }
+    start_user_question_worker(&session, user_question_rx);
     let (session_done_tx, session_done_rx) = tokio::sync::oneshot::channel::<()>();
     let diagnostics_ctx = ::diagnostics::session_ctx::DiagnosticCtx::new(
         session.session_info.id.0.to_string(),
@@ -3126,18 +3134,26 @@ enum SessionThreadState {
     Joined { panicked: bool },
 }
 struct SessionThreadOwner {
+    persistence: Option<tokio::task::AbortHandle>,
+    persistence_sender: Option<tokio::sync::mpsc::WeakUnboundedSender<crate::session::persistence::PersistenceMsg>>,
     state: std::sync::Mutex<SessionThreadState>,
 }
-fn session_thread_reaper() -> &'static std::sync::mpsc::Sender<std::thread::JoinHandle<()>> {
-    static REAPER: std::sync::OnceLock<std::sync::mpsc::Sender<std::thread::JoinHandle<()>>> =
+type SessionReaperJob = (
+    std::thread::JoinHandle<()>,
+    Option<tokio::sync::mpsc::WeakUnboundedSender<crate::session::persistence::PersistenceMsg>>,
+);
+
+fn session_thread_reaper() -> &'static std::sync::mpsc::Sender<SessionReaperJob> {
+    static REAPER: std::sync::OnceLock<std::sync::mpsc::Sender<SessionReaperJob>> =
         std::sync::OnceLock::new();
     REAPER.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<std::thread::JoinHandle<()>>();
+        let (tx, rx) = std::sync::mpsc::channel::<SessionReaperJob>();
         std::thread::Builder::new()
             .name("session-reaper".into())
             .spawn(move || {
-                while let Ok(handle) = rx.recv() {
+                while let Ok((handle, sender)) = rx.recv() {
                     let _ = handle.join();
+                    request_persistence_stop(sender.as_ref());
                 }
             })
             .expect("session thread reaper must start");
@@ -3150,40 +3166,60 @@ impl Drop for SessionThreadOwner {
             .state
             .get_mut()
             .unwrap_or_else(|error| error.into_inner());
-        let SessionThreadState::Running(handle) =
-            std::mem::replace(state, SessionThreadState::Joining)
-        else {
-            return;
-        };
-        // The last logical owner disappearing must never detach a live session
-        // thread. One process-owned reaper serializes joins off the Tokio
-        // runtime. If the reaper itself is unavailable, fail closed and join
-        // synchronously rather than exposing a second writer admission.
-        if let Err(error) = session_thread_reaper().send(handle) {
-            let _ = error.0.join();
+        match std::mem::replace(state, SessionThreadState::Joining) {
+            SessionThreadState::Running(handle) => {
+                // Join off-runtime, then close the persistence mailbox even
+                // when external resources still retain a sender. A weak route
+                // does not itself prolong that mailbox's lifetime.
+                if let Err(error) = session_thread_reaper()
+                    .send((handle, self.persistence_sender.take()))
+                {
+                    let (handle, sender) = error.0;
+                    let _ = handle.join();
+                    request_persistence_stop(sender.as_ref());
+                }
+            }
+            SessionThreadState::Joined { .. } => {
+                request_persistence_stop(self.persistence_sender.as_ref());
+            }
+            // The blocking join closure retains an Arc until it publishes
+            // Joined, so final owner cleanup cannot normally reach this state.
+            SessionThreadState::Joining => {}
         }
     }
 }
 impl SessionThread {
     fn new(join_handle: std::thread::JoinHandle<()>) -> Self {
+        Self::with_persistence(join_handle, None, None)
+    }
+    pub(crate) fn with_persistence(join_handle: std::thread::JoinHandle<()>, persistence: Option<tokio::task::AbortHandle>, persistence_sender: Option<tokio::sync::mpsc::WeakUnboundedSender<crate::session::persistence::PersistenceMsg>>) -> Self {
         Self {
             owner: std::sync::Arc::new(SessionThreadOwner {
+                persistence,
+                persistence_sender,
                 state: std::sync::Mutex::new(SessionThreadState::Running(join_handle)),
             }),
         }
     }
-    /// Check if the session thread has exited (panicked or finished).
+    /// Both owners must exit before another incarnation can claim the lease.
     pub fn is_finished(&self) -> bool {
         let state = self
             .owner
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        match &*state {
+        let actor_finished = match &*state {
             SessionThreadState::Running(handle) => handle.is_finished(),
             SessionThreadState::Joining => false,
             SessionThreadState::Joined { .. } => true,
+        };
+        drop(state);
+        if !actor_finished { return false; }
+        if self.owner.persistence.as_ref().is_some_and(|task| !task.is_finished()) {
+            request_persistence_stop(self.owner.persistence_sender.as_ref());
+            return false;
         }
+        true
     }
     /// Consume and join a finished session thread so panic is not mistaken for
     /// a clean writer shutdown. Callers must check `is_finished` first.
@@ -3239,7 +3275,25 @@ struct SessionInitResult {
 async fn join_failed_session_init_thread(
     session_thread: SessionThread,
 ) -> Result<std::thread::Result<()>, tokio::task::JoinError> {
-    tokio::task::spawn_blocking(move || session_thread.join()).await
+    let persistence = session_thread.owner.persistence.clone();
+    let sender = session_thread.owner.persistence_sender.clone();
+    let result = tokio::task::spawn_blocking(move || session_thread.join()).await;
+    request_persistence_stop(sender.as_ref());
+    wait_for_persistence_exit(persistence.as_ref()).await;
+    result
+}
+
+fn request_persistence_stop(sender: Option<&tokio::sync::mpsc::WeakUnboundedSender<crate::session::persistence::PersistenceMsg>>) {
+    if let Some(sender) = sender.and_then(|sender| sender.upgrade()) {
+        let _ = sender.send(crate::session::persistence::PersistenceMsg::Stop);
+    }
+}
+
+async fn wait_for_persistence_exit(task: Option<&tokio::task::AbortHandle>) {
+    while task.is_some_and(|task| !task.is_finished()) {
+        // The owner may be scheduled on this runtime: never block it in join.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 fn session_initialization_error_to_acp(error: &agent::AgentBuildError) -> acp::Error {
@@ -3352,6 +3406,8 @@ pub(crate) async fn spawn_session_on_thread(
 ) -> Result<(SessionHandle, SessionThread), acp::Error> {
     let (init_tx, init_rx) =
         tokio::sync::oneshot::channel::<Result<SessionInitResult, agent::AgentBuildError>>();
+    let persistence_completion = persistence.task_completion();
+    let persistence_sender = persistence.tx.downgrade();
     let sid = session_info.id.0.to_string();
     let thread_name = format!("ses-{}", &sid[..sid.len().min(8)]);
     const SESSION_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
@@ -3474,6 +3530,9 @@ pub(crate) async fn spawn_session_on_thread(
     let join_handle = match join_handle {
         Ok(h) => h,
         Err(e) => {
+            // std::thread::Builder dropped the captured sender on failure.
+            request_persistence_stop(Some(&persistence_sender));
+            wait_for_persistence_exit(persistence_completion.as_ref()).await;
             tracing::error!(
                 error = %e,
                 "failed to spawn session thread (thread/PID limit or memory pressure?)"
@@ -3483,7 +3542,7 @@ pub(crate) async fn spawn_session_on_thread(
             );
         }
     };
-    let session_thread = SessionThread::new(join_handle);
+    let session_thread = SessionThread::with_persistence(join_handle, persistence_completion, Some(persistence_sender));
     if let Some(register) = on_thread_spawned {
         register(session_thread.clone());
     }
@@ -3562,13 +3621,19 @@ impl crate::session::mcp_restart::RestartActions for SessionRestartActions {
             .unwrap_or_else(|e| e.into_inner())
             .is_shutting_down(server)
     }
-    async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
+    async fn respawn_stdio(
+        &self,
+        server: &str,
+    ) -> Result<(), crate::session::mcp_restart::RecoveryError> {
         self.session.respawn_stdio(server).await
     }
     async fn is_http_server_configured(&self, server: &str) -> bool {
         self.session.is_http_server_configured(server).await
     }
-    async fn reset_http_client(&self, server: &str) -> Result<(), String> {
+    async fn reset_http_client(
+        &self,
+        server: &str,
+    ) -> Result<(), crate::session::mcp_restart::RecoveryError> {
         self.session.reset_http_client(server).await
     }
     fn unregister_server_tools(&self, server: &str) {
@@ -3703,6 +3768,95 @@ mod failed_session_init_join_tests {
             acp_error.message,
             "Cannot restore this session: persisted Rewind transaction version 0 is incompatible with current version 1. Start a new session."
         );
+    }
+
+    #[tokio::test]
+    async fn reaper_stops_persistence_after_last_owner_thread_exit() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || { let _ = wait.recv(); });
+        let owner = SessionThread::with_persistence(thread, None, Some(sender.downgrade()));
+        drop(owner.clone());
+        assert!(receiver.try_recv().is_err(), "non-final clone cannot stop persistence");
+        drop(owner);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), receiver.recv()).await.is_err(), "live thread cannot be stopped by reaper");
+        release.send(()).unwrap();
+        let stop = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv()).await;
+        assert!(matches!(stop, Ok(Some(crate::session::persistence::PersistenceMsg::Stop))), "reaper must stop persistence after join");
+    }
+
+    #[tokio::test]
+    async fn joined_last_owner_stops_persistence() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let thread = std::thread::spawn(|| {});
+        let owner = SessionThread::with_persistence(thread, None, Some(sender.downgrade()));
+        assert!(owner.clone().join().is_ok());
+        assert!(receiver.try_recv().is_err());
+        drop(owner);
+        assert!(matches!(receiver.try_recv(), Ok(crate::session::persistence::PersistenceMsg::Stop)), "joined final owner must stop persistence");
+    }
+
+    #[tokio::test]
+    async fn finished_actor_waits_for_persistence_owner() {
+        use crate::session::storage::StorageAdapter;
+        let root = tempfile::tempdir().unwrap();
+        let info = crate::session::info::Info { id: acp_transport::protocol::SessionId::new("delayed-writer"), cwd: "/test/workspace".into() };
+        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
+        storage.init_session(&info, crate::session::persistence::default_model_id()).await.unwrap();
+        let replacement = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let owner = tokio::spawn(async move {
+            let _storage = storage;
+            let _ = wait.await;
+        });
+        let thread = std::thread::spawn(|| {});
+        while !thread.is_finished() { tokio::task::yield_now().await; }
+        let session = SessionThread::with_persistence(thread, Some(owner.abort_handle()), None);
+        let premature = session.is_finished();
+        assert!(replacement.load_session_for_write_without_updates(&info).await.is_err());
+        let _ = release.send(());
+        owner.await.unwrap();
+        assert!(!premature, "actor exit must not expose replacement while persistence owns its lease");
+        assert!(session.is_finished());
+        assert!(session.join().is_ok());
+        replacement.load_session_for_write_without_updates(&info).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_initialization_waits_for_persistence_exit() {
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let owner = tokio::spawn(async move { let _ = wait.await; });
+        let registered = SessionThread::with_persistence(std::thread::spawn(|| {}), Some(owner.abort_handle()), None);
+        let joined = join_failed_session_init_thread(registered.clone());
+        tokio::pin!(joined);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut joined).await.is_err());
+        assert!(!registered.is_finished());
+        let _ = release.send(());
+        assert!(joined.await.unwrap().is_ok());
+        assert!(registered.is_finished());
+    }
+
+    #[tokio::test]
+    async fn persistence_completion_waits_for_cancelled_or_panicked_task_drop() {
+        for panic in [false, true] {
+            let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            struct OnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for OnDrop {
+                fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::SeqCst); }
+            }
+            let guard = OnDrop(dropped.clone());
+            let owner = tokio::spawn(async move {
+                let _guard = guard;
+                if panic { panic!("persistence panic fixture"); }
+                std::future::pending::<()>().await;
+            });
+            let registered = SessionThread::with_persistence(std::thread::spawn(|| {}), Some(owner.abort_handle()), None);
+            if !panic { owner.abort(); }
+            let _ = owner.await;
+            while !registered.is_finished() { tokio::task::yield_now().await; }
+            assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+            assert!(registered.join().is_ok());
+        }
     }
 
     #[tokio::test]

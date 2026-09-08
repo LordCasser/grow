@@ -10,6 +10,7 @@
 pub mod actions;
 pub mod agent_view;
 pub mod bundle;
+pub mod doctor;
 pub mod cli;
 pub mod root;
 pub mod session;
@@ -26,9 +27,12 @@ pub mod status_blocks;
 pub mod subagent;
 pub(crate) use root::effects::sanitize_user_error;
 pub(crate) mod external_editor;
+pub(crate) mod external_pager;
 #[cfg(all(test, unix))]
 mod leader_cluster;
 pub(crate) mod screen_mode_relaunch;
+pub(crate) mod setting_persistence;
+pub(crate) mod transcript_file_writes;
 pub mod signal_handler;
 mod xt_filter;
 pub(crate) use crate::terminal::kitty_flags_pushed;

@@ -1,0 +1,2 @@
+# Design
+Follow actor/summary provider failure, timeout and invalid-output paths into persist_title_fallback and commit_session_title. Timeline validates at most 160 Unicode scalar values for every title source. Bound the pure fallback helper to the same metric after the existing ten-word selection; trim a boundary space. Keep generated-output validation and user-title protection unchanged. Add long ASCII, CJK, emoji and boundary-space cases; retain existing goal/skill/default tests. No new state or route changes.

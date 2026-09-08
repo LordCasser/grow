@@ -1,25 +1,10 @@
-//! Release-safe FPS readout — `/debug fps`, `GROW_FPS` on release builds.
+//! Runtime FPS readout for `/debug fps` and `GROW_FPS` in all builds.
 //!
-//! The full frame profiler (`render::frame_metrics`, `GROW_FPS`) is compiled
-//! only in debug/dev builds because it threads per-phase timings
-//! through `draw_frame`. This HUD measures the one thing that needs no
-//! pipeline change — the wall-clock duration of the whole `draw_frame` call
-//! (render + flush + writer handoff) — so it compiles into release builds
-//! behind a runtime toggle (the scroll-debug HUD precedent) and profiles the
-//! production render path with zero fidelity gap.
-//!
-//! `GROW_FPS` ownership: in debug/dev builds the env feeds `FrameMetrics` as
-//! always and this HUD stays toggle-only (no double overlay); on release
-//! binaries — where that overlay does not exist — the same env enables this
-//! HUD from startup, so `GROW_FPS=1` is never a silent no-op
-//! ([`HONORS_GROW_FPS_ENV`]).
-//!
-//! "fps" here is render throughput (1 / mean frame cost), not paint
-//! frequency: the pager draws on demand, so an idle UI paints nothing and a
-//! busy one is bounded by this number.
-//!
-//! Invariant (shared with the scroll HUD): pure observation. Disabled cost
-//! is one bool check per frame; rendering only paints buffer cells.
+//! Samples synchronous draw cost: ordinary `draw_frame` or the minimal draw
+//! hook, including preparation and writer handoff in that path. Output is
+//! queued to a background writer, so this does not measure completed PTY I/O
+//! or terminal paint frequency. "fps" is the reciprocal mean render cost.
+//! Disabled recording is a bool check; no extra frame timer is installed.
 use super::debug_style;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -31,14 +16,8 @@ const SAMPLE_CAP: usize = 120;
 const REFRESH: Duration = Duration::from_millis(250);
 /// Panel width in cells; each line is padded/truncated to this.
 const PANEL_WIDTH: u16 = 32;
-/// Whether this HUD owns the `GROW_FPS` env gate: only where the dev
-/// `FrameMetrics` overlay is compiled out. In debug/dev builds the env keeps
-/// feeding that overlay alone.
-const HONORS_GROW_FPS_ENV: bool = true;
-/// Runtime state for the FPS HUD. `GROW_FPS` enables it at startup on
-/// release binaries ([`HONORS_GROW_FPS_ENV`]); `/debug fps` toggles it
-/// live everywhere. Deliberately NOT a settings-registry entry: it is a
-/// diagnostic, not a preference to persist.
+/// Runtime diagnostic state; `GROW_FPS` enables it at startup and
+/// `/debug fps` toggles it without persisting a preference.
 pub struct FpsHud {
     enabled: bool,
     samples: VecDeque<Duration>,
@@ -56,9 +35,9 @@ impl FpsHud {
         Self::with_env(std::env::var("GROW_FPS").ok())
     }
     /// `env` is the raw `GROW_FPS` value; the truthiness rule (nonempty and
-    /// not `"0"`) matches `FrameMetrics` and `GROW_SCROLL_DEBUG`.
+    /// not `"0"`) matches the existing `GROW_SCROLL_DEBUG` convention.
     fn with_env(env: Option<String>) -> Self {
-        let env_on = HONORS_GROW_FPS_ENV && env.is_some_and(|v| !v.is_empty() && v != "0");
+        let env_on = env.is_some_and(|v| !v.is_empty() && v != "0");
         Self {
             enabled: env_on,
             samples: VecDeque::with_capacity(SAMPLE_CAP),
@@ -81,7 +60,7 @@ impl FpsHud {
     pub fn overlay_height(&self) -> u16 {
         if self.enabled { 2 } else { 0 }
     }
-    /// Record one frame's `draw_frame` wall duration.
+    /// Record one synchronous draw path duration.
     pub fn record(&mut self, frame: Duration) {
         if !self.enabled {
             return;
@@ -141,10 +120,25 @@ fn percentile(sorted: &[f64], pct: f64) -> f64 {
 /// Owned render params for one frame (title + stats line, top-right).
 pub struct FpsOverlay {
     body: String,
-    /// Rows left free for overlays above (the dev `GROW_FPS` line).
+    /// Rows left free for overlays above.
     pub top_offset: u16,
 }
 impl FpsOverlay {
+    /// Reserve two diagnostic rows only when three content rows remain.
+    pub fn minimal_rows(available: u16) -> u16 {
+        if available >= 5 { 2 } else { 0 }
+    }
+
+    /// Draw above the minimal live content and return its unobscured area.
+    pub fn render_minimal(&self, area: Rect, buf: &mut Buffer) -> Rect {
+        let rows = Self::minimal_rows(area.height);
+        if rows == 0 {
+            return area;
+        }
+        self.render(Rect { height: rows, ..area }, buf);
+        Rect { y: area.y + rows, height: area.height - rows, ..area }
+    }
+
     /// Paint the two-line panel in the top-right corner of `area`, in the
     /// shared theme-agnostic debug chrome (every cell, padding included).
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -175,18 +169,12 @@ mod tests {
         assert!(!hud.enabled());
         assert!(hud.overlay(0).is_none());
     }
-    /// Default test builds compile without dev instrumentation — release-shaped
-    /// for this gate — so a truthy env must construct enabled. A
-    /// debug/dev test build hands the env to `FrameMetrics` instead;
-    /// asserting against [`HONORS_GROW_FPS_ENV`] keeps the test true under
-    /// both cfgs (the dev half is pinned by the constant's shape, the same
-    /// limitation as the `/debug` visibility test).
     #[test]
-    fn grow_fps_env_enables_hud_where_dev_overlay_absent() {
+    fn grow_fps_env_enables_hud() {
         for truthy in ["1", "full", " "] {
             assert_eq!(
                 FpsHud::with_env(Some(truthy.into())).enabled(),
-                HONORS_GROW_FPS_ENV,
+                true,
                 "GROW_FPS={truthy:?} must track the env-gate owner"
             );
         }
@@ -220,6 +208,38 @@ mod tests {
         let overlay = hud.overlay(0).expect("enabled");
         assert_eq!(overlay.body, "fps:100 p50:10.0ms p95:10.0ms");
     }
+    #[test]
+    fn minimal_fps_panel_reserves_rows_without_overwriting_content() {
+        let mut hud = FpsHud::with_env(None);
+        assert!(hud.overlay(0).is_none());
+        hud.toggle();
+        hud.record(Duration::from_millis(10));
+        let overlay = hud.overlay(0).unwrap();
+        for height in 0..9 {
+            let area = Rect::new(3, 4, 60, height);
+            let mut buf = Buffer::empty(area);
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    buf[(x, y)].set_symbol("x");
+                }
+            }
+            let content = overlay.render_minimal(area, &mut buf);
+            let rows = if height >= 5 { 2 } else { 0 };
+            assert_eq!(content, Rect::new(3, 4 + rows, 60, height - rows));
+            for y in content.y..content.bottom() {
+                assert_eq!(buf[(3, y)].symbol(), "x");
+                assert_eq!(buf[(62, y)].symbol(), "x");
+            }
+            if rows > 0 {
+                let line: String = (area.x..area.right())
+                    .map(|x| buf[(x, area.y + 1)].symbol()).collect();
+                assert!(line.contains("fps:100"));
+            }
+        }
+        hud.toggle();
+        assert!(hud.overlay(0).is_none());
+    }
+
     #[test]
     fn record_is_a_noop_while_disabled() {
         let mut hud = FpsHud::with_env(None);

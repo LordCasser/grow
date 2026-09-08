@@ -75,10 +75,20 @@ pub(crate) type SharedLivenessSlot = Arc<parking_lot::Mutex<Option<TransportLive
 /// Both watcher-exit arms (transport closed, transient state drift)
 /// clear the slot so a later [`McpClient::arm_liveness_watcher`] can
 /// install a fresh handle. The taken handle is dropped outside the
-/// critical section — the lock is held for nanoseconds.
-fn clear_liveness_slot(slot: &SharedLivenessSlot) {
-    let stale_handle = slot.lock().take();
+/// critical section. Returns false when a replacement already cancelled this
+/// watcher, leaving the successor's slot untouched.
+fn clear_liveness_slot(slot: &SharedLivenessSlot, token: &CancellationToken) -> bool {
+    let stale_handle = {
+        let mut slot = slot.lock();
+        // Replacing the handle cancels its token under this same lock. A
+        // watcher returning from an awaited check must not take its successor.
+        if token.is_cancelled() {
+            return false;
+        }
+        slot.take()
+    };
     drop(stale_handle);
+    true
 }
 
 /// RAII handle for the per-client liveness task.
@@ -157,6 +167,8 @@ pub(crate) fn spawn_transport_liveness(
 
     let server_name_for_task = server_name.clone();
     let transport_revision = client.current_transport_revision();
+    // Monitoring must not keep a removed client and its transport alive.
+    let client = Arc::downgrade(&client);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(poll_interval);
         // Skip missed ticks under runtime stall — see fn doc.
@@ -176,6 +188,10 @@ pub(crate) fn spawn_transport_liveness(
                     return;
                 }
                 _ = tick.tick() => {
+                    let Some(client) = client.upgrade() else {
+                        clear_liveness_slot(&liveness_slot, &token);
+                        return;
+                    };
                     match client.liveness_check().await {
                         LivenessCheck::Healthy => continue,
                         LivenessCheck::TransportClosed => {
@@ -195,7 +211,9 @@ pub(crate) fn spawn_transport_liveness(
                             // `return` immediately — but DO NOT add any
                             // post-`return` work that re-enters the
                             // `select!`; it would race this self-cancel.
-                            clear_liveness_slot(&liveness_slot);
+                            if !clear_liveness_slot(&liveness_slot, &token) {
+                                return;
+                            }
 
                             if let Some(sink) = client.event_sink_clone()
                                 && sink
@@ -224,7 +242,7 @@ pub(crate) fn spawn_transport_liveness(
                                 server = %server_name_for_task,
                                 "transport liveness watcher: state drifted out of Ready, exiting silently",
                             );
-                            clear_liveness_slot(&liveness_slot);
+                            clear_liveness_slot(&liveness_slot, &token);
                             return;
                         }
                     }
@@ -244,6 +262,50 @@ mod tests {
     use super::*;
     use crate::servers::McpClient;
     use tokio::sync::mpsc::unbounded_channel;
+
+    #[test]
+    fn stale_cleanup_does_not_cancel_replacement_watcher() {
+        let old = CancellationToken::new();
+        let next = CancellationToken::new();
+        let slot: SharedLivenessSlot =
+            Arc::new(parking_lot::Mutex::new(Some(TransportLivenessHandle {
+                server_name: "server".into(),
+                _cancel: old.clone().drop_guard(),
+            })));
+        *slot.lock() = Some(TransportLivenessHandle {
+            server_name: "server".into(),
+            _cancel: next.clone().drop_guard(),
+        });
+        assert!(old.is_cancelled());
+        assert!(!clear_liveness_slot(&slot, &old));
+        assert!(slot.lock().is_some(), "old cleanup removed new watcher");
+        assert!(!next.is_cancelled());
+        assert!(clear_liveness_slot(&slot, &next));
+        assert!(slot.lock().is_none());
+        assert!(next.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watcher_does_not_retain_last_client_owner() {
+        let client = make_stub_client();
+        let weak = Arc::downgrade(&client);
+        let (tx, mut rx) = unbounded_channel();
+        bind_sink(&client, tx);
+        let slot: SharedLivenessSlot = Arc::new(parking_lot::Mutex::new(None));
+        let handle = spawn_transport_liveness(
+            "server".into(),
+            client.clone(),
+            Duration::from_millis(500),
+            slot.clone(),
+        );
+        *slot.lock() = Some(handle);
+        drop(client);
+        assert!(weak.upgrade().is_none(), "watcher owns the removed client");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(slot.lock().is_none());
+        assert!(rx.try_recv().is_err());
+    }
 
     /// Stub client whose `liveness_check()` returns
     /// `LivenessCheck::Transient`: `McpClient::stub` lands in
@@ -269,7 +331,7 @@ mod tests {
         bind_sink(&client, tx);
         let handle = spawn_transport_liveness(
             "test-server".to_string(),
-            client,
+            Arc::clone(&client),
             Duration::from_millis(500),
             Arc::clone(&slot),
         );
@@ -313,7 +375,7 @@ mod tests {
         bind_sink(&client, tx);
         let handle = spawn_transport_liveness(
             "test-server".to_string(),
-            client,
+            Arc::clone(&client),
             Duration::from_millis(500),
             Arc::clone(&slot),
         );
@@ -344,7 +406,7 @@ mod tests {
         bind_sink(&client, tx);
         let handle = spawn_transport_liveness(
             "test-server".to_string(),
-            client,
+            Arc::clone(&client),
             Duration::from_secs(60), // Long interval so the first tick is far away.
             Arc::clone(&slot),
         );

@@ -97,7 +97,7 @@ pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal, frame: pager::motio
     // `commit::sync_pending_marks`).
     commit::sync_pending_marks(app);
     // Advance any in-progress /transcript build by one time-budgeted slice
-    // (arms `pending_pager_path` when done; see `full_view::pump_transcript`).
+    // (arms `pending_pager` when done; see `full_view::pump_transcript`).
     full_view::pump_transcript(app);
     welcome::maybe_commit_welcome(app, terminal);
     plan::maybe_commit_plan(app);

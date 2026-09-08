@@ -118,6 +118,7 @@ impl WorkspaceHandle {
         let lsp: Option<Arc<dyn tools::implementations::lsp::LspBackend>> = {
             let sourced = tools::implementations::lsp::config::load_servers_with_plugins_sourced(
                 &config.root_cwd,
+                config.project_lsp_trusted,
                 &[],
                 &[],
                 &[],

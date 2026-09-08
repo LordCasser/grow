@@ -142,6 +142,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     /// this unset and resolve the global default independently of the model.
     pub persisted_agent_name: Option<&'a str>,
     pub session_model_id: crate::agent::models::ModelId,
+    pub session_sampling_config: SamplingConfig,
     pub session_permission_mode: crate::util::config::PermissionMode,
     pub prompt_display_cwd: Option<String>,
 }

@@ -284,6 +284,16 @@ pub fn install_from_source_with_label(
     })?;
 
     let repo_path = install_dir.join(&repo_key);
+    // A failed clone, copy, or discovery must not leave a partially installed
+    // repository. Stage on the same filesystem and publish only after discovery.
+    let staging = tempfile::Builder::new()
+        .prefix(".install-")
+        .tempdir_in(&install_dir)
+        .map_err(|source| InstallError::Io {
+            path: install_dir.clone(),
+            source,
+        })?;
+    let staged_path = staging.path().join("repo");
 
     let (kind, commit) = match source {
         InstallSource::Git {
@@ -292,8 +302,8 @@ pub fn install_from_source_with_label(
             git_sha,
             subdir,
         } => {
-            clone_repo(url, git_ref.as_deref(), git_sha.as_deref(), &repo_path)?;
-            let commit = read_head_commit(&repo_path);
+            clone_repo(url, git_ref.as_deref(), git_sha.as_deref(), &staged_path)?;
+            let commit = read_head_commit(&staged_path);
             let kind = InstallKind::Git {
                 url: url.clone(),
                 git_ref: git_sha.clone().or_else(|| git_ref.clone()),
@@ -311,8 +321,8 @@ pub fn install_from_source_with_label(
             // Deliberate full copy (not a symlink): isolates the install from
             // later source edits/deletion and keeps uninstall a simple dir remove;
             // local_refresh re-copies trusted sources to pick up new components.
-            copy_dir_recursive(path, &repo_path).map_err(|e| InstallError::Io {
-                path: repo_path.clone(),
+            copy_dir_recursive(path, &staged_path).map_err(|e| InstallError::Io {
+                path: staged_path.clone(),
                 source: e,
             })?;
             let kind = InstallKind::Local {
@@ -327,15 +337,18 @@ pub fn install_from_source_with_label(
     let subdir = match source {
         InstallSource::Git { subdir, .. } | InstallSource::Local { subdir, .. } => subdir.clone(),
     };
-    let plugins = discover_plugins_in_dir(&repo_path, subdir.as_deref())?;
+    let plugins = discover_plugins_in_dir(&staged_path, subdir.as_deref())?;
 
     if plugins.is_empty() {
-        // Clean up — no valid plugins found
-        let _ = remove_repo_path(&repo_path);
         return Err(InstallError::InstallFailed {
             detail: "no plugins found in the source (missing required plugin.json)".to_string(),
         });
     }
+
+    std::fs::rename(&staged_path, &repo_path).map_err(|source| InstallError::Io {
+        path: repo_path.clone(),
+        source,
+    })?;
 
     Ok(InstallResult {
         repo_key,

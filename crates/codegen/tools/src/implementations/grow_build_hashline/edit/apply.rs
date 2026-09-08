@@ -43,23 +43,39 @@ pub(crate) fn anchor_suffix(a: &Anchor) -> String {
     }
 }
 
-/// Check whether any line in `content` starts with an anchor prefix
-/// (e.g. `"22:abc:rst\u{2192}..."` or `"axy:edj->..."`).
+/// Check whether any line in `content` starts with an anchor prefix using the
+/// active scheme's actual hash shape. This avoids treating ordinary code such
+/// as `ns::get()->run();` as an anchor merely because it contains `:` and `->`.
 /// Returns the first offending line (1-based) if found.
-fn detect_anchor_prefix_in_content(content: &str) -> Option<usize> {
+fn detect_anchor_prefix_in_content(content: &str, scheme: &dyn AnchorScheme) -> Option<usize> {
+    let example = scheme.generate_anchors(&[""]).first()?.clone();
+    let hash_len = scheme.hash_len();
+    let matches_shape = |prefix: &str| {
+        if let Some(parsed) = ParsedAnchor::parse(prefix) {
+            return parsed.local.len() == hash_len
+                && parsed.context.as_ref().map(String::len)
+                    == example.context.as_ref().map(String::len);
+        }
+
+        let parts: Vec<_> = prefix.split(':').collect();
+        let expected_parts = if example.context.is_some() { 2 } else { 1 };
+        parts.len() == expected_parts
+            && parts.iter().all(|part| {
+                part.len() == hash_len
+                    && !part.is_empty()
+                    && part.bytes().all(|b| b.is_ascii_lowercase())
+            })
+    };
+
     for (idx, line) in content.lines().enumerate() {
         let s = line.trim_start();
         if let Some((before, _)) = s.split_once('\u{2192}')
-            && before.len() <= 25
-            && before.contains(':')
-            && !before.contains(' ')
+            && matches_shape(before)
         {
             return Some(idx + 1);
         }
         if let Some((before, _)) = s.split_once("->")
-            && before.len() <= 25
-            && before.contains(':')
-            && !before.contains(' ')
+            && matches_shape(before)
         {
             return Some(idx + 1);
         }
@@ -119,6 +135,82 @@ struct ResolvedOp {
     new_lines: Vec<String>,
 }
 
+/// Return one terminator per logical line, including a final empty entry when
+/// the file ends in a newline. The text lines used by anchors intentionally
+/// omit CR; this parallel vector lets edits preserve untouched CRLF and mixed
+/// line endings on disk.
+fn line_endings(content: &str) -> Vec<&'static str> {
+    let bytes = content.as_bytes();
+    let mut endings = Vec::new();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            endings.push(if index > 0 && bytes[index - 1] == b'\r' {
+                "\r\n"
+            } else {
+                "\n"
+            });
+        }
+    }
+    // split_lines adds a synthetic empty line after a terminal newline, and a
+    // non-terminated file still has one final logical line.
+    endings.push("");
+    endings
+}
+
+fn replacement_lines(
+    op: &ResolvedOp,
+    original_endings: &[&'static str],
+    original_line_count: usize,
+) -> Vec<(String, &'static str)> {
+    if op.new_lines.is_empty() {
+        return Vec::new();
+    }
+    let candidate = if op.start < op.end {
+        original_endings[op.end - 1]
+    } else if op.start > 0 {
+        original_endings[op.start - 1]
+    } else if op.start < original_line_count {
+        original_endings[op.start]
+    } else {
+        "\n"
+    };
+    let fallback = if candidate.is_empty() {
+        original_endings
+            .iter()
+            .rev()
+            .copied()
+            .find(|ending| !ending.is_empty())
+            .unwrap_or("\n")
+    } else {
+        candidate
+    };
+    let replaced_count = op.end - op.start;
+    op.new_lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let ending = if index + 1 == op.new_lines.len() {
+                if replaced_count > 0 {
+                    original_endings[op.end - 1]
+                } else if op.start == original_line_count {
+                    ""
+                } else {
+                    fallback
+                }
+            } else if index < replaced_count {
+                original_endings
+                    .get(op.start + index)
+                    .copied()
+                    .filter(|ending| !ending.is_empty())
+                    .unwrap_or(fallback)
+            } else {
+                fallback
+            };
+            (line.clone(), ending)
+        })
+        .collect()
+}
+
 /// Result of `apply_edits`: the output to return to the caller, plus the new
 /// file content on success (to be written to disk by the tool layer).
 pub(crate) struct ApplyResult {
@@ -153,13 +245,15 @@ pub(crate) fn apply_edits(
     scheme: &dyn AnchorScheme,
 ) -> ApplyResult {
     let lines = split_lines(content);
+    let original_endings = line_endings(content);
+    debug_assert_eq!(lines.len(), original_endings.len());
 
     if ops.len() == 1
         && let HashlineOp::Write {
             content: new_content,
         } = &ops[0]
     {
-        if let Some(line_num) = detect_anchor_prefix_in_content(new_content) {
+        if let Some(line_num) = detect_anchor_prefix_in_content(new_content, scheme) {
             return ApplyResult {
                 output: HashlineEditOutput::Error(anchor_content_error(
                     "write",
@@ -243,7 +337,11 @@ pub(crate) fn apply_edits(
             .then(b.original_idx.cmp(&a.original_idx))
     });
 
-    let mut result_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    let mut result_lines: Vec<(String, &'static str)> = lines
+        .iter()
+        .zip(original_endings.iter().copied())
+        .map(|(line, ending)| ((*line).to_owned(), ending))
+        .collect();
 
     // Collect each edit's affected region (0-based, pre-splice coordinates).
     // We record post-splice positions by tracking cumulative line-count shifts.
@@ -277,10 +375,32 @@ pub(crate) fn apply_edits(
     }
 
     for op in &resolved {
-        result_lines.splice(op.start..op.end, op.new_lines.iter().cloned());
+        result_lines.splice(
+            op.start..op.end,
+            replacement_lines(op, &original_endings, lines.len()),
+        );
     }
 
-    let new_content = result_lines.join("\n");
+    // An unterminated line can become internal after an EOF insertion,
+    // including several insertions at the same original anchor.
+    let separator = original_endings
+        .iter()
+        .rev()
+        .copied()
+        .find(|ending| !ending.is_empty())
+        .unwrap_or("\n");
+    let new_content = result_lines.iter().enumerate().fold(
+        String::new(),
+        |mut content, (index, (line, ending))| {
+            content.push_str(line);
+            content.push_str(if ending.is_empty() && index + 1 < result_lines.len() {
+                separator
+            } else {
+                ending
+            });
+            content
+        },
+    );
     let total_new_lines = split_lines(&new_content).len();
 
     // Sort edit regions top-down and merge nearby ones.
@@ -425,7 +545,7 @@ fn resolve_op(
                 None => start + 1, // single line
             };
 
-            if let Some(line_num) = detect_anchor_prefix_in_content(content) {
+            if let Some(line_num) = detect_anchor_prefix_in_content(content, scheme) {
                 return Err(anchor_content_error("replace", content, line_num));
             }
             let new_lines: Vec<String> = if content.is_empty() {
@@ -460,7 +580,7 @@ fn resolve_op(
                 line + 1
             };
 
-            if let Some(line_num) = detect_anchor_prefix_in_content(content) {
+            if let Some(line_num) = detect_anchor_prefix_in_content(content, scheme) {
                 return Err(anchor_content_error("insert_after", content, line_num));
             }
             let new_lines: Vec<String> = if content.is_empty() {
@@ -1328,11 +1448,31 @@ mod tests {
             content: "line3".to_owned(),
         }];
 
-        match apply_edits(content, &ops, &test_path(), &*test_scheme()).output {
+        let applied = apply_edits(content, &ops, &test_path(), &*test_scheme());
+        assert_eq!(applied.new_content.as_deref(), Some("line1\nline2\nline3"));
+        match applied.output {
             HashlineEditOutput::EditsApplied(result) => {
                 assert!(result.snippet.contains("line3"));
             }
             HashlineEditOutput::Error(e) => panic!("Expected success, got error: {}", e.message),
+        }
+    }
+
+    #[test]
+    fn expanding_unterminated_last_line_keeps_internal_separators() {
+        for ending in ["\n", "\r\n"] {
+            let content = format!("first{ending}last");
+            let anchors = anchors_for(&content);
+            let ops = [HashlineOp::Replace {
+                anchor: anchors[1].clone(),
+                end_anchor: None,
+                content: "new-a\nnew-b".into(),
+            }];
+            let applied = apply_edits(&content, &ops, &test_path(), &*test_scheme());
+            assert_eq!(
+                applied.new_content,
+                Some(format!("first{ending}new-a{ending}new-b"))
+            );
         }
     }
 
@@ -2154,33 +2294,48 @@ mod tests {
 
     #[test]
     fn detect_anchor_prefix_in_content_works() {
+        let scheme = test_scheme();
         // Unicode arrow detected
         assert_eq!(
-            detect_anchor_prefix_in_content("axy:edj\u{2192}    # comment"),
+            detect_anchor_prefix_in_content("axy:edj\u{2192}    # comment", &*scheme),
             Some(1)
         );
         // With line number prefix
         assert_eq!(
-            detect_anchor_prefix_in_content("   56:axy:edj\u{2192}    let x = 1;"),
+            detect_anchor_prefix_in_content("   56:axy:edj\u{2192}    let x = 1;", &*scheme),
             Some(1)
         );
         // ASCII arrow detected
         assert_eq!(
-            detect_anchor_prefix_in_content("22:abc:rst->code here"),
+            detect_anchor_prefix_in_content("22:abc:rst->code here", &*scheme),
             Some(1)
         );
         // No prefix — not detected
-        assert_eq!(detect_anchor_prefix_in_content("    normal code"), None);
-        // Empty after arrow — still detected
-        assert_eq!(detect_anchor_prefix_in_content("ab:cd\u{2192}"), Some(1));
+        assert_eq!(
+            detect_anchor_prefix_in_content("    normal code", &*scheme),
+            None
+        );
+        // Hash-only prefix — still detected
+        assert_eq!(
+            detect_anchor_prefix_in_content("abc:def\u{2192}", &*scheme),
+            Some(1)
+        );
         // Multi-line: detected on first line
-        let multi = "22:xx:yy\u{2192}line1\nline2";
-        assert_eq!(detect_anchor_prefix_in_content(multi), Some(1));
+        let multi = "22:xxx:yyy\u{2192}line1\nline2";
+        assert_eq!(detect_anchor_prefix_in_content(multi, &*scheme), Some(1));
         // Multi-line: detected on second line
-        let multi2 = "normal line\n22:xx:yy\u{2192}line2";
-        assert_eq!(detect_anchor_prefix_in_content(multi2), Some(2));
+        let multi2 = "normal line\n22:xxx:yyy\u{2192}line2";
+        assert_eq!(detect_anchor_prefix_in_content(multi2, &*scheme), Some(2));
         // No anchors in multi-line
-        assert_eq!(detect_anchor_prefix_in_content("line1\nline2\nline3"), None);
+        assert_eq!(
+            detect_anchor_prefix_in_content("line1\nline2\nline3", &*scheme),
+            None
+        );
+        // C++ scope/member syntax is not an anchor shape.
+        assert_eq!(
+            detect_anchor_prefix_in_content("ns::get()->run();", &*scheme),
+            None
+        );
     }
 
     #[test]

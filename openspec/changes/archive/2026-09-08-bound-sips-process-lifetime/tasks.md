@@ -1,0 +1,3 @@
+- [x] Introduce owned deadline runner and wire the converter.
+- [x] Test successful/nonzero exit, timeout and descendant cleanup.
+- [x] Validate, update docs and archive.

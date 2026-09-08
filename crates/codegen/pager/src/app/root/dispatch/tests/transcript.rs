@@ -406,3 +406,356 @@ fn open_block_viewer_skips_image_viewer_when_no_graphics() {
         "image_viewer modal should not open on terminals without a graphics protocol"
     );
 }
+
+#[test]
+fn export_file_uses_session_cwd_and_preserves_absolute_targets() {
+    let session_dir = tempfile::tempdir().unwrap();
+    // Capture the buggy process-relative destination inside an owned temp dir.
+    let process_relative = tempfile::tempdir_in(".").unwrap();
+    let relative = std::path::PathBuf::from(process_relative.path().file_name().unwrap())
+        .join("nested/transcript.md");
+    assert!(relative.is_relative());
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.cwd = session_dir.path().to_path_buf();
+    agent.scrollback.push_block(RenderBlock::user_prompt("Export this conversation"));
+    dispatch_file_action(Action::ExportConversation { file_path: Some(relative.clone()) }, &mut app);
+    let expected = session_dir.path().join(&relative);
+    assert!(expected.is_file(), "export must land at {}", expected.display());
+    assert!(!relative.exists(), "must not write under process cwd");
+    assert_eq!(std::fs::read_to_string(expected).unwrap(), "## User\n\nExport this conversation");
+
+    let absolute = process_relative.path().canonicalize().unwrap().join("absolute.md");
+    dispatch_file_action(Action::ExportConversation { file_path: Some(absolute.clone()) }, &mut app);
+    assert_eq!(std::fs::read_to_string(absolute).unwrap(), "## User\n\nExport this conversation");
+}
+
+#[test]
+fn export_waits_until_history_replay_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.md");
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.loading_replay = true;
+    agent.scrollback.push_block(RenderBlock::user_prompt("First part"));
+    dispatch_file_action(Action::ExportConversation { file_path: Some(path.clone()) }, &mut app);
+    assert!(!path.exists(), "partial history must not be exported");
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.scrollback.push_block(RenderBlock::user_prompt("Remaining history"));
+    agent.session.loading_replay = false;
+    dispatch_file_action(Action::ExportConversation { file_path: Some(path.clone()) }, &mut app);
+    let text = std::fs::read_to_string(path).unwrap();
+    assert_eq!(text, "## User\n\nFirst part\n\n## User\n\nRemaining history");
+}
+
+#[test]
+fn copy_file_uses_session_cwd_and_keeps_private_permissions() {
+    let session_dir = tempfile::tempdir().unwrap();
+    let process_dir = tempfile::tempdir_in(".").unwrap();
+    let relative = std::path::PathBuf::from(process_dir.path().file_name().unwrap()).join("reply.txt");
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.cwd = session_dir.path().to_path_buf();
+    agent.scrollback.push_block(RenderBlock::agent_message("Copy this reply"));
+    dispatch_file_action(Action::CopyAssistantMessage { n: 1, file_path: Some(relative.clone()) }, &mut app);
+    let expected = session_dir.path().join(relative.clone());
+    assert!(expected.is_file(), "copy must use session cwd");
+    assert!(!relative.exists(), "must not write under process cwd");
+    assert_eq!(std::fs::read_to_string(&expected).unwrap(), "Copy this reply");
+    let absolute = process_dir.path().join("absolute.txt");
+    dispatch_file_action(Action::CopyAssistantMessage { n: 1, file_path: Some(absolute.clone()) }, &mut app);
+    assert_eq!(std::fs::read_to_string(&absolute).unwrap(), "Copy this reply");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [expected, absolute] {
+            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+}
+
+#[test]
+fn copy_selection_uses_assistant_order_and_rejects_invalid_indices() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app_with_agent();
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    for text in ["oldest", "middle", "latest"] {
+        agent.scrollback.push_block(RenderBlock::agent_message(text));
+        agent.scrollback.push_block(RenderBlock::user_prompt("not an assistant message"));
+    }
+    for (n, expected) in [(1, "latest"), (2, "middle"), (3, "oldest")] {
+        let path = dir.path().join(format!("{n}.txt"));
+        dispatch_file_action(Action::CopyAssistantMessage { n, file_path: Some(path.clone()) }, &mut app);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+    }
+    for n in [0, 4, usize::MAX] {
+        let path = dir.path().join(format!("invalid-{n}.txt"));
+        dispatch_file_action(Action::CopyAssistantMessage { n, file_path: Some(path.clone()) }, &mut app);
+        assert!(!path.exists(), "invalid index must not write a file");
+    }
+}
+
+fn complete_file_effect(effect: Effect, app: &mut AppView) -> Vec<Effect> {
+    let Effect::WriteTranscriptFile { id, request } = effect else { panic!("expected file effect") };
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let result = runtime.block_on(crate::app::transcript_file_writes::execute(id, request));
+    dispatch(Action::TaskComplete(result), app)
+}
+fn dispatch_file_action(action: Action, app: &mut AppView) {
+    let mut effects = dispatch(action, app);
+    while let Some(effect) = effects.pop() {
+        effects.extend(complete_file_effect(effect, app));
+    }
+}
+
+#[test]
+fn file_writes_are_deferred_ordered_and_ignore_rebound_session_feedback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.md");
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().scrollback.push_block(RenderBlock::user_prompt("first"));
+    let mut first = dispatch(Action::ExportConversation { file_path: Some(path.clone()) }, &mut app);
+    assert!(!path.exists(), "dispatcher must not write files");
+    app.agents.get_mut(&AgentId(0)).unwrap().scrollback.push_block(RenderBlock::agent_message("second"));
+    assert!(dispatch(Action::CopyAssistantMessage { n: 1, file_path: Some(path.clone()) }, &mut app).is_empty());
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    agent.session.session_id = Some(acp::SessionId::from("different-session".to_string()));
+    let visible = agent.scrollback.len();
+    let mut second = complete_file_effect(first.pop().unwrap(), &mut app);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "## User\n\nfirst");
+    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), visible);
+    assert_eq!(second.len(), 1);
+    assert!(complete_file_effect(second.pop().unwrap(), &mut app).is_empty());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "second");
+    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), visible);
+}
+
+#[test]
+fn failed_file_write_advances_queue_after_origin_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.md");
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().scrollback.push_block(RenderBlock::user_prompt("content"));
+    let mut first = dispatch(Action::ExportConversation { file_path: Some(dir.path().to_path_buf()) }, &mut app);
+    assert!(dispatch(Action::ExportConversation { file_path: Some(good.clone()) }, &mut app).is_empty());
+    app.agents.shift_remove(&AgentId(0));
+    let mut next = complete_file_effect(first.pop().unwrap(), &mut app);
+    assert_eq!(next.len(), 1);
+    assert!(complete_file_effect(next.pop().unwrap(), &mut app).is_empty());
+    assert_eq!(std::fs::read_to_string(good).unwrap(), "## User\n\ncontent");
+    assert!(dir.path().is_dir());
+}
+
+#[test]
+fn full_file_write_queue_rejects_new_request_without_dropping_accepted_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app_with_agent();
+    app.agents.get_mut(&AgentId(0)).unwrap().scrollback.push_block(RenderBlock::user_prompt("content"));
+    let mut effects = dispatch(Action::ExportConversation { file_path: Some(dir.path().join("0.md")) }, &mut app);
+    for i in 1..=8 {
+        assert!(dispatch(Action::ExportConversation { file_path: Some(dir.path().join(format!("{i}.md"))) }, &mut app).is_empty());
+    }
+    let rejected = dir.path().join("rejected.md");
+    assert!(dispatch(Action::ExportConversation { file_path: Some(rejected.clone()) }, &mut app).is_empty());
+    let agent = &app.agents[&AgentId(0)];
+    let RenderBlock::Notice(notice) = &agent.scrollback.entry(agent.scrollback.len() - 1).unwrap().block else { panic!() };
+    assert!(notice.text.contains("Too many file writes pending"));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    while let Some(effect) = effects.pop() {
+        effects.extend(complete_file_effect(effect, &mut app));
+    }
+    assert!(!rejected.exists());
+    for i in 0..=8 {
+        assert_eq!(std::fs::read_to_string(dir.path().join(format!("{i}.md"))).unwrap(), "## User\n\ncontent");
+    }
+    let agent = &app.agents[&AgentId(0)];
+    let RenderBlock::Notice(notice) = &agent.scrollback.entry(agent.scrollback.len() - 1).unwrap().block else { panic!() };
+    assert!(notice.text.contains("Conversation exported to"));
+}
+
+#[test]
+fn pager_transcript_files_are_private_and_owned_across_replacement() {
+    let mut app = test_app_with_agent();
+    app.screen_mode = crate::app::ScreenMode::Fullscreen;
+    assert!(!app.screen_mode.is_minimal());
+    app.agents.get_mut(&AgentId(0)).unwrap().scrollback.push_block(
+        RenderBlock::user_prompt("private transcript"),
+    );
+    dispatch(Action::OpenTranscriptPager, &mut app);
+    let markdown = app.pending_pager.as_ref().unwrap().path.to_path_buf();
+    assert_eq!(markdown.extension().unwrap(), "md");
+    assert!(std::fs::read_to_string(&markdown).unwrap().contains("private transcript"));
+    assert!(!app.pending_pager.as_ref().unwrap().ansi);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&markdown).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    crate::minimal_api::app_set_pending_pager(&mut app, AgentId(0), "\x1b[31mprivate ANSI\x1b[0m", true).unwrap();
+    assert!(!markdown.exists(), "replacing a queued request releases its file");
+    let ansi = app.pending_pager.as_ref().unwrap().path.to_path_buf();
+    assert_eq!(ansi.extension().unwrap(), "ansi");
+    assert_eq!(std::fs::read_to_string(&ansi).unwrap(), "\x1b[31mprivate ANSI\x1b[0m");
+    assert!(app.pending_pager.as_ref().unwrap().ansi);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&ansi).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    drop(app);
+    assert!(!ansi.exists(), "dropping the app releases the pending snapshot");
+}
+
+#[test]
+fn minimal_transcript_waits_for_owner_reload() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().scrollback.push_block(RenderBlock::user_prompt("before reload"));
+    crate::minimal_api::request_minimal_transcript(&mut app);
+    app.agents.get_mut(&id).unwrap().begin_session_reload(1);
+    assert!(crate::minimal_api::take_minimal_transcript(&mut app).is_none(),
+        "a pump must not consume entry IDs while the owner transcript is stashed");
+    assert!(crate::minimal_api::minimal_transcript_progress(&app).is_some());
+}
+
+#[test]
+fn minimal_transcript_restarts_from_final_reload_state_even_between_frames() {
+    for (success, full_replay) in [(true, true), (true, false), (false, true)] {
+        for pump_during_reload in [true, false] {
+            let mut app = test_app_with_agent();
+            let id = AgentId(0);
+            for text in ["old first", "old second"] {
+                app.agents.get_mut(&id).unwrap().scrollback.push_block(RenderBlock::user_prompt(text));
+            }
+            crate::minimal_api::request_minimal_transcript(&mut app);
+            let mut build = crate::minimal_api::take_minimal_transcript(&mut app).unwrap();
+            build.next = 1;
+            build.out = "rendered old prefix".to_string();
+            crate::minimal_api::set_minimal_transcript(&mut app, Some(build));
+            app.agents.get_mut(&id).unwrap().begin_session_reload(8);
+            crate::minimal_api::restart_minimal_transcript_after_reload(&mut app, &[id]);
+            if pump_during_reload {
+                assert!(crate::minimal_api::take_minimal_transcript(&mut app).is_none());
+            }
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.scrollback.push_block(RenderBlock::user_prompt("reload text"));
+            if full_replay {
+                agent.mark_reload_replay_seen();
+            }
+            assert!(agent.finish_session_reload(8, success));
+            let expected: Vec<_> = (0..agent.scrollback.len())
+                .map(|i| agent.scrollback.entry(i).unwrap().id).collect();
+            assert!(!expected.is_empty());
+            let rebuilt = crate::minimal_api::take_minimal_transcript(&mut app).unwrap();
+            assert_eq!(rebuilt.agent, id);
+            assert_eq!(rebuilt.ids, expected);
+            assert_eq!(rebuilt.next, 0);
+            assert!(rebuilt.out.is_empty());
+            assert!(!rebuilt.restart_after_reload);
+        }
+    }
+}
+
+#[test]
+fn minimal_transcript_new_request_waits_and_unrelated_reload_preserves_build() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().scrollback.push_block(RenderBlock::user_prompt("retained"));
+    app.agents.get_mut(&id).unwrap().begin_session_reload(1);
+    crate::minimal_api::request_minimal_transcript(&mut app);
+    assert!(crate::minimal_api::minimal_transcript_progress(&app).is_some());
+    assert!(crate::minimal_api::take_minimal_transcript(&mut app).is_none());
+    assert!(app.agents.get_mut(&id).unwrap().finish_session_reload(1, false));
+    let mut build = crate::minimal_api::take_minimal_transcript(&mut app).unwrap();
+    assert!(!build.ids.is_empty());
+    let expected_ids = build.ids.clone();
+    build.next = 1;
+    build.out = "keep prefix".to_string();
+    crate::minimal_api::set_minimal_transcript(&mut app, Some(build));
+    app.active_view = ActiveView::Agent(AgentId(999));
+    crate::minimal_api::restart_minimal_transcript_after_reload(&mut app, &[AgentId(999)]);
+    let unchanged = crate::minimal_api::take_minimal_transcript(&mut app).unwrap();
+    assert_eq!(unchanged.agent, id);
+    assert_eq!(unchanged.ids, expected_ids);
+    assert_eq!(unchanged.next, 1);
+    assert_eq!(unchanged.out, "keep prefix");
+}
+
+#[test]
+fn transcript_initial_history_load_does_not_publish_partial_content() {
+    for mode in [crate::app::ScreenMode::Inline, crate::app::ScreenMode::Fullscreen, crate::app::ScreenMode::Minimal] {
+        let mut app = test_app_with_agent();
+        app.screen_mode = mode;
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.loading_replay = true;
+        agent.scrollback.push_block(RenderBlock::user_prompt("first part"));
+        dispatch(Action::OpenTranscriptPager, &mut app);
+        assert!(app.pending_pager.is_none(), "{mode:?} must not write partial history");
+        assert!(crate::minimal_api::minimal_transcript_progress(&app).is_none());
+        let agent = app.agents.get_mut(&id).unwrap();
+        assert!(matches!(&agent.scrollback.last().unwrap().block,
+            RenderBlock::Notice(notice) if notice.text.contains("history is still loading")));
+        agent.session.loading_replay = false;
+        agent.scrollback.push_block(RenderBlock::user_prompt("final part"));
+        let expected_ids: Vec<_> = (0..agent.scrollback.len())
+            .map(|i| agent.scrollback.entry(i).unwrap().id).collect();
+        dispatch(Action::OpenTranscriptPager, &mut app);
+        if mode.is_minimal() {
+            let build = crate::minimal_api::take_minimal_transcript(&mut app).unwrap();
+            assert_eq!(build.ids, expected_ids);
+        } else {
+            let content = std::fs::read_to_string(&app.pending_pager.as_ref().unwrap().path).unwrap();
+            assert!(content.contains("first part"));
+            assert!(content.contains("final part"));
+        }
+    }
+}
+
+#[test]
+fn pager_child_feedback_preserves_origin_and_rejects_rebound_session() {
+    let mut app = test_app_with_agent();
+    app.screen_mode = crate::app::ScreenMode::Fullscreen;
+    let mut child = crate::test_util::make_agent_view(Some("pager-child"), "/tmp");
+    child.session.id = AgentId(99);
+    child.scrollback.push_block(RenderBlock::user_prompt("child-only-transcript"));
+    let root = app.agents.get_mut(&AgentId(0)).unwrap();
+    root.insert_subagent_view("pager-child".into(), Box::new(child));
+    root.active_subagent = Some("pager-child".into());
+    dispatch(Action::OpenTranscriptPager, &mut app);
+    let request = app.pending_pager.take().unwrap();
+    assert!(std::fs::read_to_string(&request.path).unwrap().contains("child-only-transcript"));
+    app.agents.get_mut(&AgentId(0)).unwrap().active_subagent = None;
+    let root_len = app.agents[&AgentId(0)].scrollback.len();
+    assert!(!request.report(&mut app, "child-pager-failure"));
+    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), root_len);
+    let child = app.agents.get_mut(&AgentId(0)).unwrap().subagent_views.get_mut("pager-child").unwrap();
+    assert!(matches!(&child.scrollback.last().unwrap().block, RenderBlock::Notice(block) if block.text == "child-pager-failure"));
+    let child_len = child.scrollback.len();
+    child.session.session_id = Some("replacement-session".into());
+    assert!(!request.report(&mut app, "stale-pager-failure"));
+    assert_eq!(app.agents[&AgentId(0)].subagent_views["pager-child"].scrollback.len(), child_len);
+    app.agents.get_mut(&AgentId(0)).unwrap().subagent_views.remove("pager-child");
+    assert!(!request.report(&mut app, "removed-child-failure"));
+    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), root_len);
+}
+
+#[test]
+fn minimal_pager_capture_uses_build_owner_after_tab_switch() {
+    let mut app = test_app_with_agent();
+    let other = AgentId(1);
+    let mut agent = crate::test_util::make_agent_view(Some("other-tab"), "/tmp");
+    agent.session.id = other;
+    app.agents.insert(other, agent);
+    app.active_view = ActiveView::Agent(other);
+    crate::minimal_api::app_set_pending_pager(&mut app, AgentId(0), "original-build", true).unwrap();
+    let request = app.pending_pager.take().unwrap();
+    assert!(request.ansi);
+    let other_len = app.agents[&other].scrollback.len();
+    assert!(!request.report(&mut app, "build-owner-notice"));
+    assert_eq!(app.agents[&other].scrollback.len(), other_len);
+    assert!(matches!(&app.agents[&AgentId(0)].scrollback.last().unwrap().block, RenderBlock::Notice(block) if block.text == "build-owner-notice"));
+    app.agents.shift_remove(&AgentId(0));
+    assert!(!request.report(&mut app, "removed-root-notice"));
+    assert_eq!(app.agents[&other].scrollback.len(), other_len);
+}

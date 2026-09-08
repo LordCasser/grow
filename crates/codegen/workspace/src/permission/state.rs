@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use tools::util::grow_home::grow_home;
 
 const PERMISSION_STATE_SCHEMA_VERSION: u32 = 1;
+const MAX_PERMISSION_STATE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,27 +48,60 @@ fn state_dir_for_cwd(cwd: &AbsPathBuf) -> std::path::PathBuf {
     config::sessions_cwd_dir(cwd.as_str())
 }
 
-fn sanitize_client_id(id: &str) -> String {
-    id.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 fn state_file_path(dir: &std::path::Path, client_identifier: Option<&str>) -> std::path::PathBuf {
     match client_identifier {
-        Some(id) => dir.join(format!("permission_{}.toml", sanitize_client_id(id))),
+        Some(id) => {
+            use sha2::{Digest, Sha256};
+            let key = Sha256::digest(id.as_bytes());
+            dir.join(format!("permission_{key:x}.toml"))
+        }
         None => dir.join("permission.toml"),
     }
 }
 
+fn permission_state_admission_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "permission state must be an ordinary file within 1 MiB",
+    )
+}
+
+fn read_permission_state_at(path: &std::path::Path) -> std::io::Result<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_PERMISSION_STATE_BYTES {
+        return Err(permission_state_admission_error());
+    }
+    read_permission_state_from(file)
+}
+
+fn read_permission_state_from(reader: impl std::io::Read) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_PERMISSION_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PERMISSION_STATE_BYTES {
+        return Err(permission_state_admission_error());
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 async fn try_load_state(path: &std::path::Path) -> Option<PermissionState> {
-    match tokio::fs::read_to_string(path).await {
+    let source = path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || read_permission_state_at(&source))
+        .await
+        .map_err(std::io::Error::other)
+        .and_then(|result| result);
+    match result {
         Ok(s) => {
             if let Ok(state) = toml::from_str::<PermissionState>(&s)
                 && state.schema_version == PERMISSION_STATE_SCHEMA_VERSION
@@ -87,8 +121,10 @@ async fn try_load_state(path: &std::path::Path) -> Option<PermissionState> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
-            tracing::warn!(?e, "failed reading permission state");
-            None
+            tracing::warn!(?e, path = %path.display(), "failed reading permission state");
+            // Only absence permits shared-state fallback; unreadable client state
+            // must not import grants from another scope.
+            Some(PermissionState::default())
         }
     }
 }
@@ -121,6 +157,9 @@ async fn persist_state_to_path(
 ) -> std::io::Result<()> {
     let contents = toml::to_string_pretty(state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if contents.len() as u64 > MAX_PERMISSION_STATE_BYTES {
+        return Err(permission_state_admission_error());
+    }
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || config::fs_atomic::write_atomically(&path, &contents, None))
         .await
@@ -188,6 +227,79 @@ pub async fn cleanup_stale_permission_state(max_age: std::time::Duration) {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn permission_cache_byte_boundaries_preserve_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut granted = PermissionState::default();
+        granted.allow_bash_execute = true;
+        persist_state_to_dir(tmp.path(), &granted, None).await;
+        let path = state_file_path(tmp.path(), Some("bounded"));
+        let mut exact = toml::to_string(&granted).unwrap();
+        exact.extend(std::iter::repeat_n(
+            ' ',
+            MAX_PERMISSION_STATE_BYTES as usize - exact.len(),
+        ));
+        tokio::fs::write(&path, &exact).await.unwrap();
+        assert!(
+            load_state_from_dir(tmp.path(), Some("bounded"))
+                .await
+                .allow_bash_execute
+        );
+        exact.push(' ');
+        tokio::fs::write(&path, &exact).await.unwrap();
+        assert!(
+            !load_state_from_dir(tmp.path(), Some("bounded"))
+                .await
+                .allow_bash_execute
+        );
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), exact);
+        let previous = b"previous destination";
+        tokio::fs::write(&path, previous).await.unwrap();
+        granted
+            .allowed_bash_commands
+            .insert("x".repeat(MAX_PERMISSION_STATE_BYTES as usize));
+        assert!(persist_state_to_path(&path, &granted).await.is_err());
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), previous);
+    }
+
+    #[test]
+    fn permission_stream_read_stops_at_budget() {
+        let mut cursor = std::io::Cursor::new(vec![b' '; MAX_PERMISSION_STATE_BYTES as usize + 20]);
+        assert!(read_permission_state_from(&mut cursor).is_err());
+        assert_eq!(cursor.position(), MAX_PERMISSION_STATE_BYTES + 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_fifo_is_rejected_without_waiting_for_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{FileTypeExt, symlink};
+        let tmp = tempfile::tempdir().unwrap();
+        let fifo = tmp.path().join("fifo");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let source = fifo.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_permission_state_at(&source).is_err());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(2))
+                .expect("FIFO read blocked")
+        );
+        assert!(
+            std::fs::symlink_metadata(fifo)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+        let regular = tmp.path().join("regular");
+        std::fs::write(&regular, "state").unwrap();
+        let link = tmp.path().join("link");
+        symlink(regular, &link).unwrap();
+        assert_eq!(read_permission_state_at(&link).unwrap(), "state");
+    }
 
     // ── PermissionState serialization roundtrip tests ─────────────
 
@@ -435,35 +547,56 @@ mod tests {
     }
 
     #[test]
-    fn state_file_path_with_client_id() {
+    fn client_cache_keys_are_fixed_length_and_distinct() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = state_file_path(tmp.path(), Some("vscode-ext"));
-        assert_eq!(path.file_name().unwrap(), "permission_vscode-ext.toml");
+        let long = "客户".repeat(1000);
+        let ids = [
+            "foo/bar",
+            "foo\\bar",
+            "foo_bar",
+            "Foo_bar",
+            "",
+            "../",
+            "has\0null",
+            &long,
+        ];
+        let mut paths = HashSet::new();
+        for id in ids {
+            let path = state_file_path(tmp.path(), Some(id));
+            assert_eq!(path.parent(), Some(tmp.path()));
+            assert_eq!(path.file_name().unwrap().len(), 80);
+            assert_ne!(path, state_file_path(tmp.path(), None));
+            assert!(paths.insert(path));
+        }
+        assert_eq!(
+            state_file_path(tmp.path(), Some("")).file_name().unwrap(),
+            "permission_e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.toml"
+        );
     }
 
-    #[test]
-    fn state_file_path_empty_client_id() {
+    #[tokio::test]
+    async fn previously_colliding_clients_keep_distinct_grants() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = state_file_path(tmp.path(), Some(""));
-        assert_eq!(path.file_name().unwrap(), "permission_.toml");
-    }
-
-    #[test]
-    fn state_file_path_sanitizes_path_separators() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = state_file_path(tmp.path(), Some("foo/bar"));
-        assert_eq!(path.file_name().unwrap(), "permission_foo_bar.toml");
-
-        let path = state_file_path(tmp.path(), Some("foo\\bar"));
-        assert_eq!(path.file_name().unwrap(), "permission_foo_bar.toml");
-    }
-
-    #[test]
-    fn sanitize_client_id_prevents_traversal() {
-        assert_eq!(sanitize_client_id("foo/../../attack"), "foo_______attack");
-        assert_eq!(sanitize_client_id("normal-id"), "normal-id");
-        assert_eq!(sanitize_client_id("has\0null"), "has_null");
-        assert_eq!(sanitize_client_id("back\\slash"), "back_slash");
+        let ids = ["foo/bar", "foo\\bar", "foo_bar"];
+        for id in ids {
+            let mut state = PermissionState::default();
+            state.allowed_bash_commands.insert(id.to_string());
+            persist_state_to_dir(tmp.path(), &state, Some(id)).await;
+        }
+        for id in ids {
+            let state = load_state_from_dir(tmp.path(), Some(id)).await;
+            assert_eq!(state.allowed_bash_commands, HashSet::from([id.to_string()]));
+        }
+        let mut legacy = PermissionState::default();
+        legacy.allow_bash_execute = true;
+        persist_state_to_path(&tmp.path().join("permission_old_client.toml"), &legacy)
+            .await
+            .unwrap();
+        assert!(
+            !load_state_from_dir(tmp.path(), Some("old/client"))
+                .await
+                .allow_bash_execute
+        );
     }
 
     #[tokio::test]
@@ -500,6 +633,44 @@ mod tests {
         let loaded = load_state_from_dir(dir, Some("client_a")).await;
         assert!(loaded.allow_bash_execute);
         assert!(loaded.allowed_bash_commands.contains("cargo test"));
+    }
+
+    #[tokio::test]
+    async fn client_read_errors_do_not_inherit_shared_grants() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut shared = PermissionState::default();
+        shared.allow_bash_execute = true;
+        shared.allowed_bash_commands.insert("shared-command".into());
+        shared
+            .allowed_web_fetch_domains
+            .insert("example.com".into());
+        shared.allowed_mcp_servers.insert("shared-server".into());
+        persist_state_to_dir(tmp.path(), &shared, None).await;
+        let invalid = state_file_path(tmp.path(), Some("invalid"));
+        tokio::fs::write(&invalid, [0xff, 0xfe]).await.unwrap();
+        let directory = state_file_path(tmp.path(), Some("directory"));
+        tokio::fs::create_dir(&directory).await.unwrap();
+        tokio::fs::write(directory.join("keep"), "untouched")
+            .await
+            .unwrap();
+        for id in ["invalid", "directory"] {
+            let loaded = load_state_from_dir(tmp.path(), Some(id)).await;
+            assert_eq!(
+                serde_json::to_value(loaded).unwrap(),
+                serde_json::to_value(PermissionState::default()).unwrap(),
+                "{id}"
+            );
+        }
+        assert_eq!(tokio::fs::read(invalid).await.unwrap(), [0xff, 0xfe]);
+        assert_eq!(
+            tokio::fs::read(directory.join("keep")).await.unwrap(),
+            b"untouched"
+        );
+        assert!(
+            load_state_from_dir(tmp.path(), None)
+                .await
+                .allow_bash_execute
+        );
     }
 
     #[tokio::test]

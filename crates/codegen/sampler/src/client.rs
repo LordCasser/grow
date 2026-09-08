@@ -735,14 +735,6 @@ impl SamplingClient {
             }
         }
         {
-            let auth_prefix = headers
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(20).collect::<String>());
-            let x_api_key_prefix = headers
-                .get(HeaderName::from_static("x-api-key"))
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(12).collect::<String>());
             tracing::info!(
                 target: crate::sampling_log::TARGET,
                 event = "client_post",
@@ -753,8 +745,6 @@ impl SamplingClient {
                 has_bearer_resolver = self.bearer_resolver.is_some(),
                 has_authorization_header = headers.get(AUTHORIZATION).is_some(),
                 has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
-                auth_header_prefix = auth_prefix.as_deref().unwrap_or("none"),
-                x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
             );
         }
         let sent_bearer = Self::sent_fragment_from_headers(&headers, &self.defaults.auth_scheme);
@@ -822,10 +812,7 @@ impl SamplingClient {
             (AuthScheme::Bearer, Some(_)) => "bearer",
             (_, None) => "none",
         };
-        crate::sampling_log::AuthInfo {
-            auth_type,
-            auth_prefix,
-        }
+        crate::sampling_log::AuthInfo { auth_type }
     }
 
     /// Check if a header name contains sensitive information that should be redacted.
@@ -1958,6 +1945,62 @@ mod tests {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
         }
+    }
+
+    #[test]
+    fn sampling_auth_logs_omit_credentials() {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Capture(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for (scheme, key, header, value) in [
+                (
+                    AuthScheme::Bearer,
+                    "bear-secret",
+                    "authorization",
+                    "Bearer bear-secret",
+                ),
+                (AuthScheme::XApiKey, "api-secret", "x-api-key", "api-secret"),
+            ] {
+                let mut cfg = minimal_config();
+                cfg.auth_scheme = scheme;
+                cfg.api_key = Some(key.into());
+                let client = SamplingClient::new(cfg).unwrap();
+                let span = crate::sampling_log::request_span(
+                    &crate::types::RequestId::random(),
+                    "test-model",
+                    "test",
+                    "https://example.test",
+                    &client.auth_info(),
+                );
+                let _guard = span.enter();
+                let request = client.post("https://example.test").builder.build().unwrap();
+                assert_eq!(request.headers().get(header).unwrap(), value);
+            }
+        });
+        let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("client_post"));
+        assert!(logs.contains("sampling_request"));
+        assert!(logs.contains("has_authorization_header"));
+        assert!(logs.contains("has_x_api_key_header"));
+        assert!(logs.contains("auth_type"));
+        assert!(!logs.contains("bear-secret"), "bearer leaked: {logs}");
+        assert!(!logs.contains("api-secret"), "API key leaked: {logs}");
     }
 
     #[test]

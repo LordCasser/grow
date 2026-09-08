@@ -62,25 +62,6 @@ pub(crate) fn dispatch_initial_prompt(app: &mut AppView, prompt: String) -> Vec<
     effects
 }
 
-pub(super) fn collect_live_doctor_report_for_terminal(
-    app: &AppView,
-    agent_id: AgentId,
-    terminal: &crate::terminal::TerminalContext,
-) -> Option<crate::diagnostics::DiagnosticReport> {
-    let agent = app.agents.get(&agent_id)?;
-    let report = crate::slash::commands::doctor::DoctorCommand::report_for_terminal(
-        terminal,
-        app.screen_mode,
-        crate::diagnostics::TuiRuntimeRequest {
-            workspace: &agent.session.cwd,
-            notification_method: app.notification_service.config().method,
-            notification_protocol: app.notification_service.protocol(),
-            notification_condition: app.notification_service.config().condition,
-        },
-    );
-    Some(report)
-}
-
 fn doctor_fix_target(agent: &AgentView) -> DoctorFixTarget {
     DoctorFixTarget {
         agent_id: agent.session.id,
@@ -91,36 +72,29 @@ fn doctor_fix_target(agent: &AgentView) -> DoctorFixTarget {
 }
 
 pub(super) fn dispatch_doctor(request: DoctorRequest, app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(agent_id) = app.active_view else {
+    let ActiveView::Agent(agent_id) = app.active_view else { return vec![]; };
+    let Some(agent) = app.agents.get_mut(&agent_id) else { return vec![]; };
+    let Ok(permit) = app.doctor_collection.clone().try_acquire_owned() else {
+        agent.scrollback.push_block(RenderBlock::notice("Diagnostics are already being checked. Please wait for the current result."));
         return vec![];
     };
-    let terminal = crate::terminal::terminal_context().clone();
-    let Some(report) = collect_live_doctor_report_for_terminal(app, agent_id, &terminal) else {
-        return vec![];
+    let target = doctor_fix_target(agent);
+    let input = crate::app::doctor::DoctorReportInput {
+        workspace: target.cwd.clone(),
+        fullscreen_active: app.screen_mode.is_fullscreen(),
+        kitty_flags_pushed: crate::app::kitty_flags_pushed(),
+        xtversion: crate::terminal::xtversion::detected().map(str::to_owned),
+        notification_method: app.notification_service.config().method,
+        notification_protocol: app.notification_service.protocol(),
+        notification_condition: app.notification_service.config().condition,
     };
-
-    match request {
-        DoctorRequest::Report => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
-                agent.scrollback.push_block(RenderBlock::notice(
-                    crate::diagnostics::format_doctor(&report),
-                ));
-            }
-        }
-        DoctorRequest::ListFixes | DoctorRequest::Fix(_) => {
-            let Some(agent) = app.agents.get(&agent_id) else {
-                return vec![];
-            };
-            let target = doctor_fix_target(agent);
-            return vec![Effect::PlanDoctorFix {
-                target,
-                report: Box::new(report),
-                terminal,
-                request,
-            }];
-        }
-    }
-    vec![]
+    vec![Effect::PrepareDoctor {
+        target,
+        input: Box::new(input),
+        permit,
+        terminal: crate::terminal::terminal_context().clone(),
+        request,
+    }]
 }
 
 pub(super) fn open_doctor_fix_question(

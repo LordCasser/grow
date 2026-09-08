@@ -1,0 +1,2 @@
+# Verification
+Source inspection only: announcements/src/lib.rs, pager announcement views/slash/update handler/router/effect/task-result, shell initialization/config update/emit paths. Scoped symbol/field searches show no persistent-field behavior consumer in these paths. No fresh runtime test, live UI or external API validation. Strict OpenSpec checks validate documentation, not runtime correctness.

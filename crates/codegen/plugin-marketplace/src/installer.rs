@@ -72,27 +72,7 @@ pub fn install_from_marketplace(
             Ok(MarketplaceInstallResult::Installed { repo_key })
         }
         Err(InstallError::AlreadyInstalled { key }) => {
-            // Remove old installation and retry so re-install works after uninstall.
-            let old_path = registry.install_dir().join(&key);
-            if old_path.exists() {
-                let _ = std::fs::remove_dir_all(&old_path);
-            }
-            // Also remove the symlink if it's one.
-            let _ = std::fs::remove_file(&old_path);
-            registry.remove(&key);
-            registry.save()?;
-            // Retry — registry no longer has the key.
-            match git_install::install_from_source(&source, registry, false) {
-                Ok(result) => {
-                    let repo_key = result.repo_key.clone();
-                    let mut repo = git_install::build_installed_repo(&result, &source);
-                    repo.marketplace = Some(provenance);
-                    registry.insert(repo_key.clone(), repo);
-                    registry.save()?;
-                    Ok(MarketplaceInstallResult::Installed { repo_key })
-                }
-                Err(e) => Err(e),
-            }
+            Ok(MarketplaceInstallResult::AlreadyInstalled { repo_key: key })
         }
         Err(e) => Err(e),
     }
@@ -170,29 +150,7 @@ pub fn install_from_remote_url(
             Ok(MarketplaceInstallResult::Installed { repo_key })
         }
         Err(InstallError::AlreadyInstalled { key }) => {
-            let old_path = registry.install_dir().join(&key);
-            if old_path.exists() {
-                let _ = std::fs::remove_dir_all(&old_path);
-            }
-            let _ = std::fs::remove_file(&old_path);
-            registry.remove(&key);
-            registry.save()?;
-            match git_install::install_from_source_with_label(
-                &source,
-                registry,
-                require_sha,
-                Some(plugin_name),
-            ) {
-                Ok(result) => {
-                    let repo_key = result.repo_key.clone();
-                    let mut repo = git_install::build_installed_repo(&result, &source);
-                    repo.marketplace = Some(provenance);
-                    registry.insert(repo_key.clone(), repo);
-                    registry.save()?;
-                    Ok(MarketplaceInstallResult::Installed { repo_key })
-                }
-                Err(e) => Err(e),
-            }
+            Ok(MarketplaceInstallResult::AlreadyInstalled { repo_key: key })
         }
         Err(e) => Err(e),
     }
@@ -984,6 +942,121 @@ mod tests {
             MarketplaceInstallResult::Installed { repo_key } => repo_key,
             MarketplaceInstallResult::AlreadyInstalled { repo_key } => repo_key,
         }
+    }
+
+    #[test]
+    fn repeated_local_install_preserves_the_existing_snapshot() {
+        with_test_registry(|registry| {
+            let marketplace = tempfile::tempdir().unwrap();
+            write_plugin(marketplace.path(), "stable", "1.0.0", "old");
+            let key = install_test_plugin(registry, marketplace.path(), "stable");
+            let before_registry =
+                std::fs::read(registry.install_dir().join("registry.json")).unwrap();
+            std::fs::write(
+                marketplace.path().join("plugins/stable/plugin.json"),
+                "broken",
+            )
+            .unwrap();
+
+            let result = install_from_marketplace(
+                marketplace.path(),
+                "plugins/stable",
+                provenance(marketplace.path(), "plugins/stable"),
+                registry,
+            )
+            .unwrap();
+            assert!(
+                matches!(result, MarketplaceInstallResult::AlreadyInstalled { repo_key } if repo_key == key)
+            );
+            let installed = registry.get_repo(&key).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(installed.path.join("marker.txt")).unwrap(),
+                "old"
+            );
+            assert_eq!(
+                std::fs::read(registry.install_dir().join("registry.json")).unwrap(),
+                before_registry
+            );
+        });
+    }
+
+    #[test]
+    fn repeated_remote_install_with_changed_provenance_keeps_old_repository() {
+        if !git_available() {
+            return;
+        }
+        with_test_registry(|registry| {
+            let repo = tempfile::tempdir().unwrap();
+            run_git(repo.path(), &["init", "--initial-branch=main", "--quiet"]);
+            write_root_plugin(repo.path(), "stable", "1.0.0");
+            run_git(repo.path(), &["add", "-A"]);
+            run_git(repo.path(), &["commit", "-m", "initial", "--quiet"]);
+            let url = format!("file://{}", repo.path().display());
+            let mut origin = provenance(repo.path(), "stable");
+            let result = install_from_remote_url(
+                &url,
+                Some("main"),
+                None,
+                None,
+                "stable",
+                origin.clone(),
+                registry,
+                false,
+            )
+            .unwrap();
+            let key = match result {
+                MarketplaceInstallResult::Installed { repo_key } => repo_key,
+                _ => panic!("expected a fresh installation"),
+            };
+            let old_registry = std::fs::read(registry.install_dir().join("registry.json")).unwrap();
+            std::fs::remove_dir_all(repo.path()).unwrap();
+            origin.source_url_or_path = "different-catalog".into();
+            assert!(
+                matches!(install_from_remote_url(&url, Some("main"), None, None, "stable", origin, registry, false).unwrap(), MarketplaceInstallResult::AlreadyInstalled { repo_key } if repo_key == key)
+            );
+            assert!(
+                registry
+                    .get_repo(&key)
+                    .unwrap()
+                    .path
+                    .join("plugin.json")
+                    .is_file()
+            );
+            assert_eq!(
+                std::fs::read(registry.install_dir().join("registry.json")).unwrap(),
+                old_registry
+            );
+        });
+    }
+
+    #[test]
+    fn failed_local_copy_leaves_no_partial_installation() {
+        with_test_registry(|registry| {
+            let marketplace = tempfile::tempdir().unwrap();
+            std::fs::create_dir(marketplace.path().join("plugins")).unwrap();
+            // copy_dir_recursive creates its destination before read_dir.
+            // A regular file as the source deterministically fails that read,
+            // without permission or platform-specific special-file behavior.
+            std::fs::write(
+                marketplace.path().join("plugins/partial"),
+                "not a directory",
+            )
+            .unwrap();
+            assert!(
+                install_from_marketplace(
+                    marketplace.path(),
+                    "plugins/partial",
+                    provenance(marketplace.path(), "plugins/partial"),
+                    registry
+                )
+                .is_err()
+            );
+            assert!(registry.list().is_empty());
+            assert_eq!(
+                std::fs::read_dir(registry.install_dir()).unwrap().count(),
+                0
+            );
+        });
     }
 
     #[test]

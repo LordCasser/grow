@@ -736,3 +736,91 @@ async fn recap_request_rides_parent_prompt_cache() {
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn recap_model_stays_with_prepared_endpoint_after_switch() {
+    assert_sideband_prepared_route(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn side_question_model_stays_with_prepared_endpoint_after_switch() {
+    assert_sideband_prepared_route(true).await;
+}
+
+async fn assert_sideband_prepared_route(side_question: bool) {
+    use test_support::MockInferenceServer;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _grx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _prx, _events) = sideband_persistence_harness();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let old_server = MockInferenceServer::start().await.unwrap();
+            old_server.set_response("Previous work summary.");
+            let new_server = MockInferenceServer::start().await.unwrap();
+            new_server.set_response("New summary.");
+            let mut old = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            old.base_url = old_server.url();
+            old.model = "old-model".into();
+            old.api_backend = sampling_types::ApiBackend::Responses;
+            actor.chat_state_handle.replace_sampling_route(old.clone());
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::user("q".repeat(40_000)),
+                    ConversationItem::assistant("One owner controls the lifetime."),
+                ],
+            )
+            .await;
+            let mut new = old;
+            new.base_url = new_server.url();
+            new.model = "new-model".into();
+            new.context_window = std::num::NonZeroU64::new(8_000).unwrap();
+            let handle = actor.chat_state_handle.clone();
+            let preparation_hook = if side_question {
+                &super::super::recap::SIDE_QUESTION_AFTER_PREPARE
+            } else {
+                &super::super::recap::RECAP_AFTER_PREPARE
+            };
+            preparation_hook.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || handle.replace_sampling_route(new)));
+            });
+            if side_question {
+                assert_eq!(
+                    actor
+                        .handle_side_question("What is ownership?")
+                        .await
+                        .unwrap(),
+                    "Previous work summary."
+                );
+            } else {
+                actor.handle_recap(false).await;
+            }
+            preparation_hook.with(|hook| assert!(hook.borrow().is_none()));
+            let requests = old_server.requests();
+            let request = requests
+                .iter()
+                .find(|r| r.path.contains("responses"))
+                .unwrap();
+            assert_eq!(request.body.as_ref().unwrap()["model"], "old-model");
+            assert!(
+                request
+                    .body
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains(&"q".repeat(40_000)),
+                "prepared large window must retain the full input"
+            );
+            assert!(!new_server.has_responses_request());
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .unwrap()
+                    .model,
+                "new-model"
+            );
+        })
+        .await;
+}

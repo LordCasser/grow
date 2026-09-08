@@ -1,6 +1,7 @@
 use acp_transport::protocol as acp;
 use tools::implementations::grow_build::{
     SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
+    scheduler::interval::{interval_to_human as scheduler_interval_to_human, parse_interval},
 };
 
 use crate::slash::command::{CommandExecCtx, CommandResult, ScheduledTaskPreview, SlashCommand};
@@ -33,50 +34,14 @@ fn parse_loop_args(args: &str) -> (Option<&str>, &str) {
 /// of s/m/h/d. Zero is rejected so the preview never shows a cadence the tool
 /// would reject (`parse_interval` errors on zero).
 fn is_interval_token(s: &str) -> bool {
-    if s.len() < 2 {
-        return false;
-    }
-    let (digits, suffix) = s.split_at(s.len() - 1);
-    matches!(suffix, "s" | "m" | "h" | "d")
-        && digits.chars().all(|c| c.is_ascii_digit())
-        && digits.parse::<u64>().is_ok_and(|n| n > 0)
+    parse_interval(s).is_ok()
 }
 
 /// Convert an interval token like "5m" to a human string like "every 5 minutes".
 fn interval_to_human(token: &str) -> String {
-    let (digits, suffix) = token.split_at(token.len() - 1);
-    let n: u64 = digits.parse().unwrap_or(0);
-    match suffix {
-        "s" => {
-            if n <= 1 {
-                "every 1 second".into()
-            } else {
-                format!("every {n} seconds")
-            }
-        }
-        "m" => {
-            if n == 1 {
-                "every 1 minute".into()
-            } else {
-                format!("every {n} minutes")
-            }
-        }
-        "h" => {
-            if n == 1 {
-                "every 1 hour".into()
-            } else {
-                format!("every {n} hours")
-            }
-        }
-        "d" => {
-            if n == 1 {
-                "every 1 day".into()
-            } else {
-                format!("every {n} days")
-            }
-        }
-        _ => format!("every {token}"),
-    }
+    parse_interval(token)
+        .map(scheduler_interval_to_human)
+        .unwrap_or_else(|_| "scheduling…".into())
 }
 
 impl SlashCommand for LoopCommand {
@@ -218,6 +183,10 @@ mod tests {
             "0s do x",                    // zero value
             "abc do x",                   // alphabetic
             "99999999999999999999m do x", // overflows u64 -> parse Err branch
+            "18446744073709551615d do x", // overflows seconds
+            "每5分钟 检查构建",
+            "5ｍ 检查构建",
+            "５m 检查构建",
         ] {
             let (interval, prompt) = parse_loop_args(input);
             assert_eq!(interval, None, "input {input:?} must not yield a token");
@@ -249,7 +218,8 @@ mod tests {
         assert_eq!(interval_to_human("1h"), "every 1 hour");
         assert_eq!(interval_to_human("1d"), "every 1 day");
         assert_eq!(interval_to_human("7d"), "every 7 days");
-        assert_eq!(interval_to_human("60s"), "every 60 seconds");
+        assert_eq!(interval_to_human("60s"), "every 1 minute");
+        assert_eq!(interval_to_human("30s"), "every 1 minute");
     }
 
     fn run_loop(args: &str) -> CommandResult {

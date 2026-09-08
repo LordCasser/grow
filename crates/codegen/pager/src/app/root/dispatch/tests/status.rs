@@ -88,6 +88,13 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool(
     // to its default (false).
     let _ = dispatch(Action::SetCompactMode(true), &mut app);
     assert!(app.current_ui.compact_mode);
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SettingPersisted {
+            key: "compact_mode",
+            value: SettingValue::Bool(true),
+        }),
+        &mut app,
+    );
 
     setup_reset_confirm_open(&mut app, "compact_mode");
 
@@ -138,6 +145,13 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum(
         // Flip theme to a non-default first.
         let _ = dispatch(Action::SetTheme("tokyonight".to_string()), &mut app);
         assert_eq!(app.current_ui.theme.as_deref(), Some("tokyonight"));
+        let _ = dispatch(
+            Action::TaskComplete(TaskResult::SettingPersisted {
+                key: "theme",
+                value: SettingValue::Enum("tokyonight"),
+            }),
+            &mut app,
+        );
 
         setup_reset_confirm_open(&mut app, "theme");
 

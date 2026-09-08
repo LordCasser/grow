@@ -1,8 +1,11 @@
 //! Shared tmux command protocol and result parsing.
 
 use std::process::{Command, Stdio};
+use std::io::Read;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 
+const TMUX_OUTPUT_LIMIT: usize = 64 * 1024;
 const TMUX_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// After the leader exits, allow this much additional time for process-group
 /// teardown and concurrent pipe drains so a near-deadline success is not turned
@@ -16,6 +19,7 @@ enum TmuxCommand<'a> {
     OptionValue(&'a str),
     OptionSupport(&'a str),
     ControlMode,
+    ConfigFiles,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,7 +45,10 @@ fn run_tmux_bounded(
     command: TmuxCommand<'_>,
     timeout: Duration,
 ) -> Result<TmuxCommandOutput, String> {
-    let mut command = build_tmux_command(command);
+    run_command_bounded(build_tmux_command(command), timeout)
+}
+
+fn run_command_bounded(mut command: Command, timeout: Duration) -> Result<TmuxCommandOutput, String> {
     #[allow(clippy::disallowed_methods)] // bounded probe, waited on with a timeout
     let mut child = command
         .spawn()
@@ -64,11 +71,16 @@ fn run_tmux_bounded(
         .stderr
         .take()
         .ok_or_else(|| "tmux stderr pipe was not captured".to_owned())?;
-    let stdout = spawn_pipe_drain(stdout, "stdout");
-    let stderr = spawn_pipe_drain(stderr, "stderr");
+    let output_exceeded = Arc::new(AtomicBool::new(false));
+    let stdout = spawn_pipe_drain(stdout, "stdout", output_exceeded.clone());
+    let stderr = spawn_pipe_drain(stderr, "stderr", output_exceeded.clone());
     let deadline = std::time::Instant::now() + timeout;
 
     let status = loop {
+        if output_exceeded.load(Ordering::Acquire) {
+            terminate_tmux_tree(&group, &mut child);
+            return Err(format!("tmux query output exceeded {TMUX_OUTPUT_LIMIT} bytes per stream"));
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if std::time::Instant::now() < deadline => {
@@ -100,16 +112,22 @@ fn run_tmux_bounded(
 }
 
 fn spawn_pipe_drain(
-    mut pipe: impl std::io::Read + Send + 'static,
+    pipe: impl std::io::Read + Send + 'static,
     label: &'static str,
+    output_exceeded: Arc<AtomicBool>,
 ) -> std::sync::mpsc::Receiver<Result<Vec<u8>, String>> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let mut output = Vec::new();
-        let result = pipe
+        let result = pipe.take(TMUX_OUTPUT_LIMIT as u64 + 1)
             .read_to_end(&mut output)
-            .map(|_| output)
-            .map_err(|error| format!("failed to read tmux {label}: {error}"));
+            .map_err(|error| format!("failed to read tmux {label}: {error}"))
+            .and_then(|_| {
+                if output.len() > TMUX_OUTPUT_LIMIT {
+                    output_exceeded.store(true, Ordering::Release);
+                    Err(format!("tmux {label} exceeded {TMUX_OUTPUT_LIMIT} bytes"))
+                } else { Ok(output) }
+            });
         let _ = sender.send(result);
     });
     receiver
@@ -186,6 +204,27 @@ fn query_option_support_with(runner: &dyn TmuxCommandRunner, option: &str) -> Tm
     }
 }
 
+/// Startup configuration candidates, not a successful-load log. The tmux
+/// format uses unescaped commas; consumers must not assume it is a path list.
+pub fn query_config_files() -> TmuxQueryResult<String> {
+    query_config_files_with(&LiveTmuxCommandRunner)
+}
+
+fn query_config_files_with(runner: &dyn TmuxCommandRunner) -> TmuxQueryResult<String> {
+    match runner.run(TmuxCommand::ConfigFiles) {
+        Ok(output) if output.status_success => match String::from_utf8(output.stdout) {
+            Ok(mut value) => {
+                if value.ends_with('\n') { value.pop(); }
+                if value.is_empty() { TmuxQueryResult::Unavailable }
+                else { TmuxQueryResult::Available(value) }
+            }
+            Err(_) => TmuxQueryResult::Error("tmux config_files is not valid UTF-8".to_owned()),
+        },
+        Ok(_) => TmuxQueryResult::Unavailable,
+        Err(error) => TmuxQueryResult::Error(error),
+    }
+}
+
 pub fn query_control_mode() -> TmuxQueryResult<bool> {
     query_control_mode_with(&LiveTmuxCommandRunner)
 }
@@ -215,6 +254,10 @@ fn build_tmux_command(command: TmuxCommand<'_>) -> Command {
             cmd.args(["show-option", "-gv", option])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+        }
+        TmuxCommand::ConfigFiles => {
+            cmd.args(["display-message", "-p", "#{config_files}"])
+                .stdout(Stdio::piped()).stderr(Stdio::piped());
         }
         TmuxCommand::ControlMode => {
             cmd.args(["display-message", "-p", "#{client_flags}"])
@@ -283,8 +326,66 @@ mod tests {
                 TmuxCommand::OptionValue(option) => format!("value:{option}"),
                 TmuxCommand::OptionSupport(option) => format!("support:{option}"),
                 TmuxCommand::ControlMode => "control-mode".to_owned(),
+                TmuxCommand::ConfigFiles => "config-files".to_owned(),
             });
             self.output.clone()
+        }
+    }
+
+    #[test]
+    fn config_files_preserves_paths_and_refuses_invalid_encoding() {
+        for text in ["/tmp/custom config ", "/tmp/a,/tmp/b", "/tmp/a,b", "/tmp/a\n/tmp/b"] {
+            let runner = FakeRunner::output(true, format!("{text}\n").as_bytes(), b"");
+            assert_eq!(query_config_files_with(&runner), TmuxQueryResult::Available(text.to_owned()));
+            assert_eq!(*runner.calls.borrow(), ["config-files"]);
+        }
+        for bytes in [b"".as_slice(), b"\n"] {
+            assert_eq!(query_config_files_with(&FakeRunner::output(true, bytes, b"")), TmuxQueryResult::Unavailable);
+        }
+        assert!(matches!(query_config_files_with(&FakeRunner::output(true, &[0xff], b"")), TmuxQueryResult::Error(_)));
+        assert_eq!(query_config_files_with(&FakeRunner::output(false, b"/tmp/config", b"failed")), TmuxQueryResult::Unavailable);
+        let failed = FakeRunner { output: Err("timeout".into()), calls: RefCell::new(Vec::new()) };
+        assert_eq!(query_config_files_with(&failed), TmuxQueryResult::Error("timeout".into()));
+    }
+
+    #[test]
+    fn pipe_drain_rejects_output_over_limit() {
+        for label in ["stdout", "stderr"] {
+            for size in [0, TMUX_OUTPUT_LIMIT, TMUX_OUTPUT_LIMIT + 1] {
+                let exceeded = Arc::new(AtomicBool::new(false));
+                let pipe = std::io::Cursor::new(vec![b'x'; size]);
+                let result = recv_pipe_drain(spawn_pipe_drain(pipe, label, exceeded.clone()), std::time::Instant::now() + Duration::from_secs(2), label);
+                if size <= TMUX_OUTPUT_LIMIT {
+                    assert_eq!(result.unwrap(), vec![b'x'; size]);
+                    assert!(!exceeded.load(Ordering::Acquire));
+                } else {
+                    assert!(result.unwrap_err().contains("exceeded"));
+                    assert!(exceeded.load(Ordering::Acquire));
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_live_output_terminates_before_process_deadline() {
+        for redirect in ["", "1>&2"] {
+            let directory = tempfile::tempdir().unwrap();
+            let pid_path = directory.path().join("pid");
+            let mut command = Command::new("/bin/sh");
+            command.arg("-c").arg(format!(
+                "echo $$ > \"$1\"; trap '' PIPE; i=0; while [ $i -lt 128 ]; do printf '%01024d' 0 {redirect}; i=$((i+1)); done; exec sleep 30"
+            )).arg("tmux-output-fixture").arg(&pid_path)
+                .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            tty_utils::detach_std_command(&mut command);
+            let started = std::time::Instant::now();
+            let result = run_command_bounded(command, Duration::from_secs(10));
+            assert!(result.unwrap_err().contains("exceeded"));
+            assert!(started.elapsed() < Duration::from_secs(5), "output overflow must not wait for the 10-second deadline");
+            let pid: i32 = std::fs::read_to_string(pid_path).unwrap().trim().parse().unwrap();
+            // SAFETY: signal 0 only queries whether the owned child still exists.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
         }
     }
 
@@ -292,6 +393,7 @@ mod tests {
     fn command_protocol_uses_exact_argv_and_pager_env() {
         let cases = [
             (TmuxCommand::Version, vec!["-V"]),
+            (TmuxCommand::ConfigFiles, vec!["display-message", "-p", "#{config_files}"]),
             (
                 TmuxCommand::OptionValue("set-clipboard"),
                 vec!["show-option", "-gqv", "set-clipboard"],

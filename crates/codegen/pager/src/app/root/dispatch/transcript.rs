@@ -1,6 +1,7 @@
 //! Transcript export, block copying, viewer/modal, and input-log dump dispatchers.
 
 use super::ctx::with_active_agent;
+use crate::app::transcript_file_writes::{FileWriteKind, TranscriptFileWrite};
 use super::session::lifecycle::skip_picker_and_create_session;
 use crate::app::actions::Effect;
 use crate::app::root::{ActiveView, AppView};
@@ -56,39 +57,41 @@ pub(super) fn dispatch_copy_assistant_message(
     app: &mut AppView,
     n: usize,
     file_path: Option<std::path::PathBuf>,
-) {
+) -> Vec<Effect> {
+    let mut request = None;
     with_active_agent(app, |agent| {
-        // Collect agent messages in reverse order (most recent first).
-        let mut agent_messages: Vec<String> = Vec::new();
+        if n == 0 {
+            agent.scrollback.push_block(RenderBlock::notice(
+                "Usage: /copy [N] [file] where N is 1 (latest), 2, 3, ...",
+            ));
+            return;
+        }
+        let mut available = 0;
+        let mut selected = None;
         for i in (0..agent.scrollback.len()).rev() {
             if let Some(entry) = agent.scrollback.entry(i)
                 && let RenderBlock::AgentMessage(msg) = &entry.block
             {
-                agent_messages.push(msg.copy_text(false));
+                available += 1;
+                if available == n {
+                    selected = Some(msg.copy_text(false));
+                    break;
+                }
             }
         }
-
-        if agent_messages.is_empty() {
-            agent
-                .scrollback
-                .push_block(RenderBlock::notice("No assistant messages to copy"));
+        let Some(text) = selected else {
+            let message = if available == 0 {
+                "No assistant messages to copy".to_string()
+            } else {
+                format!(
+                    "Only {} assistant {} available to copy",
+                    available,
+                    if available == 1 { "message" } else { "messages" },
+                )
+            };
+            agent.scrollback.push_block(RenderBlock::notice(message));
             return;
-        }
-
-        if n > agent_messages.len() {
-            agent.scrollback.push_block(RenderBlock::notice(format!(
-                "Only {} assistant {} available to copy",
-                agent_messages.len(),
-                if agent_messages.len() == 1 {
-                    "message"
-                } else {
-                    "messages"
-                }
-            )));
-            return;
-        }
-
-        let text = &agent_messages[n - 1];
+        };
         if text.is_empty() {
             agent
                 .scrollback
@@ -96,54 +99,26 @@ pub(super) fn dispatch_copy_assistant_message(
             return;
         }
 
-        let stats = crate::clipboard::clipboard_stats_suffix(text);
-
         if let Some(p) = file_path {
-            match crate::clipboard::write_text_to_copy_file(text, &p) {
-                Ok(path) => {
-                    agent.scrollback.push_block(RenderBlock::notice(format!(
-                        "Copied to {}{stats}",
-                        path.display()
-                    )));
-                }
-                Err(e) => {
-                    agent
-                        .scrollback
-                        .push_block(RenderBlock::notice(format!("Failed to write file: {e}")));
-                }
-            }
+            let path = agent.session.cwd.join(shellexpand::tilde(&p.to_string_lossy()).as_ref());
+            request = Some(TranscriptFileWrite {
+                agent_id: agent.session.id, session_id: agent.session.session_id.clone(),
+                path, content: text, kind: FileWriteKind::Copy,
+            });
             return;
         }
 
-        let delivery = crate::clipboard::copy_text_or_file(text);
-        match &delivery {
-            crate::clipboard::CopyDelivery::Clipboard { file, .. } => {
-                let block_msg = match file {
-                    Some(path) => format!(
-                        "Copied to clipboard (also saved to {}){stats}",
-                        crate::clipboard::display_copy_path(path)
-                    ),
-                    None => format!("Copied to clipboard{stats}"),
-                };
-                agent.scrollback.push_block(RenderBlock::notice(block_msg));
-            }
-            crate::clipboard::CopyDelivery::File { path } => {
-                agent.scrollback.push_block(RenderBlock::notice(format!(
-                    "Clipboard unreachable — wrote {}{stats}",
-                    crate::clipboard::display_copy_path(path)
-                )));
-            }
-            crate::clipboard::CopyDelivery::Failed { .. } => {
-                agent
-                    .scrollback
-                    .push_block(RenderBlock::notice(format!("Copy failed{stats}")));
-            }
-        }
+        let stats = crate::clipboard::clipboard_stats_suffix(&text);
+        let delivery = crate::clipboard::copy_text_or_file(&text);
+        agent.scrollback.push_block(RenderBlock::notice(format!(
+            "{}{stats}", delivery.summary_message()
+        )));
         agent.show_toast_for(
             delivery.toast_message().as_ref(),
             std::time::Duration::from_millis(u64::from(delivery.toast_ticks()) * 33),
         );
     });
+    enqueue_file_write(app, request)
 }
 
 /// Dispatch for the `/export` command.
@@ -153,8 +128,16 @@ pub(super) fn dispatch_copy_assistant_message(
 pub(super) fn dispatch_export_conversation(
     app: &mut AppView,
     file_path: Option<std::path::PathBuf>,
-) {
+) -> Vec<Effect> {
+    let mut request = None;
     with_active_agent(app, |agent| {
+        if agent.session.loading_replay {
+            agent.scrollback.push_block(RenderBlock::notice(
+                "Session history is still loading. Try /export again when loading finishes.",
+            ));
+            return;
+        }
+
         let blocks: Vec<_> = (0..agent.scrollback.len())
             .filter_map(|i| agent.scrollback.entry(i).map(|e| &e.block))
             .collect();
@@ -169,32 +152,15 @@ pub(super) fn dispatch_export_conversation(
         }
 
         if let Some(p) = file_path {
-            // All fs logic (tilde, mkdir, write) lives here (single owner, thin command layer).
-            let expanded =
-                std::path::PathBuf::from(shellexpand::tilde(&p.to_string_lossy()).as_ref());
-            if let Some(parent) = expanded.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                agent.scrollback.push_block(RenderBlock::notice(format!(
-                    "Failed to create directory: {e}"
-                )));
-                return;
-            }
-            match std::fs::write(&expanded, &md) {
-                Ok(()) => {
-                    agent.scrollback.push_block(RenderBlock::notice(format!(
-                        "Conversation exported to {}",
-                        expanded.display()
-                    )));
-                }
-                Err(e) => {
-                    // Do not blindly re-emit a user-supplied path in the error message
-                    // (it may contain secrets or PII); the generic failure is sufficient.
-                    agent
-                        .scrollback
-                        .push_block(RenderBlock::notice(format!("Failed to write file: {}", e)));
-                }
-            }
+            // Session-relative resolution stays here; CLI and TUI share file commit logic.
+            let expanded = agent
+                .session
+                .cwd
+                .join(shellexpand::tilde(&p.to_string_lossy()).as_ref());
+            request = Some(TranscriptFileWrite {
+                agent_id: agent.session.id, session_id: agent.session.session_id.clone(),
+                path: expanded, content: md, kind: FileWriteKind::Export,
+            });
         } else {
             // Clipboard path: stats block (like assistant copy) + route-aware toast
             // (like block content copy / selection). Good UX for a potentially large transcript.
@@ -203,25 +169,30 @@ pub(super) fn dispatch_export_conversation(
             // when the delivery fell back to the backup file.
             let stats = crate::clipboard::clipboard_stats_suffix(&md);
             let delivery = agent.copy_to_clipboard(&md);
-            let block_msg = match &delivery {
-                crate::clipboard::CopyDelivery::Clipboard { file, .. } => match file {
-                    Some(path) => format!(
-                        "Conversation copied to clipboard (also saved to {}){stats}",
-                        crate::clipboard::display_copy_path(path)
-                    ),
-                    None => format!("Conversation copied to clipboard{stats}"),
-                },
-                crate::clipboard::CopyDelivery::File { path } => format!(
-                    "Clipboard unreachable — conversation written to {}{stats}",
-                    crate::clipboard::display_copy_path(path)
-                ),
-                crate::clipboard::CopyDelivery::Failed { .. } => {
-                    format!("Conversation copy failed{stats}")
-                }
-            };
+            let block_msg = format!("Conversation: {}{stats}", delivery.summary_message());
             agent.scrollback.push_block(RenderBlock::notice(block_msg));
         }
     });
+    enqueue_file_write(app, request)
+}
+
+fn enqueue_file_write(app: &mut AppView, request: Option<TranscriptFileWrite>) -> Vec<Effect> {
+    let Some(request) = request else { return vec![]; };
+    let agent_id = request.agent_id;
+    match app.transcript_file_writes.enqueue(request) {
+        Ok(effect) => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.scrollback.push_block(RenderBlock::notice("Saving file…"));
+            }
+            effect.into_iter().collect()
+        }
+        Err(()) => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.scrollback.push_block(RenderBlock::notice("Too many file writes pending. Try again after a write finishes."));
+            }
+            vec![]
+        }
+    }
 }
 
 /// Open the full transcript in `$PAGER`.
@@ -235,7 +206,7 @@ pub(super) fn dispatch_export_conversation(
 /// shipped to a worker either. Instead this only ARMS the request; the minimal
 /// render loop builds the transcript **incrementally, a time-budgeted slice
 /// per frame** (`full_view::pump_transcript`, the same time-sliced amortization
-/// pattern other TUIs use for heavy transcript work), then arms `pending_pager_path`
+/// pattern other TUIs use for heavy transcript work), then arms `pending_pager`
 /// for the event loop's suspend-into-`$PAGER`.
 ///
 /// **Other modes** keep the compact markdown export (string concatenation, no
@@ -246,16 +217,30 @@ pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) {
         return;
     }
 
+    let ActiveView::Agent(root) = app.active_view else { return; };
     let mut md = None;
+    let mut loading = false;
     with_active_agent(app, |agent| {
+        if agent.session.loading_replay {
+            loading = true;
+            agent.scrollback.push_block(RenderBlock::notice(
+                "Session history is still loading. Try /transcript again when loading finishes.",
+            ));
+            return;
+        }
         let blocks: Vec<_> = (0..agent.scrollback.len())
             .filter_map(|i| agent.scrollback.entry(i).map(|e| &e.block))
             .collect();
         let rendered = crate::scrollback::export::render_blocks_to_markdown(blocks);
         if !rendered.is_empty() {
-            md = Some(rendered);
+            md = Some(crate::export_cmd::write_pager_transcript(&rendered, false)
+                .map(|path| crate::app::external_pager::PendingPager::new(path, false, root, agent)));
         }
     });
+
+    if loading {
+        return;
+    }
 
     let Some(content) = md else {
         with_active_agent(app, |agent| {
@@ -266,11 +251,9 @@ pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) {
         return;
     };
 
-    let path = std::env::temp_dir().join(format!("grow-transcript-{}.md", uuid::Uuid::new_v4()));
-    match std::fs::write(&path, content) {
-        Ok(()) => {
-            app.pending_pager_path = Some(path);
-            app.pending_pager_ansi = false;
+    match content {
+        Ok(request) => {
+            app.pending_pager = Some(request);
         }
         Err(e) => {
             with_active_agent(app, |agent| {
@@ -554,19 +537,29 @@ pub(super) fn dispatch_copy_block_meta(app: &mut AppView) {
 
 /// Dump the input flight recorder to a JSON file for debugging.
 /// See `input_log.rs` module docs for lifecycle/removal instructions.
-pub(super) fn dispatch_dump_input_log(app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
+fn input_dump_target(app: &mut AppView) -> Option<&mut crate::app::agent_view::AgentView> {
+    let id = match app.active_view {
+        ActiveView::Agent(id) => id,
+        ActiveView::AgentDashboard => app.dashboard.as_ref()?.attached_agent?,
+        _ => return None,
     };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-
-    if agent.input_log.entry_count() == 0 {
-        agent.show_toast("No input events recorded yet.");
-        return vec![];
+    fn descend(agent: &mut crate::app::agent_view::AgentView) -> &mut crate::app::agent_view::AgentView {
+        if agent.permission_queue.is_empty()
+            && let Some(sid) = agent.active_subagent.clone()
+            && agent.subagent_views.contains_key(&sid)
+        {
+            return descend(agent.subagent_views.get_mut(&sid).unwrap());
+        }
+        agent
     }
+    app.agents.get_mut(&id).map(descend)
+}
 
+fn build_input_dump(
+    agent: &crate::app::agent_view::AgentView,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<crate::input_log::InputDump> {
+    if agent.input_log.entry_count() == 0 { return None; }
     let time_span_ms = agent.input_log.time_span_ms();
     let entries = agent.input_log.snapshot_entries();
     let entry_count = entries.len();
@@ -574,10 +567,9 @@ pub(super) fn dispatch_dump_input_log(app: &mut AppView) -> Vec<Effect> {
     let session_id = agent.session.session_id.as_ref().map(|s| s.0.to_string());
     let pager_version = crate::client_identity::PAGER_CLIENT_VERSION;
 
-    let now = chrono::Utc::now();
-    let dump = crate::input_log::InputDump {
+    Some(crate::input_log::InputDump {
         dumped_at: now.to_rfc3339(),
-        session_id: session_id.clone(),
+        session_id,
         pager_version,
         terminal,
         active_pane: format!("{:?}", agent.active_pane),
@@ -587,7 +579,19 @@ pub(super) fn dispatch_dump_input_log(app: &mut AppView) -> Vec<Effect> {
         entry_count,
         time_span_ms,
         entries,
+    })
+}
+
+pub(super) fn dispatch_dump_input_log(app: &mut AppView) -> Vec<Effect> {
+    let Some(agent) = input_dump_target(app) else { return vec![]; };
+    let now = chrono::Utc::now();
+    let Some(dump) = build_input_dump(agent, now) else {
+        agent.show_toast("No input events recorded yet.");
+        return vec![];
     };
+    let entry_count = dump.entry_count;
+    let time_span_ms = dump.time_span_ms;
+    let session_id = dump.session_id.clone();
 
     let json = match serde_json::to_string_pretty(&dump) {
         Ok(j) => j,
@@ -599,12 +603,8 @@ pub(super) fn dispatch_dump_input_log(app: &mut AppView) -> Vec<Effect> {
 
     let grow_home = tools::util::grow_home::grow_home();
     let logs_dir = grow_home.join("logs");
-    let _ = std::fs::create_dir_all(&logs_dir);
-    let ts = now.format("%Y%m%d-%H%M%S");
-    let path = logs_dir.join(format!("input-debug-{ts}.json"));
-
-    match std::fs::write(&path, json) {
-        Ok(()) => {
+    match crate::input_log::write_input_dump(&logs_dir, now, &json) {
+        Ok(path) => {
             let display_path = path.display();
             agent.show_toast(&format!(
                 "Input log ({entry_count} events) → {display_path}"
@@ -808,4 +808,80 @@ pub(super) fn handle_skills_toggle_done(
     // which triggers the session to reload skills and push an
     // AvailableCommandsUpdate notification with the updated list.
     vec![]
+}
+
+#[cfg(test)]
+mod input_diagnostic_tests {
+    use super::*;
+    use crate::app::agent_view::AgentPane;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn child_app() -> AppView {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let mut child_app = crate::app::root::tests::test_app_with_agent();
+        let mut child = child_app.agents.shift_remove(&AgentId(0)).unwrap();
+        child.session.session_id = Some(acp::SessionId::new("diagnostic-child"));
+        child.force_active_pane(AgentPane::Prompt);
+        child.prompt.set_text("child text");
+        child.prompt.set_cursor(2);
+        let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+        parent.session.session_id = Some(acp::SessionId::new("diagnostic-parent"));
+        parent.force_active_pane(AgentPane::Prompt);
+        parent.prompt.set_text("parent with different length");
+        parent.prompt.set_cursor(5);
+        parent.subagent_views.insert("child".into(), Box::new(child));
+        parent.active_subagent = Some("child".into());
+        app
+    }
+
+    #[test]
+    fn input_diagnostic_child_records_and_dump_resolves_same_surface() {
+        let mut app = child_app();
+        let _ = app.handle_input(&Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        let parent = &app.agents[&AgentId(0)];
+        assert_eq!(parent.input_log.entry_count(), 0);
+        let child = &parent.subagent_views["child"];
+        assert_eq!(child.input_log.entry_count(), 1);
+        let expected_cursor = child.prompt.cursor();
+        let expected_len = child.prompt.text().len();
+        let target = input_dump_target(&mut app).unwrap();
+        let dump = build_input_dump(target, chrono::Utc::now()).unwrap();
+        assert_eq!(dump.session_id.as_deref(), Some("diagnostic-child"));
+        assert_eq!(dump.textarea_cursor, expected_cursor);
+        assert_eq!(dump.textarea_text_len, expected_len);
+        assert_eq!(dump.entries[0].key, "Char");
+        assert_eq!(dump.entries[0].pane, "Prompt");
+        // Resolve the attached surface without claiming Esc reaches it: the
+        // dashboard consumes Esc to close its popup before agent input routing.
+        app.dashboard = Some(crate::views::dashboard::DashboardState::new());
+        app.dashboard.as_mut().unwrap().attached_agent = Some(AgentId(0));
+        app.active_view = ActiveView::AgentDashboard;
+        let dump = build_input_dump(input_dump_target(&mut app).unwrap(), chrono::Utc::now()).unwrap();
+        assert_eq!(dump.session_id.as_deref(), Some("diagnostic-child"));
+        app.dashboard.as_mut().unwrap().attached_agent = None;
+        assert!(input_dump_target(&mut app).is_none());
+    }
+
+    #[test]
+    fn input_diagnostic_parent_close_records_parent_without_stale_delta() {
+        let mut app = child_app();
+        let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+        parent.prompt.last_input_delta.cursor_before = Some(999);
+        parent.subagent_views.get_mut("child").unwrap().force_active_pane(AgentPane::Scrollback);
+        let _ = app.handle_input(&Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        let parent = &app.agents[&AgentId(0)];
+        assert!(parent.active_subagent.is_none());
+        assert_eq!(parent.input_log.entry_count(), 1);
+        assert_eq!(parent.subagent_views["child"].input_log.entry_count(), 0);
+        let dump = build_input_dump(parent, chrono::Utc::now()).unwrap();
+        assert_eq!(dump.session_id.as_deref(), Some("diagnostic-parent"));
+        assert_eq!(dump.entries[0].cursor_before, None);
+        assert_eq!(dump.entries[0].key, "Esc");
+    }
+
+    #[test]
+    fn input_diagnostic_empty_surface_has_no_dump_model() {
+        let mut app = child_app();
+        assert!(build_input_dump(input_dump_target(&mut app).unwrap(), chrono::Utc::now()).is_none());
+    }
 }

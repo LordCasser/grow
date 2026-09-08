@@ -58,6 +58,26 @@ fn ext_control_rpc_outcome(response: &acp::ExtResponse) -> actions::ControlRpcOu
     control_rpc_outcome(status.as_deref())
 }
 
+fn recap_admission_error(response: &acp::ExtResponse) -> Option<String> {
+    let Ok(envelope) = serde_json::from_str::<ExtMethodResult<serde_json::Value>>(response.0.get()) else {
+        return Some("Invalid recap admission response".into());
+    };
+    if envelope.error.is_some() {
+        return Some("Recap admission failed".into());
+    }
+    let Some(result) = envelope.result else {
+        return Some("Missing recap admission result".into());
+    };
+    if result.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Some("Recap request was not accepted".into());
+    }
+    match result.get("disabled") {
+        None | Some(serde_json::Value::Bool(false)) => None,
+        Some(serde_json::Value::Bool(true)) => Some("Session recap is not enabled".into()),
+        _ => Some("Invalid recap admission response".into()),
+    }
+}
+
 pub(crate) fn execute(
     effect: Effect,
     tasks: &mut JoinSet<TaskResult>,
@@ -67,6 +87,10 @@ pub(crate) fn execute(
 ) -> (bool, EffectMeta) {
     let meta = EffectMeta;
     match effect {
+        Effect::WriteTranscriptFile { id, request } => {
+            tasks.spawn(crate::app::transcript_file_writes::execute(id, request));
+        }
+
         Effect::RegisterActiveSession { session_id, cwd } => {
             crate::app::signal_handler::set_current_session_id(Some(session_id.clone()));
             if let Err(e) = shell::active_sessions::register(shell::active_sessions::ActiveSession {
@@ -1703,11 +1727,12 @@ pub(crate) fn execute(
             agent_id,
             child_session_id,
             owner_id,
-            path,
+            source,
+            protocol,
         } => {
             tasks.spawn(async move {
                 let result = tokio::task::spawn_blocking(move || {
-                    crate::prompt_images::load_image_data(&path)
+                    crate::prompt_images::load_image_data(source, protocol)
                 })
                 .await
                 .unwrap_or(crate::prompt_images::ImageLoadResult::Failed);
@@ -1719,10 +1744,13 @@ pub(crate) fn execute(
                 }
             });
         }
-        Effect::PlanDoctorFix { target, report, terminal, request } => {
+        Effect::PrepareDoctor { target, input, permit, terminal, request } => {
+            let report_only = matches!(request, crate::slash::command::DoctorRequest::Report);
             tasks
                 .spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || match request {
+                    let result = crate::app::doctor::execute(permit, move || {
+                        let report = input.collect(&terminal);
+                        match request {
                             crate::slash::command::DoctorRequest::ListFixes => {
                                 Ok(
                                     actions::DoctorPlanningOutcome::Listing(
@@ -1733,9 +1761,10 @@ pub(crate) fn execute(
                                     ),
                                 )
                             }
-                            crate::slash::command::DoctorRequest::Fix(id) => {
+                            crate::slash::command::DoctorRequest::Fix(id, config_path) => {
                                 match crate::diagnostics::select_fix_plan(
                                     id,
+                                    config_path,
                                     &report,
                                     &terminal,
                                 ) {
@@ -1754,13 +1783,12 @@ pub(crate) fn execute(
                                 }
                             }
                             crate::slash::command::DoctorRequest::Report => {
-                                unreachable!("report does not enter the planning effect")
+                                Ok(actions::DoctorPlanningOutcome::Report(crate::diagnostics::format_doctor(&report)))
                             }
-                        })
-                        .await
-                        .map_err(|error| format!("Could not prepare the fix: {error}"))
-                        .and_then(|result| result);
+                        }
+                    }).await;
                     TaskResult::DoctorFixPlanned {
+                        report_only,
                         target,
                         result,
                     }
@@ -1805,11 +1833,9 @@ pub(crate) fn execute(
         Effect::PersistAnnouncementsHidden { hidden_ids } => {
             tasks
                 .spawn(async move {
-                    announcements::write_hidden_announcement_ids(&hidden_ids)
-                        .await;
-                    TaskResult::AnnouncementsHiddenPersisted {
-                        result: Ok(()),
-                    }
+                    let result = announcements::write_hidden_announcement_ids(&hidden_ids)
+                        .await.map_err(|error| error.to_string());
+                    TaskResult::AnnouncementsHiddenPersisted { result }
                 });
         }
         Effect::PersistMemoryFullscreen { fullscreen } => {
@@ -3146,11 +3172,11 @@ pub(crate) fn execute(
                             .into(),
                     );
                     match acp_send(request, &tx).await {
-                        Ok(_) => {
+                        Ok(response) => {
                             TaskResult::RecapRequested {
                                 session_id,
                                 auto,
-                                error: None,
+                                error: recap_admission_error(&response),
                             }
                         }
                         Err(e) => {
@@ -3430,7 +3456,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchRewindPoints { agent_id, session_id } => {
+        Effect::FetchRewindPoints { agent_id, session_id, request_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3455,6 +3481,7 @@ pub(crate) fn execute(
                                 .filter(|v| !v.is_null())
                             {
                                 return TaskResult::RewindPointsFailed {
+                                    request_id,
                                     agent_id,
                                     error: err.as_str().unwrap_or("unknown error").to_string(),
                                 };
@@ -3468,12 +3495,14 @@ pub(crate) fn execute(
                             >(result_val) {
                                 Ok(r) => {
                                     TaskResult::RewindPointsLoaded {
+                                        request_id,
                                         agent_id,
                                         points: r.rewind_points,
                                     }
                                 }
                                 Err(e) => {
                                     TaskResult::RewindPointsFailed {
+                                        request_id,
                                         agent_id,
                                         error: format!("invalid response: {e}"),
                                     }
@@ -3482,6 +3511,7 @@ pub(crate) fn execute(
                         }
                         Err(e) => {
                             TaskResult::RewindPointsFailed {
+                                request_id,
                                 agent_id,
                                 error: sanitize_user_error(&e.to_string()),
                             }
@@ -3489,7 +3519,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RewindPreview { agent_id, session_id, target_prompt_index, mode } => {
+        Effect::RewindPreview { agent_id, session_id, target_prompt_index, mode, request_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3521,6 +3551,7 @@ pub(crate) fn execute(
                             >(result_val) {
                                 Ok(r) => {
                                     TaskResult::RewindPreviewComplete {
+                                        request_id,
                                         agent_id,
                                         response: r,
                                         target_prompt_index,
@@ -3529,6 +3560,7 @@ pub(crate) fn execute(
                                 }
                                 Err(e) => {
                                     TaskResult::RewindPreviewFailed {
+                                        request_id,
                                         agent_id,
                                         error: format!("invalid response: {e}"),
                                     }
@@ -3537,6 +3569,7 @@ pub(crate) fn execute(
                         }
                         Err(e) => {
                             TaskResult::RewindPreviewFailed {
+                                request_id,
                                 agent_id,
                                 error: sanitize_user_error(&e.to_string()),
                             }

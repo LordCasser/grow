@@ -267,3 +267,27 @@ from the preceding follow-up was not rebuilt for this additional source patch.
 After testing, `cargo clean -p pager --profile dev` removed 3.2 GiB of
 regenerable TUI build artifacts; approximately 30 GiB remained free. No source,
 configuration, or Session data was removed.
+
+自动 TTL 清理入口为 `session/persistence.rs::cleanup_stale_sessions`；删除身份由 JSONL adapter 回调返回，再交给同 root 的现有搜索队列。实现阅读从 `session/storage/search.rs::upsert_by_key` 的缺失摘要分支继续；行为约束见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-automatic-session-cleanup-updates-search-projection)。
+
+搜索投影忙锁重试位于 `session/storage/search.rs::flush_ready`：错误源保留 rusqlite 类型，按 Busy/Locked 分类复用 pending deadline。相关运行时约束见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-retry-contended-session-search-projections)；它不是跨进程持久化任务队列。
+
+索引打开时先建立既有 `meta` 表，再读取 schema version；只有缺行使用未初始化分支，查询或 SQL 类型解码失败不会被当作缺行。代码入口是 `search_fts.rs::open_with_journal_mode`，契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-search-version-reads-distinguish-absence-from-failure)。
+
+搜索缓存隔离与恢复从 `search_recovery.rs::heal_unusable` 阅读：返回值决定调用方能否重新打开，namespace epoch 同时覆盖部分隔离。两个入口位于 `search_fts.rs`；行为约束见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-search-quarantine-failure-stops-recreation)。
+
+全量搜索回填的句柄预算从 `search.rs::reindex_all` 的 admission 开始阅读；`jsonl/mod.rs` 的摘要枚举投影和只读 Timeline 打开路径避免向 writer cache 加入扫描目录。契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-search-bootstrap-bounds-live-timeline-readers)。
+
+TTL 候选处理从 `jsonl/mod.rs::cleanup_stale_sessions_sync` 阅读：发现阶段只保留摘要，删除阶段的临时 adapter 共享已固定的根目录、单独持有维护资源。`delete_if_still_stale` 继续负责锁内当前状态重检；契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-ttl-cleanup-bounds-candidate-handle-ownership)。
+
+会话扫描的错误分类位于 `jsonl/mod.rs::is_skippable_scan_error`，由目录、摘要和物理身份读取共用；清理与搜索的失败边界见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-session-scans-propagate-operational-failures)。
+
+完整回退历史的读取错误从 `workspace/session/file_state.rs::ensure_historical_loaded` 经 Result 传递到 shell 的回退和待恢复事务入口。代码导航从 `session/actor/rewind.rs` 的三处完整历史读取继续；行为约束见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-rewind-operations-reject-historical-load-failure)。
+
+固定句柄的回退 JSONL 读取器为 `workspace/session/file_state.rs::read_rewind_jsonl_from_file`：完整历史与 metadata 共用解析错误通道，错误包含物理行号；契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-pinned-rewind-parsing-rejects-malformed-records)。
+
+回退模式的文件改动资格位于 `pager/app/root/dispatch/rewind.rs` 的目标选择、预选目标加载完成与返回模式选择入口，按目标及后续 checkpoint 计算。契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-rewind-file-modes-consider-the-affected-checkpoint-range)。
+
+回退确认页的返回逻辑由 `pager/app/root/dispatch/rewind.rs::dispatch_rewind_back_to_mode_select` 从当前 phase 读取目标；契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-rewind-back-navigation-preserves-the-active-target)。
+
+回退检查点与预览读取由 `AgentView::rewind_read` 保存请求及会话绑定代次，任务返回时由 `accept_rewind_read` 校验并消费；执行结果继续走原有状态同步。见 [读取生命周期契约](../../openspec/specs/client-surfaces/spec.md#requirement-rewind-reads-belong-to-the-requesting-interaction)。

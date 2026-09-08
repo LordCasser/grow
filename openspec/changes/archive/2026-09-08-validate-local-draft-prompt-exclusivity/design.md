@@ -1,0 +1,4 @@
+# Design
+在validate_record入口拒绝两个Option同时Some，与capture_agent现有约束一致。write在检查has_payload之前验证记录，使无内容但结构冲突的记录不能通过remove分支。load继续调用同一校验并隔离无效源。正常empty记录仍执行删除。
+
+测试真实store拒写不覆盖、磁盘两份输入隔离及单staged正常回读；以真实AppView sync验证双输入记录不填composer、不重建队列、不恢复Behavior。测试不触碰真实用户目录。

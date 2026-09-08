@@ -1,0 +1,5 @@
+# Design
+Use checked integer conversion for configured TTL and checked date arithmetic before any scan/deletion. Missing configuration retains the documented 30-day default; malformed/unrepresentable configured retention must fail closed rather than become a shorter policy. Inspect config-layer error behavior before choosing the exact parser boundary. Tests must include 2^32, u32::MAX, nonpositive values, default, ordinary TTL and cutoff overflow without invoking real-home cleanup.
+
+# Implementation
+ConfigLayers treats missing config files as empty tables, but reports syntax/read errors; resolve_cleanup_ttl_days now propagates those errors. A pure effective-config parser validates storage table, optional integer TTL, positive checked u32 conversion. The cleanup entry logs and returns on error before constructing/scanning storage. Adapter also rejects zero directly and uses checked_sub_signed for representability before its scan loop. u32::MAX fits the numeric parser but is rejected by date eligibility. Process Once semantics are unchanged.

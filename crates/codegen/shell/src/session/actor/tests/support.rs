@@ -675,7 +675,7 @@ pub(crate) async fn create_test_actor_ex(
         sampler_event_drainer: TaskSlot::new(),
         rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
         image_description_model: parking_lot::RwLock::new(None),
-        session_title_route: std::cell::RefCell::new(None),
+        session_title_route: std::cell::RefCell::new(None.into()),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         workspace_ops: workspace::WorkspaceOps::for_test(),
     };

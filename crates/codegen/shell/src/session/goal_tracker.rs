@@ -449,9 +449,10 @@ impl GoalTracker {
     }
 
     pub fn account_elapsed(&mut self) {
-        let Some(started) = self.active_since.replace(Instant::now()) else {
+        let Some(started) = self.active_since else {
             return;
         };
+        self.active_since = Some(Instant::now());
         let Some(goal) = self.goal.as_mut() else {
             self.active_since = None;
             return;
@@ -565,6 +566,29 @@ mod tests {
             .create_goal("g1".into(), "ship it".into(), Some(100), "now".into())
             .unwrap();
         tracker
+    }
+
+    #[test]
+    fn stopped_goal_elapsed_does_not_grow_when_status_is_polled() {
+        for status in [
+            GoalStatus::Paused,
+            GoalStatus::Blocked,
+            GoalStatus::BudgetLimited,
+            GoalStatus::Complete,
+        ] {
+            let mut snapshot = tracker().snapshot().unwrap().clone();
+            snapshot.status = status;
+            snapshot.elapsed_ms = 123;
+            let mut tracker = GoalTracker::from_snapshot(snapshot).unwrap();
+            for _ in 0..2 {
+                tracker.account_elapsed();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                assert_eq!(tracker.elapsed_ms(), 123, "status: {status:?}");
+                tracker.account_elapsed();
+                assert_eq!(tracker.snapshot().unwrap().elapsed_ms, 123);
+                assert_eq!(tracker.status(), Some(status));
+            }
+        }
     }
 
     #[test]

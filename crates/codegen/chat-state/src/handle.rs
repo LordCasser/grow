@@ -150,7 +150,7 @@ impl ChatStateHandle {
     pub async fn push_user_message_durably(
         &self,
         item: ConversationItem,
-    ) -> Result<(), TimelineWriteError> {
+    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
         self.query("PushUserMessageDurably", |reply| {
             ChatStateCommand::PushUserMessageDurably { item, reply }
         })

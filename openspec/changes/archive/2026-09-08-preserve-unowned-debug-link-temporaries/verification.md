@@ -1,0 +1,4 @@
+# Verification
+- main. `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_BUILD_JOBS=2 RUST_MIN_STACK=16777216 cargo test --locked --offline -p diagnostics --lib debug_log::tests`: 22 passed, 0 failed/ignored, 0.01s.
+- Added explicit temp-directory test for existing regular bytes and dangling symlink target, with existing latest target preserved. Existing successful session sink link update, failed rename cleanup, filter/routing and retention regressions all pass. No real debug directory or GROW_HOME call in selected tests.
+- Collision remains best-effort: no refresh until temp is removed by its owner or existing retention policy; actual session file logging continues. No hostile directory race or retention quota guarantee. No installed binary or live TUI test.

@@ -9,7 +9,7 @@ use super::setters::{
     set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
     set_multiline_mode, set_page_flip_on_send_inner, set_prompt_suggestions_inner,
     set_remember_tool_approvals_inner, set_render_mermaid_inner, set_respect_manual_folds_inner,
-    set_screen_mode_inner, set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
+    set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
     set_timeline_inner, set_timestamps, set_timestamps_inner, set_vim_mode_inner,
 };
@@ -1030,8 +1030,8 @@ pub(in crate::app::root::dispatch) fn apply_setting_rollback(
         ("hunk_tracker_mode", SettingValue::Enum(s)) => {
             set_hunk_tracker_mode_inner(app, crate::settings::canonical_hunk_tracker_mode(Some(s)));
         }
-        ("screen_mode", SettingValue::Enum(s)) => {
-            set_screen_mode_inner(app, crate::settings::canonical_screen_mode(Some(s)));
+        ("screen_mode", SettingValue::String(s)) => {
+            app.current_ui.screen_mode = if s.is_empty() { None } else { Some(s.clone()) };
         }
         // show_tips / auto_update: if rollback equals the effective
         // default, restore to None (keeps mirror in sync with disk).

@@ -173,6 +173,7 @@ fn findings_have_stable_semantic_ids_and_dispositions() {
     let report = view(snapshot(
         &terminal,
         TmuxProbeFacts {
+            config_files: TmuxProbeResult::Unavailable,
             version: TmuxProbeResult::Unavailable,
             extended_keys: TmuxProbeResult::Unavailable,
             set_clipboard: TmuxProbeResult::Available("off".to_owned()),
@@ -244,6 +245,7 @@ fn all_tmux_finding_metadata_uses_stable_automatic_fix_ids_without_schema_change
     let report = view(snapshot(
         &terminal,
         TmuxProbeFacts {
+            config_files: TmuxProbeResult::Unavailable,
             version: TmuxProbeResult::Available("tmux 3.4".to_owned()),
             extended_keys: TmuxProbeResult::Available("off".to_owned()),
             set_clipboard: TmuxProbeResult::Available("off".to_owned()),
@@ -282,6 +284,7 @@ fn all_tmux_finding_metadata_uses_stable_automatic_fix_ids_without_schema_change
     let healthy = view(snapshot(
         &terminal,
         TmuxProbeFacts {
+            config_files: TmuxProbeResult::Unavailable,
             version: TmuxProbeResult::Available("tmux 3.4".to_owned()),
             extended_keys: TmuxProbeResult::Available("on".to_owned()),
             set_clipboard: TmuxProbeResult::Available("external".to_owned()),
@@ -312,6 +315,7 @@ fn unavailable_runtime_evidence_is_honest_and_fail_open() {
     let report = view(snapshot(
         &terminal,
         TmuxProbeFacts {
+            config_files: TmuxProbeResult::Unavailable,
             version: TmuxProbeResult::Unavailable,
             extended_keys: TmuxProbeResult::Unavailable,
             set_clipboard: TmuxProbeResult::Available("on".to_owned()),
@@ -363,6 +367,7 @@ fn unavailable_and_error_probe_evidence_is_retained_without_findings() {
     let report = view(snapshot_with_wayland(
         &terminal,
         TmuxProbeFacts {
+            config_files: TmuxProbeResult::Unavailable,
             version: TmuxProbeResult::Unavailable,
             extended_keys: TmuxProbeResult::Unavailable,
             set_clipboard: TmuxProbeResult::Error("server unreachable".to_owned()),
@@ -399,6 +404,7 @@ fn unavailable_and_error_probe_evidence_is_retained_without_findings() {
 
 fn plain_tmux() -> TmuxProbeFacts {
     TmuxProbeFacts {
+        config_files: TmuxProbeResult::Unavailable,
         version: TmuxProbeResult::Unavailable,
         extended_keys: TmuxProbeResult::Unavailable,
         set_clipboard: TmuxProbeResult::Available("on".to_owned()),
@@ -711,4 +717,14 @@ fn keyboard_fact_and_formatter_use_snapshot_host() {
         assert!(keyboard.is_none());
         assert!(!output.contains("  keyboard     "));
     }
+}
+
+#[test]
+fn report_keeps_raw_configuration_candidates() {
+    let terminal = TerminalContext { multiplexer: MultiplexerKind::Tmux, ..Default::default() };
+    let mut tmux = plain_tmux();
+    let candidates = "/tmp/a,b ";
+    tmux.config_files = TmuxProbeResult::Available(candidates.into());
+    let report = view(snapshot(&terminal, tmux, available_runtime(), false));
+    assert_eq!(report.facts.tmux.config_files.as_deref(), Some(candidates));
 }

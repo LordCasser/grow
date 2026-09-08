@@ -82,7 +82,8 @@ pub(crate) fn title_fallback_from_user_text(user_message: &str) -> String {
     if s.is_empty() {
         "New session".to_string()
     } else {
-        s
+        // Match Timeline's Unicode-scalar limit, including unbroken CJK/URLs.
+        s.chars().take(160).collect::<String>().trim_end().to_owned()
     }
 }
 
@@ -263,6 +264,20 @@ mod tests {
             ),
             "one two three four five six seven eight nine ten"
         );
+    }
+
+    #[test]
+    fn fallback_titles_fit_canonical_character_limit() {
+        for input in ["x".repeat(500), "图".repeat(500), "🦀".repeat(500)] {
+            let title = title_fallback_from_user_text(&input);
+            assert_eq!(title.chars().count(), 160);
+            assert!(input.starts_with(&title));
+        }
+        let input = format!("{} next", "x".repeat(159));
+        let title = title_fallback_from_user_text(&input);
+        assert_eq!(title, "x".repeat(159), "trim space at the cutoff");
+        let exact = "图".repeat(160);
+        assert_eq!(title_fallback_from_user_text(&exact), exact);
     }
 
     #[test]

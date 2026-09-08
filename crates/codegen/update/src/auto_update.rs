@@ -537,6 +537,7 @@ fn parse_version_output(stdout: &[u8]) -> Option<String> {
 async fn probe_version_by_exec(path: &std::path::Path) -> Option<String> {
     let mut cmd = tokio::process::Command::new(path);
     cmd.arg("--version")
+        .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         // Piped, not null: the version is read back from stdout. The
         // process is detached and stderr is null, so the probe stays silent.
@@ -1482,6 +1483,7 @@ async fn smoke_test_binary(binary_path: &std::path::Path) -> bool {
     for attempt in 1..=SMOKE_TEST_ETXTBSY_ATTEMPTS {
         let mut cmd = tokio::process::Command::new(binary_path);
         cmd.arg("--version")
+            .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -1519,21 +1521,28 @@ async fn regenerate_completions(binary: &std::path::Path, grow_home: &std::path:
     ];
 
     for (shell, dest) in completions {
-        if let Some(parent) = dest.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        let mut cmd = tokio::process::Command::new(binary);
-        cmd.args(["completions", shell])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-        tty_utils::detach_command(&mut cmd);
-        let Ok(output) = cmd.output().await else {
-            continue;
-        };
-        if output.status.success() && !output.stdout.is_empty() {
-            let _ = tokio::fs::write(dest, &output.stdout).await;
-        }
+        regenerate_completion(binary, shell, dest).await;
+    }
+}
+
+const COMPLETION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn regenerate_completion(binary: &std::path::Path, shell: &str, dest: &std::path::Path) {
+    if let Some(parent) = dest.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.args(["completions", shell])
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    tty_utils::detach_command(&mut cmd);
+    let Ok(Ok(output)) = tokio::time::timeout(COMPLETION_TIMEOUT, cmd.output()).await else {
+        return;
+    };
+    if output.status.success() && !output.stdout.is_empty() {
+        let _ = tokio::fs::write(dest, &output.stdout).await;
     }
 }
 
@@ -2181,25 +2190,29 @@ async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_
         }
     }
 
-    // Sort descending by version so the newest is first.
-    versioned.sort_by(|a, b| b.0.cmp(&a.0));
-
-    // Keep the most recent old version (index 0), delete the rest (index 1+).
-    // This matches the GitHub Release policy: current + 1 previous.
-    for (_, name) in versioned.iter().skip(1) {
+    // Retain the highest non-current version as a whole, including all
+    // platform artifacts. Counting files would make retention depend on
+    // directory enumeration when one version has multiple binaries.
+    let retained_version = versioned.iter().map(|(version, _)| version).max();
+    for (version, name) in &versioned {
+        if Some(version) == retained_version {
+            continue;
+        }
         let path = dir.join(name);
         // Same freshness guard as the `.tmp` sweep: a versioned binary
         // written moments ago is likely a concurrent installer's
         // just-renamed download (its symlink swap hasn't happened yet) —
         // deleting it would leave that installer's swap pointing at
         // nothing. Old binaries from previous releases are days old.
-        let fresh = tokio::fs::metadata(&path)
+        // Unknown age (including future mtime after clock rollback) is
+        // not evidence that a concurrent install is safe to remove.
+        let stale = tokio::fs::metadata(&path)
             .await
             .and_then(|m| m.modified())
             .ok()
             .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
-            .is_some_and(|age| age <= STALE_TMP_AGE);
-        if fresh {
+            .is_some_and(|age| age > STALE_TMP_AGE);
+        if !stale {
             continue;
         }
         if let Err(e) = tokio::fs::remove_file(&path).await {
@@ -3047,6 +3060,143 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn test_update_version_checks_terminate_on_timeout() {
+        for check in ["probe", "smoke"] {
+            assert_update_child_released(check, false).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_update_version_checks_terminate_on_cancellation() {
+        for check in ["probe", "smoke"] {
+            assert_update_child_released(check, true).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_completion_generation_only_replaces_successful_nonempty_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("grow");
+        std::fs::write(&script, "#!/bin/sh\n[ \"$1\" = completions ] || exit 2\ncase \"$2\" in\nbash) printf 'generated completion';;\nzsh) echo 'failed output'; exit 1;;\nfish) exit 0;;\nesac\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dest = dir.path().join("nested/completion");
+        regenerate_completion(&script, "bash", &dest).await;
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "generated completion"
+        );
+        for shell in ["zsh", "fish"] {
+            regenerate_completion(&script, shell, &dest).await;
+            assert_eq!(
+                std::fs::read_to_string(&dest).unwrap(),
+                "generated completion"
+            );
+        }
+        regenerate_completion(&dir.path().join("missing"), "bash", &dest).await;
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "generated completion"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_completion_generation_terminates_on_cancellation() {
+        assert_update_child_released("completion", true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_completion_generation_terminates_on_timeout() {
+        assert_update_child_released("completion", false).await;
+    }
+
+    #[cfg(unix)]
+    async fn assert_update_child_released(check: &'static str, cancel: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("grow");
+        let pid_file = dir.path().join("grow.pid");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho $$ > \"$0.pid\"\nexec /bin/sleep 60\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dest = dir.path().join("completion");
+        std::fs::write(&dest, "original completion").unwrap();
+        let task_dest = dest.clone();
+        let mut task = tokio::spawn(async move {
+            match check {
+                "smoke" => assert!(!smoke_test_binary(&script).await),
+                "probe" => assert!(probe_version_by_exec(&script).await.is_none()),
+                "completion" => regenerate_completion(&script, "bash", &task_dest).await,
+                _ => panic!("unknown update check"),
+            }
+        });
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                    && pid.trim().parse::<u32>().is_ok()
+                {
+                    break pid.trim().to_owned();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("probe process must start");
+        let mut exceeded_deadline = false;
+        if cancel {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        } else {
+            match tokio::time::timeout(std::time::Duration::from_secs(12), &mut task).await {
+                Ok(result) => result.unwrap(),
+                Err(_) => {
+                    exceeded_deadline = true;
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+        }
+        let mut alive = true;
+        for _ in 0..50 {
+            alive = std::process::Command::new("/bin/kill")
+                .args(["-0", &pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        if alive {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", &pid])
+                .status();
+        }
+        assert!(
+            !exceeded_deadline,
+            "update check exceeded its bounded wait: {check}"
+        );
+        assert!(
+            !alive,
+            "update check leaked child: check={check}, cancel={cancel}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest).unwrap(),
+            "original completion"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn test_probe_target_version_exec_falls_back_to_version_output() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("grow");
@@ -3060,6 +3210,7 @@ mod tests {
             probe_target_version(&script).await.as_deref(),
             Some("0.1.181")
         );
+        assert!(smoke_test_binary(&script).await);
     }
 
     #[cfg(unix)]
@@ -4074,6 +4225,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cleanup_old_downloads_keeps_future_dated_versioned_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for v in ["0.1.138", "0.1.139", "0.1.140", "0.1.141"] {
+            std::fs::write(d.join(format!("grow-{v}-macos-aarch64")), v).unwrap();
+        }
+        make_all_stale(d);
+        let future_path = d.join("grow-0.1.138-macos-aarch64");
+        let future = std::time::SystemTime::now() + Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&future_path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(future))
+            .unwrap();
+        cleanup_old_downloads(d, "grow", "0.1.141").await;
+        assert!(
+            future_path.exists(),
+            "unknown age after clock rollback must not authorize deletion"
+        );
+        assert!(
+            !d.join("grow-0.1.139-macos-aarch64").exists(),
+            "known stale candidate still removed"
+        );
+        assert!(
+            d.join("grow-0.1.140-macos-aarch64").exists(),
+            "previous version retained"
+        );
+        assert!(
+            d.join("grow-0.1.141-macos-aarch64").exists(),
+            "current version retained"
+        );
+    }
+
+    #[tokio::test]
     async fn test_cleanup_old_downloads_keeps_fresh_versioned_binary() {
         // A versioned binary written moments ago may be a concurrent
         // installer's just-renamed download whose symlink swap hasn't
@@ -4897,6 +5083,41 @@ mod tests {
         assert!(d.join("README.md").exists());
         assert!(d.join("config.toml").exists());
         assert!(d.join("other-tool-0.1.0").exists());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_old_downloads_retains_whole_version_groups() {
+        for prefix in ["grow", "grow-pager"] {
+            for current in ["0.1.141", "0.1.137"] {
+                for reverse in [false, true] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let mut names = Vec::new();
+                    for version in [current, "0.1.140", "0.1.139", "0.1.138"] {
+                        for platform in ["macos-aarch64", "linux-x86_64"] {
+                            names.push(format!("{prefix}-{version}-{platform}"));
+                        }
+                    }
+                    if reverse {
+                        names.reverse();
+                    }
+                    for name in &names {
+                        std::fs::write(dir.path().join(name), name).unwrap();
+                    }
+                    make_all_stale(dir.path());
+                    cleanup_old_downloads(dir.path(), prefix, current).await;
+                    for version in [current, "0.1.140", "0.1.139", "0.1.138"] {
+                        for platform in ["macos-aarch64", "linux-x86_64"] {
+                            let name = format!("{prefix}-{version}-{platform}");
+                            assert_eq!(
+                                dir.path().join(&name).exists(),
+                                version == current || version == "0.1.140",
+                                "retention must select whole versions: {name}, current={current}, reverse={reverse}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]

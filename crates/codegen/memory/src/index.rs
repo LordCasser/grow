@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Once;
+use std::sync::{Once, atomic::AtomicU64, atomic::Ordering};
 
 use rusqlite::params;
 use sqlite_journal::JournalMode;
@@ -23,6 +23,7 @@ use super::storage::MemoryStorage;
 use config_types::MemoryIndexConfig;
 
 static SQLITE_VEC_INIT: Once = Once::new();
+static REINDEX_CLAIM_NONCE: AtomicU64 = AtomicU64::new(1);
 
 fn sqlite_integer(value: usize) -> Result<i64, rusqlite::Error> {
     i64::try_from(value).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
@@ -93,6 +94,7 @@ pub struct MemoryIndex {
     vec_available: bool,
     embedding_dimensions: usize,
     embedding_identity: Option<String>,
+    claim_token: std::sync::Mutex<Option<String>>,
 }
 
 impl MemoryIndex {
@@ -191,6 +193,7 @@ impl MemoryIndex {
             vec_available,
             embedding_dimensions: dimensions,
             embedding_identity,
+            claim_token: std::sync::Mutex::new(None),
         })
     }
 
@@ -274,40 +277,47 @@ impl MemoryIndex {
             seen_ids.insert(chunk_id.clone());
 
             match existing.get(&chunk_id) {
-                Some(old) if old.hash == hash => {
+                Some(old)
+                    if old.hash == hash
+                        && old.start_line == chunk.start_line
+                        && old.end_line == chunk.end_line =>
+                {
                     // Unchanged — skip
                 }
                 Some(old) => {
-                    // Changed: update chunk, delete stale FTS entry, insert new one
+                    // Changed text or coordinates: update chunk metadata. FTS
+                    // and vectors depend on text only; a line-only shift must
+                    // preserve the valid embedding while refreshing ranges.
                     tx.execute(
                         "UPDATE chunks SET text = ?1, hash = ?2, start_line = ?3, \
                          end_line = ?4, updated_at = ?5 WHERE id = ?6",
                         params![chunk.text, hash, start_line, end_line, now, chunk_id],
                     )?;
-                    // Delete old FTS entry and insert new one
-                    tx.execute(
-                        "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
-                        params![old.rowid, old.text],
-                    )?;
-                    let new_rowid: Option<i64> = tx
-                        .query_row(
-                            "SELECT rowid FROM chunks WHERE id = ?1",
-                            params![chunk_id],
-                            |row| row.get(0),
-                        )
-                        .ok();
-                    if let Some(rid) = new_rowid {
+                    if old.hash != hash {
+                        // Delete old FTS entry and insert new one.
                         tx.execute(
-                            "INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)",
-                            params![rid, chunk.text],
+                            "INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', ?1, ?2)",
+                            params![old.rowid, old.text],
                         )?;
-                    }
-                    // Delete stale embedding (will be re-embedded later)
-                    if self.vec_available {
-                        let _ = tx.execute(
-                            "DELETE FROM chunks_vec WHERE chunk_id = ?1",
-                            params![chunk_id],
-                        );
+                        let new_rowid: Option<i64> = tx
+                            .query_row(
+                                "SELECT rowid FROM chunks WHERE id = ?1",
+                                params![chunk_id],
+                                |row| row.get(0),
+                            )
+                            .ok();
+                        if let Some(rid) = new_rowid {
+                            tx.execute(
+                                "INSERT INTO chunks_fts(rowid, text) VALUES (?1, ?2)",
+                                params![rid, chunk.text],
+                            )?;
+                        }
+                        if self.vec_available {
+                            let _ = tx.execute(
+                                "DELETE FROM chunks_vec WHERE chunk_id = ?1",
+                                params![chunk_id],
+                            );
+                        }
                     }
                     result.updated += 1;
                 }
@@ -520,7 +530,9 @@ impl MemoryIndex {
     // -----------------------------------------------------------------------
 
     /// Return chunks that don't have embeddings yet.
-    pub fn chunks_without_embeddings(&self) -> Result<Vec<(String, String)>, rusqlite::Error> {
+    pub fn chunks_without_embeddings(
+        &self,
+    ) -> Result<Vec<(String, String, String)>, rusqlite::Error> {
         if !self.vec_available {
             return Ok(vec![]);
         }
@@ -529,13 +541,17 @@ impl MemoryIndex {
             return Ok(vec![]);
         }
         let mut stmt = tx.prepare(
-            "SELECT c.id, c.text FROM chunks c \
+            "SELECT c.id, c.text, c.hash FROM chunks c \
              LEFT JOIN chunks_vec_rowids v ON v.id = c.id \
              WHERE v.id IS NULL",
         )?;
         let results = stmt
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(results)
@@ -545,6 +561,7 @@ impl MemoryIndex {
     pub fn upsert_embedding(
         &self,
         chunk_id: &str,
+        expected_hash: &str,
         embedding: &[f32],
     ) -> Result<(), rusqlite::Error> {
         if !self.vec_available {
@@ -553,6 +570,21 @@ impl MemoryIndex {
         let tx = self.db.unchecked_transaction()?;
         if !self.embedding_identity_matches(&tx)? {
             tracing::warn!("embedding cache identity changed; rejecting stale vector write");
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        use rusqlite::OptionalExtension;
+        let current_hash: Option<String> = tx
+            .query_row(
+                "SELECT hash FROM chunks WHERE id = ?1",
+                params![chunk_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current_hash.as_deref() != Some(expected_hash) {
+            tracing::warn!(
+                chunk_id,
+                "memory chunk changed while embedding was in flight; rejecting stale vector write"
+            );
             return Err(rusqlite::Error::InvalidQuery);
         }
         let embedding_bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
@@ -609,7 +641,8 @@ impl MemoryIndex {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let claim_value = format!("{pid}:{now}");
+        let nonce = REINDEX_CLAIM_NONCE.fetch_add(1, Ordering::Relaxed);
+        let claim_value = format!("{pid}:{now}:{nonce}");
         let stale_cutoff = now - stale_threshold_secs;
 
         let rows = self
@@ -624,14 +657,31 @@ impl MemoryIndex {
                 0
             });
 
-        rows == 1
+        if rows == 1 {
+            *self
+                .claim_token
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claim_value);
+            true
+        } else {
+            false
+        }
     }
 
     /// Release the reindex claim. Call after reindex completes.
     pub fn release_claim(&self) {
-        let _ = self
-            .db
-            .execute("UPDATE meta SET value = '' WHERE key = 'reindex_claim'", []);
+        let token = self
+            .claim_token
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(token) = token else {
+            return;
+        };
+        let _ = self.db.execute(
+            "UPDATE meta SET value = '' WHERE key = 'reindex_claim' AND value = ?1",
+            params![token],
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -799,8 +849,8 @@ mod tests {
         let file = tmp.path().join("memory.md");
         std::fs::write(&file, "Rust ownership and borrowing guide").unwrap();
         a.reindex_file(&file, "workspace").unwrap();
-        let id = a.chunks_without_embeddings().unwrap()[0].0.clone();
-        a.upsert_embedding(&id, &[1., 0., 0., 0.]).unwrap();
+        let (id, _, hash) = a.chunks_without_embeddings().unwrap()[0].clone();
+        a.upsert_embedding(&id, &hash, &[1., 0., 0., 0.]).unwrap();
         assert!(
             open(Some("endpoint-a/model-a"))
                 .chunks_without_embeddings()
@@ -816,13 +866,14 @@ mod tests {
         let b = open(Some("endpoint-a/model-b"));
         assert_eq!(b.chunks_without_embeddings().unwrap().len(), 1);
         assert!(!b.search_fts("ownership", 5).unwrap().is_empty());
-        b.upsert_embedding(&id, &[0., 1., 0., 0.]).unwrap();
-        assert!(a.upsert_embedding(&id, &[1., 0., 0., 0.]).is_err());
+        let (_, _, b_hash) = b.chunks_without_embeddings().unwrap()[0].clone();
+        b.upsert_embedding(&id, &b_hash, &[0., 1., 0., 0.]).unwrap();
+        assert!(a.upsert_embedding(&id, &hash, &[1., 0., 0., 0.]).is_err());
         assert!(a.vector_search(&[1., 0., 0., 0.], 1).unwrap().is_empty());
         assert_eq!(b.vector_search(&[0., 1., 0., 0.], 1).unwrap()[0].1, 0.);
         let c = open(Some("endpoint-b/model-b"));
         assert_eq!(c.chunks_without_embeddings().unwrap().len(), 1);
-        assert!(b.upsert_embedding(&id, &[0., 1., 0., 0.]).is_err());
+        assert!(b.upsert_embedding(&id, &b_hash, &[0., 1., 0., 0.]).is_err());
     }
 
     #[test]
@@ -977,6 +1028,65 @@ mod tests {
         assert_eq!(r2.added, 0);
         assert_eq!(r2.updated, 0);
         assert_eq!(r2.removed, 0);
+    }
+
+    #[test]
+    fn reindex_refreshes_line_ranges_when_chunk_text_is_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let storage = test_storage(&tmp);
+        let config = MemoryIndexConfig {
+            max_chunk_chars: 35,
+            chunk_overlap_chars: 0,
+        };
+        let db_path = tmp.path().join("ranges.sqlite");
+        let mut idx = MemoryIndex::open_or_create(&db_path, storage, config, 4, None).unwrap();
+        let file_path = tmp.path().join("ranges.md");
+
+        std::fs::write(
+            &file_path,
+            "## First\n\nalpha\n\n## Second\n\nstable body token",
+        )
+        .unwrap();
+        idx.reindex_file(&file_path, "workspace").unwrap();
+        let path = file_path.to_string_lossy();
+        let second_id = format!("{path}:1");
+        let before = idx.get_chunk(&second_id).unwrap().unwrap();
+
+        // Only the preceding section grows. The second chunk keeps identical
+        // text/hash while its source line range moves down by one line.
+        std::fs::write(
+            &file_path,
+            "## First\n\nalpha\nbeta\n\n## Second\n\nstable body token",
+        )
+        .unwrap();
+        let result = idx.reindex_file(&file_path, "workspace").unwrap();
+        let after = idx.get_chunk(&second_id).unwrap().unwrap();
+        assert_eq!(before.hash, after.hash);
+        assert_ne!(before.start_line, after.start_line);
+        assert_ne!(before.end_line, after.end_line);
+        assert_eq!(result.updated, 2, "both chunks have refreshed metadata");
+    }
+
+    #[test]
+    fn embedding_write_rejects_a_chunk_hash_changed_while_request_was_in_flight() {
+        init_sqlite_vec();
+        let tmp = TempDir::new().unwrap();
+        let mut idx = test_index(&tmp);
+        assert!(idx.vec_available(), "CAS regression requires sqlite-vec");
+        let file_path = tmp.path().join("cas.md");
+        std::fs::write(&file_path, "## CAS\n\nold embedding text").unwrap();
+        idx.reindex_file(&file_path, "workspace").unwrap();
+        let (chunk_id, _, old_hash) = idx.chunks_without_embeddings().unwrap()[0].clone();
+
+        std::fs::write(&file_path, "## CAS\n\nnew embedding text").unwrap();
+        idx.reindex_file(&file_path, "workspace").unwrap();
+
+        assert!(
+            idx.upsert_embedding(&chunk_id, &old_hash, &[0.0, 1.0, 0.0, 0.0])
+                .is_err(),
+            "late embedding for old text must fail the chunk hash CAS"
+        );
+        assert_eq!(idx.chunks_without_embeddings().unwrap().len(), 1);
     }
 
     #[test]
@@ -1360,6 +1470,35 @@ mod tests {
             idx.get_reindex_claim(),
             "",
             "release_claim must reset the claim so doctor reports no stale lock"
+        );
+    }
+
+    #[test]
+    fn stale_owner_cannot_release_a_new_owner_claim() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("claims.sqlite");
+        let storage = test_storage(&tmp);
+        let open = || {
+            MemoryIndex::open_or_create(
+                &db_path,
+                storage.clone(),
+                MemoryIndexConfig::default(),
+                4,
+                Some("test"),
+            )
+            .unwrap()
+        };
+        let old_owner = open();
+        let new_owner = open();
+        assert!(old_owner.try_claim_reindex(i64::MAX));
+        assert!(new_owner.try_claim_reindex(-1), "forced stale takeover");
+
+        old_owner.release_claim();
+
+        let observer = open();
+        assert!(
+            !observer.try_claim_reindex(60),
+            "old owner release must not clear the new owner's claim"
         );
     }
 }

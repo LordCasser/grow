@@ -1,0 +1,5 @@
+## Design
+FixRequest提供内部ssh_alias_is_configured方法，按捕获shell和配置覆盖解析目标，再调用现有managed_alias_configured。独立报告用from_environment构造同一请求；不可用或不安全配置保持未配置。保留远程会话提前返回。避免执行shell启动脚本或新建另一套环境解析。
+
+## Verification
+自定义zsh/fish目录apply前false、apply后true；仅默认文件有alias而实际自定义文件缺失时false，确保不读错默认文件。运行修复与doctor调用方测试。

@@ -234,7 +234,7 @@ impl MemoryBackend for MemoryBackendImpl {
         })?;
 
         // ── Sync phase 1: reindex dirty files, collect chunks needing embeddings ──
-        let mut reindex_chunks: Vec<(String, String)> = Vec::new();
+        let mut reindex_chunks: Vec<(String, String, String)> = Vec::new();
         let mut needs_release = false;
         // Watcher-sync diagnostics data (populated inside the claim guard below).
         let mut watcher_sync_stats: Option<(usize, usize, std::time::Instant)> = None;
@@ -253,9 +253,14 @@ impl MemoryBackend for MemoryBackendImpl {
             // called and the old `reindexed_count` would stay at 0).
             let mut changed_chunk_count: usize = 0;
             for file in &dirty_files {
+                let Some(source) = self.storage.classify_source(file) else {
+                    // The watcher covers the shared memory root, which also
+                    // contains sibling workspaces. Only this storage's
+                    // MEMORY.md and session files belong in its index.
+                    continue;
+                };
                 if file.exists() {
                     // File was created or modified — reindex it.
-                    let source = self.storage.classify_source(file);
                     if let Ok(stats) = index.reindex_file(file, source) {
                         changed_chunk_count += stats.added + stats.updated + stats.removed;
                     }
@@ -286,13 +291,13 @@ impl MemoryBackend for MemoryBackendImpl {
         if !reindex_chunks.is_empty()
             && let Some(ref provider) = provider
         {
-            let mut upserts: Vec<(String, Vec<f32>)> = Vec::new();
+            let mut upserts: Vec<(String, String, Vec<f32>)> = Vec::new();
             for batch in reindex_chunks.chunks(32) {
-                let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+                let texts: Vec<&str> = batch.iter().map(|(_, t, _)| t.as_str()).collect();
                 match provider.embed_batch(&texts).await {
                     Ok(embeddings) => {
-                        for ((chunk_id, _), emb) in batch.iter().zip(embeddings.into_iter()) {
-                            upserts.push((chunk_id.clone(), emb));
+                        for ((chunk_id, _, hash), emb) in batch.iter().zip(embeddings.into_iter()) {
+                            upserts.push((chunk_id.clone(), hash.clone(), emb));
                         }
                     }
                     Err(e) => {
@@ -305,8 +310,8 @@ impl MemoryBackend for MemoryBackendImpl {
                 }
             }
             // Sync: upsert embeddings back (borrows &index, no await)
-            for (chunk_id, emb) in &upserts {
-                if index.upsert_embedding(chunk_id, emb).is_ok() {
+            for (chunk_id, hash, emb) in &upserts {
+                if index.upsert_embedding(chunk_id, hash, emb).is_ok() {
                     embedded_count += 1;
                 }
             }
@@ -969,7 +974,7 @@ mod factory_tests {
         std::fs::create_dir_all(&global).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let storage = MemoryStorage::with_paths(global.clone(), workspace);
+        let storage = MemoryStorage::with_paths(global.clone(), workspace.clone());
         let db_path = storage.workspace_dir().join("index.sqlite");
 
         // Step 1: Write + canonicalize the file path BEFORE indexing.
@@ -977,7 +982,7 @@ mod factory_tests {
         // On macOS, TempDir paths may live under /private/tmp (via a symlink
         // from /tmp).  FSEvents returns canonicalized paths, so the path stored
         // in the index must match what the watcher event delivers.
-        let file_raw = global.join("note.md");
+        let file_raw = workspace.join("MEMORY.md");
         std::fs::write(&file_raw, "# Unique\n\nXyzzy-watcher-delete-token.").unwrap();
         let file = dunce::canonicalize(&file_raw).unwrap_or(file_raw);
 
@@ -1053,6 +1058,149 @@ mod factory_tests {
         assert!(
             after.is_empty(),
             "deleted file's content must not appear after watcher-driven delete sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_rebuild_and_delete_ignore_sibling_workspace_files() {
+        let tmp = TempDir::new().unwrap();
+        let global = tmp.path().join("memory");
+        let workspace_a = global.join("workspace-a");
+        let workspace_b = global.join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).unwrap();
+        std::fs::create_dir_all(&workspace_b).unwrap();
+        let storage = MemoryStorage::with_paths(global.clone(), workspace_a.clone());
+
+        let own_file = workspace_a.join("MEMORY.md");
+        std::fs::write(&own_file, "# Own\n\nworkspace-a-anchor").unwrap();
+        let db_path = workspace_a.join("index.sqlite");
+        let mut idx = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            config_types::MemoryIndexConfig::default(),
+            4,
+            None,
+        )
+        .unwrap();
+        idx.reindex_file(&own_file, "workspace").unwrap();
+        drop(idx);
+
+        let watch_dir = dunce::canonicalize(&global).unwrap_or(global.clone());
+        let watcher = std::sync::Arc::new(
+            crate::watcher::MemoryFileWatcher::start(&watch_dir)
+                .expect("watcher must start for sibling-scope regression"),
+        );
+        let backend = MemoryBackendImpl::from_session_params(
+            storage,
+            &MemoryBackendParams {
+                watcher: Some(watcher.clone()),
+                ..make_params_fts_only("sibling-scope")
+            },
+        );
+
+        let sibling_file = workspace_b.join("MEMORY.md");
+        std::fs::write(&sibling_file, "# Sibling\n\nsiblingquasaranchor").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if watcher.is_dirty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("watcher did not report sibling creation within 2 seconds");
+        assert!(
+            backend
+                .search("siblingquasaranchor", 5, 0.0)
+                .await
+                .unwrap()
+                .is_empty(),
+            "sibling workspace creation must not rebuild into workspace A"
+        );
+
+        std::fs::remove_file(&sibling_file).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if watcher.is_dirty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("watcher did not report sibling deletion within 2 seconds");
+        assert!(
+            backend
+                .search("siblingquasaranchor", 5, 0.0)
+                .await
+                .unwrap()
+                .is_empty(),
+            "sibling workspace deletion must not mutate workspace A's index"
+        );
+        assert!(
+            !backend
+                .search("workspace-a-anchor", 5, 0.0)
+                .await
+                .unwrap()
+                .is_empty(),
+            "sibling deletion must not remove workspace A's own indexed content"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_range_round_trips_through_backend_get() {
+        let tmp = TempDir::new().unwrap();
+        let storage = make_storage(&tmp);
+        let db_path = storage.workspace_dir().join("index.sqlite");
+        let file = storage.workspace_dir().join("MEMORY.md");
+        let content = "## First\n\nalpha\nbeta\n\n## Second\n\nsearch-get-roundtrip-token";
+        std::fs::create_dir_all(storage.workspace_dir()).unwrap();
+        std::fs::write(&file, content).unwrap();
+        let mut index = MemoryIndex::open_or_create(
+            &db_path,
+            storage.clone(),
+            config_types::MemoryIndexConfig {
+                max_chunk_chars: 35,
+                chunk_overlap_chars: 0,
+            },
+            4,
+            None,
+        )
+        .unwrap();
+        index.reindex_file(&file, "workspace").unwrap();
+        drop(index);
+
+        let backend = MemoryBackendImpl::from_session_params(
+            storage,
+            &make_params_fts_only("search-get-roundtrip"),
+        );
+        let result = backend
+            .search("search-get-roundtrip-token", 5, 0.0)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("second chunk must be searchable");
+        assert!(
+            result.start_line > 0,
+            "fixture must exercise a non-first chunk"
+        );
+
+        let display_start = result.start_line + 1;
+        let display_end = result.end_line;
+        let fetched = backend
+            .get(
+                &result.path,
+                Some(display_start.saturating_sub(1)),
+                Some(display_end.saturating_sub(display_start).saturating_add(1)),
+            )
+            .unwrap();
+        assert!(
+            fetched.contains("search-get-roundtrip-token"),
+            "displayed {}-{} must fetch the searched chunk, got {fetched:?}",
+            display_start,
+            display_end
         );
     }
 
@@ -1179,8 +1327,8 @@ mod tests {
             Some("test"),
         )
         .unwrap();
-        let id = old.chunks_without_embeddings().unwrap()[0].0.clone();
-        old.upsert_embedding(&id, &[0., 1., 0., 0.]).unwrap();
+        let (id, _, hash) = old.chunks_without_embeddings().unwrap()[0].clone();
+        old.upsert_embedding(&id, &hash, &[0., 1., 0., 0.]).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = EmbeddingEndpoint::from_static(
             &format!("http://{}/v1", listener.local_addr().unwrap()),
@@ -1474,9 +1622,10 @@ mod index_embedding_tests {
         );
 
         // After upserting an embedding, the chunk should disappear from missing
-        let (chunk_id, _) = &missing[0];
+        let (chunk_id, _, hash) = &missing[0];
         let dummy_embedding = vec![0.0f32; 4];
-        idx.upsert_embedding(chunk_id, &dummy_embedding).unwrap();
+        idx.upsert_embedding(chunk_id, hash, &dummy_embedding)
+            .unwrap();
 
         let missing_after = idx.chunks_without_embeddings().unwrap();
         assert_eq!(

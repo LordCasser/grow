@@ -131,15 +131,15 @@ pub enum ContentBlock {
     },
     Thinking {
         thinking: String,
+        // Streaming providers may deliver the signature in a later delta.
+        #[serde(default)]
         signature: String,
     },
     /// Encrypted reasoning the model chose to redact. Carries only an opaque
     /// `data` blob (never plaintext). Added so a stream that includes one
     /// deserializes instead of failing the whole event parse; behavior-preserving
     /// for producers (never constructed by request-building or the sampler).
-    RedactedThinking {
-        data: String,
-    },
+    RedactedThinking { data: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

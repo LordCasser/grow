@@ -17,32 +17,125 @@ impl SessionTitleRoute {
     }
 }
 
+/// The empty slot while a worker owns the route must not erase revocation.
+pub(crate) enum SessionTitleRouteState {
+    Ready(SessionTitleRoute),
+    Claimed,
+    Closed,
+}
+
+impl From<Option<SessionTitleRoute>> for SessionTitleRouteState {
+    fn from(route: Option<SessionTitleRoute>) -> Self {
+        route.map(Self::Ready).unwrap_or(Self::Closed)
+    }
+}
+
+impl SessionTitleRouteState {
+    pub(crate) fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
+
+    fn claim(&mut self) -> Option<SessionTitleRoute> {
+        if !self.is_ready() {
+            return None;
+        }
+        match std::mem::replace(self, Self::Claimed) {
+            Self::Ready(route) => Some(route),
+            _ => unreachable!("readiness checked without yielding"),
+        }
+    }
+
+    fn restore(&mut self, route: SessionTitleRoute) {
+        if matches!(self, Self::Claimed) {
+            *self = Self::Ready(route);
+        }
+    }
+
+    pub(crate) fn revoke(&mut self) {
+        *self = Self::Closed;
+    }
+
+    fn finish(&mut self) {
+        if matches!(self, Self::Claimed) {
+            *self = Self::Closed;
+        }
+    }
+}
+
+fn title_input_source(
+    materialized: &chat_state::TimelineMaterialization,
+    prompt_index: usize,
+) -> Option<chat_state::SurfaceId> {
+    if materialized.surface.len() != materialized.surface_ids.len() {
+        return None;
+    }
+    let mut sources = materialized
+        .surface
+        .iter()
+        .zip(&materialized.surface_ids)
+        .filter_map(|(item, source)| match item {
+            sampling_types::ConversationItem::User(user)
+                if user.synthetic_reason.is_none() && user.prompt_index == Some(prompt_index) =>
+            {
+                Some(*source)
+            }
+            _ => None,
+        });
+    let source = sources.next()?;
+    sources.next().is_none().then_some(source)
+}
+
 impl SessionActor {
     /// Claim the one-shot title route after the first real user message is
     /// durable, freeze that exact Timeline event, then run the provider call
     /// independently on the session LocalSet.
-    pub(crate) async fn schedule_session_title(self: &std::sync::Arc<Self>, user_text: String) {
+    pub(crate) async fn schedule_session_title_for_prompt(
+        self: &std::sync::Arc<Self>,
+        user_text: String,
+        prompt_index: usize,
+    ) {
         if user_text.trim().is_empty() {
             return;
         }
-        let Some(route) = self.session_title_route.borrow_mut().take() else {
+        if !self.session_title_route.borrow().is_ready() {
             return;
-        };
+        }
         let Some(materialized) = self
             .chat_state_handle
             .materialize_timeline(self.session_info.id.to_string())
             .await
         else {
-            self.session_title_route.replace(Some(route));
             tracing::warn!("session title: failed to freeze Timeline input");
             return;
         };
+        let Some(source) = title_input_source(&materialized, prompt_index) else {
+            tracing::warn!(
+                prompt_index,
+                "session title: admitted user source is missing or ambiguous"
+            );
+            return;
+        };
+        self.schedule_session_title(user_text, source.event).await;
+    }
+
+    pub(crate) async fn schedule_session_title(
+        self: &std::sync::Arc<Self>,
+        user_text: String,
+        input_event: chat_state::EventSeq,
+    ) {
+        if user_text.trim().is_empty() {
+            return;
+        }
+        let Some(route) = self.session_title_route.borrow_mut().claim() else {
+            return;
+        };
         let input_ref = chat_state::TimelineRangeRef {
-            timeline_id: materialized.input_ref.timeline_id,
-            first_seq: materialized.input_ref.last_seq,
-            last_seq: materialized.input_ref.last_seq,
+            timeline_id: self.session_info.id.to_string(),
+            first_seq: input_event.get(),
+            last_seq: input_event.get(),
         };
         let Some(activity) = self.session_activities.try_start("session_title") else {
+            self.session_title_route.borrow_mut().finish();
             return;
         };
         let session = std::sync::Arc::clone(self);
@@ -51,6 +144,7 @@ impl SessionActor {
             session
                 .generate_session_title(route, user_text, input_ref)
                 .await;
+            session.session_title_route.borrow_mut().finish();
         });
     }
 
@@ -85,7 +179,7 @@ impl SessionActor {
             Ok(sideband) => sideband,
             Err(error) => {
                 tracing::warn!(%error, "session title: failed to start Sideband");
-                self.session_title_route.replace(Some(route));
+                self.session_title_route.borrow_mut().restore(route);
                 return;
             }
         };
@@ -94,7 +188,7 @@ impl SessionActor {
             .await
         {
             tracing::warn!(%error, "session title: failed to commit Sideband attempt");
-            self.session_title_route.replace(Some(route));
+            self.session_title_route.borrow_mut().restore(route);
             return;
         }
         let response = match tokio::time::timeout(
@@ -112,7 +206,7 @@ impl SessionActor {
                     Ok(reference) => reference,
                     Err(record_error) => {
                         tracing::warn!(%record_error, "session title: failed to commit provider failure");
-                        self.session_title_route.replace(Some(route));
+                        self.session_title_route.borrow_mut().restore(route);
                         return;
                     }
                 };
@@ -121,7 +215,7 @@ impl SessionActor {
             }
             Ok(Err(error)) => {
                 tracing::warn!(%error, "session title: provider admission failed");
-                self.session_title_route.replace(Some(route));
+                self.session_title_route.borrow_mut().restore(route);
                 return;
             }
             Err(_) => {
@@ -135,7 +229,7 @@ impl SessionActor {
                     Ok(reference) => reference,
                     Err(record_error) => {
                         tracing::warn!(%record_error, "session title: failed to commit timeout");
-                        self.session_title_route.replace(Some(route));
+                        self.session_title_route.borrow_mut().restore(route);
                         return;
                     }
                 };
@@ -150,7 +244,7 @@ impl SessionActor {
             Ok(usage) => usage,
             Err(error) => {
                 tracing::warn!(%error, "session title: failed to settle provider usage");
-                self.session_title_route.replace(Some(route));
+                self.session_title_route.borrow_mut().restore(route);
                 return;
             }
         };
@@ -166,7 +260,7 @@ impl SessionActor {
                     Ok(reference) => reference,
                     Err(record_error) => {
                         tracing::warn!(%record_error, "session title: failed to commit validation failure");
-                        self.session_title_route.replace(Some(route));
+                        self.session_title_route.borrow_mut().restore(route);
                         return;
                     }
                 };
@@ -187,7 +281,7 @@ impl SessionActor {
             Ok(reference) => reference,
             Err(error) => {
                 tracing::warn!(%error, "session title: failed to commit Sideband result");
-                self.session_title_route.replace(Some(route));
+                self.session_title_route.borrow_mut().restore(route);
                 return;
             }
         };
@@ -279,4 +373,131 @@ pub(crate) fn session_info_update(
                 ),
         ),
     )
+}
+
+#[cfg(test)]
+mod title_source_tests {
+    use super::*;
+    use sampling_types::ConversationItem;
+
+    fn materialized(items: Vec<ConversationItem>) -> chat_state::TimelineMaterialization {
+        let mut timeline = chat_state::Timeline::default();
+        for item in items {
+            timeline
+                .append(item, chat_state::MessageCause::User)
+                .unwrap();
+        }
+        // A non-message fact can become the tail after the admitted input.
+        timeline
+            .record(chat_state::TimelineEventKind::SessionTitle(
+                chat_state::SessionTitleEvent {
+                    title: "manual".into(),
+                    source: chat_state::SessionTitleSource::User,
+                },
+            ))
+            .unwrap();
+        chat_state::TimelineMaterialization {
+            input_ref: chat_state::TimelineRangeRef {
+                timeline_id: "session".into(),
+                first_seq: 0,
+                last_seq: timeline.events().last().unwrap().seq.get(),
+            },
+            surface_revision: timeline.surface_revision(),
+            surface: timeline.surface().to_vec(),
+            surface_ids: timeline.surface_ids().to_vec(),
+            direct_user_inputs: vec![],
+            permission_context: vec![],
+            active_control_contexts: Default::default(),
+        }
+    }
+
+    fn user(text: &str, index: usize) -> ConversationItem {
+        let mut item = ConversationItem::user(text);
+        item.set_prompt_index(index);
+        item
+    }
+
+    #[test]
+    fn title_source_stays_on_user_before_later_events() {
+        let mut notification = ConversationItem::notification_drain("finished background task");
+        notification.set_prompt_index(2);
+        let snapshot = materialized(vec![
+            user("old", 1),
+            user("title objective", 2),
+            notification,
+        ]);
+        let source = title_input_source(&snapshot, 2).unwrap();
+        assert_eq!(source, snapshot.surface_ids[1]);
+        assert_ne!(source.event.get(), snapshot.input_ref.last_seq);
+        assert_ne!(source, snapshot.surface_ids[2]);
+    }
+
+    #[test]
+    fn title_source_requires_unique_admitted_identity() {
+        let snapshot = materialized(vec![user("same", 2), user("same", 2)]);
+        assert!(title_input_source(&snapshot, 2).is_none());
+        assert!(title_input_source(&snapshot, 3).is_none());
+        let mut notification = ConversationItem::notification_drain("same");
+        notification.set_prompt_index(2);
+        assert!(title_input_source(&materialized(vec![notification]), 2).is_none());
+    }
+}
+
+#[cfg(test)]
+mod title_route_tests {
+    use super::*;
+
+    fn ready() -> SessionTitleRouteState {
+        let client = SamplingClient::new(sampler::SamplerConfig {
+            api_key: Some("test-key".into()),
+            base_url: "http://127.0.0.1:1".into(),
+            model: "test-model".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        Some(SessionTitleRoute::new(client, "test-model".into())).into()
+    }
+
+    #[tokio::test]
+    async fn revoked_claim_cannot_restore_generation() {
+        let mut state = ready();
+        let owned = state.claim().unwrap();
+        assert!(state.claim().is_none());
+        state.revoke();
+        state.restore(owned);
+        state.finish();
+        assert!(matches!(state, SessionTitleRouteState::Closed));
+        assert!(state.claim().is_none());
+    }
+
+    #[tokio::test]
+    async fn valid_failed_claim_can_retry_once() {
+        let mut state = ready();
+        let owned = state.claim().unwrap();
+        state.restore(owned);
+        state.finish();
+        assert!(
+            state.is_ready(),
+            "worker finalization preserves restored retry"
+        );
+        let _retry = state.claim().unwrap();
+        assert!(state.claim().is_none());
+        state.finish();
+        assert!(state.claim().is_none(), "completed claim is one-shot");
+    }
+
+    #[tokio::test]
+    async fn revocation_before_claim_or_after_restore_stays_closed() {
+        let mut state = ready();
+        state.revoke();
+        assert!(state.claim().is_none());
+        let mut state = ready();
+        let owned = state.claim().unwrap();
+        state.restore(owned);
+        state.revoke();
+        state.finish();
+        assert!(state.claim().is_none());
+        let mut absent = SessionTitleRouteState::from(None);
+        assert!(absent.claim().is_none());
+    }
 }

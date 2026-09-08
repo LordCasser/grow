@@ -1887,6 +1887,7 @@ impl McpErasedTool {
             {
                 self.recover_and_retry(
                     client,
+                    &mcp_service,
                     params,
                     timeout_duration,
                     tool_timeout,
@@ -1904,7 +1905,7 @@ impl McpErasedTool {
                 *is_timeout = true;
                 // Reset for the next call but don't retry — a slow side-effecting tool must not run twice.
                 if client.is_http() && !*reconnect_attempted {
-                    client.reset_transport().await;
+                    client.reset_transport(Some(&mcp_service)).await;
                     *reconnect_attempted = true;
                 }
                 Err(tool_runtime::ToolError::custom(
@@ -1923,6 +1924,7 @@ impl McpErasedTool {
     async fn recover_and_retry(
         &self,
         client: &Arc<McpClient>,
+        failed_service: &McpService,
         params: CallToolRequestParams,
         timeout_duration: std::time::Duration,
         tool_timeout: u64,
@@ -1937,7 +1939,7 @@ impl McpErasedTool {
             error = %original_err,
             "MCP transport error, attempting reconnect"
         );
-        let mcp_service = match client.recover().await {
+        let mcp_service = match client.recover_from(Some(failed_service)).await {
             Ok(service) => service,
             Err(_) => {
                 return Err(tool_runtime::ToolError::custom(
@@ -2385,7 +2387,7 @@ enum ClientState {
     /// [`McpClient::init_done`] (with a bounded timeout) rather than
     /// attempt a parallel handshake. If the holder is cancelled or
     /// panics before publishing a result, an [`InitGuard`] restores the
-    /// transport on a best-effort basis so other callers can retry.
+    /// transport or Empty under the state lock, then wakes other callers.
     Initializing,
     /// Handshake completed; the service is reference-counted via `Arc`.
     Ready(McpService),
@@ -2619,7 +2621,7 @@ impl McpClientEvent {
     }
 }
 
-/// RAII guard that restores [`ClientState::Pending`] if the
+/// RAII guard that restores Pending or Empty if the
 /// [`McpClient::ensure_initialized`] holder is dropped before publishing
 /// its handshake result (task cancellation, panic). Without this guard a
 /// cancellation mid-handshake would leave `state` stuck in
@@ -2632,20 +2634,16 @@ impl McpClientEvent {
 /// `Ready`/`Empty` under the state lock, which converts the `Drop` into
 /// a no-op. The guard never restores on the success path.
 ///
-/// Drop uses [`tokio::sync::Mutex::try_lock`] because `Drop` runs
-/// synchronously and we cannot block the runtime here. If the lock is
-/// contended (extremely rare — the only competing locker is another
-/// `ensure_initialized` caller which holds the lock for the duration of
-/// a match arm, microseconds), the restore is skipped and the
-/// inflight-wait timeout in `ensure_initialized` becomes the
-/// last-resort recovery path.
+/// The private state mutex protects synchronous, short state transitions only.
+/// Drop acquires it normally so contention cannot discard cancellation cleanup.
+/// Network handshakes and notification waits never hold this lock.
 struct InitGuard<'a> {
-    state: &'a Mutex<ClientState>,
+    state: &'a parking_lot::Mutex<ClientState>,
     init_done: &'a Notify,
-    /// `Some` until [`Self::disarm`] is called. Holds the restorable
-    /// transport (HTTP) or `None` for Stdio (whose child
-    /// process is consumed by `client.serve` and cannot be reused).
-    restore: Option<PendingTransport>,
+    /// Cancellation target until disarmed: Pending for a reusable transport,
+    /// Empty for Stdio whose consumed child cannot be reused. Only None means
+    /// the result has been published and cancellation cleanup is disabled.
+    restore: Option<ClientState>,
 }
 
 impl InitGuard<'_> {
@@ -2662,17 +2660,14 @@ impl Drop for InitGuard<'_> {
         let Some(restore) = self.restore.take() else {
             return;
         };
-        // Best-effort restore. `try_lock` cannot block the runtime from
-        // inside Drop; on contention the slot stays Initializing and the
-        // inflight-wait timeout becomes the recovery path.
-        if let Ok(mut guard) = self.state.try_lock()
-            && matches!(&*guard, ClientState::Initializing)
+        // All state critical sections are synchronous and short. Complete
+        // cancellation under the same lock rather than losing it on contention.
         {
-            *guard = ClientState::Pending(restore);
+            let mut guard = self.state.lock();
+            if matches!(&*guard, ClientState::Initializing) {
+                *guard = restore;
+            }
         }
-        // Notify whether or not we managed to restore — parked waiters
-        // need to wake up and either retry against the restored
-        // transport or hit the wait-timeout error path.
         self.init_done.notify_waiters();
     }
 }
@@ -2718,7 +2713,7 @@ pub struct McpClient {
     /// alone cannot distinguish delayed events from the replaced transport.
     transport_revision: Arc<std::sync::atomic::AtomicU64>,
     server_name: McpServerName,
-    state: Mutex<ClientState>,
+    state: parking_lot::Mutex<ClientState>,
     /// Wakes [`Self::ensure_initialized`] callers that observed
     /// [`ClientState::Initializing`] and parked. Notified after each
     /// handshake attempt finishes (success **or** failure) and `state`
@@ -2918,7 +2913,7 @@ impl McpClient {
             client_id: next_client_id(),
             transport_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             server_name,
-            state: Mutex::new(ClientState::Pending(transport)),
+            state: parking_lot::Mutex::new(ClientState::Pending(transport)),
             init_done: Notify::new(),
             startup_timeout_sec,
             tool_timeout_sec,
@@ -2933,7 +2928,9 @@ impl McpClient {
     }
 
     /// Reset the transport so the next `ensure_initialized` rebuilds it with a
-    /// fresh connection.
+    /// fresh connection. Production timeout calls bind `expected` to the
+    /// service that timed out; `None` is an unconditional low-level reset used
+    /// by the transport state tests.
     ///
     /// Called when a tool call fails with a transport error (`TransportClosed`,
     /// `TransportSend`) — the underlying connection is dead but the server's
@@ -2944,15 +2941,23 @@ impl McpClient {
     /// from the `reconnect` snapshot taken at construction. Returns `false`
     /// for clients whose `reconnect` is `None` (e.g. Stdio — dead child
     /// processes can't be restarted from here).
-    async fn reset_transport(&self) -> bool {
+    async fn reset_transport(&self, expected: Option<&McpService>) -> bool {
         let Some(t) = self.reconnect.as_ref().and_then(restorable_transport) else {
             return false;
         };
-        // Invalidate handlers/watchers belonging to the old transport before
-        // yielding through the state replacement. The subsequent handshake
-        // advances again and owns the next event-producing revision.
-        self.advance_transport_revision();
-        self.replace_state(ClientState::Pending(t)).await;
+        {
+            let mut state = self.state.lock();
+            if let Some(expected) = expected
+                && !matches!(&*state, ClientState::Ready(current) if Arc::ptr_eq(current, expected))
+            {
+                return false;
+            }
+            // Compare and invalidate atomically: an old timeout cannot replace
+            // a newer service or an in-flight handshake.
+            self.advance_transport_revision();
+            *state = ClientState::Pending(t);
+        }
+        self.init_done.notify_waiters();
         tracing::info!(
             server = %self.server_name,
             "Reset transport for reconnect after transport failure"
@@ -2984,16 +2989,36 @@ impl McpClient {
     /// `Err` for a client with no restorable transport (e.g. Stdio — its child
     /// was consumed by the handshake).
     pub async fn recover(self: &Arc<Self>) -> Result<McpService, McpError> {
-        // Coalesce concurrent recoveries: reset only when Ready; if already
-        // non-Ready a recovery is in flight, so join its single-flight
-        // ensure_initialized instead of racing a reset.
-        if matches!(self.state_kind().await, ClientStateKind::Ready)
-            && !self.reset_transport().await
+        self.recover_from(None).await
+    }
+
+    /// Tool failures carry the service they used; a late failure must not
+    /// invalidate a replacement installed by another recovery.
+    async fn recover_from(
+        self: &Arc<Self>,
+        failed_service: Option<&McpService>,
+    ) -> Result<McpService, McpError> {
+        // Check and reset under one lock. A competing recovery must observe
+        // Pending/Initializing and join the handshake, never reset over it.
         {
-            return Err(McpError::ClientError(format!(
-                "MCP client {} has no transport to recover",
-                self.server_name,
-            )));
+            let mut state = self.state.lock();
+            if matches!(&*state, ClientState::Ready(current)
+                if failed_service.is_none_or(|failed| Arc::ptr_eq(current, failed)))
+            {
+                let transport = self
+                    .reconnect
+                    .as_ref()
+                    .and_then(restorable_transport)
+                    .ok_or_else(|| {
+                        McpError::ClientError(format!(
+                            "MCP client {} has no transport to recover",
+                            self.server_name,
+                        ))
+                    })?;
+                self.advance_transport_revision();
+                *state = ClientState::Pending(transport);
+                self.init_done.notify_waiters();
+            }
         }
         let service = self.ensure_initialized().await?;
         // Re-arm liveness so the next close is detected again. A `false` return
@@ -3010,25 +3035,6 @@ impl McpClient {
             );
         }
         Ok(service)
-    }
-
-    /// Replace [`Self::state`] under the lock and wake any
-    /// [`Self::ensure_initialized`] callers parked on [`Self::init_done`]
-    /// so they re-check the new state on their next loop iteration.
-    ///
-    /// Use this for *external* state transitions that need to invalidate
-    /// in-flight waits (such as transport resets) so a parked
-    /// waiter doesn't sit on a stale [`ClientState::Initializing`] view of
-    /// the world. `ensure_initialized` itself doesn't go through this
-    /// helper because it already mints the new state under the lock it's
-    /// holding and notifies waiters once at the end of the handshake
-    /// attempt.
-    async fn replace_state(&self, new_state: ClientState) {
-        {
-            let mut guard = self.state.lock().await;
-            *guard = new_state;
-        }
-        self.init_done.notify_waiters();
     }
 
     pub fn new_stdio(
@@ -3177,22 +3183,13 @@ impl McpClient {
     ///
     /// ## Cancellation safety
     ///
-    /// If the holder is dropped (parent task cancelled, panic) before
-    /// publishing a result, [`InitGuard`]'s `Drop` impl best-effort
-    /// restores the transport (so future callers can retry without an
-    /// explicit `reset_transport`) and wakes parked waiters. The
-    /// restore uses [`tokio::sync::Mutex::try_lock`] because `Drop` is
-    /// synchronous; on the rare contention case the slot stays
-    /// `Initializing` and the wait-timeout fallback below surfaces a
-    /// clear error rather than blocking forever.
+    /// If the holder is dropped before publishing a result, the guard restores
+    /// Pending for reusable transports or Empty for Stdio, then wakes waiters.
+    /// The short synchronous state lock also makes cleanup reliable when
+    /// another thread is inspecting state at cancellation time.
     pub async fn ensure_initialized(&self) -> Result<McpService, McpError> {
-        // Bound how long a parked caller waits on `init_done` before
-        // surfacing an error. `try_handshake` is itself bounded by
-        // `startup_timeout_sec`, so anything beyond that plus a 1 s margin
-        // means the holder was dropped without restoring the transport
-        // (cancellation under heavy contention) — wedging silently would
-        // turn this into the exact "stuck client" failure mode the rest of
-        // this rewrite is designed to eliminate.
+        // Bound parked callers even if an invariant violation leaves no holder.
+        // Normal handshakes have their own timeout; cancellation restores state.
         let inflight_wait =
             std::time::Duration::from_secs(self.startup_timeout_sec.saturating_add(1));
 
@@ -3210,53 +3207,32 @@ impl McpClient {
             let notified = self.init_done.notified();
             tokio::pin!(notified);
 
-            let mut guard = self.state.lock().await;
-            // Swap the current state for `Initializing` up front and
-            // match on the OWNED previous value. This avoids the
-            // `match-by-ref → mem::replace → re-match → unreachable!()`
-            // dance — the compiler can bind `ClientState::Pending(t)`
-            // directly from an owned value with no irrefutable-let
-            // hole. Non-Pending arms restore their original variant
-            // before falling through; the lock is held the entire
-            // window so the brief `Initializing` placeholder is
-            // invisible to other callers. Cost is one trivial unit-
-            // variant write per non-Pending call (plus an `Arc::clone`
-            // on the Ready path) — negligible.
-            match std::mem::replace(&mut *guard, ClientState::Initializing) {
-                ClientState::Ready(service) => {
-                    *guard = ClientState::Ready(service.clone());
-                    return Ok(service);
-                }
-                ClientState::Empty => {
-                    *guard = ClientState::Empty;
-                    return Err(McpError::ClientError(format!(
-                        "MCP client {} has no transport configured",
-                        self.server_name,
-                    )));
-                }
-                ClientState::Initializing => {
-                    // Another caller already owns the slot. Restore the
-                    // placeholder we just swapped in (semantically a
-                    // no-op since `Initializing` is a unit variant),
-                    // drop the lock, park on `init_done`.
-                    *guard = ClientState::Initializing;
-                    drop(guard);
-                    match tokio::time::timeout(inflight_wait, notified.as_mut()).await {
-                        Ok(()) => continue,
-                        Err(_) => {
-                            return Err(McpError::ClientError(format!(
-                                "MCP client {} init still in progress after {}s",
-                                self.server_name,
-                                inflight_wait.as_secs(),
-                            )));
-                        }
+            {
+                let mut guard = self.state.lock();
+                match std::mem::replace(&mut *guard, ClientState::Initializing) {
+                    ClientState::Ready(service) => {
+                        *guard = ClientState::Ready(service.clone());
+                        return Ok(service);
                     }
+                    ClientState::Empty => {
+                        *guard = ClientState::Empty;
+                        return Err(McpError::ClientError(format!(
+                            "MCP client {} has no transport configured",
+                            self.server_name,
+                        )));
+                    }
+                    ClientState::Initializing => {}
+                    ClientState::Pending(transport) => break transport,
                 }
-                // The single arm that KEEPS the `Initializing`
-                // placeholder we swapped in — this caller becomes the
-                // single-flight handshake holder for the duration of
-                // `try_handshake` below.
-                ClientState::Pending(transport) => break transport,
+            }
+            // No state guard can cross this wait. A parked caller has already
+            // subscribed, so a concurrent completion cannot lose its wakeup.
+            if tokio::time::timeout(inflight_wait, notified.as_mut()).await.is_err() {
+                return Err(McpError::ClientError(format!(
+                    "MCP client {} init still in progress after {}s",
+                    self.server_name,
+                    inflight_wait.as_secs(),
+                )));
             }
         };
 
@@ -3280,7 +3256,10 @@ impl McpClient {
         let mut init_guard = InitGuard {
             state: &self.state,
             init_done: &self.init_done,
-            restore: restore_for_guard,
+            restore: Some(match restore_for_guard {
+                Some(transport) => ClientState::Pending(transport),
+                None => ClientState::Empty,
+            }),
         };
 
         let transport_revision = self.advance_transport_revision();
@@ -3289,11 +3268,6 @@ impl McpClient {
 
         let handshake_elapsed = handshake_start.elapsed().as_micros() as u64;
         tracing::info!(target: diagnostics::instrumentation::TARGET, event = "timing", name = "mcp_try_handshake", elapsed_us = handshake_elapsed);
-        // Disarm before publishing the result so the drop guard
-        // doesn't double-restore on the success path or fight with
-        // the failure-path assignment below.
-        init_guard.disarm();
-
         // Snapshot the event sender before we commit Ready/Pending/Empty
         // under the lock. We want to emit `HandshakeFailed` (on `Err`) or
         // signal the dispatcher to set status=ready (on `Ok`) AFTER
@@ -3308,7 +3282,10 @@ impl McpClient {
         let event_sink = self.event_sink_clone();
 
         let outcome = {
-            let mut guard = self.state.lock().await;
+            let mut guard = self.state.lock();
+            // Keep cancellation recovery armed through this lock wait.
+            // Disarming and publishing below contain no suspension point.
+            init_guard.disarm();
             match result {
                 Ok(service) => {
                     let service = Arc::new(service);
@@ -3615,7 +3592,7 @@ impl McpClient {
     /// continues to report `true`. That is the desired semantics — a
     /// liveness probe would belong in a separate watcher, not here.
     pub async fn is_healthy(&self) -> bool {
-        let guard = self.state.lock().await;
+        let guard = self.state.lock();
         match &*guard {
             ClientState::Ready(service) => !service.is_transport_closed(),
             _ => false,
@@ -3631,7 +3608,7 @@ impl McpClient {
     /// `is_healthy`-based predicate cannot tell the cases apart and
     /// would false-fire `TransportClosed` on re-handshake transitions.
     pub async fn liveness_check(&self) -> LivenessCheck {
-        let guard = self.state.lock().await;
+        let guard = self.state.lock();
         match &*guard {
             ClientState::Ready(service) => {
                 if service.is_transport_closed() {
@@ -3651,7 +3628,7 @@ impl McpClient {
     /// `Copy` enum so callers can match without holding a reference to
     /// the inner [`McpService`] / [`PendingTransport`].
     pub async fn state_kind(&self) -> ClientStateKind {
-        let guard = self.state.lock().await;
+        let guard = self.state.lock();
         match &*guard {
             ClientState::Empty => ClientStateKind::Empty,
             ClientState::Pending(_) => ClientStateKind::Pending,
@@ -3749,7 +3726,7 @@ impl McpClient {
     /// Read the server's `instructions` from the MCP initialize handshake.
     /// Returns `None` if the client isn't ready yet.
     pub async fn server_instructions(&self) -> Option<String> {
-        let guard = self.state.lock().await;
+        let guard = self.state.lock();
         if let ClientState::Ready(service) = &*guard {
             service
                 .peer_info()?
@@ -6196,9 +6173,16 @@ mod tests {
         let mut reconnect_attempted = false;
         let mut is_timeout = false;
 
+        let (working_url, _, _) =
+            spawn_fake_mcp(CallToolBehavior::ErrorThenOk { code: -32603 }).await;
+        let failed_service = fake_http_client(&working_url, 1)
+            .ensure_initialized()
+            .await
+            .unwrap();
         let err = tool
             .recover_and_retry(
                 &client,
+                &failed_service,
                 params,
                 std::time::Duration::from_secs(1),
                 1,
@@ -6216,12 +6200,25 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     enum CallToolBehavior {
-        ErrorThenOk { code: i32 },
-        AlwaysError { code: i32 },
-        HangThenOk { hang_ms: u64 },
-        ErrorThenHang { code: i32, hang_ms: u64 },
+        DeferredError {
+            started: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        },
+        ErrorThenOk {
+            code: i32,
+        },
+        AlwaysError {
+            code: i32,
+        },
+        HangThenOk {
+            hang_ms: u64,
+        },
+        ErrorThenHang {
+            code: i32,
+            hang_ms: u64,
+        },
     }
 
     #[derive(Clone)]
@@ -6274,6 +6271,15 @@ mod tests {
             Some("tools/call") => {
                 let n = state.calls.fetch_add(1, Ordering::Relaxed);
                 match state.behavior {
+                    CallToolBehavior::DeferredError { started, release } => {
+                        if n == 0 {
+                            started.notify_one();
+                            release.notified().await;
+                            axum::Json(err(-32603, "session expired".into())).into_response()
+                        } else {
+                            axum::Json(ok()).into_response()
+                        }
+                    }
                     CallToolBehavior::ErrorThenOk { code } => {
                         if n == 0 {
                             axum::Json(err(code, "session expired".to_string())).into_response()
@@ -6339,6 +6345,91 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         (format!("http://{addr}/mcp"), inits, calls)
+    }
+
+    #[tokio::test]
+    async fn late_tool_error_reuses_already_recovered_service() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (url, inits, calls) = spawn_fake_mcp(CallToolBehavior::DeferredError {
+            started: started.clone(),
+            release: release.clone(),
+        })
+        .await;
+        let client = fake_http_client(&url, 5);
+        let tool = fake_echo_tool();
+        let mut retried = false;
+        let mut timed_out = false;
+        let raw = serde_json::json!({});
+        {
+            let call = tool.try_call_tool(&client, &raw, &mut retried, &mut timed_out);
+            tokio::pin!(call);
+            tokio::select! {
+                _ = started.notified() => {},
+                result = &mut call => panic!("call ended before release: {result:?}"),
+            }
+            client.recover().await.unwrap();
+            assert_eq!(inits.load(Ordering::Relaxed), 2);
+            release.notify_one();
+            assert!(call.await.is_ok());
+        }
+        assert!(retried);
+        assert!(!timed_out);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            inits.load(Ordering::Relaxed),
+            2,
+            "late error reset replacement service"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_tool_timeout_preserves_recovered_service_without_replay() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (url, inits, calls) = spawn_fake_mcp(CallToolBehavior::DeferredError {
+            started: started.clone(),
+            release: release.clone(),
+        })
+        .await;
+        let client = fake_http_client(&url, 1);
+        let tool = fake_echo_tool();
+        let mut retried = false;
+        let mut timed_out = false;
+        let raw = serde_json::json!({});
+        let replacement;
+        {
+            let call = tool.try_call_tool(&client, &raw, &mut retried, &mut timed_out);
+            tokio::pin!(call);
+            tokio::select! {
+                _ = started.notified() => {},
+                result = &mut call => panic!("call ended before timeout: {result:?}"),
+            }
+            replacement = client.recover().await.unwrap();
+            let err = call.await.unwrap_err();
+            assert!(err.to_string().contains("timed out"));
+        }
+        release.notify_one();
+        assert!(timed_out);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(
+            matches!(client.state_kind().await, ClientStateKind::Ready),
+            "old timeout reset new Ready"
+        );
+        assert!(Arc::ptr_eq(
+            &replacement,
+            &client.ensure_initialized().await.unwrap()
+        ));
+        assert_eq!(inits.load(Ordering::Relaxed), 2);
+        let revision = client.current_transport_revision();
+        *client.state.lock() = ClientState::Initializing;
+        assert!(!client.reset_transport(Some(&replacement)).await);
+        assert!(matches!(
+            client.state_kind().await,
+            ClientStateKind::Initializing
+        ));
+        assert_eq!(client.current_transport_revision(), revision);
+        *client.state.lock() = ClientState::Ready(replacement);
     }
 
     fn fake_http_client(url: &str, tool_timeout_sec: u64) -> Arc<McpClient> {
@@ -6571,14 +6662,14 @@ mod tests {
             headers: vec![],
         };
         let client = McpClient::new_http("example-mcp".to_string(), config, None, None);
-        assert!(client.reset_transport().await);
+        assert!(client.reset_transport(None).await);
     }
 
     #[tokio::test]
     async fn test_reset_transport_fails_for_stub() {
         // Stub has `reconnect = None`, simulating a Stdio client.
         let client = McpClient::stub("stdio-srv");
-        assert!(!client.reset_transport().await);
+        assert!(!client.reset_transport(None).await);
     }
 
     #[tokio::test]
@@ -6590,9 +6681,9 @@ mod tests {
         let client = McpClient::new_http("example-mcp".to_string(), config, None, None);
 
         // Multiple resets should all succeed.
-        assert!(client.reset_transport().await);
-        assert!(client.reset_transport().await);
-        assert!(client.reset_transport().await);
+        assert!(client.reset_transport(None).await);
+        assert!(client.reset_transport(None).await);
+        assert!(client.reset_transport(None).await);
     }
 
     #[tokio::test]
@@ -6617,7 +6708,7 @@ mod tests {
         );
 
         // Reset puts the client back into Pending with a fresh transport.
-        assert!(client.reset_transport().await);
+        assert!(client.reset_transport(None).await);
 
         // Second ensure_initialized should attempt another handshake (not
         // return a cached error). It will fail again with the same kind of
@@ -6630,6 +6721,155 @@ mod tests {
             ),
             "second init after reset should also attempt handshake: {err2}"
         );
+    }
+
+    #[tokio::test]
+    async fn init_guard_cancellation_survives_state_lock_contention() {
+        for restorable in [false, true] {
+            let state = Arc::new(parking_lot::Mutex::new(ClientState::Initializing));
+            let lock = state.lock();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let worker_state = Arc::clone(&state);
+            let worker = std::thread::spawn(move || {
+                let notify = Notify::new();
+                let target = if restorable {
+                    ClientState::Pending(PendingTransport::Http(HttpConfig {
+                        url: "http://localhost:1".into(), headers: vec![],
+                    }))
+                } else {
+                    ClientState::Empty
+                };
+                let guard = InitGuard {
+                    state: &worker_state, init_done: &notify, restore: Some(target),
+                };
+                started_tx.send(()).unwrap();
+                drop(guard);
+                done_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+            let completed_while_locked = done_rx.recv_timeout(std::time::Duration::from_millis(20));
+            drop(lock);
+            worker.join().unwrap();
+            assert!(completed_while_locked.is_err(), "cleanup discarded its target under contention");
+            let state = state.lock();
+            assert!(if restorable {
+                matches!(*state, ClientState::Pending(_))
+            } else {
+                matches!(*state, ClientState::Empty)
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_initialization_cancelled_releases_waiters() {
+        let mut config = acp::McpServerStdio::new("cancel-test", PathBuf::from("/bin/sleep"));
+        config.args = vec!["60".into()];
+        let client = start_mcp_server(
+            acp::McpServer::Stdio(config), None, None, &McpSpawnCtx::session_less(),
+        ).await.unwrap();
+        let mut initializing = Box::pin(client.ensure_initialized());
+        assert!(futures::poll!(initializing.as_mut()).is_pending());
+        assert!(matches!(*client.state.lock(), ClientState::Initializing));
+        let notified = client.init_done.notified();
+        tokio::pin!(notified);
+        assert!(futures::poll!(notified.as_mut()).is_pending());
+        drop(initializing);
+        assert!(matches!(*client.state.lock(), ClientState::Empty));
+        assert!(futures::poll!(notified.as_mut()).is_ready());
+        let mut retry = Box::pin(client.ensure_initialized());
+        let std::task::Poll::Ready(Err(error)) = futures::poll!(retry.as_mut()) else {
+            panic!("cancelled stdio initialization still waits");
+        };
+        assert!(error.to_string().contains("no transport configured"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initialization_cancelled_under_state_contention_restores_pending() {
+        struct PendingInvoker;
+        #[async_trait::async_trait]
+        impl crate::acp_transport::AcpReverseInvoker for PendingInvoker {
+            async fn invoke(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: std::time::Duration,
+            ) -> Result<serde_json::Value, String> {
+                std::future::pending().await
+            }
+        }
+        let overrides = McpClientTimeoutOverrides {
+            startup_timeout_sec: Some(1),
+            ..Default::default()
+        };
+        let client = McpClient::new_acp(
+            "test".into(), "id".into(), Arc::new(PendingInvoker), Some(&overrides), None,
+        );
+        let mut initializing = Box::pin(client.ensure_initialized());
+        assert!(futures::poll!(initializing.as_mut()).is_pending());
+        let lock = client.state.lock();
+        assert!(matches!(*lock, ClientState::Initializing));
+        std::thread::scope(|scope| {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let worker = scope.spawn(move || {
+                drop(initializing);
+                done_tx.send(()).unwrap();
+            });
+            let premature = done_rx.recv_timeout(std::time::Duration::from_millis(20));
+            drop(lock);
+            worker.join().unwrap();
+            assert!(premature.is_err(), "cancelled future skipped state restoration");
+        });
+        assert!(matches!(*client.state.lock(), ClientState::Pending(_)));
+    }
+
+    #[tokio::test]
+    async fn concurrent_recoveries_admit_one_reset_and_share_handshake() {
+        struct Initializer(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl crate::acp_transport::AcpReverseInvoker for Initializer {
+            async fn invoke(
+                &self,
+                _: &str,
+                message: serde_json::Value,
+                _: std::time::Duration,
+            ) -> Result<serde_json::Value, String> {
+                if message["method"] != "initialize" {
+                    return Err("unexpected method".into());
+                }
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(
+                    serde_json::json!({"jsonrpc":"2.0", "id":message["id"], "result": {
+                        "protocolVersion":message["params"]["protocolVersion"],
+                        "capabilities":{}, "serverInfo":{"name":"test", "version":"1"}
+                    }}),
+                )
+            }
+        }
+        let invoker = Arc::new(Initializer(std::sync::atomic::AtomicUsize::new(0)));
+        let client = Arc::new(McpClient::new_acp(
+            "test".into(),
+            "id".into(),
+            invoker.clone(),
+            None,
+            None,
+        ));
+        client.ensure_initialized().await.unwrap();
+        let revision = client.current_transport_revision();
+        let first = client.recover();
+        let second = client.recover();
+        tokio::pin!(first, second);
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        assert_eq!(
+            client.current_transport_revision(),
+            revision + 2,
+            "contending recoveries reset twice"
+        );
+        let (first, second) = tokio::join!(first, second);
+        assert!(Arc::ptr_eq(&first.unwrap(), &second.unwrap()));
+        assert_eq!(invoker.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -6669,10 +6909,10 @@ mod tests {
         );
 
         // ACP clients restore from `reconnect`, unlike Stdio.
-        assert!(client.reset_transport().await);
+        assert!(client.reset_transport(None).await);
         assert!(
             matches!(
-                &*client.state.lock().await,
+                &*client.state.lock(),
                 ClientState::Pending(PendingTransport::Acp { .. })
             ),
             "reset_transport should restore the ACP transport to Pending"
@@ -6808,7 +7048,7 @@ mod tests {
         ));
         // Inject the closed real service so the FIRST `call_tool` fails retriably.
         let dead = dead_service().await;
-        *client.state.lock().await = ClientState::Ready(dead);
+        *client.state.lock() = ClientState::Ready(dead);
 
         let erased = McpErasedTool {
             tool: McpTool::new(
@@ -6844,7 +7084,7 @@ mod tests {
             "successful retry must not be flagged as timeout"
         );
         // reset_transport + re-handshake replaced the dead service with a live one.
-        assert!(matches!(&*client.state.lock().await, ClientState::Ready(_)));
+        assert!(matches!(&*client.state.lock(), ClientState::Ready(_)));
     }
 
     #[test]
@@ -7147,7 +7387,7 @@ mod tests {
 
         // Simulate an in-flight handshake by another task: pretend
         // that task took the transport and entered Initializing.
-        *client.state.lock().await = ClientState::Initializing;
+        *client.state.lock() = ClientState::Initializing;
 
         // Spawn the parker. It must observe Initializing and park on
         // `init_done` rather than fail-fast.
@@ -7159,7 +7399,7 @@ mod tests {
 
         // Publish a fresh Pending transport and notify — simulates the
         // holder's failure-path restore.
-        *client.state.lock().await = ClientState::Pending(PendingTransport::Http(config.clone()));
+        *client.state.lock() = ClientState::Pending(PendingTransport::Http(config.clone()));
         client.init_done.notify_waiters();
 
         // The parker should wake, take the transport, run its own
@@ -7194,7 +7434,7 @@ mod tests {
     /// timeout error rather than block indefinitely.
     ///
     /// Without the inflight-wait timeout, a wedged client (one whose
-    /// drop guard couldn't acquire the lock to restore) would silently
+    /// state was corrupted outside the normal holder lifecycle) would silently
     /// stall every future `ensure_initialized` caller until process
     /// restart. The 1 s margin past `startup_timeout_sec` keeps the
     /// happy path snappy while still bounding the worst case.
@@ -7211,7 +7451,7 @@ mod tests {
         let client = McpClient::new_http("test-server".to_string(), config, Some(&overrides), None);
 
         // Wedge the slot in Initializing with no live holder.
-        *client.state.lock().await = ClientState::Initializing;
+        *client.state.lock() = ClientState::Initializing;
 
         let err = client.ensure_initialized().await.unwrap_err();
         let msg = err.to_string();
@@ -7227,7 +7467,7 @@ mod tests {
 
     /// When the holder task is cancelled (`abort()`) mid-handshake, the
     /// `InitGuard` drop impl restores `Pending(transport)` on a
-    /// best-effort basis so a follow-on caller can retry without
+    /// deterministic basis so a follow-on caller can retry without
     /// requiring an explicit `reset_transport`.
     #[tokio::test]
     async fn ensure_initialized_drop_guard_restores_state_after_holder_aborted() {
@@ -7254,7 +7494,7 @@ mod tests {
         // Wait for the holder to enter Initializing.
         let started = std::time::Instant::now();
         loop {
-            if matches!(&*client.state.lock().await, ClientState::Initializing) {
+            if matches!(&*client.state.lock(), ClientState::Initializing) {
                 break;
             }
             assert!(
@@ -7269,11 +7509,11 @@ mod tests {
         holder.abort();
         let _ = holder.await;
 
-        // The drop guard restores best-effort via `try_lock` and notifies.
+        // The drop guard restores under the state lock and notifies.
         // Wait briefly for it to settle.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        match &*client.state.lock().await {
+        match &*client.state.lock() {
             ClientState::Pending(_) => {} // expected
             other => panic!(
                 "expected Pending after holder abort + drop guard, found {}",
@@ -7417,7 +7657,7 @@ mod tests {
     async fn is_healthy_empty_returns_false() {
         let client = McpClient::stub("empty");
         // `stub` starts in `ClientState::Empty`.
-        assert!(matches!(*client.state.lock().await, ClientState::Empty));
+        assert!(matches!(*client.state.lock(), ClientState::Empty));
         assert!(!client.is_healthy().await);
         assert_eq!(client.state_kind().await, ClientStateKind::Empty);
     }
@@ -7431,7 +7671,7 @@ mod tests {
         let client = McpClient::new_http("pending".to_string(), config, None, None);
         // `new_http` constructs with `ClientState::Pending(_)`.
         assert!(matches!(
-            *client.state.lock().await,
+            *client.state.lock(),
             ClientState::Pending(_)
         ));
         assert!(!client.is_healthy().await);
@@ -7441,7 +7681,7 @@ mod tests {
     #[tokio::test]
     async fn is_healthy_initializing_returns_false() {
         let client = McpClient::stub("initializing");
-        *client.state.lock().await = ClientState::Initializing;
+        *client.state.lock() = ClientState::Initializing;
         assert!(!client.is_healthy().await);
         assert_eq!(client.state_kind().await, ClientStateKind::Initializing);
     }

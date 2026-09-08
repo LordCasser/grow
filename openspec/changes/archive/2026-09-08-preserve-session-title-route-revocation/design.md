@@ -1,0 +1,7 @@
+# Design
+Inspect every route initializer, claimant and restoration site. Replace the ambiguous empty-slot meaning with explicit lifecycle ownership (ready, claimed, revoked) or an equally small serialized mechanism. A worker may restore only a still-valid claim; manual-title command revocation must survive later failure callbacks. Keep the existing route itself as the only provider configuration and canonical Timeline as title authority. No persistent index, extra retry framework or automatic regeneration after a committed title.
+
+Tests should deterministically claim, revoke and then fail/restore, verify no later request can claim; separately verify unreclaimed transient failure restores once. Cover direct command and normal scheduling through their shared route admission. Keep manual title commit ordering and acknowledged-error semantics explicit.
+
+# Implementation
+SessionTitleRouteState replaces the actor Option slot with Ready(route), Claimed and Closed. Startup Option values convert once at actor construction. claim is synchronous and exclusive; restore only accepts Claimed, revoke always closes, and finish closes only an un-restored claim. The shared normal/direct-command scheduler owns this transition. All eight restorable failures call restore; worker return calls finish without an intervening await after restoration. A legitimately restored Ready survives finish, whereas a revocation never does. Existing pre-commit manual revocation policy is preserved even if that title commit later fails. No persistence schema or provider route duplication.

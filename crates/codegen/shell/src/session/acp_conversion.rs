@@ -280,14 +280,14 @@ pub fn acp_tool_update(
                 .raw_output(raw_output_json(output, rewriter)),
         )),
         // Web fetch output is converted to text content for the model.
-        // Success (Content) → Completed; errors (DomainNotAllowed, CrossHostRedirect) → Failed.
+        // Success (Content) → Completed; errors (DomainNotAllowed, RedirectRequired) → Failed.
         // This matches the pattern used by ReadFile, ListDir, and SearchReplace.
         ToolOutput::WebFetch(web_fetch_output) => {
             use tools::types::output::WebFetchOutput;
             let status = match web_fetch_output {
                 WebFetchOutput::Content(_) => acp::ToolCallStatus::Completed,
                 WebFetchOutput::DomainNotAllowed(_)
-                | WebFetchOutput::CrossHostRedirect { .. }
+                | WebFetchOutput::RedirectRequired { .. }
                 | WebFetchOutput::Error { .. } => acp::ToolCallStatus::Failed,
             };
             let text = web_fetch_output.to_prompt_format();
@@ -561,6 +561,28 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tools::types::output::*;
+
+    #[test]
+    fn web_fetch_redirect_requires_new_call_in_acp() {
+        let redirect = WebFetchOutput::RedirectRequired {
+            original_url: "https://example.com/docs".into(),
+            redirect_url: "https://example.com/private".into(),
+        };
+        let prompt = redirect.to_prompt_format();
+        assert!(prompt.contains("https://example.com/private"));
+        assert!(prompt.contains("new web_fetch call"));
+        let output = ToolOutput::WebFetch(redirect);
+        let update = acp_tool_update(&output, "redirect", None, None).unwrap();
+        assert_eq!(update.fields.status, Some(acp::ToolCallStatus::Failed));
+        let json = serde_json::to_value(&update).unwrap().to_string();
+        assert!(json.contains(&prompt));
+        let raw = raw_output_json(&output, None).unwrap();
+        let restored: ToolOutput = serde_json::from_value(raw).unwrap();
+        assert!(matches!(
+            restored,
+            ToolOutput::WebFetch(WebFetchOutput::RedirectRequired { .. })
+        ));
+    }
 
     #[test]
     fn coordination_tools_publish_full_standard_acp_results_and_terminal_status() {

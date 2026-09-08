@@ -1,0 +1,4 @@
+# Design
+Shell to_ext_response wraps recap payloads in ExtMethodResult. The effect currently discards the response. A private response classifier validates envelope error/result, ok=true, and optional boolean disabled. disabled=true is not admission. Reuse RecapRequested.error and its existing manual session-bound cleanup, avoiding a new state entity or global capability mutation. Use stable local error messages, not arbitrary response-body text.
+
+Test the actual execute Effect::SendRecap path with real ACP channels, serialize responses using the shell production helper, dispatch the resulting TaskResult into a local AppView, and inspect manual progress/auto silence. Include accepted true/absent disabled, rejected, disabled, envelope error and malformed payloads. This is controlled capability-response coverage, not a live configuration reload or provider generation test.

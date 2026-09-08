@@ -13,7 +13,7 @@ pub use tools::implementations::skills::types::{SkillInfo, SkillScope};
 
 use tools::implementations::skills::discovery::{
     find_command_paths, find_skill_md_paths, find_skill_paths, is_valid_skill_name,
-    normalize_skill_name, parse_skill_files, scan_md_files, walk_for_skill_md,
+    normalize_skill_name, parse_skill_files, scan_md_files,
 };
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -28,17 +28,19 @@ pub struct SkillsConfig {
     #[serde(default)]
     pub ignore: Vec<String>,
 
-    /// Skill names that are disabled. Disabled skills remain in the list
+    /// Disabled catalog keys: native name or plugin:name. Disabled skills remain in the list
     /// (unlike `ignore` which hides them entirely) but are excluded from
     /// the system prompt and skill tool invocation.
     #[serde(default)]
     pub disabled: Vec<String>,
 
     /// Launcher-injected server-synced skill dirs (tagged `Server` scope).
+    /// Includes a root SKILL.md as well as skills in subdirectories.
     #[serde(default)]
     pub server_skill_dirs: Vec<String>,
 
     /// Launcher-injected platform bundled skill dirs (tagged `Bundled` scope).
+    /// Includes a root SKILL.md as well as skills in subdirectories.
     #[serde(default)]
     pub bundled_skill_dirs: Vec<String>,
 }
@@ -51,7 +53,7 @@ pub struct SkillsConfig {
 /// → Server (injected `config.server_skill_dirs`)
 /// → Bundled (injected `config.bundled_skill_dirs` + `~/.grow/bundled`; lowest precedence).
 ///
-/// `config.ignore` globs are applied across all sources after collection.
+/// `config.ignore` path prefixes are applied across all sources before merging.
 /// Skills with the same name from higher-priority sources override lower-priority ones.
 ///
 /// When `working_directory` is `None`, only User-scoped skills are returned.
@@ -103,7 +105,7 @@ pub async fn list_skills_with_plugins(
     skills.sort_by_key(|s| s.scope);
 
     let plugin_skills = if let Some(registry) = plugins {
-        collect_plugin_skills(registry)
+        filter_skills(collect_plugin_skills(registry), &config.ignore)
     } else {
         vec![]
     };
@@ -116,7 +118,7 @@ pub async fn list_skills_with_plugins(
     if !config.disabled.is_empty() {
         let disabled_set: HashSet<&str> = config.disabled.iter().map(|s| s.as_str()).collect();
         for skill in &mut merged {
-            if disabled_set.contains(skill.name.as_str()) {
+            if disabled_set.contains(skill.dedup_key().as_str()) {
                 skill.enabled = false;
             }
         }
@@ -135,10 +137,14 @@ pub fn collect_skill_config_dirs(
     user_roots: &[PathBuf],
     config_paths: &[String],
 ) -> Vec<PathBuf> {
+    let resolved_cwd =
+        cwd.map(|path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+    let cwd = resolved_cwd.as_deref();
     let git_root = cwd.and_then(|c| {
-        git2::Repository::discover(c)
-            .ok()
-            .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
+        git2::Repository::discover(c).ok().and_then(|repo| {
+            repo.workdir()
+                .map(|p| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+        })
     });
 
     let mut dirs = Vec::new();
@@ -278,12 +284,14 @@ async fn list_skills_with_roots(
     workspace_user_dir: Option<&Path>,
     user_roots: &[PathBuf],
 ) -> Vec<SkillInfo> {
-    let cwd = working_directory.map(PathBuf::from);
+    let cwd = working_directory
+        .map(|path| dunce::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)));
 
     let git_root = cwd.as_ref().and_then(|c| {
-        git2::Repository::discover(c)
-            .ok()
-            .and_then(|repo| repo.workdir().map(|p| p.to_path_buf()))
+        git2::Repository::discover(c).ok().and_then(|repo| {
+            repo.workdir()
+                .map(|p| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+        })
     });
 
     let config_dirs =
@@ -345,11 +353,14 @@ fn expand_tilde(raw: &str) -> PathBuf {
 fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Vec<SkillInfo> {
     let mut skill_files: Vec<(PathBuf, SkillScope)> = Vec::new();
     let mut seen = HashSet::new();
+    let resolved_root =
+        git_root.map(|root| dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
 
     for raw in config_paths {
         let expanded = expand_tilde(raw);
-        let scope = match git_root {
-            Some(root) if expanded.starts_with(root) => SkillScope::Repo,
+        let resolved = dunce::canonicalize(&expanded).unwrap_or_else(|_| expanded.clone());
+        let scope = match resolved_root.as_deref() {
+            Some(root) if resolved.starts_with(root) => SkillScope::Repo,
             _ => SkillScope::User,
         };
 
@@ -391,8 +402,7 @@ fn collect_injected_skills(dirs: &[String], scope: SkillScope) -> Vec<SkillInfo>
         if !expanded.is_dir() {
             continue;
         }
-        let mut dir_paths = Vec::new();
-        walk_for_skill_md(&expanded, &mut dir_paths, 0);
+        let dir_paths = find_skill_md_paths(&expanded);
         collect_discovered_paths(dir_paths, scope, &mut seen, &mut skill_files);
     }
 
@@ -686,13 +696,18 @@ pub(crate) async fn resolve_preloaded_skills(
             continue;
         };
 
+        if !skill.enabled {
+            tracing::debug!(skill_name = %name, "Skipping disabled skill declared in agent definition");
+            continue;
+        }
+
         // A caller may provide a frozen catalog (for example a Workflow Run).
         // `load_skill_content` treats an existing body as authoritative and
         // only consults disk for ordinary live-discovery entries.
         match tools::implementations::skills::skill::load_skill_content(skill).await {
             Ok(body) => {
                 let mut loaded = skill.clone();
-                loaded.body = (!body.is_empty()).then_some(body);
+                loaded.body = Some(body);
                 result.push(loaded);
             }
             Err(e) => {
@@ -712,10 +727,70 @@ pub(crate) async fn resolve_preloaded_skills(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn preloading_respects_disabled_skills_without_name_fallback() {
+        let disabled = SkillInfo {
+            name: "blocked".into(),
+            enabled: false,
+            body: Some("DISABLED BODY".into()),
+            ..Default::default()
+        };
+        let plugin = SkillInfo {
+            name: "plugin-blocked".into(),
+            plugin_name: Some("demo".into()),
+            ..disabled.clone()
+        };
+        let fallback = SkillInfo {
+            enabled: true,
+            plugin_name: Some("fallback".into()),
+            body: Some("UNREQUESTED FALLBACK".into()),
+            ..disabled.clone()
+        };
+        let enabled = SkillInfo {
+            name: "allowed".into(),
+            enabled: true,
+            body: Some("ALLOWED BODY".into()),
+            ..Default::default()
+        };
+        let loaded = resolve_preloaded_skills(
+            &[
+                "blocked".into(),
+                "demo:plugin-blocked".into(),
+                "allowed".into(),
+            ],
+            &[disabled, plugin, fallback, enabled],
+        )
+        .await;
+        assert_eq!(
+            loaded
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["allowed"]
+        );
+        let prompt = format_skills_for_injection(&loaded);
+        assert!(prompt.contains("ALLOWED BODY"));
+        assert!(!prompt.contains("DISABLED BODY"));
+        assert!(!prompt.contains("UNREQUESTED FALLBACK"));
+    }
+
+    #[tokio::test]
+    async fn preloading_preserves_empty_skill_snapshot() {
+        let skill = SkillInfo {
+            name: "empty".into(),
+            path: "chat-product://empty".into(),
+            body: Some(String::new()),
+            ..Default::default()
+        };
+        let loaded = resolve_preloaded_skills(&["empty".into()], &[skill]).await;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].body.as_deref(), Some(""));
+    }
     use std::fs;
     use tools::implementations::skills::discovery::{
         MAX_BODY_PEEK_BYTES, MAX_SKILL_WALK_DEPTH, SkillParseError, extract_first_paragraph,
-        is_valid_skill_name, normalize_skill_name, parse_skill_frontmatter,
+        is_valid_skill_name, normalize_skill_name, parse_skill_frontmatter, walk_for_skill_md,
     };
 
     /// Helper: create a minimal valid SKILL.md with the given name.
@@ -725,6 +800,22 @@ mod tests {
             "---\nname: {name}\ndescription: A test skill called {name}\n---\n\nSkill body here.\n"
         );
         fs::write(dir.join("SKILL.md"), content).unwrap();
+    }
+
+    #[test]
+    fn injected_skill_directories_include_root_and_deduplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_skill_md(tmp.path(), "root");
+        write_skill_md(&tmp.path().join("child"), "child");
+        let path = tmp.path().to_string_lossy().into_owned();
+        for scope in [SkillScope::Server, SkillScope::Bundled] {
+            let skills = collect_injected_skills(&[path.clone(), path.clone()], scope);
+            assert_eq!(
+                skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+                ["root", "child"]
+            );
+            assert!(skills.iter().all(|s| s.scope == scope));
+        }
     }
 
     // ── Server-synced skills (injected server_skill_dirs) ────────────────
@@ -1256,8 +1347,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_frontmatter_recovers_colon_in_value() {
+    fn parse_frontmatter_requires_quoted_value_colon() {
         let content = "---\nname: my-skill\ndescription: lorem ipsum: dolor sit amet\n---\n";
+        assert!(matches!(
+            parse_skill_frontmatter(content, None),
+            Err(SkillParseError::YamlError(_))
+        ));
+        let content = "---\nname: my-skill\ndescription: \"lorem ipsum: dolor sit amet\"\n---\n";
         let parsed = parse_skill_frontmatter(content, None).unwrap();
         assert_eq!(parsed.name, "my-skill");
         assert_eq!(parsed.description, "lorem ipsum: dolor sit amet");
@@ -1428,6 +1524,34 @@ mod tests {
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "my-skill");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_config_skills_scope_follows_source_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let inside = repo.join("inside");
+        let outside = tmp.path().join("outside");
+        write_skill_md(&inside, "inside");
+        write_skill_md(&outside, "outside");
+        let into_repo = tmp.path().join("into-repo");
+        let out_of_repo = repo.join("out-of-repo");
+        std::os::unix::fs::symlink(&inside, &into_repo).unwrap();
+        std::os::unix::fs::symlink(&outside, &out_of_repo).unwrap();
+        for (path, expected) in [
+            (into_repo, SkillScope::Repo),
+            (out_of_repo, SkillScope::User),
+        ] {
+            let skills = collect_config_skills(&[path.to_string_lossy().into_owned()], Some(&repo));
+            assert_eq!(skills.len(), 1);
+            assert_eq!(skills[0].scope, expected, "{}", path.display());
+        }
+        let repo_alias = tmp.path().join("repo-alias");
+        std::os::unix::fs::symlink(&repo, &repo_alias).unwrap();
+        let skills =
+            collect_config_skills(&[inside.to_string_lossy().into_owned()], Some(&repo_alias));
+        assert_eq!(skills[0].scope, SkillScope::Repo);
     }
 
     #[test]
@@ -1915,6 +2039,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ignore_paths_apply_to_plugin_skills_before_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        write_skill_md(&repo.join(".grow/skills/shared"), "shared");
+        let plugin_root = tmp.path().join("plugin");
+        let shared = plugin_root.join("skills/shared");
+        let sibling = plugin_root.join("skills/sibling");
+        write_skill_md(&shared, "shared");
+        write_skill_md(&sibling, "sibling");
+        let registry =
+            make_registry_with_skill_dirs("demo", &plugin_root, vec![shared.clone(), sibling]);
+        for (ignore, expected) in [
+            (vec![], vec!["demo:shared", "demo:sibling"]),
+            (vec![plugin_root.to_string_lossy().into_owned()], vec![]),
+            (
+                vec![shared.join("SKILL.md").to_string_lossy().into_owned()],
+                vec!["demo:sibling"],
+            ),
+        ] {
+            let config = SkillsConfig {
+                ignore,
+                ..Default::default()
+            };
+            let skills = list_skills_with_plugins(repo.to_str(), &config, Some(&registry)).await;
+            assert!(skills.iter().any(|s| s.dedup_key() == "shared"));
+            let mut plugin_keys: Vec<_> = skills
+                .iter()
+                .filter(|s| s.plugin_name.as_deref() == Some("demo"))
+                .map(|s| s.dedup_key())
+                .collect();
+            plugin_keys.sort();
+            assert_eq!(plugin_keys, expected, "ignore: {:?}", config.ignore);
+        }
+    }
+
+    #[tokio::test]
     async fn list_skills_ignore_allows_lower_priority_same_name_fallback() {
         let tmp = tempfile::tempdir().unwrap();
         let repo_root = tmp.path().join("repo");
@@ -1950,13 +2112,12 @@ mod tests {
             1,
             "Expected repo fallback skill after local ignore"
         );
-        assert!(
-            same_skills[0]
-                .path
-                .starts_with(repo_skill_dir.to_str().unwrap()),
-            "Expected fallback from repo path, got: {}",
-            same_skills[0].path
+        assert_eq!(
+            dunce::canonicalize(&same_skills[0].path).unwrap(),
+            dunce::canonicalize(repo_skill_dir.join("SKILL.md")).unwrap(),
+            "Expected the repository fallback file"
         );
+        assert_eq!(same_skills[0].scope, SkillScope::Repo);
     }
 
     // discover_skills_for_paths and dedup_by_canonical_path tests removed --
@@ -1964,6 +2125,36 @@ mod tests {
     // and tools::types::skill_discovery_tracker, tested there.
 
     // ── Disabled skills marking ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn disabled_config_distinguishes_plugin_and_native_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        write_skill_md(&repo.join(".grow/skills/shared"), "shared");
+        let plugin_root = tmp.path().join("plugin");
+        let plugin_skill = plugin_root.join("skills/shared");
+        write_skill_md(&plugin_skill, "shared");
+        let registry = make_registry_with_skill_dirs("demo", &plugin_root, vec![plugin_skill]);
+        for disabled in ["demo:shared", "shared"] {
+            let config = SkillsConfig {
+                disabled: vec![disabled.into()],
+                ..Default::default()
+            };
+            let skills = list_skills_with_plugins(repo.to_str(), &config, Some(&registry)).await;
+            let matching: Vec<_> = skills.iter().filter(|s| s.name == "shared").collect();
+            assert_eq!(matching.len(), 2);
+            for skill in matching {
+                assert_eq!(
+                    skill.enabled,
+                    skill.dedup_key() != disabled,
+                    "{disabled}: {}",
+                    skill.dedup_key()
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn disabled_config_marks_skill_enabled_false() {
@@ -2342,6 +2533,47 @@ mod tests {
             "Expected no bundled skills from empty bundled dir, got: {:?}",
             bundled.iter().map(|s| &s.name).collect::<Vec<_>>()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cwd_alias_discovery_stops_at_actual_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path();
+        let repo = outer.join("repo");
+        let sub = repo.join("sub");
+        fs::create_dir_all(sub.join(".grow")).unwrap();
+        fs::create_dir_all(repo.join(".grow")).unwrap();
+        fs::create_dir_all(outer.join(".grow")).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        let alias = outer.join("alias");
+        std::os::unix::fs::symlink(&sub, &alias).unwrap();
+        let dirs = collect_skill_config_dirs(Some(&alias), None, &[], &[]);
+        let dirs: Vec<_> = dirs
+            .iter()
+            .map(|p| dunce::canonicalize(p).unwrap())
+            .collect();
+        assert_eq!(
+            dirs,
+            [
+                dunce::canonicalize(sub.join(".grow")).unwrap(),
+                dunce::canonicalize(repo.join(".grow")).unwrap()
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_grow_link_preserves_entry_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        let shared = tmp.path().join("shared");
+        fs::create_dir_all(&cwd).unwrap();
+        write_skill_md(&shared.join("skills/linked"), "linked");
+        std::os::unix::fs::symlink(&shared, cwd.join(".grow")).unwrap();
+        let skills = list_skills_with_roots(cwd.to_str(), None, &[]).await;
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].scope, SkillScope::Local);
     }
 
     #[test]

@@ -446,8 +446,7 @@ impl SlashController {
         if let Some(snapshot) = snapshot
             && !mru::persist_async(snapshot)
         {
-            // No write could be attempted (writer unavailable and the sync
-            // fallback failed): keep the changes dirty so the next record
+            // The writer is unavailable: keep the changes dirty so the next record
             // retries instead of silently dropping them.
             self.mru.borrow_mut().mark_dirty();
         }

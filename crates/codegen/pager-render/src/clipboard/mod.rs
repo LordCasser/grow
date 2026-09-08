@@ -494,6 +494,18 @@ impl CopyDelivery {
         }
     }
 
+    /// Persistent feedback: preserve backend evidence and always name the backup.
+    pub fn summary_message(&self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Clipboard { result, file: Some(path) } => std::borrow::Cow::Owned(format!(
+                "{} (also saved to {})",
+                result.message_lead,
+                display_copy_path(path),
+            )),
+            _ => self.toast_message(),
+        }
+    }
+
     /// Toast duration in ticks for [`Self::toast_message`].
     pub fn toast_ticks(&self) -> u8 {
         match self {
@@ -553,27 +565,47 @@ pub fn write_text_to_copy_file(
     Ok(expanded)
 }
 
-/// Write `text` to `path`, owner-readable only (`0600`) on unix.
-///
-/// A pre-existing file (e.g. a `last-copy.txt` created `0644` by an older
-/// grow) is tightened via `set_permissions` since the create-time `mode`
-/// only applies to newly created files. Non-unix falls back to a plain write.
+/// Commit a private copy file without truncating the previous content first.
 fn write_owner_only(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    write_owner_only_with(path, |file| file.write_all(text.as_bytes()))
+}
+
+fn write_owner_only_with(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => path.canonicalize()?,
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(error),
+    };
+    match std::fs::metadata(&target) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Err(Error::new(ErrorKind::InvalidInput, "Copy target must be a regular file"));
+            }
+            if metadata.permissions().readonly() {
+                return Err(Error::new(ErrorKind::PermissionDenied, "Copy target is read-only"));
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let parent = target.parent().filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
     {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file.write_all(text.as_bytes())
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file().set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    #[cfg(not(unix))]
-    std::fs::write(path, text)
+    write(temp.as_file_mut())?;
+    temp.as_file().sync_all()?;
+    temp.persist(&target).map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// Write to the default fallback path ([`default_copy_fallback_path`]).
@@ -699,14 +731,16 @@ fn log_clipboard_copy_event(
 
 /// Return the parenthetical stats suffix used in clipboard success messages.
 /// Format: " (N chars, M lines)" with proper pluralization.
+/// Characters are Unicode scalar values (including newline characters).
 /// Extracted to eliminate the exact duplication between assistant copy and
 /// full-conversation export (and any future clipboard users).
 pub fn clipboard_stats_suffix(text: &str) -> String {
-    let chars = text.len();
+    let chars = text.chars().count();
     let lines = text.lines().count();
     format!(
-        " ({} chars, {} {})",
+        " ({} {}, {} {})",
         chars,
+        if chars == 1 { "char" } else { "chars" },
         lines,
         if lines == 1 { "line" } else { "lines" }
     )
@@ -1343,6 +1377,102 @@ pub use test_support::{
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn copy_summary_preserves_delivery_evidence_and_backup() {
+        for feedback in [ClipboardFeedback::Copied, ClipboardFeedback::CopiedTmux,
+            ClipboardFeedback::UnverifiedOscRemote] {
+            for backup in [None, Some(std::path::PathBuf::from("/copy-backup.txt"))] {
+                let expected = match &backup {
+                    Some(_) => format!("{} (also saved to /copy-backup.txt)", feedback.message_lead()),
+                    None => feedback.message().to_string(),
+                };
+                let delivery = CopyDelivery::Clipboard { result: feedback.to_result(), file: backup };
+                assert_eq!(delivery.summary_message(), expected);
+                if feedback == ClipboardFeedback::UnverifiedOscRemote {
+                    assert!(delivery.summary_message().starts_with("Copy sent"));
+                    assert!(!delivery.summary_message().contains("Copied"));
+                }
+            }
+        }
+        let file = CopyDelivery::File { path: "/copy-backup.txt".into() };
+        assert_eq!(file.summary_message(), "Clipboard unreachable — wrote /copy-backup.txt");
+        let failed = CopyDelivery::Failed { clipboard: ClipboardFeedback::Failed.to_result(),
+            file_error: std::io::Error::other("disk error") };
+        assert_eq!(failed.summary_message(), ClipboardFeedback::Failed.message());
+    }
+
+    #[test]
+    fn copy_file_partial_failure_preserves_old_content() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("copy.txt");
+        std::fs::write(&path, "old content").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let result = super::write_owner_only_with(&path, |file| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+            }
+            file.write_all(b"partial")?;
+            Err(std::io::Error::other("injected copy failure"))
+        });
+        assert!(result.unwrap_err().to_string().contains("injected copy failure"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old content");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
+        }
+        super::write_text_to_copy_file("new content", &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(super::write_text_to_copy_file("no", dir.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_file_preserves_symlink_and_tightens_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = dir.path().join("copy.txt");
+        symlink("target.txt", &link).unwrap();
+        super::write_text_to_copy_file("new", &link).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
+        let dangling = dir.path().join("dangling.txt");
+        symlink("missing.txt", &dangling).unwrap();
+        assert!(super::write_text_to_copy_file("no", &dangling).is_err());
+        assert!(std::fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink());
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(super::write_text_to_copy_file("no", &link).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    #[test]
+    fn clipboard_stats_count_unicode_characters() {
+        for (text, expected) in [
+            ("", " (0 chars, 0 lines)"),
+            ("A", " (1 char, 1 line)"),
+            ("你好", " (2 chars, 1 line)"),
+            ("🦀", " (1 char, 1 line)"),
+            ("e\u{301}", " (2 chars, 1 line)"),
+            ("你好\nworld", " (8 chars, 2 lines)"),
+            ("A\r\nB", " (4 chars, 2 lines)"),
+        ] {
+            assert_eq!(super::clipboard_stats_suffix(text), expected, "{text:?}");
+        }
+    }
+
     use super::*;
     use crate::terminal::{
         ByobuBackend, EmbeddedEditor, MultiplexerKind, TerminalContext, TerminalName,

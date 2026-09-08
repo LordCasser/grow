@@ -1877,3 +1877,28 @@ fn real_session_glide_ends_without_finalize_burst_or_drop() {
     );
     assert_eq!(last["events_total"], 54);
 }
+
+#[test]
+fn scroll_log_failure_reports_off_and_next_toggle_reenables() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = Instant::now();
+    let mut state = MouseScrollState::new_at(base);
+    state.recorder = Some(ScrollLogRecorder::new(directory.path().to_path_buf(), base));
+    let mut mirror = MouseScrollState::new_at(base);
+    let config = make_config(3, ScrollInputMode::Trackpad);
+    assert!(state.scroll_log_active(), "pending recorder is enabled");
+    for i in 0..20 {
+        let at = base + Duration::from_millis(i * 5);
+        assert_eq!(
+            state.on_scroll_event_at(at, ScrollDirection::Down, config).lines,
+            mirror.on_scroll_event_at(at, ScrollDirection::Down, config).lines,
+        );
+        assert!(!state.scroll_log_active(), "failed sink must report off");
+    }
+    assert!(directory.path().is_dir());
+    let path = state.toggle_scroll_log().expect("one toggle retries from failed state");
+    assert!(state.scroll_log_active());
+    assert!(!path.exists(), "retry remains lazy and does not write user logs in this test");
+    assert!(state.toggle_scroll_log().is_none());
+    assert!(!state.scroll_log_active());
+}

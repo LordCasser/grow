@@ -12,7 +12,19 @@ pub fn parse_interval(s: &str) -> Result<u64, SchedulerError> {
         ));
     }
 
+    // Only ASCII compact intervals are accepted. Validate before splitting by
+    // byte so natural-language and full-width suffixes return an ordinary error.
+    if !s.is_ascii() {
+        return Err(SchedulerError::InvalidInterval(format!(
+            "invalid interval format: {s:?} (expected e.g. 5m, 2h, 1d)"
+        )));
+    }
     let (digits, suffix) = s.split_at(s.len() - 1);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(SchedulerError::InvalidInterval(format!(
+            "invalid interval format: {s:?} (expected e.g. 5m, 2h, 1d)"
+        )));
+    }
     let value: u64 = digits.parse().map_err(|_| {
         SchedulerError::InvalidInterval(format!(
             "invalid interval format: {s:?} (expected e.g. 5m, 2h, 1d)"
@@ -116,6 +128,9 @@ mod tests {
         assert!(parse_interval("abc").is_err());
         assert!(parse_interval("5x").is_err());
         assert!(parse_interval("m").is_err());
+        for value in ["5分钟", "每5分钟", "5ｍ", "秒", "５m", "+5m"] {
+            assert!(parse_interval(value).is_err(), "accepted {value:?}");
+        }
     }
 
     #[test]

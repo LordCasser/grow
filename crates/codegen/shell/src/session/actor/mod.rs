@@ -1840,10 +1840,10 @@ pub(crate) struct SessionActor {
     /// Explicitly configured vision model for `read_file` image/PDF results.
     /// `None` leaves those images on the active session model path.
     pub(crate) image_description_model: parking_lot::RwLock<Option<String>>,
-    /// One-shot title inference capability. `None` means the session already
-    /// has a title or is a child session that never generates one.
+    /// One-shot title inference ownership, including permanent revocation
+    /// while a background worker holds the provider route.
     pub(crate) session_title_route:
-        std::cell::RefCell<Option<crate::session::actor::summary::SessionTitleRoute>>,
+        std::cell::RefCell<crate::session::actor::summary::SessionTitleRouteState>,
     /// Cache auxiliary image outputs by content and prompt fingerprint.
     pub(crate) image_describe_cache: Arc<crate::session::image_describe::ImageDescribeCache>,
     pub(crate) workspace_ops: workspace::WorkspaceOps,

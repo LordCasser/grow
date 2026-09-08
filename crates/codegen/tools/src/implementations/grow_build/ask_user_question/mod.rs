@@ -152,7 +152,6 @@ pub struct AskUserQuestionInput {
     /// is required.
     #[schemars(description = "The questions to ask, each with its own options.")]
     pub questions: Vec<Question>,
-
     /// Internal flag: when `true`, the tool result is formatted in the
     /// alternate shape (referenced by id, not label).
     /// Skipped on the wire and from the JSON schema so the model never
@@ -247,7 +246,7 @@ impl tool_runtime::Tool for AskUserQuestionTool {
             ));
         }
 
-        // ── Step 1: Validate unique question text ───────────────────────
+        // ── Step 1: Validate unambiguous question and option text ───────────────────────
         {
             let mut seen = std::collections::HashSet::new();
             for q in &input.questions {
@@ -256,6 +255,15 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                         "Duplicate question text: \"{}\"",
                         q.question
                     )));
+                }
+                let mut labels = std::collections::HashSet::new();
+                for option in &q.options {
+                    if !labels.insert(&option.label) {
+                        return Err(tool_runtime::ToolError::invalid_arguments(format!(
+                            "Duplicate option label {:?} in question {:?}",
+                            option.label, q.question
+                        )));
+                    }
                 }
             }
         }
@@ -582,6 +590,77 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("Duplicate question text"), "got: {msg}");
         assert!(msg.contains("Same question?"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn duplicate_option_labels_rejected_before_send() {
+        for id_format in [false, true] {
+            let (shared, mut rx) = resources_with_sender();
+            let mut question = make_question("Which version?", &["Same", "Same"]);
+            question.id = Some("q1".into());
+            question.options[0].id = Some("first".into());
+            question.options[1].id = Some("second".into());
+            question.options[1].description = "Different meaning".into();
+            let input = AskUserQuestionInput {
+                questions: vec![question],
+                use_id_keyed_format: id_format,
+            };
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                tool_runtime::Tool::run(
+                    &AskUserQuestionTool,
+                    test_ctx_with_call_id(shared, "duplicates"),
+                    input,
+                ),
+            )
+            .await
+            .expect("ambiguous options must fail before waiting for a response");
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Duplicate option label")
+            );
+            assert!(rx.try_recv().is_err(), "no question should be sent");
+        }
+    }
+
+    #[tokio::test]
+    async fn option_labels_can_repeat_across_questions() {
+        let (shared, mut rx) = resources_with_sender();
+        let input = AskUserQuestionInput {
+            questions: vec![
+                make_question("First?", &["Yes", "No"]),
+                make_question("Second?", &["Yes", "No"]),
+            ],
+            use_id_keyed_format: false,
+        };
+        let handle = tokio::spawn(async move {
+            tool_runtime::Tool::run(
+                &AskUserQuestionTool,
+                test_ctx_with_call_id(shared, "cross-question"),
+                input,
+            )
+            .await
+        });
+        let request = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let answers = IndexMap::from([
+            ("First?".into(), vec!["Yes".into()]),
+            ("Second?".into(), vec!["No".into()]),
+        ]);
+        request
+            .result_tx
+            .send(Ok(UserQuestionResponse::Accepted {
+                answers,
+                annotations: None,
+            }))
+            .unwrap();
+        let output = handle.await.unwrap().unwrap();
+        assert!(output.message.contains("First?"));
+        assert!(output.message.contains("Second?"));
     }
 
     // ── Blocking round-trip tests ────────────────────────────────────────

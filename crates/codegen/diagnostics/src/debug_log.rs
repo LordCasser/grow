@@ -218,7 +218,7 @@ fn update_latest_symlink(dir: &Path, target: &Path) {
         "{LATEST_TMP_PREFIX}{}{LATEST_TMP_SUFFIX}",
         name.to_string_lossy()
     ));
-    let _ = std::fs::remove_file(&tmp);
+    // Creation is exclusive: leave any existing entry to its owner.
     if std::os::unix::fs::symlink(name, &tmp).is_ok()
         && std::fs::rename(&tmp, dir.join(LATEST_LINK_NAME)).is_err()
     {
@@ -286,15 +286,26 @@ impl RoutingLayer {
         }
         // First event for this session: open OUTSIDE the lock.
         let path = self.dir.join(format!("{key}.txt"));
-        let Ok(mut writer) = crate::appender::non_blocking_file_writer(&path) else {
+        let Ok((mut writer, guard)) = crate::appender::unparked_file_writer(&path) else {
             return;
         };
         update_latest_symlink(&self.dir, &path);
         let _ = writer.write_all(line);
-        let mut map = self.lock();
-        // If a concurrent event opened it first, keep that one and drop ours (the
-        // line we wrote already reached the file via our worker).
-        map.sessions.entry(key.to_owned()).or_insert(writer);
+        let retained = {
+            let mut map = self.lock();
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                map.sessions.entry(key.to_owned())
+            {
+                entry.insert(writer);
+                true
+            } else {
+                false
+            }
+        };
+        if retained {
+            crate::appender::park_file_log_guard(guard);
+        }
+        // A losing guard flushes and retires outside the routing lock.
     }
 
     // Append `line` to the `<role>-<pid>.txt` catch-all, opening it on first use.
@@ -307,13 +318,21 @@ impl RoutingLayer {
             }
         }
         let path = self.dir.join(format!("{}-{}.txt", self.role, self.pid));
-        let Ok(mut writer) = crate::appender::non_blocking_file_writer(&path) else {
+        let Ok((mut writer, guard)) = crate::appender::unparked_file_writer(&path) else {
             return;
         };
         let _ = writer.write_all(line);
-        let mut map = self.lock();
-        if map.fallback.is_none() {
-            map.fallback = Some(writer);
+        let retained = {
+            let mut map = self.lock();
+            if map.fallback.is_none() {
+                map.fallback = Some(writer);
+                true
+            } else {
+                false
+            }
+        };
+        if retained {
+            crate::appender::park_file_log_guard(guard);
         }
     }
 }
@@ -477,17 +496,16 @@ fn resolve_debug_target_inner(
 const LOG_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Prune `*.txt` firehose files (and orphaned `latest.txt` swap temps) under
-/// `~/.grow/debug` older than [`LOG_RETENTION`] so the dir doesn't grow
-/// unbounded. Age-based (not count-based) so a still-open log from a concurrent
-/// process is never unlinked mid-write; best-effort, ignore errors.
+/// `~/.grow/debug` older than [`LOG_RETENTION`]. Shared writer locks protect
+/// idle open logs from cooperating processes. This startup sweep is not a byte
+/// quota; cleanup is best-effort and ignores errors.
 pub(crate) fn sweep_old_logs() {
     prune_old_logs(&grow_home().join("debug"), LOG_RETENTION);
 }
 
 // Pure prune core: remove `*.txt` files and orphaned `latest.txt` swap temps in
-// `dir` older than `max_age`. Age-based so a recently-written (active) log is
-// never deleted; spares the `latest.txt` symlink (a stale link is harmless and
-// never an active file); best-effort so cleanup never fails logging setup;
+// `dir` older than `max_age`. Regular logs require exclusive lock ownership;
+// spares the `latest.txt` symlink. Best-effort so cleanup never fails logging setup;
 // testable against a tempdir.
 fn prune_old_logs(dir: &Path, max_age: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -513,7 +531,34 @@ fn prune_old_logs(dir: &Path, max_age: std::time::Duration) {
             continue;
         };
         if now.duration_since(modified).is_ok_and(|age| age > max_age) {
-            let _ = std::fs::remove_file(&path);
+            if is_log {
+                // Do not follow a symlink or open a known special file as a log.
+                if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                    continue;
+                }
+                let Ok(file) = std::fs::File::open(&path) else {
+                    continue;
+                };
+                if file.try_lock().is_err() {
+                    continue;
+                }
+                // A writer may have appended since the directory metadata read.
+                let Ok(metadata) = file.metadata() else {
+                    continue;
+                };
+                if !metadata.is_file()
+                    || !metadata
+                        .modified()
+                        .ok()
+                        .and_then(|modified| now.duration_since(modified).ok())
+                        .is_some_and(|age| age > max_age)
+                {
+                    continue;
+                }
+                let _ = std::fs::remove_file(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
         }
     }
 }
@@ -529,6 +574,62 @@ mod tests {
     fn flush_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn concurrent_first_writes_retain_one_guard_per_sink() {
+        const CHILD: &str = "GROW_DEBUG_WRITER_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "debug_log::tests::concurrent_first_writes_retain_one_guard_per_sink",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let layer = std::sync::Arc::new(RoutingLayer::new(
+            dir.path().to_path_buf(),
+            "agent".into(),
+            1,
+        ));
+        let initial = crate::appender::parked_guard_count();
+        for fallback in [false, true] {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+            let handles: Vec<_> = (0..16)
+                .map(|index| {
+                    let layer = layer.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let line = format!("line-{index}\n");
+                        if fallback {
+                            layer.write_fallback(line.as_bytes());
+                        } else {
+                            layer.write_session("session", line.as_bytes());
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        }
+        assert_eq!(crate::appender::parked_guard_count(), initial + 2);
+        crate::appender::flush_file_log_guards();
+        for name in ["session.txt", "agent-1.txt"] {
+            let text = std::fs::read_to_string(dir.path().join(name)).unwrap();
+            let lines: std::collections::HashSet<_> = text.lines().collect();
+            assert_eq!(text.lines().count(), 16);
+            for index in 0..16 {
+                assert!(lines.contains(format!("line-{index}").as_str()));
+            }
+        }
     }
 
     #[test]
@@ -901,6 +1002,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn update_latest_symlink_preserves_existing_temporary() {
+        for existing_link in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let tmp = dir.path().join(".latest.sess.txt.tmp");
+            let latest = dir.path().join("latest.txt");
+            std::os::unix::fs::symlink("previous.txt", &latest).unwrap();
+            if existing_link {
+                std::os::unix::fs::symlink("other.txt", &tmp).unwrap();
+            } else {
+                std::fs::write(&tmp, b"unowned data").unwrap();
+            }
+            update_latest_symlink(dir.path(), &dir.path().join("sess.txt"));
+            assert_eq!(
+                std::fs::read_link(&latest).unwrap(),
+                Path::new("previous.txt")
+            );
+            if existing_link {
+                assert_eq!(std::fs::read_link(&tmp).unwrap(), Path::new("other.txt"));
+            } else {
+                assert_eq!(std::fs::read(&tmp).unwrap(), b"unowned data");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn update_latest_symlink_failed_rename_removes_temp() {
         // Sanity: prove the temp symlink is creatable here, so the helper's
         // symlink step must succeed and the post-call absence below can only
@@ -925,6 +1052,39 @@ mod tests {
             blocker.join("occupant.txt").exists(),
             "rename must have failed, leaving the blocker dir untouched"
         );
+    }
+
+    #[test]
+    fn pruning_spares_old_open_writer_across_processes() {
+        const CHILD_DIR: &str = "GROW_DEBUG_PRUNE_TEST_DIR";
+        let max_age = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            let dir = PathBuf::from(dir);
+            prune_old_logs(&dir, max_age);
+            assert!(dir.join("idle.txt").exists(), "open idle log was unlinked");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idle.txt");
+        let (_writer, guard) = crate::appender::unparked_file_writer(&path).unwrap();
+        let old = std::time::SystemTime::now() - max_age - std::time::Duration::from_secs(3600);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "debug_log::tests::pruning_spares_old_open_writer_across_processes",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        drop(guard);
+        prune_old_logs(dir.path(), max_age);
+        assert!(!path.exists());
     }
 
     #[test]

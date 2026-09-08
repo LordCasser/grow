@@ -1,0 +1,4 @@
+# Design
+OpenOptions在Unix使用O_NONBLOCK，再从File.metadata检查regular和长度；特殊文件返回InvalidData且不隔离。长度用u64比较，避免先截断usize。元数据超限保留quarantine。私有load_from_reader承接同一File，最多取MAX_RECORD_BYTES+1，先判断实际长度再JSON解析/验证；超限和坏JSON共用既有quarantine策略。
+
+测试精确大小有效JSON、静态超限、metadata之后真实增长、FIFO无writer/目录拒绝、普通symlink保留。不是慢文件系统墙钟超时，也不修复quarantine与外部并发替换之间的路径竞争。

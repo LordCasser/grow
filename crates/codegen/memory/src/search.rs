@@ -546,7 +546,8 @@ mod tests {
         let chunk_id = format!("{path_str}:0");
         let chunk = idx.get_chunk(&chunk_id).unwrap().unwrap();
         let embeddings = mock.embed_batch(&[&chunk.text]).await.unwrap();
-        idx.upsert_embedding(&chunk_id, &embeddings[0]).unwrap();
+        idx.upsert_embedding(&chunk_id, &chunk.hash, &embeddings[0])
+            .unwrap();
 
         // Search — should use both FTS and vector paths
         let config = MemorySearchConfig {
@@ -980,7 +981,8 @@ mod tests {
         let chunk_a_id = format!("{path_a}:0");
         let chunk_a = idx.get_chunk(&chunk_a_id).unwrap().unwrap();
         let embeddings = mock.embed_batch(&[&chunk_a.text]).await.unwrap();
-        idx.upsert_embedding(&chunk_a_id, &embeddings[0]).unwrap();
+        idx.upsert_embedding(&chunk_a_id, &chunk_a.hash, &embeddings[0])
+            .unwrap();
 
         // File B: FTS only (no embedding)
         let file_b = tmp.path().join("unembedded.md");
@@ -1049,7 +1051,9 @@ mod tests {
 
         // Use the mock to get a consistent embedding
         let embedding = mock.embed_batch(&["test"]).await.unwrap();
-        idx.upsert_embedding(&chunk_id, &embedding[0]).unwrap();
+        let chunk = idx.get_chunk(&chunk_id).unwrap().unwrap();
+        idx.upsert_embedding(&chunk_id, &chunk.hash, &embedding[0])
+            .unwrap();
 
         // Search with vector — the mock returns deterministic embeddings
         let fts_results = idx.search_fts("content test", 10).unwrap_or_default();
