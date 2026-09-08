@@ -1,3 +1,3 @@
 - [x] Inspect failure location, request classifier and competing expectations.
 - [x] Separate foreground and auxiliary fixture lanes without changing deadlines.
-- [ ] Pass final Linux core regression and CLI build.
+- [x] Pass final Linux core regression and CLI build.
