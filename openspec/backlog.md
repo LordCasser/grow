@@ -772,3 +772,15 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager workflows视图耦合运行状态与列表交互
 
 `views/workflows.rs`同时处理workflow列表/状态、选择、过滤、渲染和输入投影。静态事实已登记，后续需按运行状态模型和列表交互拆分并补真实Workflow视图验证；本轮不改视图行为。
+
+## 待拆分：Pager scrollback block混合数据模型、折叠和渲染入口
+
+`scrollback/block.rs`同时承载滚动块模型、折叠/展开、渲染入口、选择和条目元数据。10条静态契约已登记，后续需按数据模型、布局状态和渲染适配拆分并补真实终端验证；本轮不改block行为。
+
+## 待拆分：Pager modal window混合布局、滚动和输入命中
+
+`views/modal_window.rs`同时处理modal尺寸/布局、标题/边框、滚动、焦点和鼠标/键盘输入投影。12条静态契约已登记，后续需按布局模型、焦点状态和命中测试拆分并补真实终端验证；本轮不改modal行为。
+
+## 待拆分：Pager entry renderer混合块包装和工具状态投影
+
+`scrollback/wrappers/entry_renderer.rs`同时承载entry渲染包装、块/工具状态投影、文本布局和测试辅助边界。静态事实已登记，后续需按渲染包装、状态投影和布局拆分并补真实终端验证；本轮不改renderer行为。

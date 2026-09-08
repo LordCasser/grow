@@ -2478,11 +2478,14 @@
       "Allocator release hook installation and trace attribution",
       "Async view shared wake notification",
       "Background work watcher count projection",
+      "BlockContent SHALL define the common scrollback rendering contract: content, accent/bullet styling, backgrounds, padding, fold/display modes, selection/grouping, media references, fullscreen preambles, and optional Mermaid/media affordances.",
+      "BlockContent inline media SHALL reserve trailing image geometry and expose Mermaid affordance rows without forcing output work for non-media blocks.",
       "Bundled how-to lookup and managed disk extraction",
       "CLI agent argument and inline definition normalization",
       "CLI completion script generation and zsh root rewrite",
       "Cached terminal OSC8 hyperlink route projection",
       "Cancel-turn and Goal interrupt panels SHALL consume their own keyboard and mouse input. Cancel-turn supports navigation, numeric/Enter choice submission, Ctrl-C cancel, Tab to scrollback, and Esc ContinueToRun while refreshing rewind suppression. Goal interrupt supports navigation, numeric/Enter choice submission, Tab/focus controls and an Esc dismiss-only path that closes the panel without cancelling the turn or Goal.",
+      "Centered tip footer fitting and content partition",
       "Client model catalog refresh and selection state",
       "Client model image capability and context window projection",
       "Clipboard image tip polling and successful show commit",
@@ -2500,14 +2503,17 @@
       "Doctor JSON schema facts nullable values and complete probe notes",
       "Doctor human report fact grouping probe suppression and remediation wording",
       "Editable TOML loading and hint persistence boundaries",
+      "Embedded modal rendering and row styling",
       "Embedded tutorial topic catalog and guide references",
       "Ephemeral tip slot counting and expiry policy",
       "Export CLI replay projection and output precedence",
       "External URL browser unavailable UI fallback",
       "Focus tracker notification thresholds and automatic recap retry state",
+      "Fold indicator rendering",
       "Follow up chip prefix rendering and original text mapping",
       "Follow up notification identity and ingestion limits",
       "Follow up response acceptance and pending turn buffer",
+      "Footer shortcut layout, styling, and hit metadata",
       "Git discovery labels path display and branch glyph policy",
       "Grow home disk usage metadata walk and report serialization",
       "Headless CLI permission parse failure policy",
@@ -2560,6 +2566,11 @@
       "Minimal renderer hook registration and absent hook dispatch",
       "Minimal transcript request snapshot and expansion retry queue",
       "Minimal view facade projection and btw geometry thresholds",
+      "Modal frame geometry and content/footer contract",
+      "Modal keyboard close and fold navigation",
+      "Modal mouse close, tab, shortcut, and content routing",
+      "Modal sizing defaults, presets, compact mode, and bounds",
+      "Modal window state initialization",
       "Models CLI listing and worker shutdown ownership",
       "Notification configuration defaults enum spellings and template projection",
       "Notification hook shell execution enrollment and timeout boundaries",
@@ -3344,6 +3355,12 @@
       "Queued edit entry focus lock and draft restoration",
       "Queued edit save payload and hold ordering",
       "Queued follow up send now tip and acceptance",
+      "RenderBlock SHALL classify block kinds for selection, cache invalidation, plan controls, media resolution, accent styling, fullscreen support, copy/drag affordances, and raw-mode mutation.",
+      "RenderBlock SHALL expose immutable event IDs and replay equivalence so reconnect/minimal replay can match durable transcript facts without comparing presentation state.",
+      "RenderBlock SHALL expose pre-wrap content and authoritative Markdown hyperlinks to callers while retaining image references and media paths for fullscreen/link projection.",
+      "RenderBlock SHALL provide state-aware visible copy, raw-or-rendered block copy, metadata copy labels, and full-text search source projections that omit empty fields and align markdown search with rendered plain text.",
+      "RenderBlock SHALL wrap all supported scrollback block variants, delegate BlockContent capabilities to the inner variant, prepend bullets through its output path, and use the edit-specific rendered output path when available.",
+      "RenderBlock constructors SHALL create the typed user, agent, tool, thinking, notice, lifecycle, background-task, subagent, workflow, side-question, and context blocks while preserving variant-specific metadata, error, output, event ID, and streaming semantics.",
       "Responsive Mermaid render sizing and quality parameters",
       "Resume target pinning and selected profile retention",
       "Resume title matching and ambiguity reporting",
@@ -3393,6 +3410,7 @@
       "Shell suggestion dropdown and ghost reset scopes",
       "Shell suggestion response strict wire projection",
       "Shell suggestion text matching and response state updates",
+      "Shortcut label key/description splitting",
       "Simple input mode reconciliation and contextual hint overrides",
       "Sleep inhibition platform acquisition failure latch and release",
       "Small screen and SSH startup tip evaluation",
@@ -3403,6 +3421,7 @@
       "Status auxiliary surface dispatch admission",
       "Steering dispatch and failed payload review queue",
       "Structured edit diff construction and conservative hunk stitching",
+      "Tab bar wrapping, styles, and hit rectangles",
       "Terminal initialization SHALL enable raw input, select alternate or inline viewport according to ScreenMode, configure focus/paste/mouse reporting and negotiated Kitty flags, apply tri-state cursor blink policy without clobbering inherited terminal style, and downgrade minimal to inline when the inline viewport probe cannot provide minimal semantics.",
       "Terminal marker notification precedence and late response metadata",
       "Terminal marker stop hook stash identity folding",
@@ -3417,6 +3436,7 @@
       "The pager SHALL keep process-wide input ownership flags coherent: the `/gboom` game may push and pop an additional Kitty keyboard layer exactly once, mouse capture state SHALL be observable, minimal mode SHALL be tracked separately from styling toggles, and Esc cancellation plus opt-in mouse-reporting behavior SHALL be derived from explicit mode/config inputs.",
       "The pager run entry point SHALL load and validate effective configuration before redirecting native stderr, materialize session startup intent, resolve leader/permission/screen mode, initialize terminal state, connect with bounded cancellation, fall back from a failed leader to the embedded agent, run the root event loop, restore terminal ownership, and preserve update/relaunch/exit outcomes.",
       "The question modal SHALL expose Navigation, InputMode, and PlanAction focus modes. Navigation SHALL support bounded cursor movement, page/half jumps, option toggles/selections, option-key shortcuts, freeform activation, question tab cycling, clipboard copy of option text, fullscreen, cancellation/skip and pane transfer. InputMode SHALL route prompt editing and Enter/newline, save per-question freeform state on exit, and advance or submit. PlanAction SHALL select ChatAboutThis or SkipInterview explicitly with arrows/Enter and return to navigation on Esc.",
+      "The scrollback block module SHALL preserve its inline regression matrix for media placement, block factories and foldability, fullscreen viewer gating, bullet selection metadata, copy projection, and searchable text across all supported block variants. These tests are source evidence for block-state and projection behavior and do not prove terminal rendering or external clipboard integration.",
       "Theme and quality separation in Mermaid cache keys",
       "Theme commit and preview state separation",
       "Thinking and tool grouping setting invalidation scope",
@@ -3440,6 +3460,7 @@
       "Usage modal opening and usage result identity",
       "Usage modal rendering and row hit projection",
       "Usage modal session and context field projection",
+      "Vim navigation search hint",
       "When a ProjectSelect question is open, AgentView SHALL temporarily restore the stashed composer prompt and forward the event to the normal input router so project-picker backing input edits the composer rather than the picker path field. The question view SHALL be restashed after routing; non-project questions SHALL be restored unchanged and return no outcome.",
       "When another client resolves an interaction, AgentView SHALL dismiss only the matching question, Plan approval, or permission identified by source session and tool call. Question dismissal restores the prompt and cleans view state; Plan approval sends stale cancel, restores prompt, resets comment/viewer state; removing the front permission resolves the queue transition. Nonmatching or absent interactions SHALL be a silent false result.",
       "When copy is enabled, y/copy_selected SHALL copy the selected item or visual range through the injected ClipboardProvider and expose a copy toast window; no selection, follow mode, empty/filtered lists, or disabled copy SHALL be no-ops.",
@@ -3458,6 +3479,7 @@
       "Wrapped terminal restore and termination signal boundaries",
       "dashboard_answer_question SHALL answer only the active external question. A valid option index selects that option; a nonempty freeform string selects Other and clears a single-choice option; empty Other input, missing question view, or local questions SHALL be NoOp. Nonfinal answers advance the active tab, while the final answer sends the accepted response, restores the stashed prompt, clears question state, and returns Submitted.",
       "prepare_layout SHALL reuse a clean cache, extend heights incrementally on appends, rebuild on width/wrap/filter changes or shrink/eviction, refilter stale physical indices, and preserve stable selection through item mutations.",
+      "prepend_bullet SHALL add the configured bullet/icon to the first output line with theme-derived or explicit accent color while preserving selection metadata and shifting selectable span coordinates past the prefix.",
       "toggle_follow SHALL enter bottom-follow with no selection when NAV is active and exit to a valid selection when follow is active; follow-disabled configurations make it a no-op."
     ],
     "reviewed_files": [
@@ -4214,6 +4236,10 @@
         "sha256": "d8ea02184bc357ed70ab239a84ae0c9d0452c2558b54dee7c7dead9febb228e8"
       },
       {
+        "path": "crates/codegen/pager/src/scrollback/block.rs",
+        "sha256": "8c9e4fcb6cab6eec80723e69caa335056441efb328bcf9c9387a41cd1562e559"
+      },
+      {
         "path": "crates/codegen/pager/src/scrollback/blocks/btw.rs",
         "sha256": "0d9dfa5c904ed096d3b06902d83fa167a4f6fc3f9d4a1e9e24d5c6e3029b2c08"
       },
@@ -4268,6 +4294,10 @@
       {
         "path": "crates/codegen/pager/src/scrollback/wrappers/accented.rs",
         "sha256": "7e28231707cb31935d747587e05c9e96d10292cef0f3c1870ed6835dc993b359"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/wrappers/entry_renderer.rs",
+        "sha256": "15e1044ac3e81c59a4e3201f26f1b7967c7df8a2934fedacfa9478cc982f2d36"
       },
       {
         "path": "crates/codegen/pager/src/scrollback/wrappers/mod.rs",
@@ -4712,6 +4742,10 @@
       {
         "path": "crates/codegen/pager/src/views/mod.rs",
         "sha256": "e516656fbd02f0b2ab219a56a8ca269259e0ae72818ba8f79e29e5b87d29c565"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/modal_window.rs",
+        "sha256": "d9f3a76370b8756982ea96bcb990e08f529f7621a853c60cd9d08e39d6d9ae14"
       },
       {
         "path": "crates/codegen/pager/src/views/permission_view.rs",

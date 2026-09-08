@@ -14152,3 +14152,467 @@ The 74 inline test functions SHALL exercise pure policy helpers, parser projecti
 - **THEN** only the applicable platform/policy evidence is claimed.
 
 证据：`crates/codegen/pager/src/app/mod.rs` — `tests module (74 #[test]/#[tokio::test] functions: asserts_quick_edit_and_resize_clears_mouse_input, preserves_unrelated_bits, idempotent, recovers_from_stale_crossterm_capture_mode, restore_runs_teardown_even_when_writer_failed, cursor_blink_config_maps_to_policy, llm_config_template_explains_both_credential_options, bounded_connect_times_out_when_the_target_stalls, bounded_connect_returns_err_on_cancel, terminal_title_strips_control_characters, hunk_tracker_mode_nothing_set_is_none, hunk_tracker_mode_empty_env_is_none, hunk_tracker_mode_precedence_cli_over_env_over_config, hunk_tracker_mode_trims_and_passes_off_through, no_leader_flag_wins_over_leader_flag_and_config, leader_flag_enables, not_eligible_returns_false, config_toml_enables, config_toml_disables, default_is_false, cli_flag_overrides_config, sandbox_confinement_refuses_leader_even_with_leader_flag_and_config_on, matrix_reports_the_profile_only_when_the_sandbox_takes_leader_mode_away, sandbox_notice_names_the_profile_without_promising_enforcement, sandbox_confinement_preserves_config_off_reclaim_reason, cli_leader_and_no_leader_conflict, cli_leader_flag_parses, cli_no_leader_flag_parses, cli_neither_leader_flag_defaults_false, no_leader_flag_overrides_config_for_tui_fallback, cli_top_level_leader_with_agent_subcommand_parses_flag, cli_top_level_no_leader_with_agent_subcommand_parses_flag, remote_settings_none_falls_through_to_default, remote_settings_leader_mode_true_enables_leader, remote_settings_leader_mode_false_disables_leader, remote_settings_unknown_leader_mode_is_not_policy_disable, config_toml_overrides_remote_settings, cli_resume_parses_session_id, cli_short_r_parses_session_id, cli_continue_flag_parses, cli_continue_short_c_parses, cli_resume_no_id_sets_empty_sentinel, cli_short_r_no_id_sets_empty_sentinel, cli_resume_with_id_is_not_most_recent, cli_no_resume_is_not_most_recent, cli_continue_conflicts_with_resume, cli_no_session_flags_defaults, cli_chat_flag_rejected_without_feature, cli_worktree_flag_parses, cli_worktree_short_w_parses, cli_worktree_with_label, cli_worktree_long_with_label, cli_worktree_with_empty_string, cli_worktree_with_resume_parses, cli_worktree_label_with_resume, cli_worktree_default_none, cli_session_id_parses, cli_session_id_short_s_parses, cli_session_id_with_resume_requires_fork, cli_session_id_with_continue_requires_fork, cli_session_id_with_resume_and_fork_ok, cli_session_id_default_none, cli_no_alt_screen_flag_parses, cli_no_alt_screen_default_false, cli_command_name_is_grow, cli_help_output_header, cli_completions_parses, print_exit_resume_hint_writes_expected_lines, print_exit_resume_hint_includes_minimal_flag, print_exit_resume_hint_includes_session_summary, print_exit_resume_hint_truncates_summary_to_width, print_relaunch_failure_hint_writes_expected_lines, print_hints_survive_eio, print_hints_survive_closed_pipe`。
+### Requirement: BlockContent SHALL define the common scrollback rendering contract: content, accent/bullet styling, backgrounds, padding, fold/display modes, selection/grouping, media references, fullscreen preambles, and optional Mermaid/media affordances.
+The trait defaults SHALL be conservative and composable: bullet follows accent, accent backgrounds and block backgrounds are disabled, padding/foldability/selectability are enabled with Expanded/Collapsed defaults, finished mode and preamble/media/affordance/open-button outputs are absent, and extra estimated rows are zero. has_vpad SHALL delegate to has_vpad_for using the context appearance.
+
+#### Scenario: Default styling
+- **WHEN** a block does not override an optional capability
+- **THEN** the documented neutral style, padding, fold, selection, grouping, or media default is returned.
+
+#### Scenario: Fold cycle
+- **WHEN** a block is toggled from Collapsed, Truncated, or Expanded
+- **THEN** the default cycle returns Expanded from Collapsed and Collapsed otherwise.
+
+#### Scenario: Appearance-aware padding
+- **WHEN** the caller supplies an AppearanceConfig
+- **THEN** has_vpad forwards only the appearance to has_vpad_for.
+
+#### Scenario: Optional media
+- **WHEN** a block has no inline media, diagram, or viewer button
+- **THEN** empty/None results avoid rendering or reserving extra rows.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::bullet`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::accent_background`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::background`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::has_vpad_for`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::has_vpad`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::has_raw_mode`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::is_foldable`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::next_fold_mode`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::collapse_mode`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::default_display_mode`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::finished_display_mode`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::is_selectable`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::has_bullet`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::preamble`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::is_groupable`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::image_references`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::inline_media`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::diagram_affordances`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::estimate_extra_rows`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::inline_open_button`。
+
+### Requirement: BlockContent inline media SHALL reserve trailing image geometry and expose Mermaid affordance rows without forcing output work for non-media blocks.
+inline_media_placements SHALL return immediately for blocks without inline_media; for a media block it SHALL build output once to count content lines, ask inline_image_reserved_rows for fitted rows at context width, and return one AnchoredMedia anchored at content_lines+1. Diagram affordances and estimate_extra_rows remain block-specific hooks, while AnchoredMedia carries path/dimensions/type metadata, row offset, and crop rows.
+
+#### Scenario: Non-media fast path
+- **WHEN** inline_media returns None
+- **THEN** placements is empty without rebuilding output.
+
+#### Scenario: Trailing media
+- **WHEN** a block exposes one InlineMediaInfo
+- **THEN** one placement starts one row after the output lines and reserves fitted image rows.
+
+#### Scenario: Mermaid affordance
+- **WHEN** a block overrides diagram_affordances
+- **THEN** the caller receives block-relative rows for clickable Open/Copy actions.
+
+#### Scenario: Geometry metadata
+- **WHEN** a placement is returned
+- **THEN** info, row_offset, and rows are preserved for layout and terminal image emission.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `AnchoredMedia`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::inline_media_placements`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::diagram_affordances`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::estimate_extra_rows`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::inline_media`；`crates/codegen/pager/src/scrollback/block.rs` — `default_inline_media_placements_wrap_trailing_media`；`crates/codegen/pager/src/scrollback/block.rs` — `default_inline_media_placements_empty_without_media`。
+
+### Requirement: prepend_bullet SHALL add the configured bullet/icon to the first output line with theme-derived or explicit accent color while preserving selection metadata and shifting selectable span coordinates past the prefix.
+prepend_bullet SHALL no-op when the configured bullet has no character or output has no first line. Otherwise it SHALL choose the explicit bullet AccentStyle color or gray/gray_bright based on collapsed state, insert a styled `bullet + space` span at index zero, and call shift_selection_metadata_for_prefix with prefix width one.
+
+#### Scenario: No bullet
+- **WHEN** configuration has no bullet character or output is empty
+- **THEN** output and metadata are unchanged.
+
+#### Scenario: Default color
+- **WHEN** bullet style is None
+- **THEN** collapsed output uses theme gray and expanded output uses theme bright gray.
+
+#### Scenario: Explicit accent
+- **WHEN** bullet returns AccentStyle
+- **THEN** the explicit color is used.
+
+#### Scenario: Selectable output
+- **WHEN** the first line carries selection metadata
+- **THEN** the prefix is rendered and selectable span coordinates remain aligned to body text.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `prepend_bullet`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::bullet`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::output`；`crates/codegen/pager/src/scrollback/block.rs` — `test_bullet_preserves_selection_metadata`。
+
+### Requirement: RenderBlock SHALL wrap all supported scrollback block variants, delegate BlockContent capabilities to the inner variant, prepend bullets through its output path, and use the edit-specific rendered output path when available.
+RenderBlock::output SHALL delegate inner output, check has_bullet, and prepend the selected bullet. All other BlockContent methods SHALL dispatch to the matching variant. rendered_output SHALL return generic output for non-edit blocks, but use EditToolCallBlock::rendered_output and apply the same bullet policy for edits.
+
+#### Scenario: Variant rendering
+- **WHEN** any RenderBlock variant is rendered
+- **THEN** the corresponding inner block output and capability values are returned.
+
+#### Scenario: Bullet interception
+- **WHEN** a variant reports has_bullet
+- **THEN** the delegated output receives one configured prefix and adjusted metadata.
+
+#### Scenario: Edit rendering
+- **WHEN** the variant is ToolCall(Edit)
+- **THEN** the edit block’s richer RenderedBlockOutput is preserved and bullet styling is applied.
+
+#### Scenario: Type mismatch
+- **WHEN** a caller asks for a variant-specific mutable accessor
+- **THEN** None is returned without changing the enum.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock`；`crates/codegen/pager/src/scrollback/block.rs` — `delegate_block!`；`crates/codegen/pager/src/scrollback/block.rs` — `impl BlockContent for RenderBlock`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::output`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::rendered_output`；`crates/codegen/pager/src/scrollback/block.rs` — `tool_replay_kind`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::as_stub_mut`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::as_tool_call_mut`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::as_agent_message_mut`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::as_agent_message`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::as_thinking_mut`。
+
+### Requirement: RenderBlock constructors SHALL create the typed user, agent, tool, thinking, notice, lifecycle, background-task, subagent, workflow, side-question, and context blocks while preserving variant-specific metadata, error, output, event ID, and streaming semantics.
+Factory methods SHALL map arguments to the corresponding block constructors; failed generic/tool operations SHALL attach the standard failure text, edit factories SHALL preserve paths/hunks/errors or parse the leading edit count, streaming factories SHALL expose mutable inner blocks for chunk updates, and background-task description mutation SHALL be a no-op for other variants.
+
+#### Scenario: Prompt variants
+- **WHEN** plain, bash, skill, cron, or interjection prompt is requested
+- **THEN** the matching UserPromptBlock mode is constructed, with optional skill token ranges retained.
+
+#### Scenario: Tool failure
+- **WHEN** a generic or detailed tool call has success=false
+- **THEN** the typed Other/tool block carries `Tool call failed`.
+
+#### Scenario: Edit construction
+- **WHEN** hunks, an error, or legacy edit info is supplied
+- **THEN** the Edit block preserves hunks/error or parses the leading numeric edit count.
+
+#### Scenario: Streaming
+- **WHEN** an empty agent/thinking stream is created
+- **THEN** the matching mutable accessor permits chunk/time updates without changing the enum variant.
+
+#### Scenario: Task status
+- **WHEN** background task started/completed/failed is constructed
+- **THEN** command, task id, elapsed, exit code, signal, and optional description are retained.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::stub`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::stub_non_groupable`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::user_prompt`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::bash_prompt`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::skill_prompt`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::user_prompt_with_skill_tokens`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::cron_prompt`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::interjection_prompt`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::agent_message`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::agent_message_streaming`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::tool_call`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::tool_call_with_details`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::execute`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::execute_with_output`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::read`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::list_dir`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::list_dir_with_output`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::search`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::edit_with_hunks`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::edit_failed`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::edit`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::thinking`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::thinking_with_time`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::thinking_streaming`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::thinking_streaming_replay`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::notice`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::typed_notice`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::terminal_notice`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::subagent_permission`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::context_info`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::session_event`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::session_event_with_id`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::bg_task`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::bg_task_completed`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::bg_task_failed`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::with_bg_task_description`；`crates/codegen/pager/src/scrollback/block.rs` — `StubBlock::new`；`crates/codegen/pager/src/scrollback/block.rs` — `StubBlock::non_groupable`；`crates/codegen/pager/src/scrollback/block.rs` — `StubBlock::with_line_bg`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::as_agent_message_mut`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::as_thinking_mut`。
+
+### Requirement: RenderBlock SHALL expose immutable event IDs and replay equivalence so reconnect/minimal replay can match durable transcript facts without comparing presentation state.
+immutable_event_id SHALL return IDs only for Notice, Subagent, and SessionEvent variants. replay_equivalent SHALL require matching variants and compare stable domain IDs when both exist, otherwise compare exact durable source fields or debug representations; presentation state such as fold, selection, or theme SHALL not participate, and differing variants SHALL be false.
+
+#### Scenario: Durable event ID
+- **WHEN** a notice/subagent/session event has an event_id
+- **THEN** the ID is returned; ad-hoc blocks return None.
+
+#### Scenario: Stable replay match
+- **WHEN** two same-kind blocks have matching domain IDs
+- **THEN** they compare equivalent even if presentation fields differ.
+
+#### Scenario: Fallback replay match
+- **WHEN** IDs are absent
+- **THEN** the documented source fields or debug value determine equivalence.
+
+#### Scenario: Variant mismatch
+- **WHEN** blocks have different RenderBlock variants
+- **THEN** replay_equivalent returns false.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::immutable_event_id`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::replay_equivalent`；`crates/codegen/pager/src/scrollback/block.rs` — `tool_replay_kind`。
+
+### Requirement: RenderBlock SHALL classify block kinds for selection, cache invalidation, plan controls, media resolution, accent styling, fullscreen support, copy/drag affordances, and raw-mode mutation.
+Type predicates SHALL recognize their exact variants; is_plan_control_tool SHALL match the three supported names only. evict_render_caches SHALL clear markdown wrap caches for AgentMessage, Thinking, and Btw only. accent_color SHALL follow theme and outcome/running state, fullscreen support SHALL combine normal viewers with image references, copy support SHALL be restricted to documented variants, drag selection SHALL exclude stubs, and set_raw_mode SHALL affect only markdown-capable agent/thinking blocks.
+
+#### Scenario: Type classification
+- **WHEN** a caller asks for a block-kind predicate
+- **THEN** the exact variant classification is returned.
+
+#### Scenario: Plan control
+- **WHEN** an Other tool name is one of PlanControl, plan_control, or Plan: Control
+- **THEN** the plan-control predicate is true; other names are false.
+
+#### Scenario: Cache eviction
+- **WHEN** off-screen cache eviction visits a block
+- **THEN** only markdown-backed wrap caches are evicted; source data remains.
+
+#### Scenario: Viewer support
+- **WHEN** a block has normal viewer content or image references
+- **THEN** supports_fullscreen reports the combined capability while errors/empty outputs follow variant rules.
+
+#### Scenario: Raw mode
+- **WHEN** a markdown block or non-markdown block receives set_raw_mode
+- **THEN** agent/thinking state changes; other variants are unchanged.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::is_user_prompt`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::is_tool_call`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::is_thinking`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::is_bg_task`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::is_subagent`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::is_agent_message`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::is_plan_control_tool`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::media_ref_path`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::evict_render_caches`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::accent_color`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::has_normal_fullscreen_viewer`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::supports_fullscreen`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::supports_copy`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::is_drag_block_selectable`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::set_raw_mode`。
+
+### Requirement: RenderBlock SHALL provide state-aware visible copy, raw-or-rendered block copy, metadata copy labels, and full-text search source projections that omit empty fields and align markdown search with rendered plain text.
+plain_text_from_output SHALL skip non-selectable lines, derive selection text, preserve line joiners, apply selection boundaries, and return None when no selectable text exists. copy_visible_text_in_state SHALL use rendered output and authoritative boundaries; copy_text SHALL honor raw for markdown and support only documented tool variants; copy_meta/copy_meta_label SHALL expose command/path/url/pattern metadata. searchable_text SHALL join nonempty source fields, omit empty-only blocks, use rendered markdown for AgentMessage/Thinking/Btw, flatten session events, and include structured tool/subagent fields per variant.
+
+#### Scenario: Visible copy
+- **WHEN** rendered lines include separators or padded table spans
+- **THEN** copy excludes non-selectable/render-only padding and rejoins content with semantic line breaks.
+
+#### Scenario: Markdown copy
+- **WHEN** raw is true or false
+- **THEN** copy_text returns source or rendered text according to the markdown block policy.
+
+#### Scenario: Metadata copy
+- **WHEN** a supported tool has command/path/url/pattern metadata
+- **THEN** copy_meta and copy_meta_label return the corresponding value/label.
+
+#### Scenario: Search index
+- **WHEN** a block has multiple optional fields or markdown markers
+- **THEN** nonempty fields are newline-joined and rendered markdown markers are absent.
+
+#### Scenario: Empty source
+- **WHEN** all searchable fields are empty
+- **THEN** searchable_text returns None instead of indexing a blank string.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `plain_text_from_output`；`crates/codegen/pager/src/scrollback/block.rs` — `join_searchable`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::copy_visible_text_in_state`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::copy_text`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::copy_meta`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::searchable_text`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::copy_meta_label`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::with_link_content`；`crates/codegen/pager/src/scrollback/block.rs` — `test_copy_visible_text_in_state_rejoins_wrapped_lines`；`crates/codegen/pager/src/scrollback/block.rs` — `test_copy_visible_text_in_state_skips_non_selectable_lines`；`crates/codegen/pager/src/scrollback/block.rs` — `test_copy_does_not_capture_render_only_table_padding`。
+
+### Requirement: RenderBlock SHALL expose pre-wrap content and authoritative Markdown hyperlinks to callers while retaining image references and media paths for fullscreen/link projection.
+with_link_content SHALL provide markdown-backed AgentMessage/Thinking/Btw lines plus hyperlink targets, map UserPrompt text to raw lines with no targets, and return empty slices for unrelated variants. image_references and media_ref_path SHALL delegate to the corresponding block data and only generic Other tool blocks may resolve a media path.
+
+#### Scenario: Markdown links
+- **WHEN** a markdown-backed block is queried
+- **THEN** pre-wrap lines and hyperlink targets are passed to the callback in renderer coordinates.
+
+#### Scenario: User prompt links
+- **WHEN** a user prompt is queried
+- **THEN** raw prompt lines are provided with no hyperlink targets.
+
+#### Scenario: Other block
+- **WHEN** a non-markdown block is queried
+- **THEN** empty line/target slices are returned.
+
+#### Scenario: Media path
+- **WHEN** an image-backed generic tool exists
+- **THEN** its absolute/derived media path is returned; unrelated variants return None.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::image_references`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::with_link_content`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::media_ref_path`。
+
+### Requirement: The scrollback block module SHALL preserve its inline regression matrix for media placement, block factories and foldability, fullscreen viewer gating, bullet selection metadata, copy projection, and searchable text across all supported block variants. These tests are source evidence for block-state and projection behavior and do not prove terminal rendering or external clipboard integration.
+The 33 inline tests SHALL exercise pure BlockContent/RenderBlock outputs and searchable/copy projections. They cover default media wrapper geometry, stubs, prompts, agent/tool variants, search/list-dir viewer gates, nonselectable/padded-line copy boundaries, bullet metadata, and all structured searchable text variants.
+
+#### Scenario: Media and factory tests
+- **WHEN** media/stub/prompt/tool constructors are exercised
+- **THEN** the selected variant and basic output/capability invariants remain stable.
+
+#### Scenario: Viewer/copy tests
+- **WHEN** viewer eligibility or visible copy is queried
+- **THEN** error/empty and selectable-line boundaries produce the documented result.
+
+#### Scenario: Search indexing tests
+- **WHEN** each structured block variant is indexed
+- **THEN** the expected source fields are present, empty-only inputs are omitted, and markdown markers are stripped.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `tests module (33 #[test] functions: default_inline_media_placements_wrap_trailing_media, default_inline_media_placements_empty_without_media, test_stub_block, test_stub_block_running, test_user_prompt_block, test_agent_message_block, test_tool_call_block, test_tool_call_with_output_is_foldable, test_search_block_with_matches_has_fullscreen_viewer, test_errored_search_block_has_no_fullscreen_viewer, test_list_dir_block_with_output_has_fullscreen_viewer, test_empty_list_dir_block_has_no_fullscreen_viewer, test_copy_visible_text_in_state_rejoins_wrapped_lines, edit_whole_block_copy_preserves_path_boundary_whitespace, test_copy_visible_text_in_state_skips_non_selectable_lines, test_copy_does_not_capture_render_only_table_padding, test_bullet_preserves_selection_metadata, system_indexes_message_text, user_prompt_indexes_text, empty_only_source_field_returns_none, session_event_flattens_to_sentence, bg_task_indexes_command_and_description, subagent_failed_indexes_metadata_and_error, btw_indexes_question_and_rendered_response, context_info_indexes_model_only, search_tool_indexes_pattern_and_match_line, list_dir_indexes_path_and_output, memory_search_indexes_query_and_results, lifecycle_indexes_event_name, other_tool_indexes_name_summary_output_and_error, execute_indexes_command_output_and_error, agent_message_indexes_rendered_text, thinking_indexes_rendered_text`。
+### Requirement: Embedded modal rendering and row styling
+The modal chrome SHALL support a process-wide embedded mode for minimal UI: embedded rendering fills the supplied area without a popup border or close button, optional titles occupy the first row, and embedded list rows remain transparent while selected text uses the theme fuzzy accent; full TUI mode SHALL retain the centered bordered popup.
+
+#### Scenario: Mode toggle
+- **WHEN** embedded is enabled
+- **THEN** the modal fills the complete area and embedded returns true.
+
+#### Scenario: Embedded frame
+- **WHEN** a title is present in embedded mode
+- **THEN** the title is bold/background-free and content begins below it without border/close chrome.
+
+#### Scenario: Row style
+- **WHEN** a picker requests embedded_row_style
+- **THEN** transparent background and accent selected text are returned; full mode returns None.
+
+#### Scenario: Full frame
+- **WHEN** embedded is disabled
+- **THEN** the popup is centered and smaller than the supplied area.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `set_embedded`；`crates/codegen/pager/src/views/modal_window.rs` — `embedded`；`crates/codegen/pager/src/views/modal_window.rs` — `EmbeddedRowStyle`；`crates/codegen/pager/src/views/modal_window.rs` — `embedded_row_style`；`crates/codegen/pager/src/views/modal_window.rs` — `render_modal_window`；`crates/codegen/pager/src/views/modal_window.rs` — `embedded_fills_area_without_centering`。
+
+### Requirement: Modal sizing defaults, presets, compact mode, and bounds
+ModalSizing SHALL provide stable default, medium, and large presets; compact mode SHALL set v_margin=0, h_pad=1, and v_pad=0 while preserving width/footer fields; compute_modal_dims SHALL clamp width to the terminal area even when min_width is larger.
+
+#### Scenario: Preset
+- **WHEN** default/medium/large is selected
+- **THEN** documented fractions, limits, margins, padding, and footer rows are supplied.
+
+#### Scenario: Compact
+- **WHEN** with_compact(true) is called
+- **THEN** outer margin and content padding are minimized while unrelated fields stay unchanged.
+
+#### Scenario: Normal
+- **WHEN** with_compact(false) is called
+- **THEN** the sizing value is unchanged.
+
+#### Scenario: Narrow terminal
+- **WHEN** area width is below min_width
+- **THEN** the computed modal width never exceeds area width.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `ModalSizing`；`crates/codegen/pager/src/views/modal_window.rs` — `ModalSizing::default`；`crates/codegen/pager/src/views/modal_window.rs` — `medium`；`crates/codegen/pager/src/views/modal_window.rs` — `large`；`crates/codegen/pager/src/views/modal_window.rs` — `with_compact`；`crates/codegen/pager/src/views/modal_window.rs` — `compute_modal_dims`；`crates/codegen/pager/src/views/modal_window.rs` — `predict_shortcut_rows`；`crates/codegen/pager/src/views/modal_window.rs` — `modal_sizing_with_compact_reduces_margins_aggressively`；`crates/codegen/pager/src/views/modal_window.rs` — `modal_width_never_exceeds_narrow_terminal`；`crates/codegen/pager/src/views/modal_window.rs` — `modal_sizing_medium_has_expected_values`；`crates/codegen/pager/src/views/modal_window.rs` — `modal_sizing_large_matches_default`。
+
+### Requirement: Modal frame geometry and content/footer contract
+render_modal_window SHALL clear and draw modal chrome, store popup and hit rectangles, render optional tabs/divider, reserve padding and dynamically sized footer rows, and return content/footer/inner geometry; areas below 20x6 SHALL clear stale hit state and return None.
+
+#### Scenario: Too small
+- **WHEN** computed dimensions are below 20x6
+- **THEN** popup, close, shortcut, and tab hit state is cleared.
+
+#### Scenario: Full frame
+- **WHEN** a sufficient full-TUI area is rendered
+- **THEN** a centered cleared bordered/title frame and content/footer rectangles are returned.
+
+#### Scenario: Tabs
+- **WHEN** tabs are configured
+- **THEN** tab rows and divider consume vertical space before content.
+
+#### Scenario: Footer
+- **WHEN** labels need more rows than footer_lines
+- **THEN** footer expands and content shrinks accordingly.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `render_modal_window`；`crates/codegen/pager/src/views/modal_window.rs` — `ModalWindowConfig`；`crates/codegen/pager/src/views/modal_window.rs` — `ModalContentArea`；`crates/codegen/pager/src/views/modal_window.rs` — `ModalWindowState`；`crates/codegen/pager/src/views/modal_window.rs` — `shortcuts_rows_needed`。
+
+### Requirement: Tab bar wrapping, styles, and hit rectangles
+The tab bar SHALL greedily wrap labels by display width, style active/inactive tabs by focus and embedded mode, clip at the inner right edge without invalid UTF-8, record visible tab Rects, and leave clipped tabs without hit rectangles.
+
+#### Scenario: Wrapping
+- **WHEN** labels do not fit on one row
+- **THEN** labels wrap in order.
+
+#### Scenario: Active
+- **WHEN** a tab equals active_tab
+- **THEN** focused full TUI uses bold primary/visual background; embedded or unfocused uses bold accent without band.
+
+#### Scenario: Hit area
+- **WHEN** a tab is visible
+- **THEN** its display-width rectangle is recorded; clipped tabs are None.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `render_tab_bar`；`crates/codegen/pager/src/views/modal_window.rs` — `tab_rects`；`crates/codegen/pager/src/views/modal_window.rs` — `active_tab`；`crates/codegen/pager/src/views/modal_window.rs` — `tabs_focused`；`crates/codegen/pager/src/views/modal_window.rs` — `byte_offset_at_width`。
+
+### Requirement: Footer shortcut layout, styling, and hit metadata
+render_modal_shortcuts SHALL handle empty areas, greedily wrap with separators, bottom-align and center rows, clip by display width, style key/description halves, highlight hovered labels, and return hit metadata for all rendered shortcuts using the original full-slice index.
+
+#### Scenario: Empty
+- **WHEN** area/list is empty
+- **THEN** no cells or hits are returned.
+
+#### Scenario: Wrapping
+- **WHEN** labels exceed width
+- **THEN** shortcuts wrap bottom-up within height.
+
+#### Scenario: Hover
+- **WHEN** a shortcut is hovered
+- **THEN** all visible label cells use bg_highlight and hovered_shortcut tracks its full slice index.
+
+#### Scenario: Rendered
+- **WHEN** a shortcut is visible
+- **THEN** ShortcutHitArea includes rect, id, original index, and clickable.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `render_modal_shortcuts`；`crates/codegen/pager/src/views/modal_window.rs` — `Shortcut`；`crates/codegen/pager/src/views/modal_window.rs` — `ShortcutHitArea`；`crates/codegen/pager/src/views/modal_window.rs` — `shortcuts_rows_needed`；`crates/codegen/pager/src/views/modal_window.rs` — `byte_offset_at_width`；`crates/codegen/pager/src/views/modal_window.rs` — `hover_shortcut_uses_shortcuts_idx_not_position_in_hits`。
+
+### Requirement: Shortcut label key/description splitting
+split_shortcut_label SHALL split only at the first ASCII space, keep that leading space in the description, preserve later spaces/non-ASCII whitespace, and treat no-space input as key-only.
+
+#### Scenario: ASCII space
+- **WHEN** a label contains a space
+- **THEN** key is the prefix and label begins with the space.
+
+#### Scenario: Multiword
+- **WHEN** suffix has more spaces
+- **THEN** all suffix text remains the label.
+
+#### Scenario: Unicode whitespace
+- **WHEN** tabs/NBSP or arrows occur
+- **THEN** UTF-8 remains valid and non-ASCII whitespace does not split.
+
+#### Scenario: No separator
+- **WHEN** input has no ASCII space
+- **THEN** the whole input is key and label is empty.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `split_shortcut_label`；`crates/codegen/pager/src/views/modal_window.rs` — `split_shortcut_label_basic_ascii`；`crates/codegen/pager/src/views/modal_window.rs` — `split_shortcut_label_multi_word_label`；`crates/codegen/pager/src/views/modal_window.rs` — `split_shortcut_label_unicode_arrows`；`crates/codegen/pager/src/views/modal_window.rs` — `split_shortcut_label_no_whitespace_is_key_only`；`crates/codegen/pager/src/views/modal_window.rs` — `split_shortcut_label_only_splits_on_ascii_space`。
+
+### Requirement: Centered tip footer fitting and content partition
+fit_tip_line SHALL choose the first display-width fitting candidate or truncate the last nonempty candidate; render_centered_tip_footer SHALL truncate/style/center a tip; split_content_for_tip_footer SHALL reserve a tip at height >=3 and a blank gap at height >=6.
+
+#### Scenario: Fit
+- **WHEN** a candidate fits
+- **THEN** the first fitting candidate is returned.
+
+#### Scenario: Truncate
+- **WHEN** none fits
+- **THEN** the last nonempty candidate is width-truncated.
+
+#### Scenario: Render
+- **WHEN** tip exceeds footer width
+- **THEN** it is clipped, centered, italic gray_dim on bg_base.
+
+#### Scenario: Height
+- **WHEN** content is short/medium/tall
+- **THEN** no tip, tip without gap, or tip with gap is produced.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `fit_tip_line`；`crates/codegen/pager/src/views/modal_window.rs` — `render_centered_tip_footer`；`crates/codegen/pager/src/views/modal_window.rs` — `split_content_for_tip_footer`；`crates/codegen/pager/src/views/modal_window.rs` — `footer_lines_with_tip_gap`；`crates/codegen/pager/src/views/modal_window.rs` — `centered_tip_footer_centers_and_clips`；`crates/codegen/pager/src/views/modal_window.rs` — `split_content_for_tip_footer_thresholds`；`crates/codegen/pager/src/views/modal_window.rs` — `fit_tip_line_picks_first_fit_then_truncates`。
+
+### Requirement: Vim navigation search hint
+push_vim_nav_search_hint SHALL append a non-clickable `i search` shortcut only when vim mode is enabled and search is inactive, and SHALL otherwise leave the list unchanged.
+
+#### Scenario: Nav
+- **WHEN** vim on/search off
+- **THEN** the hint is appended.
+
+#### Scenario: Search
+- **WHEN** search active
+- **THEN** no hint is appended.
+
+#### Scenario: Disabled
+- **WHEN** vim off
+- **THEN** no hint is appended.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `push_vim_nav_search_hint`；`crates/codegen/pager/src/views/modal_window.rs` — `load_vim_mode`；`crates/codegen/pager/src/views/modal_window.rs` — `vim_nav_search_hint_only_in_vim_nav_mode`。
+
+### Requirement: Fold indicator rendering
+fold_indicator_span SHALL render a two-column collapsed chevron or expanded diamond plus space, use gray_dim normally and text_primary/bold on hover, and apply optional background; render_fold_indicator SHALL write it and return width 2.
+
+#### Scenario: Collapsed
+- **WHEN** collapsed true
+- **THEN** chevron plus space is rendered.
+
+#### Scenario: Expanded
+- **WHEN** collapsed false
+- **THEN** diamond plus space is rendered.
+
+#### Scenario: Hover/background
+- **WHEN** hover or bg is supplied
+- **THEN** style changes accordingly.
+
+#### Scenario: Direct
+- **WHEN** render_fold_indicator is called
+- **THEN** buffer is written and 2 is returned.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `fold_indicator_span`；`crates/codegen/pager/src/views/modal_window.rs` — `render_fold_indicator`；`crates/codegen/pager/src/views/modal_window.rs` — `chevron`；`crates/codegen/pager/src/views/modal_window.rs` — `diamond_filled`。
+
+### Requirement: Modal keyboard close and fold navigation
+handle_modal_key SHALL map Esc to CloseRequested; return Unhandled for unrelated/tab-focused input; otherwise prioritize group collapse/expand, detail collapse/expand, then parent jump based on FoldInfo, with h/l equivalent to Left/Right.
+
+#### Scenario: Esc
+- **WHEN** Esc is pressed
+- **THEN** CloseRequested is returned.
+
+#### Scenario: No fold/tabs
+- **WHEN** horizontal input has no applicable fold or tabs are focused
+- **THEN** Unhandled is returned.
+
+#### Scenario: Group
+- **WHEN** collapsible expanded/collapsed group is focused
+- **THEN** Left/h collapses or Right/l expands the group.
+
+#### Scenario: Details
+- **WHEN** group action does not apply and detail state can change
+- **THEN** Left/h collapses or Right/l expands details.
+
+#### Scenario: Parent
+- **WHEN** no higher action applies and parent exists
+- **THEN** Left/h returns JumpToParent; absent parent is Unhandled.
+
+#### Scenario: Precedence
+- **WHEN** group and detail actions both apply
+- **THEN** group wins, then details, then parent.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `handle_modal_key`；`crates/codegen/pager/src/views/modal_window.rs` — `FoldInfo`；`crates/codegen/pager/src/views/modal_window.rs` — `ModalWindowOutcome`；`crates/codegen/pager/src/views/modal_window.rs` — `tabs_focused`；`crates/codegen/pager/src/views/modal_window.rs` — `key_esc_returns_close_requested`；`crates/codegen/pager/src/views/modal_window.rs` — `key_other_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `key_left_without_fold_info_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `key_h_without_fold_info_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `key_right_without_fold_info_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `key_l_without_fold_info_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `left_on_expanded_collapsible_returns_collapse_group`；`crates/codegen/pager/src/views/modal_window.rs` — `right_on_collapsed_collapsible_returns_expand_group`；`crates/codegen/pager/src/views/modal_window.rs` — `left_on_collapsed_collapsible_with_parent_returns_jump`；`crates/codegen/pager/src/views/modal_window.rs` — `left_on_collapsed_collapsible_without_parent_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `left_on_expanded_details_returns_collapse_details`；`crates/codegen/pager/src/views/modal_window.rs` — `right_on_collapsed_details_returns_expand_details`；`crates/codegen/pager/src/views/modal_window.rs` — `left_on_leaf_without_details_returns_jump_to_parent`；`crates/codegen/pager/src/views/modal_window.rs` — `right_on_expanded_collapsible_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `h_key_uses_fold_info_same_as_left`；`crates/codegen/pager/src/views/modal_window.rs` — `l_key_uses_fold_info_same_as_right`；`crates/codegen/pager/src/views/modal_window.rs` — `left_collapse_group_wins_over_collapse_details`；`crates/codegen/pager/src/views/modal_window.rs` — `right_expand_group_wins_over_expand_details`；`crates/codegen/pager/src/views/modal_window.rs` — `right_on_expanded_collapsible_with_unexpanded_details_returns_expand_details`；`crates/codegen/pager/src/views/modal_window.rs` — `left_on_bare_leaf_no_parent_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `right_on_fully_expanded_details_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `esc_with_fold_info_returns_close_requested`。
+
+### Requirement: Modal mouse close, tab, shortcut, and content routing
+handle_modal_mouse SHALL resolve close/tab/shortcut rectangles; left clicks SHALL close on close/outside, return TabChanged only for actual tab changes, activate clickable shortcut ids, and leave content clicks Unhandled. Movement SHALL update hover state and consume chrome or changed-hover events for redraw.
+
+#### Scenario: Close/outside
+- **WHEN** left click hits close or misses popup
+- **THEN** CloseRequested is returned.
+
+#### Scenario: Content
+- **WHEN** left click is inside popup with no chrome hit
+- **THEN** Unhandled is returned.
+
+#### Scenario: Tab/shortcut
+- **WHEN** left click hits a tab or clickable shortcut
+- **THEN** TabChanged/ShortcutActivated is returned.
+
+#### Scenario: Hover
+- **WHEN** movement enters/leaves chrome
+- **THEN** hover state updates and Handled forces redraw.
+
+#### Scenario: Stable/other
+- **WHEN** movement changes nothing or event is non-left
+- **THEN** Unhandled is returned.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `handle_modal_mouse`；`crates/codegen/pager/src/views/modal_window.rs` — `close_button_rect`；`crates/codegen/pager/src/views/modal_window.rs` — `popup_area`；`crates/codegen/pager/src/views/modal_window.rs` — `shortcut_hits`；`crates/codegen/pager/src/views/modal_window.rs` — `hovered_shortcut`；`crates/codegen/pager/src/views/modal_window.rs` — `ShortcutHitArea`；`crates/codegen/pager/src/views/modal_window.rs` — `click_on_close_button_returns_close_requested`；`crates/codegen/pager/src/views/modal_window.rs` — `click_outside_popup_returns_close_requested`；`crates/codegen/pager/src/views/modal_window.rs` — `click_inside_popup_no_chrome_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `click_on_shortcut_returns_shortcut_activated`；`crates/codegen/pager/src/views/modal_window.rs` — `hover_over_close_sets_hovered_and_returns_handled`；`crates/codegen/pager/src/views/modal_window.rs` — `hover_leaving_shortcut_returns_handled_for_redraw`；`crates/codegen/pager/src/views/modal_window.rs` — `hover_no_change_returns_unhandled`；`crates/codegen/pager/src/views/modal_window.rs` — `hover_shortcut_uses_shortcuts_idx_not_position_in_hits`。
+
+### Requirement: Modal window state initialization
+ModalWindowState::new/default SHALL initialize no popup/close/tab/shortcut hit rectangles, active_tab=0, tab_count=0, and no hovered shortcut; with_tabs(n) SHALL allocate n empty tab slots.
+
+#### Scenario: New/default
+- **WHEN** a new/default state is constructed
+- **THEN** all counters and hit areas have inert defaults.
+
+#### Scenario: Tabs
+- **WHEN** with_tabs(n) is called
+- **THEN** tab_count=n and tab_rects has n None entries.
+
+证据：`crates/codegen/pager/src/views/modal_window.rs` — `ModalWindowState::new`；`crates/codegen/pager/src/views/modal_window.rs` — `ModalWindowState::with_tabs`；`crates/codegen/pager/src/views/modal_window.rs` — `ModalWindowState::default`；`crates/codegen/pager/src/views/modal_window.rs` — `tab_rects`；`crates/codegen/pager/src/views/modal_window.rs` — `close_button_rect`；`crates/codegen/pager/src/views/modal_window.rs` — `new_defaults`；`crates/codegen/pager/src/views/modal_window.rs` — `with_tabs_initialises_rects`；`crates/codegen/pager/src/views/modal_window.rs` — `default_matches_new`。

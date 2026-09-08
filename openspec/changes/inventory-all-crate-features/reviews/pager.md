@@ -2302,3 +2302,9 @@ Luna/high复用代理完整读取`views/agent.rs`共2227行、47项内联测试�
 Luna/high复用代理完整读取`app/mod.rs`共2143行、74项内联测试（含72个`#[test]`与2个`#[tokio::test]`）；主代理复核SHA-256与11项功能需求来源，覆盖App状态、生命周期、输入/渲染协调和测试辅助边界。未运行Cargo或真实终端。
 
 Luna/high复用代理完整读取`views/workflows.rs`共2125行、24项内联测试；主代理复核SHA-256与4项功能需求来源，覆盖workflow列表/状态、选择、过滤、渲染和输入投影。未运行Cargo或真实Workflow。
+
+Luna/high复用代理完整读取`scrollback/block.rs`共1775行、33项内联测试；主代理复核SHA-256与10项功能需求来源，覆盖滚动块模型、折叠/展开、渲染入口、选择和条目元数据。未运行Cargo或真实终端。
+
+Luna/high复用代理完整读取`views/modal_window.rs`共1968行、47项内联测试；主代理复核SHA-256与12项功能需求来源，覆盖modal尺寸/布局、标题/边框、滚动、焦点和鼠标/键盘输入投影。未运行Cargo或真实终端。
+
+Luna/high复用代理完整读取`scrollback/wrappers/entry_renderer.rs`共2064行、32项内联测试；主代理复核SHA-256与4项功能需求来源，覆盖entry渲染包装、块/工具状态投影、文本布局和测试辅助边界。未运行Cargo或真实终端。
