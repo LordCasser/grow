@@ -905,24 +905,6 @@ pub enum Action {
     /// Close the picker and restore the stashed viewport.
     JumpDismiss,
 }
-/// Persist-and-notify semantics for [`Effect::PersistPermissionMode`].
-///
-/// Both variants write to `~/.grow/config.toml` and route ACP
-/// `grow/permission_mode_changed` notifications. The ACP notification is
-/// gated on disk-write success when `WithRollback` is used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionModePersist {
-    /// Typed-setter path: on disk-write failure, revert in-memory state
-    /// to the prior canonical (`&'static str`). ACP notification is
-    /// suppressed on failure so the agent never sees the optimistic value.
-    /// The soft-default latch is NOT restored — a failed persist leaves the
-    /// mode user-claimed until restart, matching the cycle path.
-    WithRollback(&'static str),
-    /// Cycle-mode path: no clean single-field rollback. On disk failure,
-    /// logs a warning and leaves in-memory state at the optimistic value.
-    /// ACP notification fires unconditionally.
-    BestEffort,
-}
 /// Canonical permission-mode state for the `permission_mode` setting.
 ///
 /// `Auto` uses the LLM classifier (not full always-approve).
@@ -1481,14 +1463,6 @@ pub enum Effect {
     PersistPreferredModel {
         model_id: shell::agent::models::ModelId,
         reasoning_effort: Option<ReasoningEffort>,
-    },
-    /// Persist the permission mode to config.toml and notify the agent
-    /// via ACP. See [`PermissionModePersist`] for rollback semantics.
-    PersistPermissionMode {
-        /// One of `"ask"`, `"always-approve"`, or `"default"`.
-        canonical: &'static str,
-        session_id: Option<acp::SessionId>,
-        persist: PermissionModePersist,
     },
     /// Notify the active session of a permission change without persisting the
     /// default used by future sessions.
@@ -2625,12 +2599,6 @@ pub enum TaskResult {
     SettingPersistFailed {
         key: crate::settings::SettingKey,
         rollback_value: crate::settings::SettingValue,
-        error: String,
-    },
-    /// Best-effort persist failed (cycle_mode path). Logs + toasts but
-    /// does NOT roll back in-memory state.
-    SettingPersistFailedBestEffort {
-        key: crate::settings::SettingKey,
         error: String,
     },
     /// Off-thread clipboard attachment probe finished (see

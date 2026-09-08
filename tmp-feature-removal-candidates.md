@@ -83,6 +83,8 @@
 - 必须保留：NotifySessionPermissionMode、普通 PersistSetting(permission_mode)、SettingPersisted/SettingPersistFailed、默认权限回滚、授权与队列逻辑。不要删除权限模式功能。
 - 状态：等待用户确认，尚未删除。最初证据见 audit-permission-persistence-reachability，当前范围更新见 fix-default-permission-persistence-order。
 
+- 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R8 验证记录。
+
 ## R9 · 技能 YAML 自动修复的闲置 helper
 
 - 位置：tools/src/implementations/skills/discovery.rs 的 quote_problematic_values、RECOVERABLE_KEYS、recover_scalar_fields。

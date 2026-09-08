@@ -3,7 +3,7 @@ use std::path::Path;
 use acp_transport::protocol as acp;
 use tokio::task::JoinSet;
 use acp_transport::{AcpAgentTx, acp_send};
-use super::actions::{PermissionModePersist, SubagentKillOutcome, TaskResult};
+use super::actions::{SubagentKillOutcome, TaskResult};
 use super::agent::AgentId;
 use crate::unified_log as ulog;
 use shell::sampling::error::{
@@ -856,56 +856,6 @@ pub(crate) async fn persist_setting(
         other => Err(format!("unknown setting key for persist: `{other}`")),
     }
 }
-/// Body for `Effect::PersistPermissionMode`. Factored out for testability.
-///
-/// 1. Persist `ui.permission_mode` to disk.
-/// 2. Fire ACP `grow/permission_mode_changed` (gated on disk success for
-///    `WithRollback`; always for `BestEffort`).
-/// 3. Return the matching `TaskResult`.
-pub(crate) async fn persist_permission_mode_and_notify(
-    canonical: &'static str,
-    session_id: Option<acp::SessionId>,
-    persist: PermissionModePersist,
-    tx: AcpAgentTx,
-) -> TaskResult {
-    let config_str: &'static str = canonical;
-    let disk_result = shell::util::config::update_config(|cfg| {
-            cfg.ui.permission_mode = Some(config_str.to_string());
-        })
-        .await;
-    let disk_outcome: Result<(), String> = disk_result.map_err(|e| e.to_string());
-    if should_send_permission_mode_notification(&disk_outcome, persist)
-        && let Some(session_id) = session_id
-    {
-        let params = serde_json::json!({
-            "sessionId": session_id,
-            "permissionMode": config_str,
-        });
-        let notification = acp::ExtNotification::new(
-            "grow/permission_mode_changed",
-            serde_json::value::to_raw_value(&params)
-                .expect("serialize permission_mode_changed params")
-                .into(),
-        );
-        if let Err(e) = acp_send(notification, &tx).await {
-            tracing::warn!("Failed to send permission_mode_changed notification: {e}");
-        }
-    }
-    route_permission_mode_result(disk_outcome, persist, config_str)
-}
-/// Whether to fire the ACP `grow/permission_mode_changed` notification.
-/// `WithRollback` suppresses on disk failure (agent must not see the
-/// optimistic value). `BestEffort` always fires.
-pub(super) fn should_send_permission_mode_notification(
-    disk_outcome: &Result<(), String>,
-    persist: PermissionModePersist,
-) -> bool {
-    match (disk_outcome, persist) {
-        (_, PermissionModePersist::BestEffort) => true,
-        (Ok(()), PermissionModePersist::WithRollback(_)) => true,
-        (Err(_), PermissionModePersist::WithRollback(_)) => false,
-    }
-}
 pub(super) fn marketplace_outcome_succeeded(
     outcome: &extension_types::ActionOutcome,
 ) -> bool {
@@ -957,36 +907,6 @@ pub(super) fn parse_subagent_kill_outcome(resp: &str) -> SubagentKillOutcome {
         SubagentCancelOutcomeDto::NotFound => {
             SubagentKillOutcome::NothingLive {
                 status: None,
-            }
-        }
-    }
-}
-/// Map disk-write outcome + persist variant to the correct `TaskResult`.
-pub(super) fn route_permission_mode_result(
-    disk_outcome: Result<(), String>,
-    persist: PermissionModePersist,
-    config_str: &'static str,
-) -> TaskResult {
-    match (disk_outcome, persist) {
-        (Ok(()), _) => {
-            TaskResult::SettingPersisted {
-                key: "permission_mode",
-                value: crate::settings::SettingValue::Enum(config_str),
-            }
-        }
-        (Err(e), PermissionModePersist::WithRollback(prev_canonical)) => {
-            tracing::warn!("failed to save permission mode preference: {e} — rolling back");
-            TaskResult::SettingPersistFailed {
-                key: "permission_mode",
-                rollback_value: crate::settings::SettingValue::Enum(prev_canonical),
-                error: e,
-            }
-        }
-        (Err(e), PermissionModePersist::BestEffort) => {
-            tracing::warn!("failed to save permission mode preference (best-effort): {e}");
-            TaskResult::SettingPersistFailedBestEffort {
-                key: "permission_mode",
-                error: e,
             }
         }
     }

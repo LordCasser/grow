@@ -7,7 +7,7 @@
 - [x] R5: inspect and apply decision.
 - [x] R6: inspect and apply decision.
 - [x] R7: inspect and apply decision.
-- [ ] R8: inspect and apply decision.
+- [x] R8: inspect and apply decision.
 - [ ] R9: inspect and apply decision.
 - [ ] R10: inspect and apply decision.
 - [ ] R11: inspect and apply decision.

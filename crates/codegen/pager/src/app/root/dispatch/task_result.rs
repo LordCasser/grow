@@ -1533,15 +1533,5 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             rollback_effects
         }
-        TaskResult::SettingPersistFailedBestEffort { key, error } => {
-            tracing::warn!(
-                target: "settings",
-                ?key, %error,
-                "setting persist failed (best-effort); in-memory state stays at optimistic value",
-            );
-            let scrubbed = scrub_error_for_toast(&error);
-            app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
-            vec![]
-        }
     }
 }

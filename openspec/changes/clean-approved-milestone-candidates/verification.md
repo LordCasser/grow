@@ -18,3 +18,6 @@ SkillManager owns active listings/slash advertisement; duplicate AvailableSkills
 
 ## R6
 Removed unregistered SkillInput/SkillOutput and exclusive protocol/normalization/permission/ACP/preparation branches. Retained skill prompt loading and ToolKind::Skill. Fresh tools skill regressions 200/200 and shell acp_conversion 29/29 passed; no remaining old IO symbol references. Existing nonfatal linker unwind warning only.
+
+## R8
+Removed unused permission policy/effect/result helpers and exclusive tests/fixtures. Shared PersistSetting, NotifySessionPermissionMode, rollback and queue behavior retained. Fresh pager modes regressions passed 37/37 after final fixture cleanup; regular AllowOnce negative permission-change regression passed 1/1. Old protocol symbols absent; only existing nonfatal linker warning.

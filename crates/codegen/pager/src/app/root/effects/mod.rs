@@ -13,7 +13,7 @@ use super::{dispatch};
 use crate::app::session as agent;
 pub(super) use helpers::parse_session_load_foreground;
 pub(crate) use helpers::{
-    EffectMeta, SessionFlags, persist_permission_mode_and_notify, persist_setting,
+    EffectMeta, SessionFlags, persist_setting,
     sanitize_user_error,
 };
 use helpers::*;
@@ -23,8 +23,6 @@ use tokio::task::JoinSet;
 use tokio::io::AsyncBufReadExt as _;
 use acp_transport::{AcpAgentTx, acp_send};
 use actions::{ClipboardPasteTarget, Effect, ProbedAttachment, SubagentKillOutcome, TaskResult};
-#[cfg(test)]
-use actions::PermissionModePersist;
 #[cfg(test)]
 use agent::AgentId;
 use crate::unified_log as ulog;
@@ -1895,18 +1893,6 @@ pub(crate) fn execute(
                         result,
                     }
                 });
-        }
-        Effect::PersistPermissionMode { canonical, session_id, persist } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(
-                    persist_permission_mode_and_notify(
-                        canonical,
-                        session_id,
-                        persist,
-                        tx,
-                    ),
-                );
         }
         Effect::NotifySessionPermissionMode {
             canonical,
