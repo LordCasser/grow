@@ -137,11 +137,15 @@ impl ResourcesStateStore for LocalResourcesStateStore {
             self.directory
                 .rename(&tmp_name, &self.directory, &self.name)?;
             if durable {
-                self.directory
-                    .try_clone()?
-                    .into_std_file()
-                    .sync_all()
+                // Linux directory capabilities may use O_PATH, which cannot
+                // be synced. Reopen relative to the same pinned capability.
+                #[cfg(unix)]
+                let parent = self.directory.open(".")
                     .map_err(published_persistence_error)?;
+                #[cfg(not(unix))]
+                let parent = self.directory.try_clone()
+                    .map_err(published_persistence_error)?.into_std_file();
+                parent.sync_all().map_err(published_persistence_error)?;
             }
             Ok(())
         })();

@@ -1,0 +1,2 @@
+- [x] Identify common CI failure and inspect pinned directory storage.
+- [x] Fix readable directory synchronization and pass persistence regressions.

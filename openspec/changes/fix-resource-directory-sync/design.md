@@ -1,0 +1,1 @@
+The existing cap-std directory capability may use O_PATH on Linux; cloning does not make it fsyncable. Use open(".") relative to that capability on Unix, and preserve the existing non-Unix path. Keep rename-before-directory-sync, cleanup and published durability uncertainty semantics. Existing acknowledged persistence and image recovery regressions exercise this path.
