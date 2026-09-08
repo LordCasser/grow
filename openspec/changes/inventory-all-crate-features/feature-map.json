@@ -168440,6 +168440,36 @@
         "Loading spinner gate",
         "entries are absent/empty or visible and loading varies",
         "the spinner is active only for loading with no visible entries."
+      ],
+      [
+        "Deferred startup",
+        "session_startup_allowed is false when LoadSession is dispatched",
+        "the request is stored as DeferredSessionStartup::Load and no effect is returned."
+      ],
+      [
+        "Existing session",
+        "an agent already owns the requested session id",
+        "the existing agent is selected with SwitchCause::Load and no new agent or LoadSession effect is created."
+      ],
+      [
+        "New load",
+        "no existing agent owns the id and startup is allowed",
+        "a new AgentView begins replay, receives app prompt/configuration gates and bootstrap commands, and emits Effect::LoadSession with the requested id and cwd."
+      ],
+      [
+        "Picker resolution",
+        "a selected picker row resolves locally in the current cwd or another cwd",
+        "normal loading receives None or the original cwd respectively; an unresolved id produces a toast and no effect."
+      ],
+      [
+        "Worktree pick",
+        "a selected picker row is chosen for a worktree",
+        "dispatch_new_worktree_session receives the selected session id after the picker state is cleared."
+      ],
+      [
+        "Content pick",
+        "a deep-search hit is selected",
+        "welcome picker fields are reset and the same local/original-cwd resolution, existing-session focus, or local-miss behavior is used."
       ]
     ],
     "sources": [
@@ -168550,6 +168580,42 @@
       [
         "crates/codegen/pager/src/views/session_picker.rs",
         "loading_spinner_active"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "dispatch_load_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "dispatch_load_session_ungated"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "clear_stale_session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "focus_if_session_already_open"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "dispatch_pick_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "dispatch_pick_session_in_worktree"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "dispatch_pick_content_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "dispatch_pick_content_session_in_worktree"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "session_picker_entry_matches"
       ]
     ]
   },
@@ -171346,6 +171412,31 @@
         "Legacy foreground",
         "only a runningPromptId-style field is present",
         "no foreground snapshot is returned."
+      ],
+      [
+        "Reload gate",
+        "SessionLoaded arrives while an open reload window defers the result",
+        "the handler returns without binding or draining the session."
+      ],
+      [
+        "Restore metadata",
+        "a loaded session includes models, restore degree/summary, and optional foreground snapshot",
+        "the agent stores the metadata, renders a restore notice when the summary is present, and adopts the foreground only when its identity is accepted."
+      ],
+      [
+        "Replay finalization",
+        "no foreground prompt is adopted",
+        "root and descendant scrollbacks finish all running entries before normal effects are scheduled."
+      ],
+      [
+        "Control reconciliation",
+        "a bound view has deferred model or behavior state without a matching pending control",
+        "the exact session control is enqueued before prompt queue draining; existing pending controls are not duplicated."
+      ],
+      [
+        "Post-load effects",
+        "a load completes",
+        "title hydration, prompt history, agent-name metadata, optional plugin CTA, active-session registration, readiness notification, and descendant restoration are scheduled as applicable."
       ]
     ],
     "sources": [
@@ -171452,6 +171543,18 @@
       [
         "crates/codegen/pager/src/app/root/effects/tests.rs",
         "tests::session_load_does_not_adopt_an_id_without_structured_foreground"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "reconcile_controls_after_reconnect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "reconcile_controls_after_reconnect::visit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "handle_session_loaded"
       ]
     ]
   },
@@ -171485,6 +171588,26 @@
         "Bootstrap commands",
         "bootstrap_acp_commands contains a command",
         "the loaded session receives the command and generation."
+      ],
+      [
+        "Bootstrap commands",
+        "app bootstrap commands are present when a placeholder AgentView is created",
+        "the session receives those commands with generation one."
+      ],
+      [
+        "Extension refresh on success",
+        "pending extension fetch is set and an extensions modal exists when SessionLoaded completes",
+        "the flag is consumed and modal tab fetch effects are appended."
+      ],
+      [
+        "Extension refresh on failure",
+        "SessionLoadFailed arrives while extension refresh is pending",
+        "the flag is cleared and no extension fetch effects are emitted."
+      ],
+      [
+        "Failed load retry",
+        "a created agent fails to load outside a reload deferral window",
+        "the eager session id is unbound, a failure event is added, and a later pick can retry instead of focusing the failed surface."
       ]
     ],
     "sources": [
@@ -171531,6 +171654,18 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs",
         "available_commands"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "dispatch_load_session_ungated"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "handle_session_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "handle_session_load_failed"
       ]
     ]
   },
@@ -171644,6 +171779,31 @@
         "Stale replay",
         "scrollback contains running entries before SessionLoaded",
         "running entries are finished and no longer animate."
+      ],
+      [
+        "Pending first prompt",
+        "pending_first_prompt exists at SessionLoaded",
+        "it is enqueued at the front and removed from the field before queue draining."
+      ],
+      [
+        "Stale replay",
+        "no accepted foreground snapshot is present",
+        "root and child running entries are finalized so the loaded view no longer animates stale replay work."
+      ],
+      [
+        "Delete from both pickers",
+        "a session id is removed while modal and welcome picker data are present",
+        "matching entries and content hits disappear from both surfaces and selection is moved to a selectable map slot."
+      ],
+      [
+        "Header anchor",
+        "the prior selected map slot is a nonselectable grouped header",
+        "selection moves backward to a selectable row, or to the first selectable row if no earlier row exists."
+      ],
+      [
+        "Empty map",
+        "reanchoring receives no rows",
+        "scroll offset is cleared and selected is set to zero."
       ]
     ],
     "sources": [
@@ -171682,6 +171842,22 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs",
         "TaskResult::SessionLoadFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "handle_session_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "remove_session_from_pickers"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "keep_picker_entry"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "reanchor_grouped_selection"
       ]
     ]
   },
@@ -171993,6 +172169,41 @@
         "Rapid fetch",
         "two plain list fetches race",
         "only the latest sequence writes entries."
+      ],
+      [
+        "Short query",
+        "a picker query trims to fewer than two bytes",
+        "content results and loading are cleared and no search effect is returned."
+      ],
+      [
+        "Debounced query",
+        "a longer query changes without force",
+        "content loading is marked and a DebounceSessionSearch effect carries the current query and sequence."
+      ],
+      [
+        "Forced query",
+        "a longer query changes with force",
+        "DeepSearchSessions is emitted immediately with the incremented sequence."
+      ],
+      [
+        "Stale completion",
+        "a debounce or result arrives with a sequence different from the live picker",
+        "no effect is emitted and no results are written."
+      ],
+      [
+        "Surface ownership",
+        "a modal picker is open, or only the Welcome view is active",
+        "modal state is updated first; otherwise only the live welcome state can accept deep results or card details."
+      ],
+      [
+        "Dismissal invalidation",
+        "the welcome picker is dismissed while a plain list or deep search is loading",
+        "plain and deep sequences/loading flags are invalidated so late work cannot resurrect the picker; modal dismissal does not bump the welcome list sequence."
+      ],
+      [
+        "Picker creation",
+        "ShowSessionPicker is dispatched",
+        "a SessionPicker modal with default picker state and empty loading/search fields is installed before list fetch dispatch."
       ]
     ],
     "sources": [
@@ -172031,6 +172242,38 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs",
         "handle_input"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "dispatch_trigger_deep_search"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "handle_session_search_debounce_expired"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "live_deep_search_seq"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "handle_card_detail_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "handle_deep_search_results"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "dispatch_show_session_picker"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "dispatch_session_picker_closed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "invalidate_picker_fetch_on_dismiss"
       ]
     ]
   },
@@ -182584,6 +182827,1104 @@
       [
         "crates/codegen/pager/src/scrollback/entry.rs",
         "RenderedBlockOutput"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The agent catalog modal SHALL expose a single Agents surface while retaining typed tab identity, initialize its window/list/search/selection state from the cwd and toggle map, and report close, change, no-op, view, and editor-refresh outcomes without mixing surface semantics.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: AgentsTab::ALL contains only Agents and label returns Agents. AgentsModalState::new creates a one-tab ModalWindowState, builds the agent list, starts selection/scroll/search empty, stores cwd/default_agent/active_agent, and clears hit mappings/message. AgentsModalMessage distinguishes Error and Info; AgentsModalOutcome carries Close, Changed, Unchanged, ViewAgent metadata/content, or EditInEditor path/tab. refresh_after_editor rebuilds entries from current toggle configuration and clamps selection.",
+    "scenarios": [
+      [
+        "Single surface",
+        "the modal asks for its available tabs",
+        "ALL contains only Agents and the label is Agents."
+      ],
+      [
+        "Fresh state",
+        "AgentsModalState::new receives cwd, toggles, bundle and optional active agent",
+        "the modal starts on Agents with built entries, zero selection/scroll, inactive search, and resolved default agent."
+      ],
+      [
+        "Editor refresh",
+        "an editor action returns to the modal",
+        "the agent catalog is rebuilt from the cwd and persisted toggles, with selection clamped."
+      ],
+      [
+        "Message kind",
+        "an operation reports an error or informational status",
+        "the message preserves its typed kind and text."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsTab"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsTab::ALL"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsTab::label"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalState::new"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalState::refresh_after_editor"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalMessage"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalOutcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "catalog_has_one_surface"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The agent catalog SHALL include the user-visible built-ins, discover project/user/bundled definitions from the cwd, resolve name collisions by scope priority, suppress non-project built-in subagent duplicates, and preserve enabled/source/scope/definition metadata for each entry.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: build_agent_list seeds Grow, GeneralPurpose, Explore, and BrowserUse as enabled built-ins by default, then consumes agent::discovery::discover(cwd). Built-in discoveries are skipped; subagent variant names are suppressed outside Project scope; collisions replace only when Project > User > Bundled > BuiltIn. Each AgentListEntry records name, description, scope, optional source path, builtin flag, enabled toggle, expansion state, and full AgentDefinition. build_switch_agent_catalog filters primary-agent-eligible definitions, deduplicates names, projects AgentArg name/description/scope, and appends qualified trusted-plugin or frontmatter-only untrusted-plugin agents.",
+    "scenarios": [
+      [
+        "Built-in baseline",
+        "the cwd has no custom definitions",
+        "the four user-visible built-ins are present and enabled unless explicitly toggled."
+      ],
+      [
+        "Scope override",
+        "the same name is discovered at multiple scopes",
+        "the highest priority project/user/bundled definition replaces the lower-priority entry."
+      ],
+      [
+        "Subagent collision",
+        "a built-in subagent name is discovered outside Project scope",
+        "the duplicate is omitted; a project-scoped definition may replace it."
+      ],
+      [
+        "Switch catalog eligibility",
+        "a definition is not primary-agent eligible or its name was already seen",
+        "it is omitted from the switch catalog."
+      ],
+      [
+        "Plugin discovery",
+        "an enabled plugin exposes agent markdown files",
+        "trusted plugins parse full definitions while untrusted plugins use frontmatter-only parsing, names are qualified as plugin:name, and duplicate qualified names are skipped."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "user_visible_builtins"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "build_agent_list"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentListEntry"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "build_switch_agent_catalog"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "append_plugin_switch_agents"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "load_plugins_discovery_config"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentDefinition::is_primary_agent_eligible"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentDefinition::from_file / from_file_frontmatter_only"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "builtin_catalog_is_nonempty"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Agent selection and spawn toggles SHALL read effective configuration, resolve a non-empty configured default before the MVP resolver fallback, and persist default-agent and subagent-toggle changes through the editable config document while returning explicit errors for unreadable or malformed configuration.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: load_agent_toggle reads subagents.toggle boolean entries and otherwise returns an empty map. resolve_default_agent_name uses a non-empty AgentSelectionConfig.name first, otherwise MvpAgent::resolve_agent_definition(...).selector_identity(). set_default_agent creates the config parent, reads an editable TOML document, creates [agent] when needed, writes or removes agent.name, and writes the document back. toggle_agent similarly creates [subagents].toggle and writes the requested boolean. Both operations surface read/parse/table/write failures as String errors; handle_agents_key refreshes default or list state only after success.",
+    "scenarios": [
+      [
+        "Configured default",
+        "effective config contains a non-empty agent.name",
+        "resolve_default_agent_name returns that exact name."
+      ],
+      [
+        "Resolver fallback",
+        "agent.name is absent or empty",
+        "the MVP agent resolver supplies selector_identity as the default."
+      ],
+      [
+        "Set default",
+        "s is pressed for a selected agent that is not the current configured name",
+        "agent.name is persisted and the state message reports the new session default."
+      ],
+      [
+        "Clear default",
+        "s is pressed for the currently configured default",
+        "agent.name is removed and the resolved fallback is reported."
+      ],
+      [
+        "Toggle spawn",
+        "t is pressed for a selected entry",
+        "the corresponding subagents.toggle boolean is persisted and the list is rebuilt."
+      ],
+      [
+        "Config failure",
+        "the config cannot be read, parsed, or has a wrong table shape",
+        "the operation returns an error message and does not claim success."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "load_agent_toggle"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "load_agent_selection_config"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "load_config_agent_name"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "resolve_default_agent_name"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "set_default_agent"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "toggle_agent"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "refresh_default_agent"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "handle_agents_key"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The agent modal SHALL filter case-insensitively over agent name and description, keep selection within the filtered entries, saturate navigation at both edges, and expand or collapse only the selected entry without panicking on an empty result.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: filtered_indices returns all indices for an empty query, otherwise lowercases query/name/description and returns matching source indices. select_next/select_prev no-op when no matches, choose the first/last match when current selection is outside the filtered set, and saturate at the corresponding edge. reset_selection_after_search_change selects the first current match. expand/collapse mutate only the selected AgentListEntry when it exists.",
+    "scenarios": [
+      [
+        "Empty query",
+        "the search query is empty",
+        "all agent indices are returned in catalog order."
+      ],
+      [
+        "Name or description match",
+        "the lowercased query occurs in either field",
+        "the matching source indices are returned and non-matches are excluded."
+      ],
+      [
+        "Search selection reset",
+        "editing the query changes the filtered set",
+        "selection moves to the first matching entry when one exists."
+      ],
+      [
+        "Navigation edges",
+        "j/k or arrows reach the first/last filtered entry",
+        "further movement remains at that edge."
+      ],
+      [
+        "No matches",
+        "the filtered set is empty",
+        "navigation returns without changing selection."
+      ],
+      [
+        "Expand/collapse",
+        "e/Right or E/Left targets a selected entry",
+        "only that entry's expanded flag changes."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalState::filtered_indices"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalState::reset_selection_after_search_change"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalState::select_next"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalState::select_prev"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalState::expand"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalState::collapse"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "navigation_clamps_at_edges"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The agent modal SHALL render centered modal chrome with search/message state, visible/default/spawn markers, descriptions and optional expanded details, selected-row highlighting, bounded scrolling, truncated text, and row_map entries that map agent and description rows back to their source index.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: format_agent_detail emits role composition, tool count/list with name_override or id suffix, skills, source path, and scope. synthesize_agent_markdown uses the definition prompt body or a base-system-prompt fallback; render_prompt_body resolves tool template variables through TemplateRenderer and falls back to the original body on render error. render_agents_modal uses modal_sizing/shortcuts, records content_rect, paints message and search/cursor, builds Agent/Description/Detail RenderRows with active/default/spawn-off suffixes, keeps selected rows highlighted, adjusts scroll to selected row and content height, truncates by content width, and records row_map for owned rows.",
+    "scenarios": [
+      [
+        "Agent row markers",
+        "an entry is active, default, disabled, or expanded",
+        "the row includes the corresponding active/default/spawn-off marker and detail rows when expanded."
+      ],
+      [
+        "Detail metadata",
+        "an expanded definition has tools, skills, source, or scope",
+        "the detail view shows role composition, tool names, skills, source, and scope lines."
+      ],
+      [
+        "Built-in view",
+        "Enter/o selects an entry without a source_path",
+        "ViewAgent includes synthesized markdown using the prompt body or base-system fallback."
+      ],
+      [
+        "File-backed view",
+        "Enter/o selects an entry with a source_path",
+        "ViewAgent carries the source path and no synthesized content."
+      ],
+      [
+        "Viewport scroll",
+        "the selected row lies above/below available content",
+        "scroll is adjusted and clamped so the selected row is visible."
+      ],
+      [
+        "Narrow content",
+        "row text exceeds content width",
+        "truncate_str clips display text to the content width without overpainting; row_map still identifies owned rows."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "format_agent_detail"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "synthesize_agent_markdown"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "render_prompt_body"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "modal_sizing"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "shortcuts"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "render_agents_modal"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "RowKind"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "RenderRow"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalOutcome::ViewAgent"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Agent modal input SHALL give active search first ownership, delegate modal chrome before local controls, map navigation/fold/page/view/search/default/toggle keys to typed outcomes and persistence, accept paste only into active search, and route mouse close, scroll, selection, and expansion through content hit rows.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: handle_agents_key clears transient messages, handles search Esc reset and Enter commit, maps remaining keys through LineEditor and line_edit_outcome, otherwise lets modal_window handle close before local j/k, e/E, page and Ctrl-d/u, Enter/o, /i, q, s and t branches. View uses source path or synthesized content; s toggles/clears default and refreshes on success; t toggles enabled and rebuilds on success. handle_agents_paste returns Unchanged when search is inactive, otherwise inserts text and resets selection after changes. handle_agents_mouse lets modal chrome close/handle first, ignores outside-content events, scrolls selection, and on a left row click toggles expansion for the selected row or selects another agent.",
+    "scenarios": [
+      [
+        "Search editing",
+        "search is active and Esc/Enter/text/paste arrives",
+        "Esc resets and exits search, Enter commits and exits, text changes update selection, and handled editor events return Changed."
+      ],
+      [
+        "Modal close",
+        "modal chrome reports CloseRequested or q is pressed",
+        "the outcome is Close."
+      ],
+      [
+        "Navigation and fold",
+        "j/k, arrows, page keys, e/E or Right/Left arrive outside search",
+        "selection or expansion changes and the outcome is Changed."
+      ],
+      [
+        "View action",
+        "Enter/o targets an existing agent",
+        "ViewAgent carries its title, source path, and optional built-in content."
+      ],
+      [
+        "Default/toggle action",
+        "s or t targets a selected agent",
+        "configuration is persisted, state is refreshed on success, and failures become typed messages while the event remains Changed."
+      ],
+      [
+        "Paste outside search",
+        "paste arrives while search is inactive",
+        "the outcome is Unchanged and state is not edited."
+      ],
+      [
+        "Mouse content routing",
+        "scroll or left click occurs inside content_rect",
+        "selection moves or the mapped row selects/expands; outside content returns Unchanged."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "handle_agents_key"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "handle_agents_paste"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "handle_agents_mouse"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "line_edit_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "ModalWindowOutcome::CloseRequested"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "MouseEventKind"
+      ],
+      [
+        "crates/codegen/pager/src/views/agents_modal.rs",
+        "AgentsModalOutcome"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Prompt-to-entry mapping with explicit metadata and interjection-aware fallback",
+    "contract": "The dispatcher SHALL map shell prompt indexes to scrollback user-prompt entries by preferring explicit prompt_index metadata from the newest matching entry, then falling back to positional counting of non-interjection UserPrompt blocks. shell_prompt_index_at SHALL walk backward from an entry, skip mid-turn interjections to the enclosing prompt, return explicit metadata when present, and count only indexed user prompts for legacy metadata-less scrollbacks. Missing anchors SHALL return None.",
+    "scenarios": [
+      [
+        "Explicit lookup",
+        "scrollback contains prompt_index 0, 1, and 2",
+        "find_user_prompt_entry_for_shell_index returns each matching entry index."
+      ],
+      [
+        "Positional lookup",
+        "prompt metadata is absent",
+        "the fallback returns the first, second, and third real user prompt while ignoring interjections."
+      ],
+      [
+        "Interjection anchor",
+        "the selected entry is an interjection or a block after it before the next prompt",
+        "shell_prompt_index_at resolves to the preceding enclosing turn."
+      ],
+      [
+        "Legacy interjection count",
+        "a metadata-less prompt follows an interjection",
+        "the interjection is excluded from the shell index count."
+      ],
+      [
+        "No match",
+        "no user prompt can anchor the target",
+        "the helper returns None rather than inventing an entry."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "primary_path_returns_correct_idx_for_each_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "fallback_path_skips_interjections"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "shell_prompt_index_at_resolves_interjection_to_enclosing_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "shell_prompt_index_at_counting_fallback_skips_interjections"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "fallback_path_returns_correct_idx_when_prompt_index_is_none"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "is_indexed_user_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "shell_prompt_index_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "find_user_prompt_entry_for_shell_index"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "prompt_index"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "is_interjection"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RenderBlock::UserPrompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "ScrollbackState::get"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Rewind entry dispatch, busy cancellation, draft stashing, and session effects",
+    "contract": "dispatch_rewind and dispatch_rewind_show_picker SHALL operate only on the active Agent view and an agent with a session id; otherwise they SHALL return no effects and report No active session when applicable. They SHALL dismiss a stale jump picker, derive the selected shell prompt anchor, stash a nonempty composer draft, and enter Loading with FetchRewindPoints when idle. When the session is busy they SHALL enter a targeted CancelOffer instead. dispatch_rewind_cancel_offer SHALL preserve anchor/target/draft, enter Loading, emit CancelTurn with cancel_subagents=true and rewind_if_pristine=false, then fetch points; it SHALL avoid removing the in-flight prompt itself.",
+    "scenarios": [
+      [
+        "Idle rewind",
+        "the active agent has a session and is idle",
+        "jump picker is dismissed, draft is stashed, Loading state is created, and FetchRewindPoints is emitted."
+      ],
+      [
+        "Busy rewind",
+        "the active agent is busy",
+        "no fetch is emitted immediately; CancelOffer stores the anchor, selected shell index, and draft."
+      ],
+      [
+        "Busy confirmation",
+        "the cancel offer is confirmed",
+        "CancelTurn precedes FetchRewindPoints, target survives, and the rewind flow owns history cleanup."
+      ],
+      [
+        "Committed prompt",
+        "the in-flight user block was already committed",
+        "rewind dispatch does not restore/remove the committed block; ordinary cancellation leaves it printed."
+      ],
+      [
+        "Late cancellation response",
+        "a cancelled PromptResponse belongs to an old prompt id",
+        "the cross-dispatch task-result path discards it while the new turn remains active."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "cancel_does_not_rewind_when_in_flight_block_committed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "rewind_then_resubmit_drains_immediately_and_discards_orphan"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "stacked_rewinds_each_get_their_own_pid_and_orphans_drop_independently"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_show_picker"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_cancel_offer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "stash_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "ActiveView::Agent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dismiss_jump_picker"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindState::new_cancel_offer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindPhase::Loading"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "Effect::FetchRewindPoints"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "Effect::CancelTurn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "rewind_if_pristine"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "cancel_subagents"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "CancelTurn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "current_prompt_id"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Rewind points resolution, picker/mode state machine, and inline edit entry",
+    "contract": "handle_rewind_points_loaded SHALL retain returned points, restore a stashed draft on an empty response and toast No rewind points available, resolve a desired inline target or sort ordinary points descending into Picker, select and center the matching scrollback anchor, and create ModeSelect with file-change metadata. Inline edit SHALL hide FilesOnly because conversation rewind is implicit; classic rewind SHALL offer it. Mode selection SHALL require a conversation-only confirmation for target zero, execute conversation-only directly for other targets, execute All/FilesOnly directly when no file changes exist, and emit RewindPreview before confirmation when file changes exist. Dismiss/back actions SHALL preserve draft and inline editor while rebuilding the appropriate state.",
+    "scenarios": [
+      [
+        "Inline submit",
+        "inline edit text differs from the original and the session is idle",
+        "Loading is entered with selected target and FetchRewindPoints is emitted while editor stays open."
+      ],
+      [
+        "No-op submit",
+        "inline text is empty or unchanged",
+        "editor exits with no rewind state or effects."
+      ],
+      [
+        "Targeted points",
+        "points load for a selected inline prompt",
+        "ModeSelect targets the point, carries has_file_changes, and hides FilesOnly."
+      ],
+      [
+        "Classic points",
+        "ordinary `/rewind` points load without inline editor",
+        "ModeSelect offers FilesOnly."
+      ],
+      [
+        "All mode",
+        "file changes exist",
+        "RewindPreview is emitted and successful preview transitions to Confirm."
+      ],
+      [
+        "Direct mode",
+        "conversation-only or files-only has no file changes",
+        "RewindExecute is emitted and inline text is armed only at execution."
+      ],
+      [
+        "Busy inline submit",
+        "inline edit is submitted during a running turn",
+        "CancelOffer is targeted at the edited prompt; confirm cancels and fetches points, dismiss returns to editing."
+      ],
+      [
+        "Back/dismiss",
+        "the user dismisses or backs out of an overlay",
+        "rewind state is cleared or rebuilt, pending resubmit is absent, and editor text/draft remains."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_submit_enters_rewind_flow_via_points_fetch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_submit_with_unchanged_text_closes_editor"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_points_loaded_opens_mode_select_over_open_editor"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "classic_rewind_mode_select_keeps_files_only_row"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_back_to_mode_select_preserves_hidden_files_only_row"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_dismiss_from_mode_select_returns_to_editor"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_busy_submit_cancel_offer_confirm_cancels_and_fetches_points"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_busy_cancel_offer_dismiss_returns_to_editor"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_inline_edit_submit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "handle_rewind_points_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_picker_select"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_select_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_confirm"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_conversation_only_confirm"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_dismiss"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_back_to_mode_select"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_dismiss_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "stash_inline_resubmit_if_editing"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindPhase::Loading"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindPhase::Picker"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindPhase::ModeSelect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindPhase::Previewing"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindPhase::Confirm"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindPhase::ConversationOnlyConfirm"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindPhase::Executing"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "Effect::RewindPreview"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "Effect::RewindExecute"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "offer_files_only"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "selected_prompt_index"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Successful rewind application, inline resubmission, and composer/image preservation",
+    "contract": "dispatch_rewind_success SHALL consume pending inline resubmit text, transition unsuccessful responses to Error, and on success close the inline editor before mutating its transcript anchor. Non-files-only modes SHALL remove the target tail, drop removed entries before releasing retained memory, clear rewind points, move to the prompt pane/bottom, and show a mode-specific confirmation as toast or minimal scrollback notice. FilesOnly SHALL preserve conversation, place inline text in the composer, and avoid SendPrompt. Non-files-only inline resubmission SHALL restore the full draft and send the edited text literally with consume_input=false when the agent view is active; if the view changed, it SHALL append text to that agent composer without clobbering existing text or image chips.",
+    "scenarios": [
+      [
+        "Conversation-only inline success",
+        "execution succeeds for the newest prompt",
+        "transcript truncates, inline editor closes, pending text is sent, composer draft survives, and no redundant revert notice is added."
+      ],
+      [
+        "All-mode success",
+        "preview/confirm completes successfully",
+        "the same inline text is resubmitted after RewindExecute."
+      ],
+      [
+        "Files-only success",
+        "files-only execution succeeds",
+        "no prompt is sent, editor closes, text fills composer, and original transcript remains."
+      ],
+      [
+        "Literal slash text",
+        "edited text starts with `/`",
+        "dispatch_send_prompt_inner receives it with literal=true as a prompt."
+      ],
+      [
+        "View switch",
+        "active view changes before completion",
+        "the edited text is appended to the target composer and no SendPrompt is emitted."
+      ],
+      [
+        "Image draft",
+        "target composer already contains an image",
+        "append preserves one image chip and its element id/image registration."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_conversation_only_success_resubmits_and_closes_editor"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_all_mode_previews_confirms_and_resubmits"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_files_only_success_prefills_composer_without_resubmit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_resubmit_sends_slash_text_literally"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_rewind_success_after_view_switch_appends_to_draft"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_view_switch_preserves_image_draft_when_appending_resubmit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "stash_inline_resubmit_if_editing"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_success"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "find_user_prompt_entry_for_shell_index"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "scrollback.remove_from"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "release_retained_memory_with"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RenderBlock::notice"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "show_toast"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "set_active_pane"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "goto_bottom"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_send_prompt_inner"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "consume_input"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "literal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "append_text"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "pending_inline_resubmit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "inline_edit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "set_inline_edit_height"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindResponse::success"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "response.mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "response.prompt_text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Rewind preview and execute failure recovery",
+    "contract": "Preview completion SHALL convert clean files and conflicts into Confirm state with ConflictDisplay projections, but an error with no clean files or conflicts SHALL enter Error without effects. Preview failure SHALL preserve anchor/draft in Error. Execute failure or a success=false response SHALL clear pending inline resubmit text, preserve the inline editor and transcript, retain the draft for dismissal, and expose the error message until the user dismisses it.",
+    "scenarios": [
+      [
+        "Preview success",
+        "preview returns clean files or conflicts",
+        "Confirm state carries target, mode, files, conflict displays, prompt preview, and active selection index zero."
+      ],
+      [
+        "Preview error",
+        "preview returns an error with no file details",
+        "Error state is entered and no effect is emitted."
+      ],
+      [
+        "Execute failure",
+        "TaskResult reports RewindExecuteFailed",
+        "pending resubmit is dropped, editor remains open, transcript is untouched, and Error state is visible."
+      ],
+      [
+        "Unsuccessful execute",
+        "RewindExecuteComplete has success=false",
+        "the same error recovery occurs using response.error or unknown error."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_execute_failure_keeps_editor_open"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "inline_edit_unsuccessful_response_keeps_editor_open"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "handle_rewind_preview_complete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "handle_rewind_preview_failed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "handle_rewind_execute_failed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_success"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindPhase::Confirm"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindPhase::Error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "ConflictDisplay::from_conflict"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "clean_files"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "conflicts"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "pending_inline_resubmit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RewindExecuteFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "response.success"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "response.error"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Rewind success memory release and presentation by screen mode",
+    "contract": "Successful conversation rewind SHALL remove scrollback from the resolved prompt anchor and call release_retained_memory_with exactly once after dropping removed entries; files-only SHALL not truncate or purge. Full TUI SHALL present the exact mode-specific success as a toast and avoid appending a system block, while Minimal SHALL avoid toast and append the corresponding notice block because committed lines cannot be erased.",
+    "scenarios": [
+      [
+        "Files-only side effect",
+        "files_only succeeds",
+        "scrollback is unchanged and retained-memory release is not called."
+      ],
+      [
+        "Conversation side effect",
+        "all/conversation_only succeeds with a matching anchor",
+        "scrollback tail is removed and retained-memory release runs once after drop."
+      ],
+      [
+        "Full screen",
+        "screen mode is non-Minimal",
+        "toast says Reverted conversation, Reverted file changes, or Reverted conversation and file changes and scrollback has no confirmation block."
+      ],
+      [
+        "Minimal screen",
+        "screen mode is Minimal",
+        "no toast exists and a Reverted system notice is committed to scrollback."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "rewind_success_truncation_releases_retained_memory"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "dispatch_rewind_success"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "rewind_success_truncation_releases_retained_memory"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "remove_from"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "drop"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "release_retained_memory_with"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "screen_mode.is_minimal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "show_toast"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "RenderBlock::notice"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "Reverted conversation"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "Reverted file changes"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "Reverted conversation and file changes"
       ]
     ]
   }

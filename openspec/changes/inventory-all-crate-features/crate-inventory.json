@@ -3751,7 +3751,19 @@
       "Width-aware source line estimation and cheap estimate cache",
       "Render output cache keys, selection branches, and edit boundary sidecars",
       "Truncated height caching, width invalidation, eviction, and render contexts",
-      "Tool hook rendering and output composition"
+      "Tool hook rendering and output composition",
+      "The agent catalog modal SHALL expose a single Agents surface while retaining typed tab identity, initialize its window/list/search/selection state from the cwd and toggle map, and report close, change, no-op, view, and editor-refresh outcomes without mixing surface semantics.",
+      "The agent catalog SHALL include the user-visible built-ins, discover project/user/bundled definitions from the cwd, resolve name collisions by scope priority, suppress non-project built-in subagent duplicates, and preserve enabled/source/scope/definition metadata for each entry.",
+      "Agent selection and spawn toggles SHALL read effective configuration, resolve a non-empty configured default before the MVP resolver fallback, and persist default-agent and subagent-toggle changes through the editable config document while returning explicit errors for unreadable or malformed configuration.",
+      "The agent modal SHALL filter case-insensitively over agent name and description, keep selection within the filtered entries, saturate navigation at both edges, and expand or collapse only the selected entry without panicking on an empty result.",
+      "The agent modal SHALL render centered modal chrome with search/message state, visible/default/spawn markers, descriptions and optional expanded details, selected-row highlighting, bounded scrolling, truncated text, and row_map entries that map agent and description rows back to their source index.",
+      "Agent modal input SHALL give active search first ownership, delegate modal chrome before local controls, map navigation/fold/page/view/search/default/toggle keys to typed outcomes and persistence, accept paste only into active search, and route mouse close, scroll, selection, and expansion through content hit rows.",
+      "Prompt-to-entry mapping with explicit metadata and interjection-aware fallback",
+      "Rewind entry dispatch, busy cancellation, draft stashing, and session effects",
+      "Rewind points resolution, picker/mode state machine, and inline edit entry",
+      "Successful rewind application, inline resubmission, and composer/image preservation",
+      "Rewind preview and execute failure recovery",
+      "Rewind success memory release and presentation by screen mode"
     ],
     "reviewed_files": [
       {
@@ -5853,6 +5865,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/entry.rs",
         "sha256": "764cad36aac411bbdc825d9931c84ebf9ebc885271effd0d2d3bc0d9abd2024a"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+        "sha256": "72ab5354586b2836fa8e98c3d636ae2cef9722fd1d30d16b0cab2d18659b6f79"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/agents_modal.rs",
+        "sha256": "8a92b144f55a1777e4c471da7e309ed508f41e420aa0bad82cb2c8a3ee330bc3"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
+        "sha256": "6bd4ec04f9e8e77222c055635fdcc6a8e0360868fcbc18dc81cc7e645efa2649"
       }
     ],
     "review": "reviews/pager.md"

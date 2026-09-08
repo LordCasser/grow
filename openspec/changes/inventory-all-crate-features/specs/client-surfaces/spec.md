@@ -20410,3 +20410,351 @@ When hook_data is attached, output_with_hooks SHALL render the base tool block f
 - **THEN** base block output is returned unchanged.
 
 证据：`crates/codegen/pager/src/scrollback/entry.rs` — `rendered_output_with_hooks`；`crates/codegen/pager/src/scrollback/entry.rs` — `output_with_hooks`；`crates/codegen/pager/src/scrollback/entry.rs` — `ToolCallHookData`；`crates/codegen/pager/src/scrollback/entry.rs` — `render_hooks_inline_suffix`；`crates/codegen/pager/src/scrollback/entry.rs` — `render_hook_separator`；`crates/codegen/pager/src/scrollback/entry.rs` — `render_hooks_for_mode`；`crates/codegen/pager/src/scrollback/entry.rs` — `render_hooks_detail`；`crates/codegen/pager/src/scrollback/entry.rs` — `pre_hooks`；`crates/codegen/pager/src/scrollback/entry.rs` — `post_hooks`；`crates/codegen/pager/src/scrollback/entry.rs` — `lifecycle`；`crates/codegen/pager/src/scrollback/entry.rs` — `ToolCallBlock::Lifecycle`；`crates/codegen/pager/src/scrollback/entry.rs` — `RenderedBlockOutput`。
+
+
+### Requirement: The agent catalog modal SHALL expose a single Agents surface while retaining typed tab identity, initialize its window/list/search/selection state from the cwd and toggle map, and report close, change, no-op, view, and editor-refresh outcomes without mixing surface semantics.
+
+The implementation SHALL satisfy the following tested behavior: AgentsTab::ALL contains only Agents and label returns Agents. AgentsModalState::new creates a one-tab ModalWindowState, builds the agent list, starts selection/scroll/search empty, stores cwd/default_agent/active_agent, and clears hit mappings/message. AgentsModalMessage distinguishes Error and Info; AgentsModalOutcome carries Close, Changed, Unchanged, ViewAgent metadata/content, or EditInEditor path/tab. refresh_after_editor rebuilds entries from current toggle configuration and clamps selection.
+
+#### Scenario: Single surface
+- **WHEN** the modal asks for its available tabs
+- **THEN** ALL contains only Agents and the label is Agents.
+
+#### Scenario: Fresh state
+- **WHEN** AgentsModalState::new receives cwd, toggles, bundle and optional active agent
+- **THEN** the modal starts on Agents with built entries, zero selection/scroll, inactive search, and resolved default agent.
+
+#### Scenario: Editor refresh
+- **WHEN** an editor action returns to the modal
+- **THEN** the agent catalog is rebuilt from the cwd and persisted toggles, with selection clamped.
+
+#### Scenario: Message kind
+- **WHEN** an operation reports an error or informational status
+- **THEN** the message preserves its typed kind and text.
+
+证据：`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsTab`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsTab::ALL`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsTab::label`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalState::new`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalState::refresh_after_editor`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalMessage`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalOutcome`；`crates/codegen/pager/src/views/agents_modal.rs` — `catalog_has_one_surface`。
+
+
+### Requirement: The agent catalog SHALL include the user-visible built-ins, discover project/user/bundled definitions from the cwd, resolve name collisions by scope priority, suppress non-project built-in subagent duplicates, and preserve enabled/source/scope/definition metadata for each entry.
+
+The implementation SHALL satisfy the following tested behavior: build_agent_list seeds Grow, GeneralPurpose, Explore, and BrowserUse as enabled built-ins by default, then consumes agent::discovery::discover(cwd). Built-in discoveries are skipped; subagent variant names are suppressed outside Project scope; collisions replace only when Project > User > Bundled > BuiltIn. Each AgentListEntry records name, description, scope, optional source path, builtin flag, enabled toggle, expansion state, and full AgentDefinition. build_switch_agent_catalog filters primary-agent-eligible definitions, deduplicates names, projects AgentArg name/description/scope, and appends qualified trusted-plugin or frontmatter-only untrusted-plugin agents.
+
+#### Scenario: Built-in baseline
+- **WHEN** the cwd has no custom definitions
+- **THEN** the four user-visible built-ins are present and enabled unless explicitly toggled.
+
+#### Scenario: Scope override
+- **WHEN** the same name is discovered at multiple scopes
+- **THEN** the highest priority project/user/bundled definition replaces the lower-priority entry.
+
+#### Scenario: Subagent collision
+- **WHEN** a built-in subagent name is discovered outside Project scope
+- **THEN** the duplicate is omitted; a project-scoped definition may replace it.
+
+#### Scenario: Switch catalog eligibility
+- **WHEN** a definition is not primary-agent eligible or its name was already seen
+- **THEN** it is omitted from the switch catalog.
+
+#### Scenario: Plugin discovery
+- **WHEN** an enabled plugin exposes agent markdown files
+- **THEN** trusted plugins parse full definitions while untrusted plugins use frontmatter-only parsing, names are qualified as plugin:name, and duplicate qualified names are skipped.
+
+证据：`crates/codegen/pager/src/views/agents_modal.rs` — `user_visible_builtins`；`crates/codegen/pager/src/views/agents_modal.rs` — `build_agent_list`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentListEntry`；`crates/codegen/pager/src/views/agents_modal.rs` — `build_switch_agent_catalog`；`crates/codegen/pager/src/views/agents_modal.rs` — `append_plugin_switch_agents`；`crates/codegen/pager/src/views/agents_modal.rs` — `load_plugins_discovery_config`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentDefinition::is_primary_agent_eligible`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentDefinition::from_file / from_file_frontmatter_only`；`crates/codegen/pager/src/views/agents_modal.rs` — `builtin_catalog_is_nonempty`。
+
+
+### Requirement: Agent selection and spawn toggles SHALL read effective configuration, resolve a non-empty configured default before the MVP resolver fallback, and persist default-agent and subagent-toggle changes through the editable config document while returning explicit errors for unreadable or malformed configuration.
+
+The implementation SHALL satisfy the following tested behavior: load_agent_toggle reads subagents.toggle boolean entries and otherwise returns an empty map. resolve_default_agent_name uses a non-empty AgentSelectionConfig.name first, otherwise MvpAgent::resolve_agent_definition(...).selector_identity(). set_default_agent creates the config parent, reads an editable TOML document, creates [agent] when needed, writes or removes agent.name, and writes the document back. toggle_agent similarly creates [subagents].toggle and writes the requested boolean. Both operations surface read/parse/table/write failures as String errors; handle_agents_key refreshes default or list state only after success.
+
+#### Scenario: Configured default
+- **WHEN** effective config contains a non-empty agent.name
+- **THEN** resolve_default_agent_name returns that exact name.
+
+#### Scenario: Resolver fallback
+- **WHEN** agent.name is absent or empty
+- **THEN** the MVP agent resolver supplies selector_identity as the default.
+
+#### Scenario: Set default
+- **WHEN** s is pressed for a selected agent that is not the current configured name
+- **THEN** agent.name is persisted and the state message reports the new session default.
+
+#### Scenario: Clear default
+- **WHEN** s is pressed for the currently configured default
+- **THEN** agent.name is removed and the resolved fallback is reported.
+
+#### Scenario: Toggle spawn
+- **WHEN** t is pressed for a selected entry
+- **THEN** the corresponding subagents.toggle boolean is persisted and the list is rebuilt.
+
+#### Scenario: Config failure
+- **WHEN** the config cannot be read, parsed, or has a wrong table shape
+- **THEN** the operation returns an error message and does not claim success.
+
+证据：`crates/codegen/pager/src/views/agents_modal.rs` — `load_agent_toggle`；`crates/codegen/pager/src/views/agents_modal.rs` — `load_agent_selection_config`；`crates/codegen/pager/src/views/agents_modal.rs` — `load_config_agent_name`；`crates/codegen/pager/src/views/agents_modal.rs` — `resolve_default_agent_name`；`crates/codegen/pager/src/views/agents_modal.rs` — `set_default_agent`；`crates/codegen/pager/src/views/agents_modal.rs` — `toggle_agent`；`crates/codegen/pager/src/views/agents_modal.rs` — `refresh_default_agent`；`crates/codegen/pager/src/views/agents_modal.rs` — `handle_agents_key`。
+
+
+### Requirement: The agent modal SHALL filter case-insensitively over agent name and description, keep selection within the filtered entries, saturate navigation at both edges, and expand or collapse only the selected entry without panicking on an empty result.
+
+The implementation SHALL satisfy the following tested behavior: filtered_indices returns all indices for an empty query, otherwise lowercases query/name/description and returns matching source indices. select_next/select_prev no-op when no matches, choose the first/last match when current selection is outside the filtered set, and saturate at the corresponding edge. reset_selection_after_search_change selects the first current match. expand/collapse mutate only the selected AgentListEntry when it exists.
+
+#### Scenario: Empty query
+- **WHEN** the search query is empty
+- **THEN** all agent indices are returned in catalog order.
+
+#### Scenario: Name or description match
+- **WHEN** the lowercased query occurs in either field
+- **THEN** the matching source indices are returned and non-matches are excluded.
+
+#### Scenario: Search selection reset
+- **WHEN** editing the query changes the filtered set
+- **THEN** selection moves to the first matching entry when one exists.
+
+#### Scenario: Navigation edges
+- **WHEN** j/k or arrows reach the first/last filtered entry
+- **THEN** further movement remains at that edge.
+
+#### Scenario: No matches
+- **WHEN** the filtered set is empty
+- **THEN** navigation returns without changing selection.
+
+#### Scenario: Expand/collapse
+- **WHEN** e/Right or E/Left targets a selected entry
+- **THEN** only that entry's expanded flag changes.
+
+证据：`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalState::filtered_indices`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalState::reset_selection_after_search_change`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalState::select_next`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalState::select_prev`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalState::expand`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalState::collapse`；`crates/codegen/pager/src/views/agents_modal.rs` — `navigation_clamps_at_edges`。
+
+
+### Requirement: The agent modal SHALL render centered modal chrome with search/message state, visible/default/spawn markers, descriptions and optional expanded details, selected-row highlighting, bounded scrolling, truncated text, and row_map entries that map agent and description rows back to their source index.
+
+The implementation SHALL satisfy the following tested behavior: format_agent_detail emits role composition, tool count/list with name_override or id suffix, skills, source path, and scope. synthesize_agent_markdown uses the definition prompt body or a base-system-prompt fallback; render_prompt_body resolves tool template variables through TemplateRenderer and falls back to the original body on render error. render_agents_modal uses modal_sizing/shortcuts, records content_rect, paints message and search/cursor, builds Agent/Description/Detail RenderRows with active/default/spawn-off suffixes, keeps selected rows highlighted, adjusts scroll to selected row and content height, truncates by content width, and records row_map for owned rows.
+
+#### Scenario: Agent row markers
+- **WHEN** an entry is active, default, disabled, or expanded
+- **THEN** the row includes the corresponding active/default/spawn-off marker and detail rows when expanded.
+
+#### Scenario: Detail metadata
+- **WHEN** an expanded definition has tools, skills, source, or scope
+- **THEN** the detail view shows role composition, tool names, skills, source, and scope lines.
+
+#### Scenario: Built-in view
+- **WHEN** Enter/o selects an entry without a source_path
+- **THEN** ViewAgent includes synthesized markdown using the prompt body or base-system fallback.
+
+#### Scenario: File-backed view
+- **WHEN** Enter/o selects an entry with a source_path
+- **THEN** ViewAgent carries the source path and no synthesized content.
+
+#### Scenario: Viewport scroll
+- **WHEN** the selected row lies above/below available content
+- **THEN** scroll is adjusted and clamped so the selected row is visible.
+
+#### Scenario: Narrow content
+- **WHEN** row text exceeds content width
+- **THEN** truncate_str clips display text to the content width without overpainting; row_map still identifies owned rows.
+
+证据：`crates/codegen/pager/src/views/agents_modal.rs` — `format_agent_detail`；`crates/codegen/pager/src/views/agents_modal.rs` — `synthesize_agent_markdown`；`crates/codegen/pager/src/views/agents_modal.rs` — `render_prompt_body`；`crates/codegen/pager/src/views/agents_modal.rs` — `modal_sizing`；`crates/codegen/pager/src/views/agents_modal.rs` — `shortcuts`；`crates/codegen/pager/src/views/agents_modal.rs` — `render_agents_modal`；`crates/codegen/pager/src/views/agents_modal.rs` — `RowKind`；`crates/codegen/pager/src/views/agents_modal.rs` — `RenderRow`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalOutcome::ViewAgent`。
+
+
+### Requirement: Agent modal input SHALL give active search first ownership, delegate modal chrome before local controls, map navigation/fold/page/view/search/default/toggle keys to typed outcomes and persistence, accept paste only into active search, and route mouse close, scroll, selection, and expansion through content hit rows.
+
+The implementation SHALL satisfy the following tested behavior: handle_agents_key clears transient messages, handles search Esc reset and Enter commit, maps remaining keys through LineEditor and line_edit_outcome, otherwise lets modal_window handle close before local j/k, e/E, page and Ctrl-d/u, Enter/o, /i, q, s and t branches. View uses source path or synthesized content; s toggles/clears default and refreshes on success; t toggles enabled and rebuilds on success. handle_agents_paste returns Unchanged when search is inactive, otherwise inserts text and resets selection after changes. handle_agents_mouse lets modal chrome close/handle first, ignores outside-content events, scrolls selection, and on a left row click toggles expansion for the selected row or selects another agent.
+
+#### Scenario: Search editing
+- **WHEN** search is active and Esc/Enter/text/paste arrives
+- **THEN** Esc resets and exits search, Enter commits and exits, text changes update selection, and handled editor events return Changed.
+
+#### Scenario: Modal close
+- **WHEN** modal chrome reports CloseRequested or q is pressed
+- **THEN** the outcome is Close.
+
+#### Scenario: Navigation and fold
+- **WHEN** j/k, arrows, page keys, e/E or Right/Left arrive outside search
+- **THEN** selection or expansion changes and the outcome is Changed.
+
+#### Scenario: View action
+- **WHEN** Enter/o targets an existing agent
+- **THEN** ViewAgent carries its title, source path, and optional built-in content.
+
+#### Scenario: Default/toggle action
+- **WHEN** s or t targets a selected agent
+- **THEN** configuration is persisted, state is refreshed on success, and failures become typed messages while the event remains Changed.
+
+#### Scenario: Paste outside search
+- **WHEN** paste arrives while search is inactive
+- **THEN** the outcome is Unchanged and state is not edited.
+
+#### Scenario: Mouse content routing
+- **WHEN** scroll or left click occurs inside content_rect
+- **THEN** selection moves or the mapped row selects/expands; outside content returns Unchanged.
+
+证据：`crates/codegen/pager/src/views/agents_modal.rs` — `handle_agents_key`；`crates/codegen/pager/src/views/agents_modal.rs` — `handle_agents_paste`；`crates/codegen/pager/src/views/agents_modal.rs` — `handle_agents_mouse`；`crates/codegen/pager/src/views/agents_modal.rs` — `line_edit_outcome`；`crates/codegen/pager/src/views/agents_modal.rs` — `ModalWindowOutcome::CloseRequested`；`crates/codegen/pager/src/views/agents_modal.rs` — `MouseEventKind`；`crates/codegen/pager/src/views/agents_modal.rs` — `AgentsModalOutcome`。
+
+
+### Requirement: Prompt-to-entry mapping with explicit metadata and interjection-aware fallback
+
+The dispatcher SHALL map shell prompt indexes to scrollback user-prompt entries by preferring explicit prompt_index metadata from the newest matching entry, then falling back to positional counting of non-interjection UserPrompt blocks. shell_prompt_index_at SHALL walk backward from an entry, skip mid-turn interjections to the enclosing prompt, return explicit metadata when present, and count only indexed user prompts for legacy metadata-less scrollbacks. Missing anchors SHALL return None.
+
+#### Scenario: Explicit lookup
+- **WHEN** scrollback contains prompt_index 0, 1, and 2
+- **THEN** find_user_prompt_entry_for_shell_index returns each matching entry index.
+
+#### Scenario: Positional lookup
+- **WHEN** prompt metadata is absent
+- **THEN** the fallback returns the first, second, and third real user prompt while ignoring interjections.
+
+#### Scenario: Interjection anchor
+- **WHEN** the selected entry is an interjection or a block after it before the next prompt
+- **THEN** shell_prompt_index_at resolves to the preceding enclosing turn.
+
+#### Scenario: Legacy interjection count
+- **WHEN** a metadata-less prompt follows an interjection
+- **THEN** the interjection is excluded from the shell index count.
+
+#### Scenario: No match
+- **WHEN** no user prompt can anchor the target
+- **THEN** the helper returns None rather than inventing an entry.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `primary_path_returns_correct_idx_for_each_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `fallback_path_skips_interjections`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `shell_prompt_index_at_resolves_interjection_to_enclosing_turn`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `shell_prompt_index_at_counting_fallback_skips_interjections`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `fallback_path_returns_correct_idx_when_prompt_index_is_none`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `is_indexed_user_prompt`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `shell_prompt_index_at`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `find_user_prompt_entry_for_shell_index`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `prompt_index`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `is_interjection`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RenderBlock::UserPrompt`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `ScrollbackState::get`。
+
+
+### Requirement: Rewind entry dispatch, busy cancellation, draft stashing, and session effects
+
+dispatch_rewind and dispatch_rewind_show_picker SHALL operate only on the active Agent view and an agent with a session id; otherwise they SHALL return no effects and report No active session when applicable. They SHALL dismiss a stale jump picker, derive the selected shell prompt anchor, stash a nonempty composer draft, and enter Loading with FetchRewindPoints when idle. When the session is busy they SHALL enter a targeted CancelOffer instead. dispatch_rewind_cancel_offer SHALL preserve anchor/target/draft, enter Loading, emit CancelTurn with cancel_subagents=true and rewind_if_pristine=false, then fetch points; it SHALL avoid removing the in-flight prompt itself.
+
+#### Scenario: Idle rewind
+- **WHEN** the active agent has a session and is idle
+- **THEN** jump picker is dismissed, draft is stashed, Loading state is created, and FetchRewindPoints is emitted.
+
+#### Scenario: Busy rewind
+- **WHEN** the active agent is busy
+- **THEN** no fetch is emitted immediately; CancelOffer stores the anchor, selected shell index, and draft.
+
+#### Scenario: Busy confirmation
+- **WHEN** the cancel offer is confirmed
+- **THEN** CancelTurn precedes FetchRewindPoints, target survives, and the rewind flow owns history cleanup.
+
+#### Scenario: Committed prompt
+- **WHEN** the in-flight user block was already committed
+- **THEN** rewind dispatch does not restore/remove the committed block; ordinary cancellation leaves it printed.
+
+#### Scenario: Late cancellation response
+- **WHEN** a cancelled PromptResponse belongs to an old prompt id
+- **THEN** the cross-dispatch task-result path discards it while the new turn remains active.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `cancel_does_not_rewind_when_in_flight_block_committed`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `rewind_then_resubmit_drains_immediately_and_discards_orphan`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `stacked_rewinds_each_get_their_own_pid_and_orphans_drop_independently`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_show_picker`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_cancel_offer`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `stash_prompt`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `ActiveView::Agent`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `session_id`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dismiss_jump_picker`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindState::new_cancel_offer`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::Loading`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `Effect::FetchRewindPoints`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `Effect::CancelTurn`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `rewind_if_pristine`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `cancel_subagents`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `CancelTurn`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `current_prompt_id`。
+
+
+### Requirement: Rewind points resolution, picker/mode state machine, and inline edit entry
+
+handle_rewind_points_loaded SHALL retain returned points, restore a stashed draft on an empty response and toast No rewind points available, resolve a desired inline target or sort ordinary points descending into Picker, select and center the matching scrollback anchor, and create ModeSelect with file-change metadata. Inline edit SHALL hide FilesOnly because conversation rewind is implicit; classic rewind SHALL offer it. Mode selection SHALL require a conversation-only confirmation for target zero, execute conversation-only directly for other targets, execute All/FilesOnly directly when no file changes exist, and emit RewindPreview before confirmation when file changes exist. Dismiss/back actions SHALL preserve draft and inline editor while rebuilding the appropriate state.
+
+#### Scenario: Inline submit
+- **WHEN** inline edit text differs from the original and the session is idle
+- **THEN** Loading is entered with selected target and FetchRewindPoints is emitted while editor stays open.
+
+#### Scenario: No-op submit
+- **WHEN** inline text is empty or unchanged
+- **THEN** editor exits with no rewind state or effects.
+
+#### Scenario: Targeted points
+- **WHEN** points load for a selected inline prompt
+- **THEN** ModeSelect targets the point, carries has_file_changes, and hides FilesOnly.
+
+#### Scenario: Classic points
+- **WHEN** ordinary `/rewind` points load without inline editor
+- **THEN** ModeSelect offers FilesOnly.
+
+#### Scenario: All mode
+- **WHEN** file changes exist
+- **THEN** RewindPreview is emitted and successful preview transitions to Confirm.
+
+#### Scenario: Direct mode
+- **WHEN** conversation-only or files-only has no file changes
+- **THEN** RewindExecute is emitted and inline text is armed only at execution.
+
+#### Scenario: Busy inline submit
+- **WHEN** inline edit is submitted during a running turn
+- **THEN** CancelOffer is targeted at the edited prompt; confirm cancels and fetches points, dismiss returns to editing.
+
+#### Scenario: Back/dismiss
+- **WHEN** the user dismisses or backs out of an overlay
+- **THEN** rewind state is cleared or rebuilt, pending resubmit is absent, and editor text/draft remains.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_submit_enters_rewind_flow_via_points_fetch`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_submit_with_unchanged_text_closes_editor`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_points_loaded_opens_mode_select_over_open_editor`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `classic_rewind_mode_select_keeps_files_only_row`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_back_to_mode_select_preserves_hidden_files_only_row`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_dismiss_from_mode_select_returns_to_editor`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_busy_submit_cancel_offer_confirm_cancels_and_fetches_points`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_busy_cancel_offer_dismiss_returns_to_editor`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_inline_edit_submit`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `handle_rewind_points_loaded`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_picker_select`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_select_mode`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_confirm`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_conversation_only_confirm`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_dismiss`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_back_to_mode_select`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_dismiss_error`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `stash_inline_resubmit_if_editing`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindMode`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::Loading`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::Picker`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::ModeSelect`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::Previewing`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::Confirm`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::ConversationOnlyConfirm`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::Executing`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `Effect::RewindPreview`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `Effect::RewindExecute`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `offer_files_only`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `selected_prompt_index`。
+
+
+### Requirement: Successful rewind application, inline resubmission, and composer/image preservation
+
+dispatch_rewind_success SHALL consume pending inline resubmit text, transition unsuccessful responses to Error, and on success close the inline editor before mutating its transcript anchor. Non-files-only modes SHALL remove the target tail, drop removed entries before releasing retained memory, clear rewind points, move to the prompt pane/bottom, and show a mode-specific confirmation as toast or minimal scrollback notice. FilesOnly SHALL preserve conversation, place inline text in the composer, and avoid SendPrompt. Non-files-only inline resubmission SHALL restore the full draft and send the edited text literally with consume_input=false when the agent view is active; if the view changed, it SHALL append text to that agent composer without clobbering existing text or image chips.
+
+#### Scenario: Conversation-only inline success
+- **WHEN** execution succeeds for the newest prompt
+- **THEN** transcript truncates, inline editor closes, pending text is sent, composer draft survives, and no redundant revert notice is added.
+
+#### Scenario: All-mode success
+- **WHEN** preview/confirm completes successfully
+- **THEN** the same inline text is resubmitted after RewindExecute.
+
+#### Scenario: Files-only success
+- **WHEN** files-only execution succeeds
+- **THEN** no prompt is sent, editor closes, text fills composer, and original transcript remains.
+
+#### Scenario: Literal slash text
+- **WHEN** edited text starts with `/`
+- **THEN** dispatch_send_prompt_inner receives it with literal=true as a prompt.
+
+#### Scenario: View switch
+- **WHEN** active view changes before completion
+- **THEN** the edited text is appended to the target composer and no SendPrompt is emitted.
+
+#### Scenario: Image draft
+- **WHEN** target composer already contains an image
+- **THEN** append preserves one image chip and its element id/image registration.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_conversation_only_success_resubmits_and_closes_editor`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_all_mode_previews_confirms_and_resubmits`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_files_only_success_prefills_composer_without_resubmit`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_resubmit_sends_slash_text_literally`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_rewind_success_after_view_switch_appends_to_draft`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_view_switch_preserves_image_draft_when_appending_resubmit`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `stash_inline_resubmit_if_editing`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_success`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `find_user_prompt_entry_for_shell_index`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `scrollback.remove_from`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `release_retained_memory_with`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RenderBlock::notice`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `show_toast`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `set_active_pane`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `goto_bottom`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_send_prompt_inner`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `consume_input`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `literal`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `append_text`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `pending_inline_resubmit`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `inline_edit`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `set_inline_edit_height`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindResponse::success`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `response.mode`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `response.prompt_text`。
+
+
+### Requirement: Rewind preview and execute failure recovery
+
+Preview completion SHALL convert clean files and conflicts into Confirm state with ConflictDisplay projections, but an error with no clean files or conflicts SHALL enter Error without effects. Preview failure SHALL preserve anchor/draft in Error. Execute failure or a success=false response SHALL clear pending inline resubmit text, preserve the inline editor and transcript, retain the draft for dismissal, and expose the error message until the user dismisses it.
+
+#### Scenario: Preview success
+- **WHEN** preview returns clean files or conflicts
+- **THEN** Confirm state carries target, mode, files, conflict displays, prompt preview, and active selection index zero.
+
+#### Scenario: Preview error
+- **WHEN** preview returns an error with no file details
+- **THEN** Error state is entered and no effect is emitted.
+
+#### Scenario: Execute failure
+- **WHEN** TaskResult reports RewindExecuteFailed
+- **THEN** pending resubmit is dropped, editor remains open, transcript is untouched, and Error state is visible.
+
+#### Scenario: Unsuccessful execute
+- **WHEN** RewindExecuteComplete has success=false
+- **THEN** the same error recovery occurs using response.error or unknown error.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_execute_failure_keeps_editor_open`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_unsuccessful_response_keeps_editor_open`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `handle_rewind_preview_complete`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `handle_rewind_preview_failed`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `handle_rewind_execute_failed`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_success`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::Confirm`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::Error`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `ConflictDisplay::from_conflict`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `clean_files`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `conflicts`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `pending_inline_resubmit`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindExecuteFailed`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `response.success`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `response.error`。
+
+
+### Requirement: Rewind success memory release and presentation by screen mode
+
+Successful conversation rewind SHALL remove scrollback from the resolved prompt anchor and call release_retained_memory_with exactly once after dropping removed entries; files-only SHALL not truncate or purge. Full TUI SHALL present the exact mode-specific success as a toast and avoid appending a system block, while Minimal SHALL avoid toast and append the corresponding notice block because committed lines cannot be erased.
+
+#### Scenario: Files-only side effect
+- **WHEN** files_only succeeds
+- **THEN** scrollback is unchanged and retained-memory release is not called.
+
+#### Scenario: Conversation side effect
+- **WHEN** all/conversation_only succeeds with a matching anchor
+- **THEN** scrollback tail is removed and retained-memory release runs once after drop.
+
+#### Scenario: Full screen
+- **WHEN** screen mode is non-Minimal
+- **THEN** toast says Reverted conversation, Reverted file changes, or Reverted conversation and file changes and scrollback has no confirmation block.
+
+#### Scenario: Minimal screen
+- **WHEN** screen mode is Minimal
+- **THEN** no toast exists and a Reverted system notice is committed to scrollback.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `rewind_success_truncation_releases_retained_memory`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_success`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `rewind_success_truncation_releases_retained_memory`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `remove_from`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `drop`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `release_retained_memory_with`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `screen_mode.is_minimal`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `show_toast`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RenderBlock::notice`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `Reverted conversation`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `Reverted file changes`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `Reverted conversation and file changes`。
