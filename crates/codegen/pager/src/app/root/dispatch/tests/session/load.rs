@@ -60,7 +60,6 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
             restore_summary: Some(
                 "checked out abc12345, staged: true, unstaged: false, untracked: 3".into(),
             ),
-            restore_degree: Some(workspace::session::git::RestoreDegree::Full),
             foreground: None,
         }),
         &mut app,
@@ -86,11 +85,6 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
         .iter()
         .any(|e| matches!(&e.block, RenderBlock::Notice(s) if s.text.contains("Code restored")));
     assert!(has_restore_msg, "expected restore summary in scrollback");
-    assert_eq!(
-        app.agents[&id].session.restore_degree,
-        Some(workspace::session::git::RestoreDegree::Full),
-        "SessionLoaded must store restore_degree on the session"
-    );
 }
 
 #[test]
@@ -120,7 +114,6 @@ fn session_loaded_models_do_not_overwrite_new_session_default() {
             )),
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -154,7 +147,6 @@ fn session_reload_reissues_matching_deferred_behavior_to_clear_confirmation() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -191,7 +183,6 @@ fn session_reload_reissues_unresolved_deferred_behavior_before_prompt_drain() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -305,7 +296,6 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -366,7 +356,6 @@ fn session_loaded_purges_replay_transient() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -390,7 +379,6 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -446,7 +434,6 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
             restore_summary: Some(
                 "restore aborted (checkout failed); stash skipped: MERGE_HEAD present".into(),
             ),
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -484,7 +471,6 @@ fn session_loaded_without_restore_no_summary() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -511,47 +497,6 @@ fn session_loaded_without_restore_no_summary() {
         .any(|e| matches!(&e.block, RenderBlock::Notice(s) if s.text.contains("Code restored")));
     assert!(!has_restore_msg, "should not have restore summary");
 }
-/// A second `SessionLoaded` without a restore must reset
-/// `restore_degree` to `None`, not keep a stale `Some(Full)` from a
-/// previous load.
-#[test]
-fn session_loaded_without_restore_resets_restore_degree() {
-    let mut app = test_app();
-    dispatch(Action::LoadSession("sess-r2".into(), None), &mut app);
-    let id = AgentId(0);
-    dispatch(
-        Action::TaskComplete(TaskResult::SessionLoaded {
-            agent_id: id,
-            session_id: acp::SessionId::new("sess-r2"),
-            models: None,
-            code_restored: true,
-            restore_summary: Some("checked out abc".into()),
-            restore_degree: Some(workspace::session::git::RestoreDegree::Full),
-            foreground: None,
-        }),
-        &mut app,
-    );
-    assert_eq!(
-        app.agents[&id].session.restore_degree,
-        Some(workspace::session::git::RestoreDegree::Full)
-    );
-    dispatch(
-        Action::TaskComplete(TaskResult::SessionLoaded {
-            agent_id: id,
-            session_id: acp::SessionId::new("sess-r2"),
-            models: None,
-            code_restored: false,
-            restore_summary: None,
-            restore_degree: None,
-            foreground: None,
-        }),
-        &mut app,
-    );
-    assert!(
-        app.agents[&id].session.restore_degree.is_none(),
-        "second load without restore must clear stale degree"
-    );
-}
 #[test]
 fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
     use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
@@ -570,7 +515,6 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -660,7 +604,6 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -689,7 +632,6 @@ fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
@@ -791,7 +733,6 @@ fn session_loaded_clears_stale_running_entries() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,

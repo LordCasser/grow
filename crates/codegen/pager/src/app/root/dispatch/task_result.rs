@@ -334,7 +334,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             session_cwd,
             code_restored,
             restore_summary,
-            restore_degree,
         } => handle_worktree_forked(
             app,
             agent_id,
@@ -343,7 +342,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             session_cwd,
             code_restored,
             restore_summary,
-            restore_degree,
         ),
         TaskResult::WorktreeSessionFailed { agent_id, error } => {
             handle_worktree_session_failed(app, agent_id, error)
@@ -362,7 +360,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             models: new_models,
             code_restored,
             restore_summary,
-            restore_degree,
             foreground,
         } => handle_session_loaded(
             app,
@@ -371,7 +368,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             new_models,
             code_restored,
             restore_summary,
-            restore_degree,
             foreground,
         ),
         TaskResult::SessionTitleFromDisk { agent_id, title } => {

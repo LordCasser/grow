@@ -642,7 +642,6 @@ pub(in crate::app::root::dispatch) fn handle_worktree_forked(
     session_cwd: std::path::PathBuf,
     code_restored: bool,
     restore_summary: Option<String>,
-    restore_degree: Option<workspace::session::git::RestoreDegree>,
 ) -> Vec<Effect> {
     let session_id_str = session_id.0.to_string();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -653,7 +652,6 @@ pub(in crate::app::root::dispatch) fn handle_worktree_forked(
         agent.bind_session_id(session_id);
         agent.scrollback.begin_batch();
         agent.begin_replay_window();
-        agent.session.restore_degree = restore_degree;
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
         app.restore_code = None;

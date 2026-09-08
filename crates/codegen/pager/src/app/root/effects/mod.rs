@@ -490,7 +490,7 @@ pub(crate) fn execute(
                             .and_then(|v| v.as_str())
                             .map(PathBuf::from)
                             .unwrap_or_else(|| wt_path.clone());
-                        let (code_restored, restore_summary, restore_degree) = parse_worktree_restore_payload(
+                        let (code_restored, restore_summary, _restore_degree) = parse_worktree_restore_payload(
                             result_obj,
                         );
                         return TaskResult::WorktreeForked {
@@ -500,7 +500,6 @@ pub(crate) fn execute(
                             session_cwd: eff_cwd,
                             code_restored,
                             restore_summary,
-                            restore_degree,
                         };
                     }
                     let worktree_id = preferred_session_id
@@ -684,7 +683,7 @@ pub(crate) fn execute(
                                 Some(&acp_session_id.0),
                                 Some(serde_json::json!({"elapsed_ms": load_elapsed_ms})),
                             );
-                            let (code_restored, restore_summary, restore_degree) = parse_session_load_restore_meta(
+                            let (code_restored, restore_summary, _restore_degree) = parse_session_load_restore_meta(
                                 resp.meta.as_ref(),
                             );
                             let foreground = parse_session_load_foreground(resp.meta.as_ref());
@@ -696,7 +695,6 @@ pub(crate) fn execute(
                                 ),
                                 code_restored,
                                 restore_summary,
-                                restore_degree,
                                 foreground,
                             }
                         }

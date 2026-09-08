@@ -2058,7 +2058,6 @@ pub enum TaskResult {
         session_cwd: std::path::PathBuf,
         code_restored: bool,
         restore_summary: Option<String>,
-        restore_degree: Option<workspace::session::git::RestoreDegree>,
     },
     /// Worktree session creation failed.
     WorktreeSessionFailed {
@@ -2072,7 +2071,6 @@ pub enum TaskResult {
         models: Option<shell::agent::models::SessionModelState>,
         code_restored: bool,
         restore_summary: Option<String>,
-        restore_degree: Option<workspace::session::git::RestoreDegree>,
         /// Structured regular foreground owner from the load response. The
         /// loader adopts its opaque id without reconstructing lifecycle
         /// semantics from the id spelling.

@@ -559,7 +559,6 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
     new_models: Option<shell::agent::models::SessionModelState>,
     code_restored: bool,
     restore_summary: Option<String>,
-    restore_degree: Option<workspace::session::git::RestoreDegree>,
     foreground: Option<crate::app::prompt_queue::ForegroundSnapshot>,
 ) -> Vec<Effect> {
     tracing::info!(
@@ -577,7 +576,6 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
         agent.session.replay_live_cursor_seen = false;
-        agent.session.restore_degree = restore_degree;
         agent.session.finish_turn(&mut agent.scrollback);
         agent.mark_turn_finished();
         if let Some(m) = new_models {

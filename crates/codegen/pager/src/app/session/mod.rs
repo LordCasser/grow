@@ -1000,15 +1000,6 @@ pub struct AgentSession {
     /// Session is currently replaying historical updates from `session/load`.
     /// Used to suppress live-style redraw/render work until the load completes.
     pub loading_replay: bool,
-    /// Last `--restore-code` outcome's `degree`, parsed from
-    /// `_meta.codeRestore.degree` (non-worktree path) or `restoreDegree`
-    /// (worktree path). Forward-compat hook: the field is set by both
-    /// dispatch handlers but no rendering path consumes it yet — the
-    /// type-safety anchor for the wire shape lives in
-    /// [`crate::app::root::effects`]'s parser tests + the deserialise tests in
-    /// `ResumeSessionInWorktreeResponse`. Adding a rendering consumer is
-    /// out of scope for now.
-    pub restore_degree: Option<workspace::session::git::RestoreDegree>,
     /// The retry-failure UI already reported this turn's terminal error.
     /// Both completion rails suppress a duplicate marker/toast. Reset at turn boundaries.
     pub model_failure_reported: bool,
@@ -1297,7 +1288,6 @@ impl AgentSession {
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
-            restore_degree: None,
             model_failure_reported: false,
             tracker: AcpUpdateTracker::new(),
             available_commands: Vec::new(),

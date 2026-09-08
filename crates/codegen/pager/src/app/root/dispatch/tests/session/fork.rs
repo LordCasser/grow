@@ -40,7 +40,6 @@ fn worktree_forked_sets_session_id_eagerly_and_emits_load() {
             session_cwd: session_cwd.clone(),
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
         }),
         &mut app,
     );
@@ -88,7 +87,6 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
             restore_summary: Some(
                 "checked out abc12345, staged: true, unstaged: false, untracked: 3".into(),
             ),
-            restore_degree: Some(workspace::session::git::RestoreDegree::Full),
         }),
         &mut app,
     );
@@ -106,11 +104,6 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
         .iter()
         .any(|e| matches!(&e.block, RenderBlock::Notice(s) if s.text.contains("Code restored")));
     assert!(has_restore_msg, "expected restore summary in scrollback");
-    assert_eq!(
-        app.agents[&id].session.restore_degree,
-        Some(workspace::session::git::RestoreDegree::Full),
-        "restore_degree must be stored on the session"
-    );
 }
 
 /// When the server emits `code_restored: false` with a non-empty
@@ -142,7 +135,6 @@ fn worktree_forked_with_restore_failure_shows_warning_banner() {
             restore_summary: Some(
                 "restore aborted (checkout failed); stash skipped: MERGE_HEAD present".into(),
             ),
-            restore_degree: None,
         }),
         &mut app,
     );
@@ -224,7 +216,6 @@ fn fork_initiation_supersedes_open_reload_window() {
             models: None,
             code_restored: false,
             restore_summary: None,
-            restore_degree: None,
             foreground: None,
         }),
         &mut app,
