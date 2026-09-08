@@ -3687,7 +3687,20 @@
       "Exit and delete session lifecycle effects",
       "Sessionless input and permission/behavior control dispatch",
       "Session identity and title fallback integration",
-      "Dashboard stop integration through lifecycle dispatch seam"
+      "Dashboard stop integration through lifecycle dispatch seam",
+      "ExecuteToolCallBlock SHALL retain the full command source, optional header display, description, error, streamed output, timing, bash-mode flag and elapsed state, with constructors and mutators that preserve incremental output and terminal timing semantics.",
+      "Execute headers SHALL support Shell and Label styles, description-first titles, user-bash markers, command highlighting and prefix-aware selection while preserving physical/soft-wrapped command structure.",
+      "ExecuteToolCallBlock SHALL render command headers, errors, and terminal output according to display mode, with bounded first/last output previews, explicit hidden-line markers, terminal-native output styling, selection ranges and dark panel backgrounds.",
+      "The Execute block SHALL expose mode-specific rendering and fold transitions that distinguish agent tools from user-initiated bash commands, preserving user choices for agent tools and showing full output for completed bash commands.",
+      "ExecuteToolCallBlock SHALL expose configurable accent state and stable block presentation flags for the shared scrollback renderer.",
+      "ExecuteToolCallBlock preamble SHALL provide a text projection of the header and error-only content for consumers that need a compact non-block representation.",
+      "Worktree fork completion, eager identity, and restore reporting",
+      "Fork dispatch guards, modal policy, and resolved effects",
+      "Fork child projection, attachment, markers, and inherited setup",
+      "Child fork marker copy and navigation guidance",
+      "Fork and new-session persistence modes without cancelling the old turn",
+      "Fork question answer translation",
+      "Displaced local fork modal notice"
     ],
     "reviewed_files": [
       {
@@ -5729,6 +5742,18 @@
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
         "sha256": "ac37e6f0268ebd0c454a73fc87ae0b809d76f4595b03174cd117fb2b187351a5"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/session_picker.rs",
+        "sha256": "393e54c30f081d23d70026cd45269dbdf01a4964f794dec8eea862d5cfa252bd"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/execute.rs",
+        "sha256": "edb4a822a96b930c27dacaf248ae9f5d27693d48cf29bf94a8b765cbd677b50f"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
+        "sha256": "b6c779fcf0aeb14c0e1f094b88ec87135064ebb2503e92c612f8f67432063f4c"
       }
     ],
     "review": "reviews/pager.md"

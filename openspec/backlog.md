@@ -885,3 +885,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Stale-result rejection compares both generation and raw query, duplicating identity across editor, request and snapshot; a single typed request identity could make the contract easier to audit.
 - Pager 审计债务：The search state performs synchronous matcher compilation for immediate UI feedback and repeats matcher compilation on the daemon, trading responsiveness for duplicate work.
 - Pager 审计债务：Tests reach private daemon snapshots/channel messages directly, which provides precise regression coverage but couples the suite to implementation details of the coalescing protocol.
+- Pager 审计债务：A single module owns filtering, map-index semantics, selection persistence, delete confirmation, worktree selection and row presentation, so changes to one coordinate space can affect several consumers.
+- Pager 审计债务：PickerItem uses separate implicit index namespaces (original entry index versus content hit index plus a numeric offset); a typed backing-key model would reduce reliance on the constant offset.
+- Pager 审计债务：The same grouping/order logic is shared by map and rendering, but the contract is maintained by convention rather than one returned grouped model.
+- Pager 审计债务：build_content_entry_data_at repeatedly calls filtered_indices.contains, making content-row construction linear in hit count times filtered-entry count for the common path.
+- Pager 审计债务：Relative-time strings are computed during row-data construction and depend on the sampled clock, which can make snapshot stability and cross-surface rendering harder without an injected time source.

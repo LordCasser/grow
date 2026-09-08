@@ -18695,3 +18695,334 @@ The dispatch integration exercised alongside session lifecycle SHALL move dashbo
 - **THEN** the first press arms confirmation and the second emits DeleteSession; completion removes the target.
 
 证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_delete_current_session_answered`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DashboardStop`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeleteSession`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeleteSessionComplete`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `delete_confirm`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DashboardState::handle_input_with_paste_provenance`。
+
+
+### Requirement: ExecuteToolCallBlock SHALL retain the full command source, optional header display, description, error, streamed output, timing, bash-mode flag and elapsed state, with constructors and mutators that preserve incremental output and terminal timing semantics.
+
+new SHALL initialize command with empty optional fields, bash_mode=false and header_display=None. with_error/with_description/with_output SHALL replace the corresponding field. push_output SHALL append chunks to existing output or create it. finish SHALL be idempotent, storing start.elapsed milliseconds only when started_at exists and elapsed_ms is unset. set_error SHALL finalize elapsed time on first error mutation when started_at exists, then replace the error. is_success SHALL mean error.is_none; elapsed_ms SHALL return stored milliseconds or live elapsed milliseconds; copy_text SHALL render terminal output to plain copyable text or return empty when absent. command_display SHALL prefer header_display while command remains the full searchable/copy source.
+
+#### Scenario: Initial block
+- **WHEN** a command is constructed before execution starts
+- **THEN** command is retained with no output/error/timing and no header override.
+
+#### Scenario: Streaming chunks
+- **WHEN** output arrives in one or more chunks
+- **THEN** chunks are appended in order and the block exposes the combined output.
+
+#### Scenario: Finish timing
+- **WHEN** a block has started_at and is finished repeatedly
+- **THEN** elapsed_ms is captured once and later finish calls do not replace it.
+
+#### Scenario: Error mutation
+- **WHEN** set_error is called while a timed block is running
+- **THEN** elapsed time is finalized before the supplied optional error is stored.
+
+#### Scenario: Copy source
+- **WHEN** copy_text is requested with terminal output or no output
+- **THEN** terminal control sequences are converted to plain text or an empty string is returned.
+
+#### Scenario: Header override
+- **WHEN** header_display contains a peeled command
+- **THEN** header helpers show the override while command remains the full searchable/copy source.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::new`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::with_error`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::with_description`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::with_output`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::push_output`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::finish`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::set_error`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::is_success`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::elapsed_ms`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::copy_text`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::command_display`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::header_line_uses_header_display_when_set_command_stays_full`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::test_push_output_basic`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::test_push_output_multiple_chunks`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::test_with_output`。
+
+
+### Requirement: Execute headers SHALL support Shell and Label styles, description-first titles, user-bash markers, command highlighting and prefix-aware selection while preserving physical/soft-wrapped command structure.
+
+description_display SHALL trim and newline-collapse descriptions, treat blank descriptions as absent, and strip a leading Run or Running word for Label titles only when followed by whitespace or end. Shell headers use a dim dollar-space prefix; Label headers use bold Run plus optional muted user marker, with command text highlighted when applicable. A description renders as the title plus a secondary dollar command when included; without a description the command is a single logical header line. label_title_line and shell_command_line flatten embedded newlines for one-line paths, while push_command_soft_wrap and push_header_lines use permission-panel wrapping, hang continuations under the prefix, exclude prefix spans from selection, and preserve newline joiners.
+
+#### Scenario: Description-first label
+- **WHEN** Label style has a nonblank description and command is included
+- **THEN** Run title appears first and a secondary dollar command line follows.
+
+#### Scenario: Description-first shell
+- **WHEN** Shell style has a nonblank description
+- **THEN** plain title appears without a Run prefix and the command follows with dollar.
+
+#### Scenario: Collapsed description
+- **WHEN** a description exists and collapsed rendering hides the command
+- **THEN** only the description title is emitted.
+
+#### Scenario: User bash label
+- **WHEN** bash_mode is true with a description
+- **THEN** the title contains Run user marker and both prefix spans are excluded from copy selection.
+
+#### Scenario: Command soft-wrap
+- **WHEN** expanded/truncated output has a long or multiline command
+- **THEN** operator-aware continuation rows are indented beneath the prefix and carry newline joiners.
+
+#### Scenario: Run prefix cleanup
+- **WHEN** description begins with Run, Running, runtime, or another word
+- **THEN** only Run/Running with a boundary is stripped; runtime and unrelated text remain.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteHeaderStyle`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::description_display`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::shell_command_line`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::command_header_prefix`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::push_command_soft_wrap`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::label_title_line`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::header_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::push_header_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `strip_leading_run_word`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::label_header_with_description_shows_title_then_command`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::collapsed_header_with_description_hides_command`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::shell_header_with_description_shows_title_then_command`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::label_header_without_description_is_single_run_command_line`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::label_header_lines_flattens_command_newlines`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::label_expanded_soft_wraps_multiline_command_like_permission_panel`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::empty_description_treated_as_absent`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::label_bash_mode_with_description_keeps_user_marker_on_title`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::strip_leading_run_word_handles_run_and_running`。
+
+
+### Requirement: ExecuteToolCallBlock SHALL render command headers, errors, and terminal output according to display mode, with bounded first/last output previews, explicit hidden-line markers, terminal-native output styling, selection ranges and dark panel backgrounds.
+
+render_with_truncation SHALL always render expanded/truncated headers with the command, append nonempty errors only when output is absent using accent_error and a separator, append nonempty output after a separator using render_terminal_lines and primary foreground, and wrap output to max(width-2,20). When truncation is Some(first,last) and total rows exceed first+last, it SHALL emit first rows with range 1, a non-selectable hidden-lines marker, and last rows with range 2; fitting or unbounded output uses range 1 for all rows. Output rows retain wrapping joiners and panel background theme.bg_dark.
+
+#### Scenario: Error-only result
+- **WHEN** output is absent and error is nonempty
+- **THEN** the expanded body shows a blank separator and red error lines.
+
+#### Scenario: Output result
+- **WHEN** output is nonempty
+- **THEN** terminal control sequences are rendered into primary-styled wrapped rows after a separator.
+
+#### Scenario: Truncated preview
+- **WHEN** output exceeds configured first plus last rows
+- **THEN** first and last windows are shown with a nonselectable hidden-line marker and distinct selection ranges.
+
+#### Scenario: Fits preview
+- **WHEN** output does not exceed the truncation threshold
+- **THEN** all rows are shown with one stdout selection range.
+
+#### Scenario: Empty fields
+- **WHEN** output is None/empty or error is empty
+- **THEN** the corresponding body section is omitted while headers remain.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `ExecuteToolCallBlock::render_with_truncation`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `EXECUTE_STDOUT_RANGE_BASE`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::agent_execute_does_not_auto_expand_and_preserves_fold_on_finish`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::label_expanded_soft_wraps_multiline_command_like_permission_panel`。
+
+
+### Requirement: The Execute block SHALL expose mode-specific rendering and fold transitions that distinguish agent tools from user-initiated bash commands, preserving user choices for agent tools and showing full output for completed bash commands.
+
+output SHALL use collapsed mode for title density, truncated mode with configured first_lines/last_lines, and expanded mode without output truncation. is_foldable SHALL be true when a meaningful Label-stripped description, output, or error reveals additional content; a bare Run/Running description alone is not foldable. next_fold_mode SHALL cycle non-bash Collapsed to Truncated and Truncated/Expanded to Collapsed, but bash Collapsed directly to Expanded. collapse_mode SHALL use Truncated for running bash and Collapsed otherwise. Agent default is Collapsed and finished mode is None; bash default is Truncated and finished mode is Expanded.
+
+#### Scenario: Agent default
+- **WHEN** an agent Execute block is created
+- **THEN** it starts Collapsed and does not auto-expand on completion.
+
+#### Scenario: User bash stream
+- **WHEN** a bash_mode block is running
+- **THEN** it starts/uses Truncated so output streams and the fold cycle can jump to Expanded.
+
+#### Scenario: User bash completion
+- **WHEN** a bash_mode block finishes
+- **THEN** finished_display_mode requests Expanded to reveal the full output.
+
+#### Scenario: Agent preservation
+- **WHEN** the user manually changed an agent tool mode
+- **THEN** finished_display_mode is None so the existing choice is preserved.
+
+#### Scenario: Foldability
+- **WHEN** a block has a real description, output/error, or only a bare Run/Running description
+- **THEN** the first cases are foldable; bare prefix-only descriptions are not.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::output`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::collapse_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::finished_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::description_makes_block_foldable_to_reveal_command`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::agent_execute_does_not_auto_expand_and_preserves_fold_on_finish`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `tests::bare_run_description_is_not_foldable`。
+
+
+### Requirement: ExecuteToolCallBlock SHALL expose configurable accent state and stable block presentation flags for the shared scrollback renderer.
+
+accent SHALL return None when execute accent_enabled is false; otherwise errors use a static accent_error, running blocks use an animated configured running_accent, and finished successes use a static accent_success. has_vpad_for and has_raw_mode SHALL return false, and background SHALL return BlockBackground::None.
+
+#### Scenario: Accent disabled
+- **WHEN** execute accent_enabled is false
+- **THEN** no accent is returned regardless of running or error state.
+
+#### Scenario: Failure
+- **WHEN** accent is enabled and error is present
+- **THEN** a static error accent is returned.
+
+#### Scenario: Running
+- **WHEN** accent is enabled and the block is running without error
+- **THEN** an animated configured running accent is returned.
+
+#### Scenario: Success
+- **WHEN** accent is enabled and the block is finished without error
+- **THEN** a static success accent is returned.
+
+#### Scenario: Presentation flags
+- **WHEN** the renderer queries padding, background or raw mode
+- **THEN** the block reports no vertical padding, no background and no raw mode.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::accent`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::background`；`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::has_raw_mode`。
+
+
+### Requirement: ExecuteToolCallBlock preamble SHALL provide a text projection of the header and error-only content for consumers that need a compact non-block representation.
+
+preamble SHALL build header lines using the configured execute header style and include the command, then append a blank line plus accent_error-styled error lines only when output is absent and error is nonempty. It returns Some(Text) for the block even when no error is present.
+
+#### Scenario: Header preamble
+- **WHEN** a caller requests preamble for a successful or running block
+- **THEN** the configured header text is returned as Text.
+
+#### Scenario: Error preamble
+- **WHEN** output is absent and a nonempty error exists
+- **THEN** the text includes a blank separator and styled error lines.
+
+#### Scenario: Output suppresses error
+- **WHEN** output exists alongside an error
+- **THEN** the preamble omits error lines under the output-present rule.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/execute.rs` — `BlockContent::preamble`。
+
+
+### Requirement: Worktree fork completion, eager identity, and restore reporting
+
+WorktreeForked and ForkSessionReady SHALL eagerly bind the child session id, set loading_replay, mark worktree state, retarget the session cwd/file search, emit LoadSession for the new id, and surface successful restore summaries or failed restore summaries as mutually exclusive success/warning notices while storing restore_degree; ForkSessionFailed SHALL leave the placeholder available for failure handling.
+
+#### Scenario: Fork ready
+- **WHEN** a worktree fork completes
+- **THEN** the child is bound before LoadSession and uses the returned session cwd/worktree state.
+
+#### Scenario: Restore success
+- **WHEN** code_restored is true with a summary
+- **THEN** a Code restored notice and restore degree are stored.
+
+#### Scenario: Restore failure
+- **WHEN** code_restored is false with a nonempty summary
+- **THEN** a warning notice contains the failure detail and no success notice appears.
+
+#### Scenario: Fork session ready
+- **WHEN** a non-worktree fork returns a new id/cwd
+- **THEN** LoadSession uses the new id/cwd, loading replay is enabled, and file search follows cwd.
+
+#### Scenario: Fork failure
+- **WHEN** fork creation fails
+- **THEN** no effect is emitted and the placeholder agent remains.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `WorktreeForked`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `ForkSessionReady`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `ForkSessionFailed`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `SessionLoaded`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `handle_worktree_forked`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `loading_replay`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `restore_summary`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `restore_degree`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `Code restored`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `Code restore failed`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `Effect::LoadSession`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `file_search.retarget`。
+
+
+### Requirement: Fork dispatch guards, modal policy, and resolved effects
+
+dispatch_fork SHALL reject Welcome/no-session/non-git worktree requests with no effect and appropriate toast, choose immediate ForkSession/CreateWorktreeSession for explicit flags, skip the worktree question in non-git cwd, open a four-option Fork modal only when Ask policy and git context require it, refuse to overwrite an existing question, and dispatch ForkAnswered back through the resolved path.
+
+#### Scenario: Invalid context
+- **WHEN** fork is requested from Welcome or before session id exists
+- **THEN** no agent/effect is created and the active agent receives a still-being-created toast when applicable.
+
+#### Scenario: Explicit worktree
+- **WHEN** worktree=true in a git cwd
+- **THEN** CreateWorktreeSession is emitted without opening a modal.
+
+#### Scenario: Explicit cwd fork
+- **WHEN** worktree=false
+- **THEN** ForkSession is emitted without a modal.
+
+#### Scenario: Non-git
+- **WHEN** worktree=true or Ask mode in a non-git cwd
+- **THEN** worktree request is rejected synchronously; no-flag request skips the meaningless modal and forks in cwd while preserving directive.
+
+#### Scenario: Ask mode
+- **WHEN** worktree preference is Ask in a git repo
+- **THEN** a four-option Yes/No/Always/Never local Fork question opens and refuses to replace an existing ACP question.
+
+#### Scenario: Answered
+- **WHEN** ForkAnswered selects a worktree/cwd branch
+- **THEN** the corresponding CreateWorktreeSession or ForkSession effect is emitted with the directive.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `OpenNewWorktreeDialog`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `dispatch_fork`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `open_fork_question`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `dispatch_fork_resolved`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `dispatch_fork_answered`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `ForkAnswered`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `LocalQuestionKind::Fork`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `WorktreeMode::Ask`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `CreateWorktreeSession`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `ForkSession`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `not in a git repository`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `still being created`。
+
+
+### Requirement: Fork child projection, attachment, markers, and inherited setup
+
+A successful fork SHALL create a child agent linked by forked_from, switch active view to the child, repoint dashboard attachment only when it referenced the parent, preserve unrelated/stale attachment state, append a parent marker with an optional directive, defer the child banner with the full parent session id and worktree mode, show transient worktree progress without transcript pollution, stash the directive as pending_first_prompt, and inherit appearance/plugin visibility.
+
+#### Scenario: Child ownership
+- **WHEN** fork succeeds
+- **THEN** the child records the parent id and becomes active.
+
+#### Scenario: Dashboard attachment
+- **WHEN** dashboard is attached to parent, unattached, or attached elsewhere
+- **THEN** only parent attachment follows the child; other states remain unchanged.
+
+#### Scenario: Parent marker
+- **WHEN** directive is present or absent
+- **THEN** the parent gets Forked: directive or exactly Forked, with no obsolete /forward text.
+
+#### Scenario: Deferred banner
+- **WHEN** child is starting
+- **THEN** pending_fork_banner stores the full parent id and worktree flag.
+
+#### Scenario: Progress/directive
+- **WHEN** worktree start or directive is supplied
+- **THEN** progress is live-only and directive is parked for first prompt.
+
+#### Scenario: Inherited display
+- **WHEN** app appearance/plugins are configured
+- **THEN** the child receives prompt compactness and plugin visibility state.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `dispatch_fork_resolved`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `forked_from`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `attached_agent`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `switch_to_agent`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `build_parent_fork_marker`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `pending_fork_banner`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `parent_sid`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `live_status`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `Creating worktree`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `pending_first_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `appearance.prompt.compact`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `disable_plugins`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `fork_worktree_mode`。
+
+
+### Requirement: Child fork marker copy and navigation guidance
+
+build_child_fork_marker SHALL include the child and full parent session ids, advertise /agents only when supplied for a non-worktree capable surface, include the shared-cwd caveat only for in-cwd forks, and advertise /resume instead of /agents in minimal mode.
+
+#### Scenario: Worktree marker
+- **WHEN** worktree=true
+- **THEN** the banner identifies both sessions and omits the shared-cwd line.
+
+#### Scenario: Shared-cwd marker
+- **WHEN** worktree=false
+- **THEN** the banner is two lines and explains that both agents share cwd.
+
+#### Scenario: Dashboard disabled
+- **WHEN** no dashboard tip is supplied
+- **THEN** /agents is omitted while ids/caveat remain.
+
+#### Scenario: Minimal mode
+- **WHEN** /resume is supplied
+- **THEN** /resume is advertised and /agents is absent.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `build_child_fork_marker`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `Session child-sid`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `forked from parent-sid`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `both agents share cwd`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `/agents`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `/resume`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `worktree`。
+
+
+### Requirement: Fork and new-session persistence modes without cancelling the old turn
+
+ForkAnswered and NewSessionAnswered SHALL persist Always/Never choices under the correct config key, route Always to CreateWorktreeSession and Never to ForkSession/CreateSession, and create the new child/session without cancelling an existing running turn; direct Always/Never preferences SHALL skip the modal.
+
+#### Scenario: Fork preference
+- **WHEN** fork mode is Always/Never
+- **THEN** the modal is skipped and the matching worktree/cwd effect is emitted.
+
+#### Scenario: Persist choice
+- **WHEN** ForkAnswered includes Always/Never
+- **THEN** the in-memory mode and fork_worktree_mode persistence effect update.
+
+#### Scenario: New session answer
+- **WHEN** the old agent turn is running
+- **THEN** CreateSession/CreateWorktreeSession is emitted and no CancelTurn is sent; old turn remains running.
+
+#### Scenario: New session preference
+- **WHEN** new-session mode is Always/Never
+- **THEN** the modal is skipped and the matching creation effect is emitted.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `dispatch_fork_answered`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `dispatch_new_session_answered`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `PersistWorktreeMode`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `fork_worktree_mode`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `new_session_worktree_mode`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `CancelTurn`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `CreateSession`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `CreateWorktreeSession`。
+
+
+### Requirement: Fork question answer translation
+
+translate_local_submit for LocalQuestionKind::Fork SHALL map option 0 to worktree=true, option 1 to worktree=false, option 2 to worktree=true plus WorktreeMode::Always, and option 3 to worktree=false plus WorktreeMode::Never while preserving the stashed directive.
+
+#### Scenario: Yes
+- **WHEN** selection is option 0
+- **THEN** ForkAnswered carries worktree=true and the directive.
+
+#### Scenario: No
+- **WHEN** selection is option 1
+- **THEN** ForkAnswered carries worktree=false and no directive when absent.
+
+#### Scenario: Always
+- **WHEN** selection is option 2
+- **THEN** ForkAnswered carries worktree=true and persist Always.
+
+#### Scenario: Never
+- **WHEN** selection is option 3
+- **THEN** ForkAnswered carries worktree=false and persist Never.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `translate_local_submit_for_test`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `LocalQuestionKind::Fork`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `ForkAnswered`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `QuestionSelection::Single`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `WorktreeMode::Always`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `WorktreeMode::Never`。
+
+
+### Requirement: Displaced local fork modal notice
+
+When an ACP ask-user question replaces a local Fork modal, the handler SHALL preserve the new ACP question without local kind and append exactly one system notice explaining that `/fork` was cancelled because another question opened.
+
+#### Scenario: Modal displacement
+- **WHEN** an active local fork question is replaced by an ACP question
+- **THEN** the ACP question becomes active and one exact cancellation notice is appended.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `handle_ask_user_question`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `QuestionViewState`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `LocalQuestionKind::Fork`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `/fork cancelled because another question opened.`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `RenderBlock::Notice`。
