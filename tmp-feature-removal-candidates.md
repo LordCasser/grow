@@ -252,7 +252,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：global缓存默认关闭；唯一非测试 set_enabled 位于 apply_remote_settings_side_effects，但全仓没有调用该函数。生产正规化目前经绕过分支直接计算，启用缓存的命中验证只见于测试。
 - 删除理由：当前未启用的缓存和开关增加维护表面；若决定保留，应另行明确配置权威并接通启用流程。
 - 拟删除范围：仅可选缓存/断开的hook与字段，实际实施前梳理类型和调用依赖；必须保留图片正规化、结果类型、错误处理和最近加入的后台计算并发限制，不能整文件直接删除。
-- 状态：用户已授权扩展为功能，正在实现；设计与验证见 openspec/changes/implement-session-image-fallback/。
+- 状态：未启用缓存及断开开关已删除，保留取消安全的后台计算，正规化回归 40/40 通过，见 remove-inactive-image-normalization-cache。用户要求的按模型图片/文字描述和 OCR 降级功能仍在 implement-session-image-fallback 中实现。
 
 ## R28 · 无调用方的旧可选 JSON 读取器
 

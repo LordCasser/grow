@@ -2,16 +2,46 @@
 //! [`MAX_ENCODE_PIXELS`], or [`MAX_ENCODE_SIDE_PX`] to fit the conversation
 //! caps. The primary dimension limit is the v9 pixel-area budget
 //! ([`MAX_ENCODE_PIXELS`]); [`MAX_ENCODE_SIDE_PX`] is a model-agnostic side
-//! clamp. Compute is amortised via
-//! [`NormalizeCache`](crate::session::normalize_cache).
-use crate::session::normalize_cache::{
-    NormalizeCache, NormalizeError, NormalizedEntry, run_blocking,
-};
+//! clamp. Blocking work uses cancellation-safe, single-worker admission.
 use agent_client_protocol::schema::v1::ImageContent;
 use base64::Engine as _;
 use bytes::Bytes;
 use std::borrow::Cow;
 use tools::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_limit};
+#[derive(Debug)]
+enum NormalizedEntry {
+    Unchanged,
+    Compressed { bytes: Bytes, mime: Cow<'static, str>, info: ImageCompressionInfo },
+    ReEncodingOversized,
+}
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct NormalizeError(String);
+
+static NORMALIZE_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Admit one image compute at a time; cancellation cannot release a running
+/// worker's permit. Maps `JoinError` to [`NormalizeError`].
+async fn run_blocking<F, T>(work: F) -> Result<T, NormalizeError>
+where
+    F: FnOnce() -> Result<T, NormalizeError> + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = NORMALIZE_WORKERS
+        .acquire()
+        .await
+        .map_err(|error| NormalizeError(format!("normalization admission failed: {error}")))?;
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => Err(NormalizeError(format!("join error: {e}"))),
+    }
+}
+
 /// Decoded attachment bytes above this are re-encoded to fit this cap.
 ///
 /// Kept low so many images fit under the inference proxy's ~50 MB request-body
@@ -118,46 +148,35 @@ pub struct NormalizeResult {
     pub dropped: Vec<String>,
 }
 pub async fn normalize_images(images: Vec<ImageContent>) -> NormalizeResult {
-    normalize_images_in(images, NormalizeCache::global()).await
+    let mut result = NormalizeResult {
+        images: Vec::with_capacity(images.len()),
+        ..Default::default()
+    };
+    for (i, image) in images.into_iter().enumerate() {
+        let index = i + 1;
+        result.push_outcome(index, normalize_one(image, index).await);
+    }
+    result
 }
-/// [`normalize_images`] with an injected cache (tests use a fresh
-/// per-case instance to avoid singleton-state leakage).
-pub(crate) async fn normalize_images_in(
-    images: Vec<ImageContent>,
-    cache: &NormalizeCache,
-) -> NormalizeResult {
-    let mut out = Vec::with_capacity(images.len());
-    let mut compressed = Vec::new();
-    let mut re_encode_fallbacks = Vec::new();
-    let mut dropped = Vec::new();
-    for (i, img) in images.into_iter().enumerate() {
-        let one_based = i + 1;
-        match normalize_one_in(img, one_based, cache).await {
-            Outcome::Unchanged(c) => out.push(c),
-            Outcome::ReEncodingOversized(c) => {
-                re_encode_fallbacks
-                    .push(
-                        format!(
-                    "Image {one_based} could not be re-encoded under the {LIMIT_LABEL} limit; the original attachment was kept."
-                ),
-                    );
-                out.push(c);
+impl NormalizeResult {
+    fn push_outcome(&mut self, index: usize, outcome: Outcome) {
+        match outcome {
+            Outcome::Unchanged(content) => self.images.push(content),
+            Outcome::ReEncodingOversized(content) => {
+                self.re_encode_fallbacks.push(format!(
+                    "Image {index} could not be re-encoded under the {LIMIT_LABEL} limit; the original attachment was kept."
+                ));
+                self.images.push(content);
             }
             Outcome::Compressed { content, info } => {
-                out.push(content);
-                compressed.push(info);
+                self.images.push(content);
+                self.compressed.push(info);
             }
             Outcome::Failed { index, error } => {
                 tracing::warn!("image {index}: normalization failed: {error}");
-                dropped.push(format!("Image {index} was dropped before send: {error}."));
+                self.dropped.push(format!("Image {index} was dropped before send: {error}."));
             }
         }
-    }
-    NormalizeResult {
-        images: out,
-        compressed,
-        re_encode_fallbacks,
-        dropped,
     }
 }
 fn render_notice(notes: &[String], inner_tag: &str) -> String {
@@ -308,7 +327,7 @@ enum Outcome {
         error: String,
     },
 }
-async fn normalize_one_in(img: ImageContent, index: usize, cache: &NormalizeCache) -> Outcome {
+async fn normalize_one(img: ImageContent, index: usize) -> Outcome {
     let raw_bytes = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
         Ok(b) => b,
         Err(e) => return fail(index, format!("base64 decode: {e}")),
@@ -337,12 +356,10 @@ async fn normalize_one_in(img: ImageContent, index: usize, cache: &NormalizeCach
     } else {
         (img, raw_bytes)
     };
-    let entry_res = cache
-        .get_or_try_insert_with(raw_bytes, move |bytes| compute_normalized(bytes, index))
-        .await;
+    let entry_res = compute_normalized(raw_bytes, index).await;
     match entry_res {
         Ok(entry) => entry_to_outcome(img, entry, index),
-        Err(arc_err) => fail(index, arc_err.0.clone()),
+        Err(error) => fail(index, error.0),
     }
 }
 fn entry_to_outcome(orig: ImageContent, entry: NormalizedEntry, index: usize) -> Outcome {
@@ -359,8 +376,8 @@ fn entry_to_outcome(orig: ImageContent, entry: NormalizedEntry, index: usize) ->
             .meta(orig.meta),
             info: ImageCompressionInfo { index, ..info },
         },
-        NormalizedEntry::ReEncodingOversized { .. } => Outcome::ReEncodingOversized(orig),
-        NormalizedEntry::Unchanged { .. } => Outcome::Unchanged(orig),
+        NormalizedEntry::ReEncodingOversized => Outcome::ReEncodingOversized(orig),
+        NormalizedEntry::Unchanged => Outcome::Unchanged(orig),
     }
 }
 async fn compute_normalized(
@@ -377,7 +394,7 @@ fn compute_normalized_blocking(
     index: usize,
 ) -> Result<NormalizedEntry, NormalizeError> {
     let original_bytes = raw_bytes.len();
-    let (orig_w, orig_h, orig_mime) =
+    let (orig_w, orig_h, _orig_mime) =
         tools::util::image_validate::validate_image_bytes_with(&raw_bytes, false)
             .map_err(|e| NormalizeError(format!("validate: {e}")))?;
     if !tools::util::image_validate::image_structurally_complete(&raw_bytes) {
@@ -402,10 +419,7 @@ fn compute_normalized_blocking(
         if let Err(e) = tools::util::image_validate::validate_image_bytes(&raw_bytes) {
             return Err(NormalizeError(format!("integrity check failed: {e}")));
         }
-        return Ok(NormalizedEntry::Unchanged {
-            bytes: Bytes::from(raw_bytes),
-            mime: Cow::Borrowed(orig_mime),
-        });
+        return Ok(NormalizedEntry::Unchanged);
     }
     if pixels > MAX_DECODE_PIXELS {
         return Err(NormalizeError(format!(
@@ -423,17 +437,11 @@ fn compute_normalized_blocking(
                 error = %e,
                 "image re-encode failed; keeping original attachment"
             );
-            return Ok(NormalizedEntry::ReEncodingOversized {
-                bytes: Bytes::from(raw_bytes),
-                mime: Cow::Borrowed(orig_mime),
-            });
+            return Ok(NormalizedEntry::ReEncodingOversized);
         }
     };
     if buf.len() >= original_bytes {
-        return Ok(NormalizedEntry::Unchanged {
-            bytes: Bytes::from(raw_bytes),
-            mime: Cow::Borrowed(orig_mime),
-        });
+        return Ok(NormalizedEntry::Unchanged);
     }
     let compressed_bytes = buf.len();
     Ok(NormalizedEntry::Compressed {
@@ -467,11 +475,37 @@ mod tests {
     use super::*;
     use image::DynamicImage;
     use image::codecs::jpeg::JpegEncoder;
-    fn fresh_cache() -> NormalizeCache {
-        let cache = NormalizeCache::with_capacity(64 * 1024 * 1024);
-        cache.set_enabled(true);
-        cache
+    #[tokio::test]
+    async fn canceled_waiter_retains_running_worker_admission() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = tokio::spawn(run_blocking(move || {
+            let _ = started_tx.send(());
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            Ok(())
+        }));
+        started_rx.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        let mut second = tokio::spawn(run_blocking(|| Ok(42)));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), second)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            42
+        );
     }
+
     fn make_test_png(width: u32, height: u32) -> Vec<u8> {
         use image::{ImageBuffer, Rgba};
         let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
@@ -499,8 +533,7 @@ mod tests {
     /// An attached ICO survives as PNG instead of being dropped by the allow-list.
     #[tokio::test]
     async fn ico_attachment_transcoded_to_png() {
-        let cache = fresh_cache();
-        let content = match normalize_one_in(make_ico_content(16, 16), 1, &cache).await {
+        let content = match normalize_one(make_ico_content(16, 16), 1).await {
             Outcome::Unchanged(c) | Outcome::Compressed { content: c, .. } => c,
             other => panic!("expected ICO to survive as PNG, got {other:?}"),
         };
@@ -528,8 +561,7 @@ mod tests {
     /// GIF must be PNG'd before send — engines do not sample GIF on the wire.
     #[tokio::test]
     async fn gif_attachment_transcoded_to_png() {
-        let cache = fresh_cache();
-        let content = match normalize_one_in(make_gif_content(32, 24), 1, &cache).await {
+        let content = match normalize_one(make_gif_content(32, 24), 1).await {
             Outcome::Unchanged(c) | Outcome::Compressed { content: c, .. } => c,
             other => panic!("expected GIF to survive as PNG, got {other:?}"),
         };
@@ -546,8 +578,7 @@ mod tests {
     async fn small_image_unchanged() {
         let img = make_image_content(100, 80);
         let original_data = img.data.clone();
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Unchanged(c) => assert_eq!(c.data, original_data),
             other => panic!("expected Unchanged, got {other:?}"),
         }
@@ -555,8 +586,7 @@ mod tests {
     #[tokio::test]
     async fn large_dimensions_resized_when_over_side_limit() {
         let img = make_image_content(3000, 2000);
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Compressed { content, info } => {
                 assert_eq!(content.mime_type, "image/png");
                 assert!(info.compressed_bytes < info.original_bytes);
@@ -574,8 +604,7 @@ mod tests {
     #[tokio::test]
     async fn attachment_over_area_cap_is_downscaled() {
         let img = make_image_content(1700, 1700);
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Compressed { info, .. } => {
                 assert!(
                     info.exceeded_dimensions,
@@ -594,8 +623,7 @@ mod tests {
     #[tokio::test]
     async fn wide_screenshot_clamped_to_side_limit_and_area_budget() {
         let img = make_image_content(3438, 1830);
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Compressed { info, .. } => {
                 assert!(info.exceeded_dimensions);
                 assert!(!info.exceeded_size, "flat PNG must be small in bytes");
@@ -615,8 +643,7 @@ mod tests {
     #[tokio::test]
     async fn near_square_over_area_budget_downscaled_below_side_clamp() {
         let img = make_image_content(1800, 1700);
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Compressed { info, .. } => {
                 assert!(info.exceeded_dimensions);
                 assert!(info.compressed_width < MAX_ENCODE_SIDE_PX);
@@ -663,8 +690,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&raw),
             "image/jpeg",
         );
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Compressed { content, info } => {
                 assert_eq!(content.mime_type, "image/jpeg");
                 assert!(info.compressed_bytes <= MAX_IMAGE_BYTES);
@@ -680,8 +706,7 @@ mod tests {
     #[tokio::test]
     async fn bad_base64_fails() {
         let img = ImageContent::new(String::from("!!!"), "image/png");
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Failed { index, error } => {
                 assert_eq!(index, 1);
                 assert!(
@@ -699,8 +724,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&raw),
             "image/png",
         );
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Failed { index, error } => {
                 assert_eq!(index, 1);
                 assert!(
@@ -718,8 +742,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&raw),
             "image/jpeg",
         );
-        let cache = fresh_cache();
-        match normalize_one_in(img, 7, &cache).await {
+        match normalize_one(img, 7).await {
             Outcome::Compressed { info, .. } => assert_eq!(info.index, 7),
             other => panic!("expected Compressed, got {other:?}"),
         }
@@ -728,8 +751,7 @@ mod tests {
     async fn normalize_images_filters_bad_and_keeps_good() {
         let good = make_image_content(100, 100);
         let bad = ImageContent::new(String::from("!!!"), "image/png");
-        let cache = fresh_cache();
-        let result = normalize_images_in(vec![good, bad], &cache).await;
+        let result = normalize_images(vec![good, bad]).await;
         assert_eq!(result.images.len(), 1);
         assert!(result.compressed.is_empty());
         assert!(result.re_encode_fallbacks.is_empty());
@@ -772,8 +794,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&raw),
             "image/jpeg",
         );
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Compressed { info, .. } => {
                 let r_in = ow as f64 / oh as f64;
                 let r_out = info.compressed_width as f64 / info.compressed_height as f64;
@@ -898,8 +919,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&bytes),
             "image/png",
         );
-        let cache = fresh_cache();
-        match normalize_one_in(img, 3, &cache).await {
+        match normalize_one(img, 3).await {
             Outcome::Failed { index, error } => {
                 assert_eq!(index, 3);
                 assert!(
@@ -919,8 +939,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&bytes),
             "image/png",
         );
-        let cache = fresh_cache();
-        match normalize_one_in(img, 11, &cache).await {
+        match normalize_one(img, 11).await {
             Outcome::Failed { index, error } => {
                 assert_eq!(index, 11);
                 assert!(
@@ -956,8 +975,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&bytes),
             "image/jpeg",
         );
-        let cache = fresh_cache();
-        match normalize_one_in(img, 12, &cache).await {
+        match normalize_one(img, 12).await {
             Outcome::Failed { index, error } => {
                 assert_eq!(index, 12);
                 assert!(
@@ -992,8 +1010,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&bytes),
             "image/jpeg",
         );
-        let cache = fresh_cache();
-        match normalize_one_in(img, 4, &cache).await {
+        match normalize_one(img, 4).await {
             Outcome::Failed { index, error } => {
                 assert_eq!(index, 4);
                 assert!(
@@ -1009,8 +1026,7 @@ mod tests {
     #[tokio::test]
     async fn below_total_pixel_floor_is_dropped() {
         let img = make_image_content(16, 16);
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Failed { error, .. } => {
                 assert!(
                     error.contains("total pixels"),
@@ -1020,7 +1036,7 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         let ok = make_image_content(32, 16);
-        match normalize_one_in(ok, 1, &fresh_cache()).await {
+        match normalize_one(ok, 1).await {
             Outcome::Unchanged(_) => {}
             other => panic!("expected Unchanged at exactly 512 px, got {other:?}"),
         }
@@ -1087,7 +1103,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&jpeg),
             "image/jpeg",
         );
-        match normalize_one_in(img, 0, &fresh_cache()).await {
+        match normalize_one(img, 0).await {
             Outcome::Compressed { content, .. } => {
                 assert!(!content.data.is_empty());
             }
@@ -1115,7 +1131,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&jpeg),
             "image/jpeg",
         );
-        match normalize_one_in(img, 0, &fresh_cache()).await {
+        match normalize_one(img, 0).await {
             Outcome::Failed { error, .. } => {
                 assert!(error.contains("decode limit"), "got: {error}");
             }
@@ -1186,8 +1202,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&raw),
             "image/jpeg",
         );
-        let cache = fresh_cache();
-        match normalize_one_in(img, 2, &cache).await {
+        match normalize_one(img, 2).await {
             Outcome::Failed { error, .. } => {
                 assert!(
                     error.contains("truncated"),
@@ -1201,8 +1216,7 @@ mod tests {
     async fn small_well_formed_png_unchanged_after_integrity_check() {
         let img = make_image_content(50, 40);
         let original_data = img.data.clone();
-        let cache = fresh_cache();
-        match normalize_one_in(img, 1, &cache).await {
+        match normalize_one(img, 1).await {
             Outcome::Unchanged(c) => assert_eq!(c.data, original_data),
             other => panic!("expected Unchanged, got {other:?}"),
         }
@@ -1219,8 +1233,7 @@ mod tests {
             "image/png",
         );
         let good = make_image_content(60, 40);
-        let cache = fresh_cache();
-        let result = normalize_images_in(vec![good, bad], &cache).await;
+        let result = normalize_images(vec![good, bad]).await;
         assert_eq!(result.images.len(), 1, "good image preserved");
         assert_eq!(result.dropped.len(), 1, "one drop note");
         assert!(result.dropped[0].contains("Image 2"), "drop names index");
@@ -1270,8 +1283,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&png_buf),
             "image/png",
         );
-        let cache = fresh_cache();
-        match normalize_one_in(content, 1, &cache).await {
+        match normalize_one(content, 1).await {
             Outcome::Compressed { content, info } => {
                 assert_eq!(
                     content.mime_type, "image/png",
@@ -1282,46 +1294,6 @@ mod tests {
             }
             other => panic!("expected Compressed, got {other:?}"),
         }
-    }
-    /// `Bytes::as_ptr` identity + re-stamped per-call `index` together
-    /// prove the second call is a cache hit through `entry_to_outcome`.
-    #[tokio::test]
-    async fn normalize_one_in_uses_cache_for_repeat_input() {
-        let cache = fresh_cache();
-        let img = make_image_content(48, 48);
-        let raw_decoded = base64::engine::general_purpose::STANDARD
-            .decode(&img.data)
-            .expect("test base64 decode");
-        let dup = img.clone();
-        let first_data = match normalize_one_in(img, 1, &cache).await {
-            Outcome::Unchanged(c) => c.data,
-            other => panic!("expected Unchanged on first call, got {other:?}"),
-        };
-        let cached_first = cache
-            .get_for_tests(&raw_decoded)
-            .await
-            .expect("first call must populate the cache");
-        let p1 = match &cached_first {
-            NormalizedEntry::Unchanged { bytes, .. } => bytes.as_ptr(),
-            other => panic!("expected Unchanged in cache, got {other:?}"),
-        };
-        let second_data = match normalize_one_in(dup, 9, &cache).await {
-            Outcome::Unchanged(c) => c.data,
-            other => panic!("expected Unchanged on second call, got {other:?}"),
-        };
-        assert_eq!(
-            first_data, second_data,
-            "cache-served output must match the first compute"
-        );
-        let cached_second = cache
-            .get_for_tests(&raw_decoded)
-            .await
-            .expect("cache entry survived");
-        let p2 = match &cached_second {
-            NormalizedEntry::Unchanged { bytes, .. } => bytes.as_ptr(),
-            _ => unreachable!("invariant: variant pinned above"),
-        };
-        assert_eq!(p1, p2, "`Bytes::as_ptr` identity proves cache hit");
     }
     /// Forces `re_encode_under_limit` to exhaust every step (drives
     /// the `ReEncodingOversized` path).
@@ -1341,13 +1313,7 @@ mod tests {
         let raw = jpeg_larger_than_limit();
         let entry = compute_normalized_blocking(raw.clone(), unsatisfiable_params(), 5)
             .expect("blocking compute ok");
-        match &entry {
-            NormalizedEntry::ReEncodingOversized { bytes, mime } => {
-                assert_eq!(bytes.as_ref(), raw.as_slice(), "original bytes preserved");
-                assert_eq!(mime.as_ref(), "image/jpeg");
-            }
-            other => panic!("expected ReEncodingOversized, got {other:?}"),
-        }
+        assert!(matches!(entry, NormalizedEntry::ReEncodingOversized));
         let orig = ImageContent::new(
             base64::engine::general_purpose::STANDARD.encode(&raw),
             "image/jpeg",
@@ -1361,55 +1327,17 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn re_encoding_oversized_round_trips_through_cache() {
+    async fn collects_re_encode_fallback_note() {
         let raw = jpeg_larger_than_limit();
-        let cache = fresh_cache();
-        let params = unsatisfiable_params();
-        cache
-            .get_or_try_insert_with(raw.clone(), move |bytes| async move {
-                compute_normalized_blocking(bytes, params, 1)
-            })
-            .await
-            .expect("seed cache");
-        let cached = cache.get_for_tests(&raw).await.expect("seed succeeded");
-        let p1 = match &cached {
-            NormalizedEntry::ReEncodingOversized { bytes, .. } => bytes.as_ptr(),
-            other => panic!("expected ReEncodingOversized in cache, got {other:?}"),
-        };
-        let input = ImageContent::new(
-            base64::engine::general_purpose::STANDARD.encode(&raw),
-            "image/jpeg",
-        );
-        match normalize_one_in(input, 3, &cache).await {
-            Outcome::ReEncodingOversized(c) => assert_eq!(c.mime_type, "image/jpeg"),
-            other => panic!("expected ReEncodingOversized from cache hit, got {other:?}"),
-        }
-        let cached_after = cache.get_for_tests(&raw).await.expect("entry survived");
-        let p2 = match &cached_after {
-            NormalizedEntry::ReEncodingOversized { bytes, .. } => bytes.as_ptr(),
-            _ => unreachable!(),
-        };
-        assert_eq!(
-            p1, p2,
-            "ReEncodingOversized cache hit must share backing buffer"
-        );
-    }
-    #[tokio::test]
-    async fn normalize_images_in_collects_re_encode_fallback_note() {
-        let raw = jpeg_larger_than_limit();
-        let cache = fresh_cache();
-        let params = unsatisfiable_params();
-        cache
-            .get_or_try_insert_with(raw.clone(), move |bytes| async move {
-                compute_normalized_blocking(bytes, params, 1)
-            })
-            .await
-            .expect("seed cache");
+        let entry = compute_normalized_blocking(raw.clone(), unsatisfiable_params(), 1)
+            .expect("blocking compute ok");
         let img = ImageContent::new(
             base64::engine::general_purpose::STANDARD.encode(&raw),
             "image/jpeg",
         );
-        let result = normalize_images_in(vec![img], &cache).await;
+        let mut result = NormalizeResult::default();
+        result.push_outcome(1, entry_to_outcome(img.clone(), entry, 1));
+        assert_eq!(result.images[0].data, img.data);
         assert_eq!(result.images.len(), 1, "image preserved despite oversize");
         assert_eq!(
             result.re_encode_fallbacks.len(),
@@ -1426,8 +1354,7 @@ mod tests {
     async fn sub_8x8_image_is_rejected() {
         let tiny = make_image_content(4, 3);
         let ok = make_image_content(30, 30);
-        let cache = fresh_cache();
-        let result = normalize_images_in(vec![tiny, ok], &cache).await;
+        let result = normalize_images(vec![tiny, ok]).await;
         assert_eq!(result.images.len(), 1, "only the >=8x8 image proceeds");
         assert_eq!(result.dropped.len(), 1);
         assert!(
@@ -1446,8 +1373,7 @@ mod tests {
     #[tokio::test]
     async fn exactly_8x8_is_rejected_by_total_pixel_floor() {
         let img = make_image_content(8, 8);
-        let cache = fresh_cache();
-        let result = normalize_images_in(vec![img], &cache).await;
+        let result = normalize_images(vec![img]).await;
         assert!(result.images.is_empty());
         assert_eq!(result.dropped.len(), 1);
         assert!(
@@ -1460,8 +1386,7 @@ mod tests {
     #[tokio::test]
     async fn seven_by_eight_is_rejected() {
         let img = make_image_content(7, 8);
-        let cache = fresh_cache();
-        let result = normalize_images_in(vec![img], &cache).await;
+        let result = normalize_images(vec![img]).await;
         assert!(result.images.is_empty());
         assert_eq!(result.dropped.len(), 1);
         assert!(result.dropped[0].contains("7×8"));

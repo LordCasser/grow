@@ -98,10 +98,6 @@ pub fn describe_prompt_fingerprint(source_context: &str) -> String {
     hasher.update(source_context.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
-/// Raw blake3 digest for binary cache keys.
-pub fn content_fingerprint_bytes(bytes: &[u8]) -> [u8; 32] {
-    *blake3::hash(bytes).as_bytes()
-}
 fn content_fingerprint_urls(image_urls: &[std::sync::Arc<str>]) -> String {
     let mut hasher = blake3::Hasher::new();
     for url in image_urls {

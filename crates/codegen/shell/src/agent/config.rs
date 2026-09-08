@@ -1727,14 +1727,6 @@ pub fn resolve_mcp_recursive_config_watch(
         .default(true)
         .resolve()
 }
-/// Apply process-wide side effects after writing `Config.remote_settings`.
-pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config::RemoteSettings>) {
-    let image_normalize_cache_enabled = settings
-        .and_then(|r| r.image_normalize_cache_enabled)
-        .unwrap_or(false);
-    crate::session::normalize_cache::NormalizeCache::global()
-        .set_enabled(image_normalize_cache_enabled);
-}
 /// Assemble the final model map from the configured provider hierarchy.
 /// Remote catalogs and compiled presets are intentionally not model sources.
 pub fn resolve_model_list(cfg: &Config) -> IndexMap<String, ModelEntry> {

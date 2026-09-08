@@ -597,11 +597,6 @@ pub struct RemoteSettings {
     /// is set in config.toml. Absent → default (**disabled** — ships dark).
     #[serde(default)]
     pub subagent_worktree_snapshot_enabled: Option<bool>,
-    /// When `Some(true)`, enable the process-wide image normalize cache that
-    /// amortises decode + integrity-check + re-encode work across SessionActors.
-    /// Default: disabled. See `session::normalize_cache`.
-    #[serde(default)]
-    pub image_normalize_cache_enabled: Option<bool>,
     /// When `Some(true)`, enrich path-not-found errors with CWD reminders,
     /// "did you mean?" corrections, and similar-name suggestions.
     /// When `Some(false)` or absent, error messages are unchanged.

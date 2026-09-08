@@ -249,7 +249,6 @@ mod mcp_dispatcher_e2e_tests;
 pub mod mcp_restart;
 pub mod mcp_servers;
 pub mod memory;
-pub(crate) mod normalize_cache;
 pub mod persistence;
 pub use client_support::placeholder_images;
 pub mod behavior;
