@@ -56916,6 +56916,61 @@
         "Report assembly",
         "view receives a diagnostic snapshot",
         "the report contains facts, ordered findings from warning and manual branches, and runtime/terminal/Wayland probe notes."
+      ],
+      [
+        "Healthy local report",
+        "a local Ghostty snapshot has truecolor, local pbcopy, no findings, and no active wrap sink",
+        "format_doctor emits the exact Environment and Clipboard sections followed by No issues found."
+      ],
+      [
+        "Tmux remediation",
+        "tmux reports set-clipboard off, allow-passthrough off, and extended-keys off",
+        "the report shows three Issue findings with stable IDs, automatic setup commands, config Add lines, and reload notes."
+      ],
+      [
+        "Limited color",
+        "color level is Ansi256",
+        "the report shows color 256, the available theme subset `2/5: grownight, growday`, and one limited-color issue with its export remediation."
+      ],
+      [
+        "SSH recommendation",
+        "SSH has OSC52 enabled but no wrap sink",
+        "the clipboard status remains confirmed and the report has no issue but one ssh-wrap recommendation with automatic and one-off guidance."
+      ],
+      [
+        "Wrapped SSH",
+        "the same SSH route has an active wrap sink",
+        "the ssh-wrap recommendation is absent."
+      ],
+      [
+        "Runtime evidence",
+        "XTVERSION returns a WezTerm string while Kitty flags are not pushed",
+        "Environment includes the XTVERSION and the report contains one WezTerm keyboard issue with its backslash/SSH note."
+      ],
+      [
+        "Incomplete probes",
+        "tmux probes are unavailable or error results and independent routes remain confirmed",
+        "probe incompleteness does not create false issues and the formatter emits No issues found."
+      ],
+      [
+        "Newline fallback",
+        "a VS Code terminal lacks Shift+Enter support",
+        "Environment shows the Alt+Enter newline fact and Recommendations contains one terminal.newline-fallback item with xterm.js guidance."
+      ],
+      [
+        "Runtime merge",
+        "runtime findings are merged into a view report that already has tmux/color findings",
+        "each checked diagnostic ID occurs once and the issue count reflects the merged set."
+      ],
+      [
+        "Startup warnings",
+        "runtime collection returns terminal bell and focus-tracking warnings",
+        "their useful messages and config path are visible, No issues found is absent, issue count is two, and the newline recommendation remains separate."
+      ],
+      [
+        "Ordering",
+        "runtime output contains an issue and recommendations",
+        "the single Issues section appears before Recommendations and the formatter does not print No issues found."
       ]
     ],
     "sources": [
@@ -56978,6 +57033,66 @@
       [
         "crates/codegen/pager/src/diagnostics/view_tests.rs",
         "tests::all_tmux_finding_metadata_uses_stable_automatic_fix_ids_without_schema_changes"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "build_doctor"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "build_doctor_with_runtime"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "format_doctor"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "view"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::healthy_local_output_is_stable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::tmux_config_and_reload_notes_output_is_stable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::limited_color_output_is_stable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::unwrapped_ssh_recommendation_with_no_issues_output_is_stable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::wrapped_ssh_output_has_no_recommendation"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::wezterm_xtversion_runtime_evidence_output_is_stable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::unavailable_and_error_probes_do_not_create_false_issues"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::vscode_newline_output_is_platform_neutral"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::runtime_merge_does_not_duplicate_view_findings"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::runtime_startup_findings_are_visible_with_useful_doctor_content"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::runtime_findings_merge_before_single_formatter_orders_issues_before_recommendations"
       ]
     ]
   },
@@ -189066,6 +189181,11 @@
         "Terminal-specific caveat",
         "an SSH VSCode-family terminal uses OSC52 without a wrap sink, or iTerm2 uses OSC52 under SSH/non-local native preflight",
         "the report adds the named recommendation for non-ASCII OSC52 or iTerm2 clipboard permission."
+      ],
+      [
+        "Fact-only failed delivery",
+        "a report initially has no findings but its clipboard delivery is changed to Failed",
+        "issue_count returns one, format_doctor prints the Clipboard issue notice, and the no-issues message is absent."
       ]
     ],
     "sources": [
@@ -189092,6 +189212,14 @@
       [
         "crates/codegen/pager/src/diagnostics/view_tests.rs",
         "tests::iterm2_and_vscode_clipboard_caveats_are_named_recommendations"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "DiagnosticReport::issue_count"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::legacy_fact_only_clipboard_issue_never_claims_no_issues"
       ]
     ]
   },
@@ -189120,6 +189248,11 @@
         "Known WezTerm evidence",
         "Kitty flag evidence is available and the WezTerm warning is produced",
         "the warning finding is retained and the newline fallback remains suppressed while the warning note carries the backslash guidance."
+      ],
+      [
+        "Explicit target keyboard fact",
+        "DiagnosticFacts contains KeyboardFact with HostOs::Macos and Cmd Dropped/Opt Native",
+        "format_doctor emits the exact keyboard line with OS rescue active and still reports No issues found."
       ]
     ],
     "sources": [
@@ -189158,6 +189291,14 @@
       [
         "crates/codegen/pager/src/diagnostics/view_tests.rs",
         "tests::keyboard_fact_and_formatter_use_snapshot_host"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "KeyboardFact"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "tests::keyboard_fact_formats_from_explicit_target_evidence"
       ]
     ]
   },
@@ -191192,6 +191333,884 @@
       [
         "crates/codegen/pager/src/scrollback/state/groups.rs",
         "gap_after"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "根dispatch SHALL 在本地回合短暂Idle但共享队列仍有条目时把新prompt路由到服务器并追加乐观队列回显；rename SHALL 更新本地display_name；ConfirmResetSetting 的 Reset SHALL 恢复Settings弹窗并递归发出对应类型setter及PersistSetting。",
+    "contract": "The implementation SHALL satisfy the following tested behavior: SendPrompt在shared_queue非空且pending为空的Idle窗口中产生带新prompt_id的Effect::SendPrompt，不设置current_prompt_id或本地运行态，并将新项排在既有shared entries之后。dispatch_rename_session返回单一效果且更新Agent显示名。Bool/Enum reset分别通过SetCompactMode(false)/SetTheme(\"grownight\")产生PersistSetting，重置内存值并在Bool场景刷新Settings ui_snapshot。",
+    "scenarios": [
+      [
+        "Idle with shared queue",
+        "Agent本地Idle、current_prompt_id为空、pending为空而shared_queue已有q1/q2",
+        "新c经服务器SendPrompt发送，回显追加在队尾且本地仍不运行。"
+      ],
+      [
+        "Rename session",
+        "dispatch_rename_session接收新名称",
+        "Agent本地display_name同步为该名称并返回一个效果。"
+      ],
+      [
+        "Reset shared Bool",
+        "compact_mode先设为true后选择Reset",
+        "持久化false、内存值为false、Settings modal仍打开且snapshot为false。"
+      ],
+      [
+        "Reset shared Enum",
+        "theme先设为tokyonight后选择Reset",
+        "持久化注册默认grownight且内存theme恢复grownight。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "send_while_idle_with_nonempty_shared_queue_routes_to_server"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "dispatch_rename_session_updates_display_name_locally"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "状态入口 SHALL 对欢迎页、minimal和完整Agent视图执行不同的Usage/Context/SessionInfo路由：无active Agent的ShowUsage静默无效；minimal保留单一scrollback-intent fetch且不打开modal；完整视图打开Usage modal、激活请求tab并同时请求三类数据。",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ShowUsage在无active agent时返回空effects；在minimal中只产生nonce=0的FetchSessionUsage/ShowContextInfo/ShowSessionInfo对应效果且不创建active_modal；完整模式为Agent替换为Usage modal，分配非零fetch_nonce，初始tab按Action选择，并依次产生同Agent/session/nonce的FetchSessionUsage、ShowContextInfo、ShowSessionInfo。完整打开不改变scrollback；Context和SessionInfo入口同样支持请求tab，minimal各自产生单一nonce=0请求。",
+    "scenarios": [
+      [
+        "Welcome no-op",
+        "没有active Agent时dispatch ShowUsage",
+        "不产生效果。"
+      ],
+      [
+        "Full usage open",
+        "完整Agent视图dispatch ShowUsage",
+        "Usage modal打开在Usage tab，nonce非零，三种fetch按固定顺序发出且transcript长度不变。"
+      ],
+      [
+        "Requested tab",
+        "完整Agent视图dispatch ShowContextInfo或ShowSessionInfo",
+        "modal激活对应tab但仍请求全部三类数据。"
+      ],
+      [
+        "Minimal usage",
+        "minimal模式dispatch ShowUsage",
+        "只保留FetchSessionUsage nonce=0，modal保持关闭。"
+      ],
+      [
+        "Minimal context/session",
+        "minimal模式dispatch ShowContextInfo或ShowSessionInfo",
+        "只保留对应单项nonce=0效果且modal保持关闭。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "show_usage_on_welcome_screen_is_noop"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "show_usage_opens_usage_modal_and_fetches_all_tabs"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "show_usage_opens_modal_on_requested_tab_for_context_and_session_info"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "show_usage_minimal_keeps_scrollback_fetch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "show_session_info_minimal_keeps_scrollback_fetch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "show_context_info_minimal_keeps_scrollback_fetch"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "minimal更新通知 SHALL 在存在active Agent时提交一个系统scrollback block；无Agent时安全无操作。OpenTutorial SHALL 无effects地在非minimal应用层打开/关闭overlay。",
+    "contract": "The implementation SHALL satisfy the following tested behavior: commit_minimal_update_notice仅依赖active Agent，新增一条系统block并包含版本与restart提示；无Agent不panic且不要求session。OpenTutorial首次设置tutorial为Some，再次清除tutorial，两次effects均为空；该测试文件证明其在默认完整模式可用，minimal gate的完整契约由生产status实现和已有delta给出。",
+    "scenarios": [
+      [
+        "Update notice with agent",
+        "active Agent存在并提交版本9.9.9",
+        "scrollback增加一条系统block，文本含Update available: v9.9.9和restart to apply。"
+      ],
+      [
+        "Update notice without agent",
+        "无active Agent提交通知",
+        "安全返回且不panic。"
+      ],
+      [
+        "Tutorial open/close",
+        "连续两次dispatch OpenTutorial",
+        "第一次创建overlay且无effect，第二次关闭overlay且仍无effect。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "minimal_update_notice_commits_a_system_block"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "minimal_update_notice_no_active_agent_is_noop"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "open_tutorial_toggles_overlay_without_effects"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Usage modal异步结果 SHALL 以open epoch和session identity保护当前modal，丢弃关闭重开后的旧结果及错误session结果；有效结果只填modal tab，modal内容不得写入transcript，失败写入当前tab Failed状态。",
+    "contract": "The implementation SHALL satisfy the following tested behavior: 每次打开Usage modal分配新nonce；SessionInfoComplete携带旧nonce时即使Agent和modal仍存在也返回空effects且保持Loading，当前nonce才生成Loaded rows。SessionUsageComplete需session_id匹配当前session，错session保持Loading且不改scrollback。SessionInfo/Context/Usage三类成功填充相应Loaded数据，失败结果写入对应UsageTabData::Failed(error)，整个modal填充过程保持scrollback长度不变。",
+    "scenarios": [
+      [
+        "Close and reopen",
+        "第一次打开得到nonce1，关闭后重开得到nonce2，迟到结果仍带nonce1",
+        "旧结果被丢弃，重开modal的SessionInfo保持Loading。"
+      ],
+      [
+        "Fresh session info",
+        "重开结果携带当前nonce2和匹配session",
+        "SessionInfo tab变为Loaded并出现Session ID=test-session行。"
+      ],
+      [
+        "Wrong usage session",
+        "Usage结果session_id不同于Agent当前session",
+        "Usage仍为Loading且transcript不变。"
+      ],
+      [
+        "Modal fill",
+        "三个成功结果都携带当前nonce",
+        "Usage、Context、SessionInfo均Loaded，scrollback没有新增block。"
+      ],
+      [
+        "Failed session info",
+        "SessionInfoFailed携带当前nonce和boom",
+        "SessionInfo tab变为Failed(\"boom\")。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "session_info_response"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "open_modal_nonce"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "stale_epoch_results_are_dropped_after_close_reopen"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "modal_fill_writes_nothing_to_scrollback"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "usage_result_guards_on_session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "failed_fetches_fill_modal_error_state"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "minimal模式下nonce=0的SessionInfo、ContextInfo和SessionUsage结果 SHALL 继续投影为各自scrollback block，而非modal数据。",
+    "contract": "The implementation SHALL satisfy the following tested behavior: 在ScreenMode::Minimal中，SessionInfoComplete追加一条包含返回text的system block，ContextInfoComplete追加一条structured context block，SessionUsageComplete追加一条包含Session usage的system block；每个结果分别令scrollback长度增加一。测试通过nonce=0及fixture Agent验证该兼容投影。",
+    "scenarios": [
+      [
+        "Session info scrollback",
+        "minimal模式收到nonce=0 SessionInfoComplete",
+        "追加Session info block且包含原始Session info block文本。"
+      ],
+      [
+        "Context scrollback",
+        "minimal模式收到nonce=0 ContextInfoComplete",
+        "追加一条结构化context block。"
+      ],
+      [
+        "Usage scrollback",
+        "minimal模式收到nonce=0 SessionUsageComplete",
+        "追加一条system block且文本含Session usage。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "minimal_mode_commits_scrollback_blocks"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "CopyUsageModalValue SHALL 在没有匹配打开的Usage modal时无操作，不产生clipboard effect。",
+    "contract": "The implementation SHALL satisfy the following tested behavior: 根dispatch接收仅含row index的CopyUsageModalValue时，若Agent没有active Usage modal，返回空effects；该测试只覆盖无modal边界，不证明Loaded行、active_tab或多Agent选择策略。",
+    "scenarios": [
+      [
+        "No modal copy",
+        "Agent存在但active_modal为空，dispatch CopyUsageModalValue(0)",
+        "返回空effects且不执行复制。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "copy_usage_modal_value_without_modal_is_noop"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Diagnostic snapshot fixture composition and runtime evidence mapping",
+    "contract": "The test snapshot helpers SHALL construct DiagnosticSnapshot from terminal, tmux, Wayland, runtime, clipboard, host, display-server, and color inputs without querying the host. snapshot SHALL default to MacOS/unknown display server/TrueColor and a fixed all-capabilities ClipboardRoute; snapshot_for_host SHALL default Wayland probes to non-Wayland/unavailable; runtime helpers SHALL encode fullscreen available, caller-provided kitty evidence, and caller-provided xtversion while preserving Unavailable as absent TUI xtversion.",
+    "scenarios": [
+      [
+        "Default snapshot",
+        "a test uses snapshot or snapshot_with_wayland",
+        "the helper injects deterministic MacOS host, unknown display server, TrueColor, clipboard route, and Wayland defaults."
+      ],
+      [
+        "Host override",
+        "a test uses snapshot_for_host or snapshot_with_wayland_for_host",
+        "the supplied HostOs and Wayland facts reach DiagnosticSnapshot unchanged."
+      ],
+      [
+        "Runtime evidence",
+        "kitty/xtversion are Available or Unavailable",
+        "TuiProbeEvidence maps Available xtversion to Some and Unavailable to None while runtime keeps the original evidence."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ROUTE"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "snapshot"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "snapshot_for_host"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "snapshot_with_wayland"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "snapshot_with_wayland_for_host"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "runtime"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "available_runtime"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "DiagnosticSnapshot::from_parts"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ProbeSnapshot"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "TuiProbeEvidence"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ClipboardProbeFacts"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "RuntimeEvidence::Available"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "RuntimeEvidence::Unavailable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "HostOs::Macos"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "DisplayServer::Unknown"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ColorLevel::TrueColor"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Stable warning category identifiers",
+    "contract": "Every WarningCategory exercised by the diagnostics view SHALL map through id_for to its stable public DiagnosticId string, preserving the terminal/notification/sandbox namespace and kebab-case identifier across schema changes.",
+    "scenarios": [
+      [
+        "Category mapping",
+        "all listed WarningCategory variants are converted",
+        "the exact 13 stable IDs are returned in declaration order and none is missing."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "warning_category_ids_are_stable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "WarningCategory"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "id_for"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "DiagnosticId::new"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.tmux-clipboard"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.dcs-passthrough"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.control-mode"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.byobu-screen"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.unsupported-emulator"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.tmux-extended-keys"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.wayland-data-control"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.wezterm-kitty"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.limited-color"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.ssh-wrap"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "notifications.protocol-fallback"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "notifications.focus-tracking-unavailable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "sandbox.profile-conflict"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Stable finding identities, dispositions, facts, and automatic remediation commands",
+    "contract": "view SHALL emit stable DiagnosticId/disposition pairs and compatible fact fields for the supplied terminal/tmux snapshot. Tmux clipboard issues SHALL remain Issue while Iterm2/SSH caveats are Recommendation; clipboard delivery/native preflight SHALL reflect the route and host. Automatic remediation metadata SHALL use the canonical fix IDs and `grow doctor fix terminal.*` commands without changing the report schema, and a healthy tmux snapshot SHALL remove the three tmux findings.",
+    "scenarios": [
+      [
+        "Finding identity",
+        "Iterm2 SSH tmux has clipboard disabled and SSH wrap context",
+        "findings appear in stable order with terminal.tmux-clipboard Issue plus Iterm2 permission and SSH wrap Recommendations."
+      ],
+      [
+        "Clipboard facts",
+        "the report is built from a confirmed route",
+        "delivery is Confirmed and native_preflight is RemoteOnly."
+      ],
+      [
+        "Automatic fixes",
+        "tmux clipboard/passthrough/extended keys are unhealthy",
+        "the three canonical fix IDs and commands are attached."
+      ],
+      [
+        "Healthy tmux",
+        "extended keys are on, clipboard is external, passthrough is all",
+        "the three tmux finding IDs are absent."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "findings_have_stable_semantic_ids_and_dispositions"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "all_tmux_finding_metadata_uses_stable_automatic_fix_ids_without_schema_changes"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "view"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "DiagnosticId::new"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "FindingDisposition::Issue"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "FindingDisposition::Recommendation"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ClipboardDelivery::Confirmed"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "NativeClipboardPreflight::RemoteOnly"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "automatic_remediation_for"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ssh_wrap_automatic_remediation"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "TMUX_CLIPBOARD_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "DCS_PASSTHROUGH_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "TMUX_EXTENDED_KEYS_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "grow doctor fix terminal.tmux-clipboard"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "grow doctor fix terminal.dcs-passthrough"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "grow doctor fix terminal.tmux-extended-keys"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Unavailable and error probe evidence remains honest and fail-open",
+    "contract": "view SHALL preserve unavailable, unsupported, and error probe evidence in probe_notes while avoiding findings that require unproven facts. Runtime-unavailable WezTerm/kitty evidence SHALL not invent a wezterm-kitty finding; known control-mode facts may still produce their finding. Clipboard/Wayland error and unsupported states SHALL remain ordered notes with status and message while findings stay empty when no actionable fact is proven.",
+    "scenarios": [
+      [
+        "Runtime unavailable",
+        "WezTerm runtime kitty/xtversion evidence is unavailable",
+        "no terminal.wezterm-kitty finding is emitted, control-mode remains reportable, and three runtime probe notes are retained."
+      ],
+      [
+        "Probe error/unsupported",
+        "tmux clipboard probe errors, passthrough support is Unsupported, and Wayland data-control is unavailable",
+        "findings remain empty while six ordered probe notes preserve Error message, Unsupported status, and probe names."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "unavailable_runtime_evidence_is_honest_and_fail_open"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "unavailable_and_error_probe_evidence_is_retained_without_findings"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "view"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "probe_notes"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ProbeStatus::Error"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ProbeStatus::Unsupported"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "RuntimeEvidence::Unavailable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.wezterm-kitty"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.control-mode"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "tmux.version"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "tmux.extended-keys"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "tmux.control-mode"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "wayland.data-control"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "server unreachable"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "WezTerm and newline fallback require affirmative keyboard evidence",
+    "contract": "The diagnostics view SHALL leave newline unset and suppress terminal.wezterm-kitty when kitty keyboard evidence is unavailable, including local and SSH WezTerm identified through xtversion. Non-WezTerm terminals SHALL retain the ordinary XtermJs newline fallback with a Recommendation containing Alt+Enter guidance. Available WezTerm evidence SHALL retain the finding and include the backslash-then-Enter remediation note.",
+    "scenarios": [
+      [
+        "Local WezTerm unknown",
+        "brand/env are WezTerm and kitty evidence is unavailable",
+        "newline is None and no wezterm-kitty finding is emitted."
+      ],
+      [
+        "SSH xtversion WezTerm",
+        "SSH terminal has xtversion WezTerm but kitty evidence is unavailable",
+        "newline is None and no wezterm-kitty fallback is inferred."
+      ],
+      [
+        "Non-WezTerm",
+        "VS Code lacks kitty evidence",
+        "newline is XtermJs for VS Code and the newline fallback recommendation mentions Alt+Enter."
+      ],
+      [
+        "Affirmative WezTerm evidence",
+        "WezTerm has available runtime evidence",
+        "newline remains None, wezterm-kitty finding exists, and its note names typing backslash then Enter."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "local_wezterm_without_kitty_evidence_has_no_alt_enter_fallback"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ssh_xtversion_wezterm_without_kitty_evidence_has_no_alt_enter_fallback"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "non_wezterm_without_kitty_evidence_keeps_ordinary_fallback"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "available_wezterm_evidence_retains_finding_and_backslash_note"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "view"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "facts.newline"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "NewlineFact::XtermJs"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "NEWLINE_FALLBACK_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "terminal.wezterm-kitty"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "Alt+Enter"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "type `\\` and then press Enter"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "RuntimeEvidence::Unavailable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "RuntimeEvidence::Available"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard delivery findings own remediation while compatibility facts remain stable",
+    "contract": "Clipboard delivery state SHALL be exposed as a fact with a compatible fix string, while the view presents the actionable delivery finding and does not duplicate the legacy `fix` doctor output row. Unverified SSH delivery SHALL recommend wrap/minimal guidance; failed non-native delivery SHALL recommend minimal mode; the finding note SHALL be non-empty.",
+    "scenarios": [
+      [
+        "Unverified SSH delivery",
+        "SSH route is unverified on Linux",
+        "delivery is Unverified, the compatibility fix is `grow wrap <ssh command> or /minimal`, and a named finding has a non-empty note."
+      ],
+      [
+        "Failed delivery",
+        "a VTE-like terminal has no native/tmux/OSC52 route",
+        "delivery is Failed, the compatibility fix is `/minimal`, and a named finding owns remediation without a legacy fix line."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "clipboard_delivery_findings_own_remediation_while_fix_fact_stays_compatible"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "view"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ClipboardDelivery::Unverified"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ClipboardDelivery::Failed"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "CLIPBOARD_DELIVERY_UNVERIFIED_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "CLIPBOARD_DELIVERY_UNAVAILABLE_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "facts.clipboard.delivery"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "facts.clipboard.fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "format_doctor"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "grow wrap <ssh command> or /minimal"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "/minimal"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "fix          "
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Named terminal-specific clipboard caveat recommendations",
+    "contract": "For SSH sessions, Iterm2 SHALL produce its permission recommendation and VS Code-compatible terminals (VS Code, Cursor, Windsurf, Zed) SHALL produce the VSCODE_SSH_NON_ASCII recommendation with the requested guidance. Ghostty SHALL not receive that VS Code-specific finding.",
+    "scenarios": [
+      [
+        "Iterm2 SSH",
+        "brand is Iterm2 over SSH",
+        "the Iterm2 permission finding is a Recommendation containing Settings guidance."
+      ],
+      [
+        "VS Code family SSH",
+        "brand is VS Code, Cursor, Windsurf, or Zed over SSH",
+        "the shared VSCODE_SSH_NON_ASCII finding is a Recommendation containing /minimal guidance."
+      ],
+      [
+        "Ghostty SSH",
+        "brand is Ghostty over SSH",
+        "the VS Code-specific finding is absent."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "iterm2_and_vscode_clipboard_caveats_are_named_recommendations"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "view"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "ITERM2_CLIPBOARD_PERMISSION_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "VSCODE_SSH_NON_ASCII_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "FindingDisposition::Recommendation"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "Settings"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "/minimal"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "TerminalName::Iterm2"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "TerminalName::VsCode"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "TerminalName::Cursor"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "TerminalName::Windsurf"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "TerminalName::Zed"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "TerminalName::Ghostty"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Keyboard fact and doctor formatter honor the snapshot host",
+    "contract": "The diagnostics view and format_doctor SHALL use the HostOs carried by the DiagnosticSnapshot rather than the process host: MacOS snapshots retain a keyboard fact and mark the formatted report with OS rescue active, while non-MacOS snapshots omit the keyboard row and its marker.",
+    "scenarios": [
+      [
+        "MacOS snapshot host",
+        "snapshot_host is Macos",
+        "keyboard.fact.os equals Macos and formatted output contains `(OS rescue active)`."
+      ],
+      [
+        "Non-MacOS snapshot host",
+        "snapshot_host is Linux",
+        "keyboard facts are absent and formatted output contains no keyboard row."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "keyboard_fact_and_formatter_use_snapshot_host"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "snapshot_for_host"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "view"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "format_doctor"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "facts.keyboard"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "keyboard.os"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "HostOs::Macos"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "HostOs::Linux"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "OS rescue active"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "keyboard     "
       ]
     ]
   }

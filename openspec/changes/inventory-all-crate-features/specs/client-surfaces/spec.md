@@ -22787,3 +22787,269 @@ project_to_layout SHALL dispatch each authoritative span by GroupKind and be the
 - **THEN** both shapes are projected without overlap and the fold headers expose their respective counts.
 
 证据：`crates/codegen/pager/src/scrollback/state/groups.rs` — `project_to_layout`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `project_verb_run`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `project_truncation`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `EntryLayoutInfo`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_header_count`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_collapse_header`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `verb_group_header`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `height`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `gap_after`。
+
+
+### Requirement: 根dispatch SHALL 在本地回合短暂Idle但共享队列仍有条目时把新prompt路由到服务器并追加乐观队列回显；rename SHALL 更新本地display_name；ConfirmResetSetting 的 Reset SHALL 恢复Settings弹窗并递归发出对应类型setter及PersistSetting。
+
+The implementation SHALL satisfy the following tested behavior: SendPrompt在shared_queue非空且pending为空的Idle窗口中产生带新prompt_id的Effect::SendPrompt，不设置current_prompt_id或本地运行态，并将新项排在既有shared entries之后。dispatch_rename_session返回单一效果且更新Agent显示名。Bool/Enum reset分别通过SetCompactMode(false)/SetTheme("grownight")产生PersistSetting，重置内存值并在Bool场景刷新Settings ui_snapshot。
+
+#### Scenario: Idle with shared queue
+- **WHEN** Agent本地Idle、current_prompt_id为空、pending为空而shared_queue已有q1/q2
+- **THEN** 新c经服务器SendPrompt发送，回显追加在队尾且本地仍不运行。
+
+#### Scenario: Rename session
+- **WHEN** dispatch_rename_session接收新名称
+- **THEN** Agent本地display_name同步为该名称并返回一个效果。
+
+#### Scenario: Reset shared Bool
+- **WHEN** compact_mode先设为true后选择Reset
+- **THEN** 持久化false、内存值为false、Settings modal仍打开且snapshot为false。
+
+#### Scenario: Reset shared Enum
+- **WHEN** theme先设为tokyonight后选择Reset
+- **THEN** 持久化注册默认grownight且内存theme恢复grownight。
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `send_while_idle_with_nonempty_shared_queue_routes_to_server`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `dispatch_rename_session_updates_display_name_locally`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum`。
+
+
+### Requirement: 状态入口 SHALL 对欢迎页、minimal和完整Agent视图执行不同的Usage/Context/SessionInfo路由：无active Agent的ShowUsage静默无效；minimal保留单一scrollback-intent fetch且不打开modal；完整视图打开Usage modal、激活请求tab并同时请求三类数据。
+
+The implementation SHALL satisfy the following tested behavior: ShowUsage在无active agent时返回空effects；在minimal中只产生nonce=0的FetchSessionUsage/ShowContextInfo/ShowSessionInfo对应效果且不创建active_modal；完整模式为Agent替换为Usage modal，分配非零fetch_nonce，初始tab按Action选择，并依次产生同Agent/session/nonce的FetchSessionUsage、ShowContextInfo、ShowSessionInfo。完整打开不改变scrollback；Context和SessionInfo入口同样支持请求tab，minimal各自产生单一nonce=0请求。
+
+#### Scenario: Welcome no-op
+- **WHEN** 没有active Agent时dispatch ShowUsage
+- **THEN** 不产生效果。
+
+#### Scenario: Full usage open
+- **WHEN** 完整Agent视图dispatch ShowUsage
+- **THEN** Usage modal打开在Usage tab，nonce非零，三种fetch按固定顺序发出且transcript长度不变。
+
+#### Scenario: Requested tab
+- **WHEN** 完整Agent视图dispatch ShowContextInfo或ShowSessionInfo
+- **THEN** modal激活对应tab但仍请求全部三类数据。
+
+#### Scenario: Minimal usage
+- **WHEN** minimal模式dispatch ShowUsage
+- **THEN** 只保留FetchSessionUsage nonce=0，modal保持关闭。
+
+#### Scenario: Minimal context/session
+- **WHEN** minimal模式dispatch ShowContextInfo或ShowSessionInfo
+- **THEN** 只保留对应单项nonce=0效果且modal保持关闭。
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `show_usage_on_welcome_screen_is_noop`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `show_usage_opens_usage_modal_and_fetches_all_tabs`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `show_usage_opens_modal_on_requested_tab_for_context_and_session_info`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `show_usage_minimal_keeps_scrollback_fetch`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `show_session_info_minimal_keeps_scrollback_fetch`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `show_context_info_minimal_keeps_scrollback_fetch`。
+
+
+### Requirement: minimal更新通知 SHALL 在存在active Agent时提交一个系统scrollback block；无Agent时安全无操作。OpenTutorial SHALL 无effects地在非minimal应用层打开/关闭overlay。
+
+The implementation SHALL satisfy the following tested behavior: commit_minimal_update_notice仅依赖active Agent，新增一条系统block并包含版本与restart提示；无Agent不panic且不要求session。OpenTutorial首次设置tutorial为Some，再次清除tutorial，两次effects均为空；该测试文件证明其在默认完整模式可用，minimal gate的完整契约由生产status实现和已有delta给出。
+
+#### Scenario: Update notice with agent
+- **WHEN** active Agent存在并提交版本9.9.9
+- **THEN** scrollback增加一条系统block，文本含Update available: v9.9.9和restart to apply。
+
+#### Scenario: Update notice without agent
+- **WHEN** 无active Agent提交通知
+- **THEN** 安全返回且不panic。
+
+#### Scenario: Tutorial open/close
+- **WHEN** 连续两次dispatch OpenTutorial
+- **THEN** 第一次创建overlay且无effect，第二次关闭overlay且仍无effect。
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `minimal_update_notice_commits_a_system_block`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `minimal_update_notice_no_active_agent_is_noop`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `open_tutorial_toggles_overlay_without_effects`。
+
+
+### Requirement: Usage modal异步结果 SHALL 以open epoch和session identity保护当前modal，丢弃关闭重开后的旧结果及错误session结果；有效结果只填modal tab，modal内容不得写入transcript，失败写入当前tab Failed状态。
+
+The implementation SHALL satisfy the following tested behavior: 每次打开Usage modal分配新nonce；SessionInfoComplete携带旧nonce时即使Agent和modal仍存在也返回空effects且保持Loading，当前nonce才生成Loaded rows。SessionUsageComplete需session_id匹配当前session，错session保持Loading且不改scrollback。SessionInfo/Context/Usage三类成功填充相应Loaded数据，失败结果写入对应UsageTabData::Failed(error)，整个modal填充过程保持scrollback长度不变。
+
+#### Scenario: Close and reopen
+- **WHEN** 第一次打开得到nonce1，关闭后重开得到nonce2，迟到结果仍带nonce1
+- **THEN** 旧结果被丢弃，重开modal的SessionInfo保持Loading。
+
+#### Scenario: Fresh session info
+- **WHEN** 重开结果携带当前nonce2和匹配session
+- **THEN** SessionInfo tab变为Loaded并出现Session ID=test-session行。
+
+#### Scenario: Wrong usage session
+- **WHEN** Usage结果session_id不同于Agent当前session
+- **THEN** Usage仍为Loading且transcript不变。
+
+#### Scenario: Modal fill
+- **WHEN** 三个成功结果都携带当前nonce
+- **THEN** Usage、Context、SessionInfo均Loaded，scrollback没有新增block。
+
+#### Scenario: Failed session info
+- **WHEN** SessionInfoFailed携带当前nonce和boom
+- **THEN** SessionInfo tab变为Failed("boom")。
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `session_info_response`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `open_modal_nonce`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `stale_epoch_results_are_dropped_after_close_reopen`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `modal_fill_writes_nothing_to_scrollback`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `usage_result_guards_on_session_id`；`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `failed_fetches_fill_modal_error_state`。
+
+
+### Requirement: minimal模式下nonce=0的SessionInfo、ContextInfo和SessionUsage结果 SHALL 继续投影为各自scrollback block，而非modal数据。
+
+The implementation SHALL satisfy the following tested behavior: 在ScreenMode::Minimal中，SessionInfoComplete追加一条包含返回text的system block，ContextInfoComplete追加一条structured context block，SessionUsageComplete追加一条包含Session usage的system block；每个结果分别令scrollback长度增加一。测试通过nonce=0及fixture Agent验证该兼容投影。
+
+#### Scenario: Session info scrollback
+- **WHEN** minimal模式收到nonce=0 SessionInfoComplete
+- **THEN** 追加Session info block且包含原始Session info block文本。
+
+#### Scenario: Context scrollback
+- **WHEN** minimal模式收到nonce=0 ContextInfoComplete
+- **THEN** 追加一条结构化context block。
+
+#### Scenario: Usage scrollback
+- **WHEN** minimal模式收到nonce=0 SessionUsageComplete
+- **THEN** 追加一条system block且文本含Session usage。
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `minimal_mode_commits_scrollback_blocks`。
+
+
+### Requirement: CopyUsageModalValue SHALL 在没有匹配打开的Usage modal时无操作，不产生clipboard effect。
+
+The implementation SHALL satisfy the following tested behavior: 根dispatch接收仅含row index的CopyUsageModalValue时，若Agent没有active Usage modal，返回空effects；该测试只覆盖无modal边界，不证明Loaded行、active_tab或多Agent选择策略。
+
+#### Scenario: No modal copy
+- **WHEN** Agent存在但active_modal为空，dispatch CopyUsageModalValue(0)
+- **THEN** 返回空effects且不执行复制。
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `copy_usage_modal_value_without_modal_is_noop`。
+
+
+### Requirement: Diagnostic snapshot fixture composition and runtime evidence mapping
+
+The test snapshot helpers SHALL construct DiagnosticSnapshot from terminal, tmux, Wayland, runtime, clipboard, host, display-server, and color inputs without querying the host. snapshot SHALL default to MacOS/unknown display server/TrueColor and a fixed all-capabilities ClipboardRoute; snapshot_for_host SHALL default Wayland probes to non-Wayland/unavailable; runtime helpers SHALL encode fullscreen available, caller-provided kitty evidence, and caller-provided xtversion while preserving Unavailable as absent TUI xtversion.
+
+#### Scenario: Default snapshot
+- **WHEN** a test uses snapshot or snapshot_with_wayland
+- **THEN** the helper injects deterministic MacOS host, unknown display server, TrueColor, clipboard route, and Wayland defaults.
+
+#### Scenario: Host override
+- **WHEN** a test uses snapshot_for_host or snapshot_with_wayland_for_host
+- **THEN** the supplied HostOs and Wayland facts reach DiagnosticSnapshot unchanged.
+
+#### Scenario: Runtime evidence
+- **WHEN** kitty/xtversion are Available or Unavailable
+- **THEN** TuiProbeEvidence maps Available xtversion to Some and Unavailable to None while runtime keeps the original evidence.
+
+证据：`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ROUTE`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `snapshot`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `snapshot_for_host`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `snapshot_with_wayland`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `snapshot_with_wayland_for_host`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `runtime`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `available_runtime`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `DiagnosticSnapshot::from_parts`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ProbeSnapshot`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `TuiProbeEvidence`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ClipboardProbeFacts`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `RuntimeEvidence::Available`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `RuntimeEvidence::Unavailable`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `HostOs::Macos`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `DisplayServer::Unknown`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ColorLevel::TrueColor`。
+
+
+### Requirement: Stable warning category identifiers
+
+Every WarningCategory exercised by the diagnostics view SHALL map through id_for to its stable public DiagnosticId string, preserving the terminal/notification/sandbox namespace and kebab-case identifier across schema changes.
+
+#### Scenario: Category mapping
+- **WHEN** all listed WarningCategory variants are converted
+- **THEN** the exact 13 stable IDs are returned in declaration order and none is missing.
+
+证据：`crates/codegen/pager/src/diagnostics/view_tests.rs` — `warning_category_ids_are_stable`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `WarningCategory`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `id_for`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `DiagnosticId::new`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.tmux-clipboard`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.dcs-passthrough`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.control-mode`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.byobu-screen`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.unsupported-emulator`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.tmux-extended-keys`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.wayland-data-control`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.wezterm-kitty`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.limited-color`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.ssh-wrap`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `notifications.protocol-fallback`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `notifications.focus-tracking-unavailable`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `sandbox.profile-conflict`。
+
+
+### Requirement: Stable finding identities, dispositions, facts, and automatic remediation commands
+
+view SHALL emit stable DiagnosticId/disposition pairs and compatible fact fields for the supplied terminal/tmux snapshot. Tmux clipboard issues SHALL remain Issue while Iterm2/SSH caveats are Recommendation; clipboard delivery/native preflight SHALL reflect the route and host. Automatic remediation metadata SHALL use the canonical fix IDs and `grow doctor fix terminal.*` commands without changing the report schema, and a healthy tmux snapshot SHALL remove the three tmux findings.
+
+#### Scenario: Finding identity
+- **WHEN** Iterm2 SSH tmux has clipboard disabled and SSH wrap context
+- **THEN** findings appear in stable order with terminal.tmux-clipboard Issue plus Iterm2 permission and SSH wrap Recommendations.
+
+#### Scenario: Clipboard facts
+- **WHEN** the report is built from a confirmed route
+- **THEN** delivery is Confirmed and native_preflight is RemoteOnly.
+
+#### Scenario: Automatic fixes
+- **WHEN** tmux clipboard/passthrough/extended keys are unhealthy
+- **THEN** the three canonical fix IDs and commands are attached.
+
+#### Scenario: Healthy tmux
+- **WHEN** extended keys are on, clipboard is external, passthrough is all
+- **THEN** the three tmux finding IDs are absent.
+
+证据：`crates/codegen/pager/src/diagnostics/view_tests.rs` — `findings_have_stable_semantic_ids_and_dispositions`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `all_tmux_finding_metadata_uses_stable_automatic_fix_ids_without_schema_changes`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `view`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `DiagnosticId::new`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `FindingDisposition::Issue`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `FindingDisposition::Recommendation`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ClipboardDelivery::Confirmed`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `NativeClipboardPreflight::RemoteOnly`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `automatic_remediation_for`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ssh_wrap_automatic_remediation`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `TMUX_CLIPBOARD_ID`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `DCS_PASSTHROUGH_ID`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `TMUX_EXTENDED_KEYS_ID`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `grow doctor fix terminal.tmux-clipboard`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `grow doctor fix terminal.dcs-passthrough`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `grow doctor fix terminal.tmux-extended-keys`。
+
+
+### Requirement: Unavailable and error probe evidence remains honest and fail-open
+
+view SHALL preserve unavailable, unsupported, and error probe evidence in probe_notes while avoiding findings that require unproven facts. Runtime-unavailable WezTerm/kitty evidence SHALL not invent a wezterm-kitty finding; known control-mode facts may still produce their finding. Clipboard/Wayland error and unsupported states SHALL remain ordered notes with status and message while findings stay empty when no actionable fact is proven.
+
+#### Scenario: Runtime unavailable
+- **WHEN** WezTerm runtime kitty/xtversion evidence is unavailable
+- **THEN** no terminal.wezterm-kitty finding is emitted, control-mode remains reportable, and three runtime probe notes are retained.
+
+#### Scenario: Probe error/unsupported
+- **WHEN** tmux clipboard probe errors, passthrough support is Unsupported, and Wayland data-control is unavailable
+- **THEN** findings remain empty while six ordered probe notes preserve Error message, Unsupported status, and probe names.
+
+证据：`crates/codegen/pager/src/diagnostics/view_tests.rs` — `unavailable_runtime_evidence_is_honest_and_fail_open`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `unavailable_and_error_probe_evidence_is_retained_without_findings`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `view`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `probe_notes`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ProbeStatus::Error`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ProbeStatus::Unsupported`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `RuntimeEvidence::Unavailable`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.wezterm-kitty`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.control-mode`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `tmux.version`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `tmux.extended-keys`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `tmux.control-mode`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `wayland.data-control`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `server unreachable`。
+
+
+### Requirement: WezTerm and newline fallback require affirmative keyboard evidence
+
+The diagnostics view SHALL leave newline unset and suppress terminal.wezterm-kitty when kitty keyboard evidence is unavailable, including local and SSH WezTerm identified through xtversion. Non-WezTerm terminals SHALL retain the ordinary XtermJs newline fallback with a Recommendation containing Alt+Enter guidance. Available WezTerm evidence SHALL retain the finding and include the backslash-then-Enter remediation note.
+
+#### Scenario: Local WezTerm unknown
+- **WHEN** brand/env are WezTerm and kitty evidence is unavailable
+- **THEN** newline is None and no wezterm-kitty finding is emitted.
+
+#### Scenario: SSH xtversion WezTerm
+- **WHEN** SSH terminal has xtversion WezTerm but kitty evidence is unavailable
+- **THEN** newline is None and no wezterm-kitty fallback is inferred.
+
+#### Scenario: Non-WezTerm
+- **WHEN** VS Code lacks kitty evidence
+- **THEN** newline is XtermJs for VS Code and the newline fallback recommendation mentions Alt+Enter.
+
+#### Scenario: Affirmative WezTerm evidence
+- **WHEN** WezTerm has available runtime evidence
+- **THEN** newline remains None, wezterm-kitty finding exists, and its note names typing backslash then Enter.
+
+证据：`crates/codegen/pager/src/diagnostics/view_tests.rs` — `local_wezterm_without_kitty_evidence_has_no_alt_enter_fallback`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ssh_xtversion_wezterm_without_kitty_evidence_has_no_alt_enter_fallback`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `non_wezterm_without_kitty_evidence_keeps_ordinary_fallback`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `available_wezterm_evidence_retains_finding_and_backslash_note`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `view`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `facts.newline`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `NewlineFact::XtermJs`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `NEWLINE_FALLBACK_ID`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `terminal.wezterm-kitty`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `Alt+Enter`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `type `\` and then press Enter`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `RuntimeEvidence::Unavailable`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `RuntimeEvidence::Available`。
+
+
+### Requirement: Clipboard delivery findings own remediation while compatibility facts remain stable
+
+Clipboard delivery state SHALL be exposed as a fact with a compatible fix string, while the view presents the actionable delivery finding and does not duplicate the legacy `fix` doctor output row. Unverified SSH delivery SHALL recommend wrap/minimal guidance; failed non-native delivery SHALL recommend minimal mode; the finding note SHALL be non-empty.
+
+#### Scenario: Unverified SSH delivery
+- **WHEN** SSH route is unverified on Linux
+- **THEN** delivery is Unverified, the compatibility fix is `grow wrap <ssh command> or /minimal`, and a named finding has a non-empty note.
+
+#### Scenario: Failed delivery
+- **WHEN** a VTE-like terminal has no native/tmux/OSC52 route
+- **THEN** delivery is Failed, the compatibility fix is `/minimal`, and a named finding owns remediation without a legacy fix line.
+
+证据：`crates/codegen/pager/src/diagnostics/view_tests.rs` — `clipboard_delivery_findings_own_remediation_while_fix_fact_stays_compatible`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `view`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ClipboardDelivery::Unverified`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ClipboardDelivery::Failed`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `CLIPBOARD_DELIVERY_UNVERIFIED_ID`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `CLIPBOARD_DELIVERY_UNAVAILABLE_ID`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `facts.clipboard.delivery`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `facts.clipboard.fix`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `format_doctor`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `grow wrap <ssh command> or /minimal`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `/minimal`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `fix          `。
+
+
+### Requirement: Named terminal-specific clipboard caveat recommendations
+
+For SSH sessions, Iterm2 SHALL produce its permission recommendation and VS Code-compatible terminals (VS Code, Cursor, Windsurf, Zed) SHALL produce the VSCODE_SSH_NON_ASCII recommendation with the requested guidance. Ghostty SHALL not receive that VS Code-specific finding.
+
+#### Scenario: Iterm2 SSH
+- **WHEN** brand is Iterm2 over SSH
+- **THEN** the Iterm2 permission finding is a Recommendation containing Settings guidance.
+
+#### Scenario: VS Code family SSH
+- **WHEN** brand is VS Code, Cursor, Windsurf, or Zed over SSH
+- **THEN** the shared VSCODE_SSH_NON_ASCII finding is a Recommendation containing /minimal guidance.
+
+#### Scenario: Ghostty SSH
+- **WHEN** brand is Ghostty over SSH
+- **THEN** the VS Code-specific finding is absent.
+
+证据：`crates/codegen/pager/src/diagnostics/view_tests.rs` — `iterm2_and_vscode_clipboard_caveats_are_named_recommendations`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `view`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `ITERM2_CLIPBOARD_PERMISSION_ID`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `VSCODE_SSH_NON_ASCII_ID`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `FindingDisposition::Recommendation`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `Settings`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `/minimal`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `TerminalName::Iterm2`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `TerminalName::VsCode`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `TerminalName::Cursor`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `TerminalName::Windsurf`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `TerminalName::Zed`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `TerminalName::Ghostty`。
+
+
+### Requirement: Keyboard fact and doctor formatter honor the snapshot host
+
+The diagnostics view and format_doctor SHALL use the HostOs carried by the DiagnosticSnapshot rather than the process host: MacOS snapshots retain a keyboard fact and mark the formatted report with OS rescue active, while non-MacOS snapshots omit the keyboard row and its marker.
+
+#### Scenario: MacOS snapshot host
+- **WHEN** snapshot_host is Macos
+- **THEN** keyboard.fact.os equals Macos and formatted output contains `(OS rescue active)`.
+
+#### Scenario: Non-MacOS snapshot host
+- **WHEN** snapshot_host is Linux
+- **THEN** keyboard facts are absent and formatted output contains no keyboard row.
+
+证据：`crates/codegen/pager/src/diagnostics/view_tests.rs` — `keyboard_fact_and_formatter_use_snapshot_host`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `snapshot_for_host`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `view`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `format_doctor`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `facts.keyboard`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `keyboard.os`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `HostOs::Macos`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `HostOs::Linux`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `OS rescue active`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `keyboard     `。

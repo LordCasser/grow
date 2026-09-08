@@ -3840,7 +3840,21 @@
       "Budget truncation discovery with hidden-thinking transparency",
       "Verb run layout projection and gap ownership",
       "Truncation layout projection and collapse header counts",
-      "Single projection writer for fold flags and layout consequences"
+      "Single projection writer for fold flags and layout consequences",
+      "根dispatch SHALL 在本地回合短暂Idle但共享队列仍有条目时把新prompt路由到服务器并追加乐观队列回显；rename SHALL 更新本地display_name；ConfirmResetSetting 的 Reset SHALL 恢复Settings弹窗并递归发出对应类型setter及PersistSetting。",
+      "状态入口 SHALL 对欢迎页、minimal和完整Agent视图执行不同的Usage/Context/SessionInfo路由：无active Agent的ShowUsage静默无效；minimal保留单一scrollback-intent fetch且不打开modal；完整视图打开Usage modal、激活请求tab并同时请求三类数据。",
+      "minimal更新通知 SHALL 在存在active Agent时提交一个系统scrollback block；无Agent时安全无操作。OpenTutorial SHALL 无effects地在非minimal应用层打开/关闭overlay。",
+      "Usage modal异步结果 SHALL 以open epoch和session identity保护当前modal，丢弃关闭重开后的旧结果及错误session结果；有效结果只填modal tab，modal内容不得写入transcript，失败写入当前tab Failed状态。",
+      "minimal模式下nonce=0的SessionInfo、ContextInfo和SessionUsage结果 SHALL 继续投影为各自scrollback block，而非modal数据。",
+      "CopyUsageModalValue SHALL 在没有匹配打开的Usage modal时无操作，不产生clipboard effect。",
+      "Diagnostic snapshot fixture composition and runtime evidence mapping",
+      "Stable warning category identifiers",
+      "Stable finding identities, dispositions, facts, and automatic remediation commands",
+      "Unavailable and error probe evidence remains honest and fail-open",
+      "WezTerm and newline fallback require affirmative keyboard evidence",
+      "Clipboard delivery findings own remediation while compatibility facts remain stable",
+      "Named terminal-specific clipboard caveat recommendations",
+      "Keyboard fact and doctor formatter honor the snapshot host"
     ],
     "reviewed_files": [
       {
@@ -6026,6 +6040,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/state/groups.rs",
         "sha256": "79e65b4d396dec752c8d7a59dd59dbe04d7479341ff47538a6b540be2b7098c6"
+      },
+      {
+        "path": "crates/codegen/pager/src/diagnostics/doctor_format_tests.rs",
+        "sha256": "020f794e3106e9a9695dc5e8ebd93d1fff2b350ef09f366ef9237dbe16ad78b4"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+        "sha256": "63c48ce337a0d6ec9a42f9b9193210fc9e8fb789fb9c15a68546d2a95766e82a"
+      },
+      {
+        "path": "crates/codegen/pager/src/diagnostics/view_tests.rs",
+        "sha256": "7dead30c2746cc3d020e558946fc15fb050d997e6644d8e86ca5db265ea65cd7"
       }
     ],
     "review": "reviews/pager.md"
