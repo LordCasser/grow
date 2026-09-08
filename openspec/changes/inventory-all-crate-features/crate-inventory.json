@@ -2473,6 +2473,8 @@
       "Agent transient toast and sticky status lifecycle",
       "AgentView SHALL clear ephemeral permission, question, Plan approval, cancel-turn, and descendant interaction state when a transport is replayed or a terminal child session disappears. Permissions removed during cleanup SHALL receive a cancelled response, centralized queue transitions SHALL be resolved when the front changes, question/approval prompts SHALL be restored, and Plan approval viewer/comment state SHALL be dropped.",
       "AgentView SHALL keep runtime session facts synchronized with ephemeral presentation containers. Permission queue mutations SHALL update pending_permission_count, question replacement/take SHALL update question_pending, and replacement paths SHALL derive facts from the complete resulting queue/view rather than incremental assumptions.",
+      "AgentView lazy Mermaid request and cache-miss lifecycle",
+      "AgentView pending action deduplication and completion reduction",
       "Allocator release hook installation and trace attribution",
       "Async view shared wake notification",
       "Background work watcher count projection",
@@ -2492,6 +2494,7 @@
       "Default actions adapt to screen and terminal",
       "Default and fork model setters use different catalogs",
       "Desktop notification protocol selection and raw stderr emission",
+      "Disabled follow SHALL ignore constructor follow, G/End one-past, overscroll, and toggle requests while selecting the last item normally; disabled wrap SHALL leave w unconsumed.",
       "Dispatch root and child view lookup boundaries",
       "Doctor CLI report collection fix preview confirmation and post verification",
       "Doctor JSON schema facts nullable values and complete probe notes",
@@ -2522,6 +2525,12 @@
       "In process ACP worker bootstrap watchers and bounded shutdown join",
       "Input diagnostic ring retention and snapshot sanitization",
       "Leader bridge channel swap outbound stale drop and cancellation",
+      "ListPane input modes SHALL expose stable prompts and map Search/Filter to their corresponding match modes; goto-line parsing SHALL accept clamped single numbers and ranges, treat an incomplete N- as a single jump, reject invalid text, and enforce start <= end.",
+      "ListPane input-bar state SHALL expose mode-dependent bottom-bar sizing, textarea text/cursor rendering, comment multiline capacity, hardware cursor coordinates, and expiring copy-toast state.",
+      "ListPane keyboard handling SHALL consume j/k, arrows, Ctrl-j/k, Ctrl-d/u, PageUp/PageDown, g/G, Home/End, z, and enabled w according to pane state; viewport scrolling pins the selected item screen row and carries leftover movement past clamped viewport edges to the nearest selectable cursor.",
+      "ListPane mouse handling SHALL prioritize scrollbar clicks/drags over content selection, map content rows to virtual item coordinates, route wheel events over the scrollbar to proportional movement, and release drag state on mouse-up.",
+      "ListPaneState SHALL clamp scrolling to content and viewport, support fixed-height NoWrap and variable-height Wrap layout, expose visible ranges/skip rows, keep empty or fitting lists at offset zero, center selected items with clamping, and preserve stable positions across append and prepare cycles.",
+      "ListPaneState SHALL own scroll/selection/layout/matcher/input/clipboard state while borrowing items only during layout and actions; constructors SHALL apply the requested wrap/follow state subject to configuration, and public accessors SHALL expose stable-ID selection, visible-to-physical mapping, layout metrics, input state, and rendering flags.",
       "Local combined dequeue payload projection",
       "Local draft identity validation and durable store operations",
       "Local draft runtime capture recovery and RPC ownership transfer",
@@ -2531,6 +2540,14 @@
       "Memory CLI clear scopes confirmation and partial failure",
       "Memory trace startup environment and threshold dump reporting",
       "Memory trace threshold hysteresis and JSONL rotation accounting",
+      "Mermaid cache hit validation and atomic PNG persistence",
+      "Mermaid child command argument contract",
+      "Mermaid child containment watchdog and process backstops",
+      "Mermaid child stdin limit and render-to-file core",
+      "Mermaid runtime reset and late-result isolation",
+      "Mermaid source-size and render-outcome gating",
+      "Mermaid subprocess dispatch and outcome mapping",
+      "Mermaid worker queue coalescing and autonomous completion",
       "Messages assistant frame content and response identity projection",
       "Messages client tool result grouping and terminal reconciliation",
       "Messages deferred initialization and command metadata retention",
@@ -3325,6 +3342,7 @@
       "Queued edit entry focus lock and draft restoration",
       "Queued edit save payload and hold ordering",
       "Queued follow up send now tip and acceptance",
+      "Responsive Mermaid render sizing and quality parameters",
       "Resume target pinning and selected profile retention",
       "Resume title matching and ambiguity reporting",
       "Reusable smart case text matching and sorted position wrap navigation",
@@ -3332,7 +3350,10 @@
       "Running turn status timers and controls",
       "Scroll setting clamps cache rebuild and unset rollback loss",
       "Scrollback activity statistics aggregation and display helpers",
+      "Selection SHALL be stored by stable item ID, resolve to the current physical/visible index after mutations, auto-select the first selectable item in NAV, skip separators/non-selectable rows, clear or replace removed selections, and select via visible index or y hit only when selectable.",
+      "Selection navigation SHALL not panic when the item slice is empty while layout metadata is stale, small viewports SHALL keep the selected item visible through repeated prepare cycles, and list input paste SHALL target only the active input bar, normalize CRLF for search, preserve comment newlines, and reject paste when closed.",
       "Server turn adoption echo and rewind projection",
+      "Session Mermaid cache sweep and disk cap",
       "Session startup materialization and local miss provenance",
       "Session usage ledger display and cost absence",
       "Sessions CLI list search and deletion dispatch",
@@ -3372,6 +3393,7 @@
       "Simple input mode reconciliation and contextual hint overrides",
       "Sleep inhibition platform acquisition failure latch and release",
       "Small screen and SSH startup tip evaluation",
+      "Source-hash rendering indicator across live layout changes",
       "Startup setting default drift and width clamp",
       "Startup warning banner selection and diagnostic action construction",
       "Status auxiliary surface dispatch admission",
@@ -3384,6 +3406,7 @@
       "The active permission view SHALL own keyboard input. FollowupInput SHALL support Esc back to options, Ctrl-C cancellation, multiline Enter routing, submit-to-PermissionFollowup, and prompt editing. Options SHALL support Ctrl-F argument expansion, Tab to scrollback, j/k or arrows, Enter and 1-9 option actions, RejectOnce text entry into followup mode, and left/right scope adjustment for MCP or Bash permissions.",
       "The interaction module SHALL preserve the focused regression behaviors pinned by its 30 inline tests: Plan action traversal and partial answers, cancel/Goal mouse-key semantics, permission chrome and scope behavior, fixed-choice no-freeform gating, and paste-chip round trips. These tests are source evidence for interaction state transitions and do not establish compiled, terminal, ACP transport, or downstream action execution behavior.",
       "The question modal SHALL expose Navigation, InputMode, and PlanAction focus modes. Navigation SHALL support bounded cursor movement, page/half jumps, option toggles/selections, option-key shortcuts, freeform activation, question tab cycling, clipboard copy of option text, fullscreen, cancellation/skip and pane transfer. InputMode SHALL route prompt editing and Enter/newline, save per-question freeform state on exit, and advance or submit. PlanAction SHALL select ChatAboutThis or SkipInterview explicitly with arrows/Enter and return to navigation on Esc.",
+      "Theme and quality separation in Mermaid cache keys",
       "Theme commit and preview state separation",
       "Thinking and tool grouping setting invalidation scope",
       "Trace CLI snapshot archive and local output",
@@ -3408,6 +3431,9 @@
       "Usage modal session and context field projection",
       "When a ProjectSelect question is open, AgentView SHALL temporarily restore the stashed composer prompt and forward the event to the normal input router so project-picker backing input edits the composer rather than the picker path field. The question view SHALL be restashed after routing; non-project questions SHALL be restored unchanged and return no outcome.",
       "When another client resolves an interaction, AgentView SHALL dismiss only the matching question, Plan approval, or permission identified by source session and tool call. Question dismissal restores the prompt and cleans view state; Plan approval sends stale cancel, restores prompt, resets comment/viewer state; removing the front permission resolves the queue transition. Nonmatching or absent interactions SHALL be a silent false result.",
+      "When copy is enabled, y/copy_selected SHALL copy the selected item or visual range through the injected ClipboardProvider and expose a copy toast window; no selection, follow mode, empty/filtered lists, or disabled copy SHALL be no-ops.",
+      "When enabled, follow mode SHALL hide selection and track the bottom; one-past j/Ctrl-d/PageDown or bottom wheel overscroll enters follow, upward/manual movement exits it, new items preserve edge state but can become selectable, and prepare_layout auto-scrolls follow to the new bottom.",
+      "When visual selection is enabled, v/Shift-j/Shift-k SHALL enter and extend an inclusive stable-ID range, Esc clears it, search clears it, and y copies the range in item order before leaving visual mode; disabled visual selection leaves v unconsumed.",
       "Word selection tip acceptance and optimistic setting update",
       "Worktree CLI ACP dispatch envelope and partial removal outcomes",
       "Worktree display formatting and best effort logical size scan",
@@ -3419,7 +3445,9 @@
       "Wrapped PTY startup and single writer channel",
       "Wrapped mode tracking and deterministic restore byte order",
       "Wrapped terminal restore and termination signal boundaries",
-      "dashboard_answer_question SHALL answer only the active external question. A valid option index selects that option; a nonempty freeform string selects Other and clears a single-choice option; empty Other input, missing question view, or local questions SHALL be NoOp. Nonfinal answers advance the active tab, while the final answer sends the accepted response, restores the stashed prompt, clears question state, and returns Submitted."
+      "dashboard_answer_question SHALL answer only the active external question. A valid option index selects that option; a nonempty freeform string selects Other and clears a single-choice option; empty Other input, missing question view, or local questions SHALL be NoOp. Nonfinal answers advance the active tab, while the final answer sends the accepted response, restores the stashed prompt, clears question state, and returns Submitted.",
+      "prepare_layout SHALL reuse a clean cache, extend heights incrementally on appends, rebuild on width/wrap/filter changes or shrink/eviction, refilter stale physical indices, and preserve stable selection through item mutations.",
+      "toggle_follow SHALL enter bottom-follow with no selection when NAV is active and exit to a valid selection when follow is active; follow-disabled configurations make it a no-op."
     ],
     "reviewed_files": [
       {
@@ -3645,6 +3673,10 @@
       {
         "path": "crates/codegen/pager/src/app/agent_view/links.rs",
         "sha256": "c00af72e88bc900872be8670e7d844e46fc9213d50b79572d534810f3cae75c3"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/mermaid_worker.rs",
+        "sha256": "ea1e1725a8def3033bf199660ea0f2d423b6ebd1b144f37311e10486315b4bfe"
       },
       {
         "path": "crates/codegen/pager/src/app/agent_view/mod.rs",
@@ -4631,6 +4663,10 @@
         "sha256": "e03ac62f0c5f09f0a5d4827c24efb164644fa3558447b36079e881335c685fe1"
       },
       {
+        "path": "crates/codegen/pager/src/views/dashboard/row.rs",
+        "sha256": "3467371dcf28ae656ecd7317db2023477f7286e73271f5c0450a037fd1e57c5b"
+      },
+      {
         "path": "crates/codegen/pager/src/views/dashboard/state.rs",
         "sha256": "d7fdd3669a3d893c7de042abeb43ea3944249eefaaa58626608b05e4bb7926d4"
       },
@@ -4645,6 +4681,10 @@
       {
         "path": "crates/codegen/pager/src/views/file_search/mod.rs",
         "sha256": "55b60c8f7c943e93cf2c87bd56a04d6e3337b65b39053fd3fa9aea83635f2307"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/list_pane/state/methods.rs",
+        "sha256": "2eb3dea31fb3330d31b10340cc26122e220bfaca0481d680b41f510566d57b24"
       },
       {
         "path": "crates/codegen/pager/src/views/list_pane/state/mod.rs",

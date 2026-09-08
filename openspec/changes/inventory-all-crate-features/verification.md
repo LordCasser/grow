@@ -3696,3 +3696,9 @@ OpenSpec strict复核发现三项agent_view新增契约缺少RFC 2119关键词�
 合并Pager `src/app/root/dispatch/tests/router.rs`：2452行、91项内联测试、SHA-256匹配；新增15条契约，pager reviewed 文件增至470个。未运行Cargo或动态dispatch。
 
 合并Pager `src/scrollback/state/nav.rs`：2426行、39项内联测试、SHA-256匹配；新增11条契约，pager reviewed 文件增至471个。未运行Cargo或动态导航。
+
+合并Pager `src/app/agent_view/mermaid_worker.rs`：2372行、37项内联测试、SHA-256匹配；新增14条契约，pager reviewed 文件增至472个。未运行Cargo或动态Mermaid渲染。
+
+合并Pager `src/views/dashboard/row.rs`：2131行、43项内联测试、SHA-256匹配；新增6条契约，pager reviewed 文件增至473个。未运行Cargo或动态dashboard渲染。
+
+合并Pager `src/views/list_pane/state/methods.rs`：2290行、SHA-256匹配；补齐该文件功能契约，pager reviewed 文件增至474个。未运行Cargo或动态列表交互。

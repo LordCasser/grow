@@ -748,3 +748,15 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager nav混合滚动、可见性和wrapped-line映射
 
 `scrollback/state/nav.rs`同时处理turn/response导航、分页滚动、follow/page-flip、sticky header、可见性、搜索reveal、折叠展开和wrapped-line映射。11条静态契约已登记，后续按导航状态、布局映射和滚动策略拆分并补真实终端验证；本轮不改导航行为。
+
+## 待拆分：Pager Mermaid worker混合线程、缓存和渲染回退
+
+`app/agent_view/mermaid_worker.rs`同时处理Mermaid后台线程、主题/尺寸、状态轮询、缓存、渲染消息和失败回退。14条静态契约已登记，后续需按后台任务生命周期、缓存一致性和渲染适配拆分并补真实渲染验证；本轮不改worker行为。
+
+## 待拆分：Pager dashboard row混合状态投影和渲染字段
+
+`views/dashboard/row.rs`同时构造dashboard行模型、状态/可见性、身份和渲染字段投影。6条静态契约已登记，后续需按状态模型、身份索引和渲染适配拆分并补真实dashboard验证；本轮不改行模型。
+
+## 待拆分：Pager list pane methods耦合状态变更与布局失效
+
+`views/list_pane/state/methods.rs`集中列表状态方法、选择/过滤、布局缓存、滚动和输入操作。静态事实已登记，后续需按状态变更、布局失效和输入动作拆分并补真实列表交互验证；本轮不改实现。

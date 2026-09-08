@@ -13388,3 +13388,537 @@ The module SHALL preserve the 39 inline regression behaviors for turn/response a
 - **THEN** page delta subtracts only a header that the renderer actually paints.
 
 证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `tests module`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `test_streaming_response_real_path`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `test_response_navigation_walks_anchor_offsets`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_up_selects_top_of_viewport`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_down_selects_bottom_of_viewport`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_up_then_select_next_does_not_teleport_to_old_selection`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_rebuilds_once_when_expanding_collapsed_entry`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_rebuilds_when_heights_are_dirty`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_down_does_not_skip_lines_behind_sticky_header`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_delta_ignores_header_when_sticky_headers_disabled`。
+### Requirement: Mermaid worker queue coalescing and autonomous completion
+The Mermaid worker SHALL run independently from the UI thread, coalesce queued jobs by MermaidCacheKey while retaining the newest job for each key, render distinct keys in FIFO order, send a coarse Ready or Failed result, wake the async view after each result, and terminate cleanly when its input channel closes.
+
+#### Scenario: Coalescing
+- **WHEN** multiple jobs for one cache key are queued before the worker drains them
+- **THEN** only the newest job for that key is rendered and the queue retains one entry per distinct key.
+
+#### Scenario: Autonomous work
+- **WHEN** a job is sent to the worker
+- **THEN** a result arrives without a second UI event and Ready reports the persisted output path.
+
+#### Scenario: Channel shutdown
+- **WHEN** the job sender is dropped
+- **THEN** the worker exits without publishing work after the receiver is gone.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `spawn_worker`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `drain_coalesced`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `MermaidJob`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `MermaidOutcome`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `MermaidResult`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `drain_coalesced_keeps_latest_per_key`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `worker_autonomously_produces_ready`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `worker_second_render_is_a_disk_hit`。
+
+### Requirement: Mermaid cache hit validation and atomic PNG persistence
+A Mermaid cache entry SHALL count as a hit only when its path is a non-symlink file containing decodable image data; fresh PNG bytes SHALL be written through a sibling temporary file and renamed atomically, and any parent creation, write, or rename failure SHALL yield no usable artifact.
+
+#### Scenario: Cache validation
+- **WHEN** the target is missing, corrupt, or a symlink
+- **THEN** the worker treats it as a miss and is allowed to render without following the link.
+
+#### Scenario: Cache hit
+- **WHEN** the target is a decodable regular PNG
+- **THEN** render_job returns Ready without invoking the render function and reports no fresh write.
+
+#### Scenario: Atomic persistence
+- **WHEN** a render produces PNG bytes and its parent is writable
+- **THEN** the parent is created, a temporary file is written, and the final path is atomically replaced.
+
+#### Scenario: Write failure
+- **WHEN** the output parent cannot be created or the write/rename fails
+- **THEN** the operation returns Failed and no output path is presented as ready.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `read_cached_png`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `write_png_atomic`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_job`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `read_cached_png_accepts_valid_rejects_corrupt_symlink_missing`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_job_disk_hit_skips_render`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_job_write_failure_is_fatal_without_a_png`。
+
+### Requirement: Mermaid source-size and render-outcome gating
+render_job SHALL reject a source larger than RenderLimits::max_source_bytes before invoking a renderer, map renderer errors to Failed without writing a PNG, and return Ready plus wrote=true only for a successful fresh artifact.
+
+#### Scenario: Oversized source
+- **WHEN** the Mermaid source exceeds the configured byte limit
+- **THEN** the renderer is not called, the outcome is Failed, and no PNG is written.
+
+#### Scenario: Renderer failure
+- **WHEN** the render step times out, exits, or reports an error
+- **THEN** the outcome is Failed and wrote is false.
+
+#### Scenario: Successful render
+- **WHEN** the render step writes a valid artifact
+- **THEN** the outcome is Ready with its output path and wrote is true.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_job`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `RenderLimits`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `worker_oversized_source_fails_without_writing`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_job_oversized_source_skips_render`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_job_render_failure_is_failed`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_job_success_reports_ready_and_wrote`。
+
+### Requirement: Session Mermaid cache sweep and disk cap
+sweep_session_cache SHALL be safe on a missing directory, remove orphaned `*.png.tmp` and truncated/corrupt PNG entries, ignore non-PNG files, preserve valid PNGs while total size is within the configured cap, and evict oldest PNGs until the cap is met when it is exceeded.
+
+#### Scenario: Missing cache
+- **WHEN** the session directory does not exist
+- **THEN** the sweep is a no-op and does not create it.
+
+#### Scenario: Cleanup
+- **WHEN** temporary or truncated PNG artifacts are present
+- **THEN** those artifacts are removed while unrelated non-PNG files remain.
+
+#### Scenario: Capacity
+- **WHEN** PNG bytes exceed max_bytes
+- **THEN** oldest entries are deleted until total PNG bytes are at or below the cap.
+
+#### Scenario: Under cap
+- **WHEN** PNG bytes are within max_bytes
+- **THEN** all existing PNG entries are retained.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `sweep_session_cache`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `SESSION_DISK_CAP_BYTES`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `SWEEP_EVERY_N_WRITES`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `sweep_enforces_cap_and_drops_corrupt_keeping_non_png`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `sweep_under_cap_keeps_everything`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `sweep_missing_dir_is_noop`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `sweep_reclaims_orphaned_png_tmp`。
+
+### Requirement: Responsive Mermaid render sizing and quality parameters
+The render target SHALL derive representative content columns from terminal width after subtracting chrome and timestamp space with a minimum floor, convert columns to oversampled pixels, clamp terminal widths to the configured range, and select bounded terminal or open-viewer RenderParams including theme and surface background.
+
+#### Scenario: Representative width
+- **WHEN** a terminal viewport is narrow or wide
+- **THEN** content columns never underflow the floor and reserve the fixed chrome/timestamp columns.
+
+#### Scenario: Pixel target
+- **WHEN** content columns are converted to a render width
+- **THEN** cell width and oversampling are applied and the result is clamped to MIN_TARGET_WIDTH_PX..MAX_TARGET_WIDTH_PX.
+
+#### Scenario: Quality tier
+- **WHEN** terminal or open rendering is requested
+- **THEN** terminal uses the target width and bounded height while open uses the open viewer width/height limits and the selected theme.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `representative_content_cols`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `target_width_px`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_params_for`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `MermaidRenderQuality`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `target_width_px_is_clamped`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `representative_cols_subtracts_chrome_and_timestamp`。
+
+### Requirement: Theme and quality separation in Mermaid cache keys
+Mermaid render jobs SHALL carry source, theme, width, quality, and output key information such that different themes or quality/width variants resolve to distinct cache artifacts; an open-viewer request SHALL use the open quality tier.
+
+#### Scenario: Theme separation
+- **WHEN** the same source is rendered under dark and light themes
+- **THEN** the derived cache filenames and persisted PNG paths differ.
+
+#### Scenario: Quality selection
+- **WHEN** an affordance requests Open output
+- **THEN** the render target derives an Open-quality key and uses the open viewer bounds.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `MermaidJob`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `MermaidCacheKey`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_render_target`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `MermaidRenderQuality`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `per_theme_renders_land_in_distinct_files`。
+
+### Requirement: Mermaid child command argument contract
+The hidden Mermaid render child SHALL require `--out`, accept only light/dark themes, terminal/open quality aliases, decimal `--width`, and optional `--deadline-ms`, apply documented defaults, reject unknown/missing/malformed/non-UTF-8 arguments, and never silently coerce invalid values.
+
+#### Scenario: Valid invocation
+- **WHEN** well-formed output, theme, quality, width, and deadline flags are supplied
+- **THEN** RenderArgs contains the exact parsed path, booleans, enum, width, and duration.
+
+#### Scenario: Defaults
+- **WHEN** width, quality, or deadline is omitted
+- **THEN** width defaults to zero, quality to terminal, and deadline to RENDER_TIMEOUT.
+
+#### Scenario: Malformed argv
+- **WHEN** a required value is missing, a value is non-numeric/unknown, or a flag is unknown/non-UTF-8
+- **THEN** parsing returns an error without spawning a child or touching stdin.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `parse_render_args`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `parse_u32_arg`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `parse_millis_arg`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `RenderArgs`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `parse_render_args_accepts_valid_and_rejects_malformed`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `parse_render_args_rejects_non_utf8_flag`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `parse_render_args_handles_deadline_ms`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `parse_u32_arg_validates`。
+
+### Requirement: Mermaid child stdin limit and render-to-file core
+The hidden child SHALL read UTF-8 Mermaid source through a bounded stdin buffer, reject input beyond RenderLimits::max_source_bytes or invalid UTF-8, render with the selected parameters, and write a decodable PNG; empty/unrenderable source SHALL fail without leaving a PNG.
+
+#### Scenario: Child rendering
+- **WHEN** bounded valid UTF-8 source is received by render_child
+- **THEN** the shared render core produces a decodable PNG at the requested output path.
+
+#### Scenario: Input rejection
+- **WHEN** stdin exceeds the source cap or is invalid UTF-8
+- **THEN** the child returns an error and does not render an unbounded payload.
+
+#### Scenario: Empty source
+- **WHEN** stdin is empty or the source cannot be rendered
+- **THEN** render_and_write returns an error and no PNG is created.
+
+#### Scenario: Engine path
+- **WHEN** a cyclic flowchart is rendered
+- **THEN** the core returns nonzero dimensions and decodable PNG bytes without panic.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_child`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `read_stdin_capped`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_and_write`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_source_to_png`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_source_to_png_handles_cyclic_login_flow`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_and_write_produces_decodable_png`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_and_write_empty_source_fails_without_png`。
+
+### Requirement: Mermaid subprocess dispatch and outcome mapping
+Production Mermaid rendering SHALL re-exec the current executable through the exact `__mermaid-render` argv[1] gate, pass source through stdin with output/theme/quality/width/deadline flags, suppress child terminal streams, enforce a wall-clock timeout, and map spawn, wait, timeout, missing output, ordinary child failure, signal crash, and watchdog exit into stable failure categories.
+
+#### Scenario: Dispatch gate
+- **WHEN** the hidden subcommand appears at argv[1]
+- **THEN** the process is routed to render_child; the same token elsewhere does not trigger child mode.
+
+#### Scenario: Successful child
+- **WHEN** a child drains stdin and writes a decodable PNG before the deadline
+- **THEN** run_render_command returns success.
+
+#### Scenario: Missing output
+- **WHEN** the child exits zero but writes no decodable PNG
+- **THEN** the outcome is `no_output`.
+
+#### Scenario: Failure mapping
+- **WHEN** spawn, wait, timeout, nonzero, signal, or watchdog conditions occur
+- **THEN** each condition maps to its documented category without falsely reporting Ready.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `render_via_subprocess`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `run_render_command`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `map_run_result`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `maybe_run_render_subprocess`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `is_render_subcommand`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `SubprocessError`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `is_render_subcommand_matches_only_argv1`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `map_run_result_covers_every_outcome`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `map_run_result_distinguishes_crash_watchdog_from_render_error`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `run_render_command_maps_stub_child_outcomes`。
+
+### Requirement: Mermaid child containment watchdog and process backstops
+The child process SHALL install containment backstops before rendering: its watchdog deadline SHALL trail the forwarded parent budget by CHILD_WATCHDOG_SLACK, watchdog exit SHALL use CHILD_WATCHDOG_EXIT_CODE, Linux SHALL cap child address space and request parent-death termination, and parent timeout/containment events SHALL remain distinguishable in the result mapping.
+
+#### Scenario: Watchdog budget
+- **WHEN** a parent deadline is forwarded to the child
+- **THEN** the self-watchdog is strictly later than the parent budget by the fixed slack.
+
+#### Scenario: Containment
+- **WHEN** the child starts on a supported platform
+- **THEN** address-space and parent-death protections are installed before engine work where available.
+
+#### Scenario: Classification
+- **WHEN** the child is signal-killed, watchdog-exits, or exits with ordinary render error
+- **THEN** the parent maps these to child_crashed, child_watchdog, or child_error respectively.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `install_child_backstops`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `child_watchdog_deadline`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `cap_child_address_space`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `install_parent_death_signal`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `CHILD_WATCHDOG_EXIT_CODE`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `child_watchdog_deadline_trails_the_forwarded_budget`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `map_run_result_distinguishes_crash_watchdog_from_render_error`。
+
+### Requirement: AgentView lazy Mermaid request and cache-miss lifecycle
+AgentView SHALL derive a render target from the live theme, representative width, source, and Open quality; on a cache miss it SHALL lazily create the runtime, dispatch one MermaidJob, record the requested action, trigger the per-session sweep, and expose a transient Rendering state, while a disk hit SHALL execute the action immediately without starting a worker.
+
+#### Scenario: Cache miss
+- **WHEN** an Open or CopyPath request has a session/cwd-backed output path but no valid cache
+- **THEN** a job is queued with the click-time key, pending action is recorded, and live motion plus a Rendering toast are observable.
+
+#### Scenario: Cache hit
+- **WHEN** the live target is a valid PNG
+- **THEN** the requested action executes immediately, no pending state remains, and no worker runtime is created.
+
+#### Scenario: Unavailable session
+- **WHEN** no session/cwd-backed cache path can be derived
+- **THEN** the request reports not-ready/toast and does not claim a render completion.
+
+#### Scenario: Cache maintenance
+- **WHEN** the runtime is first used
+- **THEN** the session sweep is scheduled once, preferring spawn_blocking under Tokio and inline otherwise.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `request_mermaid_render`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_render_target`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_out_path`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `ensure_mermaid_runtime`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `maybe_sweep_session_cache`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `MermaidRuntime::new`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_view_miss_dispatches_then_settles`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_view_disk_hit_runs_action_without_dispatch`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_view_pending_dedup_wins_over_disk_hit_race`。
+
+### Requirement: AgentView pending action deduplication and completion reduction
+AgentView SHALL deduplicate an identical key/action while allowing a different action for the same key, retain all actions awaiting one result, execute every retained action when a Ready result arrives, remove them when polling, and convert Failed results into a user-facing render error while reporting whether state changed.
+
+#### Scenario: Deduplication
+- **WHEN** the same key/action is requested while pending
+- **THEN** the request does not enqueue a second action or double-fire after completion.
+
+#### Scenario: Multiple actions
+- **WHEN** Open and CopyPath await the same key
+- **THEN** polling removes both and executes them in insertion order.
+
+#### Scenario: Ready result
+- **WHEN** the worker reports a usable path
+- **THEN** the selected action opens or copies the path and the pending state settles.
+
+#### Scenario: Failed result
+- **WHEN** the worker reports Failed
+- **THEN** all actions for that key are removed and a Could not render diagram toast is shown.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `has_pending`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `take_pending_for`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `poll_mermaid_results`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `complete_mermaid_action`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `MermaidClickAction`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `take_pending_for_takes_all_matching_and_leaves_the_rest`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `runtime_has_pending_dedupes_by_key_and_action`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_view_pending_dedup_wins_over_disk_hit_race`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_view_failed_render_shows_error_toast`。
+
+### Requirement: Mermaid runtime reset and late-result isolation
+Beginning a replay/session reset SHALL drop the MermaidRuntime, its receiver, and pending actions so completions from the old session cannot execute actions or mutate the new view; live motion SHALL be true exactly while pending actions remain.
+
+#### Scenario: Reset
+- **WHEN** a replay window begins while a render is pending
+- **THEN** the runtime is removed and a later old-session send has no live receiver/action.
+
+#### Scenario: Liveness
+- **WHEN** pending actions exist or have all been consumed
+- **THEN** mermaid_has_live_motion returns true before settlement and false after completion.
+
+#### Scenario: Wake/reduce
+- **WHEN** the worker publishes a result
+- **THEN** apply_mermaid_completions polls the reducer and returns whether visible state changed.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `reset_mermaid_runtime`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `begin_replay_window`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_has_live_motion`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `apply_mermaid_completions`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `poll_mermaid_results`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `replay_detaches_pending_actions_and_late_results`。
+
+### Requirement: Source-hash rendering indicator across live layout changes
+The transient Mermaid rendering indicator SHALL match pending work by source_hash rather than the full theme/width cache key, so changing theme or width during an in-flight render preserves the indicator for the same source and never marks another source as rendering.
+
+#### Scenario: Theme/width change
+- **WHEN** the pending key was derived under one theme/width and the live view derives another
+- **THEN** the same source remains marked rendering because source_hash is stable across cache variants.
+
+#### Scenario: Different source
+- **WHEN** a source hash has no pending action
+- **THEN** the rendering indicator is false.
+
+证据：`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_is_rendering`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `source_hash`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — `mermaid_is_rendering_matches_by_source_across_theme_width_change`。
+### Requirement: ListPaneState SHALL own scroll/selection/layout/matcher/input/clipboard state while borrowing items only during layout and actions; constructors SHALL apply the requested wrap/follow state subject to configuration, and public accessors SHALL expose stable-ID selection, visible-to-physical mapping, layout metrics, input state, and rendering flags.
+new and new_with_config SHALL initialize an empty, dirty layout and in-memory input/clipboard state; follow SHALL be enabled only when requested and allowed by config. Accessors SHALL report cached geometry and stable selection without retaining item slices; select_by_id SHALL defer index resolution until prepare_layout, and to_physical SHALL use the current filter map when present.
+
+#### Scenario: Construction
+- **WHEN** a pane is created with wrap/follow flags and a config
+- **THEN** state starts empty, layout dirty, and follow is gated by follow_enabled.
+
+#### Scenario: Stable selection
+- **WHEN** a caller sets a stable id before layout
+- **THEN** the id is retained and its visible index is resolved on the next prepare_layout.
+
+#### Scenario: Filtered projection
+- **WHEN** a filter map exists
+- **THEN** visible indices map through the stored physical index map while unfiltered indices remain identity.
+
+#### Scenario: State access
+- **WHEN** a renderer queries metrics or flags
+- **THEN** cached layout, selection, input, scrollbar, search, and highlight-related state are returned without borrowing items.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::new`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::new_with_config`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_offset`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::set_scroll_offset`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::viewport_height`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::selected_index`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::selected_id`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_by_id`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::multi_range`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::copy_range`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::layout`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::wrap_mode`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::matcher`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::to_physical`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::total_height`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::visible_count`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scrollbar_area`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::set_scrollbar_area`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::is_scrollbar_dragging`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::is_search_enabled`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::show_selection_when_unfocused`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::match_count`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::input_mode`。
+
+### Requirement: ListPane input-bar state SHALL expose mode-dependent bottom-bar sizing, textarea text/cursor rendering, comment multiline capacity, hardware cursor coordinates, and expiring copy-toast state.
+bottom_bar_height SHALL reserve one row for search/filter/goto/status and one to five rows for comment input only when the area can retain the list. render_input_textarea SHALL render the textarea, reverse the visible cursor cell, and record its screen position; cursor_position SHALL be unavailable outside an active bar, and maintain SHALL clear an expired toast and report whether redraw is needed.
+
+#### Scenario: Bar sizing
+- **WHEN** a comment contains multiple newlines or another matcher is active
+- **THEN** the bar height is clamped to one through five rows for comments or one row for other modes, and is zero when it cannot fit.
+
+#### Scenario: Cursor rendering
+- **WHEN** an active textarea is rendered into a nonzero area
+- **THEN** the cursor cell is visibly marked and its screen coordinate is available.
+
+#### Scenario: Closed cursor
+- **WHEN** the input bar is closed
+- **THEN** cursor_position returns None.
+
+#### Scenario: Toast expiry
+- **WHEN** maintain is called at or after the copy deadline
+- **THEN** the toast is cleared and maintain returns true; before expiry it returns false.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::bottom_bar_height`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::copy_toast_active`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::copy_toast_deadline`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::maintain`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::input_textarea`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::render_input_textarea`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::cursor_position`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::open_comment_input`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::input_text`。
+
+### Requirement: prepare_layout SHALL reuse a clean cache, extend heights incrementally on appends, rebuild on width/wrap/filter changes or shrink/eviction, refilter stale physical indices, and preserve stable selection through item mutations.
+prepare_layout SHALL reserve the bottom-bar row, cache per-physical-item desired heights, account for scrollbar width in wrap mode, use incremental append updates when safe, and rebuild for width/mode/filter/eviction changes. It SHALL resolve stable IDs and visual ranges after filtering, clear removed selections, auto-select the first selectable NAV item, maintain follow at the tail, apply scroll anchors, and clamp offsets.
+
+#### Scenario: Clean cache
+- **WHEN** layout parameters and item count remain unchanged
+- **THEN** the existing cache remains valid while selection and offset are still resolved/clamped.
+
+#### Scenario: Append/shrink
+- **WHEN** items are appended or evicted
+- **THEN** height cache and visible count update without stale indices, and a selected stable id is retained or cleared if removed.
+
+#### Scenario: Width/filter mutation
+- **WHEN** width, wrap mode, or matcher changes
+- **THEN** layout is rebuilt at the effective width and filtered mapping reflects current items.
+
+#### Scenario: Scrollbar width
+- **WHEN** wrapped content first fits and then overflows
+- **THEN** the layout is recomputed at width minus scrollbar columns so wrapped rows are not truncated.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::prepare_layout`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::set_scroll_anchor`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::invalidate_layout`。
+
+### Requirement: ListPaneState SHALL clamp scrolling to content and viewport, support fixed-height NoWrap and variable-height Wrap layout, expose visible ranges/skip rows, keep empty or fitting lists at offset zero, center selected items with clamping, and preserve stable positions across append and prepare cycles.
+Raw and public scrolling SHALL saturate at valid content bounds; page and half-page movement SHALL use visual lines, visible_range SHALL return item indices overlapping the viewport, first_item_skip_rows SHALL report partial top-row clipping, center_selected SHALL center item midpoints subject to clamping, and scrollbar-oriented proportional movement SHALL select the nearest selectable viewport item.
+
+#### Scenario: Scroll bounds
+- **WHEN** scroll up/down, page, half-page, or empty/fitting content is processed
+- **THEN** offset remains within [0,max] and no-op cases remain stable.
+
+#### Scenario: Layout geometry
+- **WHEN** fixed, wrapped, or variable-height items are prepared
+- **THEN** total height and visible range reflect the selected wrap mode.
+
+#### Scenario: Centering
+- **WHEN** a selected item is centered near the viewport midpoint
+- **THEN** scroll is adjusted and clamped at the top/bottom.
+
+#### Scenario: Proportional scroll
+- **WHEN** a scrollbar interaction requests a line delta or percentage
+- **THEN** the viewport moves proportionally and the nearest selectable center item is selected.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_down_raw`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_up_raw`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_down`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_up`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_and_center`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_percent`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::half_page_down`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::half_page_up`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::page_down`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::page_up`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_lines`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::goto_top`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::goto_bottom`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::center_selected`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::clamp_scroll`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::visible_range`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::first_item_skip_rows`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_nearest_at_y`。
+
+### Requirement: Selection SHALL be stored by stable item ID, resolve to the current physical/visible index after mutations, auto-select the first selectable item in NAV, skip separators/non-selectable rows, clear or replace removed selections, and select via visible index or y hit only when selectable.
+Selection movement and hit testing SHALL traverse visible indices through the filter map, reject out-of-range or non-selectable rows, update both stable ID and visible index, and keep the selected item within the viewport margin. Clearing selection SHALL also clear visual-range state.
+
+#### Scenario: Stable IDs
+- **WHEN** items are inserted, removed, or evicted around a selected row
+- **THEN** the same stable id resolves at its new index or selection is replaced when removed.
+
+#### Scenario: Selectable navigation
+- **WHEN** j/k or click crosses non-selectable items
+- **THEN** selection skips separators and select_at/select_at_y rejects non-selectable rows.
+
+#### Scenario: Filter selection
+- **WHEN** a visible mapping is active
+- **THEN** selection APIs operate on visible indices while stable id resolves to physical item.
+
+#### Scenario: Visibility margin
+- **WHEN** selection moves above or below the viewport
+- **THEN** scroll adjusts with an adaptive margin and remains clamped.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_next`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_prev`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_first`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_last`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_at`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_at_y`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::clear_selection`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::ensure_selected_visible`。
+
+### Requirement: ListPane keyboard handling SHALL consume j/k, arrows, Ctrl-j/k, Ctrl-d/u, PageUp/PageDown, g/G, Home/End, z, and enabled w according to pane state; viewport scrolling pins the selected item screen row and carries leftover movement past clamped viewport edges to the nearest selectable cursor.
+handle_key_event SHALL route normal and active-input-bar navigation, consume only supported keys, and leave unknown or disabled-wrap keys unconsumed. Ctrl-j/k, half-page, full-page, and wheel scrolling SHALL preserve the selected screen row when movement is possible and apply leftover movement at clamped edges while skipping non-selectable rows.
+
+#### Scenario: Navigation keys
+- **WHEN** a supported key is pressed
+- **THEN** selection or viewport changes and the event is consumed; unknown keys return false.
+
+#### Scenario: Screen-y pin
+- **WHEN** viewport scroll occurs with a selection
+- **THEN** selection follows the scroll at the same screen y when possible.
+
+#### Scenario: Clamped half-page
+- **WHEN** the viewport reaches top/bottom before requested movement is exhausted
+- **THEN** remaining movement advances the cursor and skips non-selectable boundaries.
+
+#### Scenario: Input-bar navigation
+- **WHEN** navigation is pressed while an editor is open
+- **THEN** navigation remains available while typing and submit/cancel routing stays mode-specific.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::handle_key_event`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::handle_nav_key`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_keeping_screen_y`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_nearest_at_y`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::half_page_down`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::half_page_up`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::page_down`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::page_up`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_lines`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::goto_top`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::goto_bottom`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::center_selected`。
+
+### Requirement: When enabled, follow mode SHALL hide selection and track the bottom; one-past j/Ctrl-d/PageDown or bottom wheel overscroll enters follow, upward/manual movement exits it, new items preserve edge state but can become selectable, and prepare_layout auto-scrolls follow to the new bottom.
+Follow transitions SHALL clear/materialize selection as appropriate, distinguish first edge contact from the subsequent one-past action, use a bounded overscroll threshold for mouse wheel input, and re-pin the viewport on every follow layout while leaving NAV selection available after exit.
+
+#### Scenario: One-past
+- **WHEN** a downward action reaches the bottom and repeats
+- **THEN** follow engages only on the subsequent edge action.
+
+#### Scenario: Follow lifecycle
+- **WHEN** follow is entered, scrolled upward, or toggled
+- **THEN** selection visibility and follow state transition as specified.
+
+#### Scenario: Streaming append
+- **WHEN** new items arrive while following or at edge
+- **THEN** follow scrolls to bottom or NAV moves into new items without spurious reset.
+
+#### Scenario: Follow disable
+- **WHEN** the data source stops streaming
+- **THEN** disable_follow_permanently clears follow and prevents later edge actions from re-entering it.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_keeping_screen_y`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_lines`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_next`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_prev`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_first`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_last`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::prepare_layout`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::engage_follow`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::exit_follow`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::disable_follow_permanently`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::reset_edge_state`。
+
+### Requirement: Disabled follow SHALL ignore constructor follow, G/End one-past, overscroll, and toggle requests while selecting the last item normally; disabled wrap SHALL leave w unconsumed.
+follow_enabled SHALL gate constructor, explicit toggle, edge engagement, and overscroll behavior; with follow disabled, last-item navigation remains ordinary NAV selection. wrap_toggle_enabled SHALL gate w handling without changing the current wrap mode.
+
+#### Scenario: Follow disabled
+- **WHEN** follow actions reach an edge or toggle is requested
+- **THEN** follow remains false and NAV selection/scrolling remains available.
+
+#### Scenario: Wrap disabled
+- **WHEN** w is pressed with wrap_toggle_enabled false
+- **THEN** the event is not consumed and wrap mode is unchanged.
+
+#### Scenario: Wrap enabled
+- **WHEN** w is pressed with the feature enabled
+- **THEN** cycle_wrap_mode records an anchor and changes between NoWrap and Wrap.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::new_with_config`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_last`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_next`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_lines`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::toggle_follow`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::cycle_wrap_mode`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::set_wrap_mode`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::handle_nav_key`。
+
+### Requirement: toggle_follow SHALL enter bottom-follow with no selection when NAV is active and exit to a valid selection when follow is active; follow-disabled configurations make it a no-op.
+toggle_follow SHALL consult follow_enabled, call engage_follow from NAV, and call exit_follow from FOLLOW so the viewport remains at the tail and a last visible selectable item is materialized on exit.
+
+#### Scenario: Enter follow
+- **WHEN** NAV mode toggles follow
+- **THEN** offset reaches bottom and selection clears.
+
+#### Scenario: Exit follow
+- **WHEN** follow mode toggles again
+- **THEN** NAV resumes with a visible selection when one exists.
+
+#### Scenario: Disabled toggle
+- **WHEN** follow is disabled
+- **THEN** state is unchanged.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::toggle_follow`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::engage_follow`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::exit_follow`。
+
+### Requirement: ListPane input modes SHALL expose stable prompts and map Search/Filter to their corresponding match modes; goto-line parsing SHALL accept clamped single numbers and ranges, treat an incomplete N- as a single jump, reject invalid text, and enforce start <= end.
+Search, Filter, GotoLine, and Comment SHALL have distinct lifecycle rules. Search/Filter SHALL rebuild a regex matcher from the textarea and Search SHALL jump to the nearest match; accepted matchers persist after the bar closes, cancellation clears them, and goto-line SHALL preview, accept, or restore a snapshot using stable IDs and optional source line numbers.
+
+#### Scenario: Mode lifecycle
+- **WHEN** search/filter/goto/comment is opened, accepted, cancelled, or closed
+- **THEN** the mode-specific matcher, snapshot, visual state, prompt, and persistence rules are applied.
+
+#### Scenario: Incremental search
+- **WHEN** a nonempty Search query changes
+- **THEN** the matcher rebuilds and jumps to the nearest match unless current selection already matches.
+
+#### Scenario: Goto preview
+- **WHEN** numeric, ranged, incomplete, reversed, invalid, or out-of-bounds text is typed
+- **THEN** selection and centering follow the parser result, while invalid or cleared text restores the snapshot.
+
+#### Scenario: Goto accept/cancel
+- **WHEN** Enter or Esc is pressed
+- **THEN** Enter finalizes the current preview and Esc restores prior scroll/selection/visual state.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::open_input`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::accept_input`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::cancel_input`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::clear_input_and_matcher`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::open_goto_line`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::apply_goto_line_live`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::accept_goto_line`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::cancel_goto_line`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::close_input_bar`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::apply_input_buffer`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::next_match`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::prev_match`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::jump_to_physical`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::set_matcher`。
+
+### Requirement: When copy is enabled, y/copy_selected SHALL copy the selected item or visual range through the injected ClipboardProvider and expose a copy toast window; no selection, follow mode, empty/filtered lists, or disabled copy SHALL be no-ops.
+copy_selected SHALL copy plain item text for a single stable selection or newline-join copy_text for an inclusive visual range after visible-to-physical mapping. Empty text, missing selection, disabled copy, and follow mode SHALL return false; y SHALL arm a 500ms toast only after a successful copy and clear visual mode.
+
+#### Scenario: Single copy
+- **WHEN** a selectable item is selected and copy is enabled
+- **THEN** its content reaches the clipboard.
+
+#### Scenario: Provider injection
+- **WHEN** a custom provider is installed
+- **THEN** copy writes to that provider.
+
+#### Scenario: Visual copy
+- **WHEN** an inclusive visual range is active
+- **THEN** items are joined in visible order and copied once.
+
+#### Scenario: No-op boundary
+- **WHEN** selection is absent, follow/empty, or copy is disabled
+- **THEN** copy returns false and does not write.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::set_clipboard_provider`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::copy_selected`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::copy_range`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::handle_key_event`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::clear_visual_if_active`。
+
+### Requirement: When visual selection is enabled, v/Shift-j/Shift-k SHALL enter and extend an inclusive stable-ID range, Esc clears it, search clears it, and y copies the range in item order before leaving visual mode; disabled visual selection leaves v unconsumed.
+enter_visual_mode SHALL anchor at the current stable id and exit follow first; prepare_layout SHALL resolve anchor/cursor IDs into an inclusive visible range. exit_visual_mode and clear_selection SHALL remove the range, and navigation/search/follow transitions SHALL apply the documented visual-mode suppression rules.
+
+#### Scenario: Visual entry
+- **WHEN** v or Shift-j starts visual mode
+- **THEN** an anchor is captured and movement extends the range.
+
+#### Scenario: Visual cancel
+- **WHEN** Esc or search is invoked
+- **THEN** visual mode and resolved range clear.
+
+#### Scenario: Visual copy
+- **WHEN** y is pressed with a range
+- **THEN** newline-joined selected content is copied and visual mode exits.
+
+#### Scenario: Goto extension
+- **WHEN** goto-line is opened from visual mode
+- **THEN** the range anchor is preserved and the typed target extends the selection.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::enter_visual_mode`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::exit_visual_mode`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::clear_visual_if_active`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::prepare_layout`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::copy_selected`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::copy_range`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::handle_key_event`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::open_goto_line`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::apply_goto_line_live`。
+
+### Requirement: Selection navigation SHALL not panic when the item slice is empty while layout metadata is stale, small viewports SHALL keep the selected item visible through repeated prepare cycles, and list input paste SHALL target only the active input bar, normalize CRLF for search, preserve comment newlines, and reject paste when closed.
+handle_paste SHALL return false with no active mode, sanitize single-line Search/Filter/Goto input, preserve multiline Comment text, and apply live matcher/goto updates only for the active mode. Navigation SHALL bounds-check physical indices against the supplied item slice even when cached layout metadata is older.
+
+#### Scenario: Stale empty items
+- **WHEN** selection navigation receives an empty slice after a prior layout
+- **THEN** no panic occurs and no invalid item is dereferenced.
+
+#### Scenario: Small viewport
+- **WHEN** render preparation occurs between repeated selection/scroll steps
+- **THEN** selection remains visible and scroll advances within bounds.
+
+#### Scenario: Input paste
+- **WHEN** search/comment input is active, closed, or receives CRLF
+- **THEN** only the active bar changes, normalization follows mode, and closed bars reject paste.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::handle_paste`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_next`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_prev`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_first`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_last`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_at`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::select_at_y`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_lines`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::prepare_layout`。
+
+### Requirement: ListPane mouse handling SHALL prioritize scrollbar clicks/drags over content selection, map content rows to virtual item coordinates, route wheel events over the scrollbar to proportional movement, and release drag state on mouse-up.
+handle_mouse_event SHALL consume left-button content clicks, scrollbar clicks and drags, reject unrelated events, and clear scrollbar_dragging on release. handle_scroll_event SHALL use scrollbar percentage movement only when the pointer is inside the rendered scrollbar rectangle; otherwise it SHALL use line scrolling. Scrollbar clicks SHALL scale very tall content before using scrollbar_click_to_offset and dispatch Top/Bottom/Offset to the corresponding state transitions.
+
+#### Scenario: Content click
+- **WHEN** a left click lands in the pane on a selectable row
+- **THEN** the virtual y is resolved and that item is selected while follow/visual state is cleared.
+
+#### Scenario: Scrollbar drag
+- **WHEN** left down/drag/up occurs inside the recorded scrollbar area
+- **THEN** dragging starts, offsets update through the scrollbar mapping, and dragging clears on release.
+
+#### Scenario: Scrollbar wheel
+- **WHEN** wheel input is over the scrollbar
+- **THEN** a proportional offset is applied and the nearest center item is selected.
+
+#### Scenario: Other wheel
+- **WHEN** wheel input is outside the scrollbar
+- **THEN** normal line scrolling and follow overscroll rules apply.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::handle_mouse_event`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::handle_scroll_event`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::apply_scrollbar_click`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::set_scroll_offset_and_center`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_and_center`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_lines`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scrollbar_area`。
