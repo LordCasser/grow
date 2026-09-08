@@ -162,7 +162,7 @@ Search past conversations, including assistant answers. `/history deployment err
 
 Use `/history --prompts` for the original prompt-history overlay: fuzzy-search this session's prompts newest-first, then press `Enter` or `Tab` to insert a match into the prompt.
 
-Contract: [historical conversation search](../../../../../openspec/changes/implement-history-conversation-search/specs/client-surfaces/spec.md).
+Contract: [historical conversation search](../../../../../openspec/specs/client-surfaces/spec.md#requirement-discoverable-historical-conversation-search).
 
 For quick recall, press `↑` on an empty prompt instead. The panel opens with your most recent prompt already filled in; `↑`/`↓` step through entries (each lands in the input), `↓` past the newest entry closes the panel, and typing edits the recalled prompt in place.
 

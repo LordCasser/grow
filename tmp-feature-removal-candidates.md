@@ -203,7 +203,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：方法体始终None，全仓Rust检索未发现调用；键盘和鼠标接受均使用selected_text。
 - 删除理由：没有产品行为，却暴露一个看似可获取选择结果的误导接口。
 - 拟删除范围：仅此方法及专属注释；保留HistoryEntry、selected_text、导航、渲染及历史功能。
-- 状态：用户已授权扩展为功能，正在实现；设计与验证见 openspec/changes/implement-history-conversation-search/。
+- 状态：已实现历史对话全文搜索，/history [query] 搜索对话，/history --prompts 保留提示词回填；验证见归档 2026-09-08-implement-history-conversation-search。
 
 ## R22 · 独立的隐藏scroll-debug命令别名
 
