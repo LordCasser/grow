@@ -23605,3 +23605,247 @@ When MarkdownContent raw mode is enabled, quote-bar stripping SHALL be disabled 
 - **THEN** the row is Selectable::All and derived selection text is exactly `> QUOTE alpha`.
 
 证据：`crates/codegen/pager/src/scrollback/blocks/quote_bar.rs` — `QuoteBarStrip::new`；`crates/codegen/pager/src/scrollback/blocks/quote_bar.rs` — `bar_style`；`crates/codegen/pager/src/scrollback/blocks/quote_bar.rs` — `MarkdownContent::set_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/quote_bar.rs` — `Selectable::All`；`crates/codegen/pager/src/scrollback/blocks/quote_bar.rs` — `derive_selection_text`。
+
+
+### Requirement: ConfirmResetSetting(Reset) for the permission_mode Enum SHALL reset the future-session default to canonical ask and persist it without changing an active session that is currently AlwaysApprove.
+
+The implementation SHALL satisfy the following tested behavior: The reset route emits PersistPermissionMode with canonical "ask" and session_id=None. The active AgentSession permission remains AlwaysApprove, while app.default_permission_mode becomes Ask. This is the security boundary between the settings default and a live session selector.
+
+#### Scenario: Reset permission default
+- **WHEN** active session and future default are both initially AlwaysApprove, then permission_mode reset is confirmed
+- **THEN** only the future default is changed and the live session stays AlwaysApprove.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `reset_permission_setting_changes_default_not_active_session`。
+
+
+### Requirement: Enabling AlwaysApprove SHALL drain queued permissions owned by the root session by selecting AllowOnce, while leaving child-session requests queued; queue transitions SHALL invalidate the double-click tracker only when the resolved root request is removed and SHALL preserve front-child follow-up input, draft text, and click state.
+
+The implementation SHALL satisfy the following tested behavior: SetPermissionMode(AlwaysApprove) sets the active session mode and invokes the root permission drain. A root request is popped and its response channel receives Selected(AllowOnce) when that option exists. A child request identified by a different session_id remains queued and unresponded. When the root request is selected or drain_root_permission_queue processes it, last_permission_click is cleared and the next front prompt resets to Options; when the front is a child request, its FollowupInput focus, composer draft, and armed click remain unchanged. Enabling the parent AlwaysApprove likewise leaves queued child Ask requests untouched.
+
+#### Scenario: Allow-once drain
+- **WHEN** root permission queue contains an AllowOnce option and AlwaysApprove is enabled
+- **THEN** queue empties and response selects opt-allow-once, never RejectOnce or Cancelled.
+
+#### Scenario: Selection tracker reset
+- **WHEN** two root requests are queued and first is selected
+- **THEN** resolved request is removed, last_permission_click clears, and next front focus is Options.
+
+#### Scenario: Turn-end drain tracker
+- **WHEN** root queue request has an armed last_permission_click
+- **THEN** draining empties the queue and clears the armed click.
+
+#### Scenario: Child protection
+- **WHEN** queued request session_id is child-session while root drain runs
+- **THEN** child request remains queued and its response channel is empty.
+
+#### Scenario: Child front follow-up
+- **WHEN** child request is front, focused FollowupInput, with draft and click armed; root request follows
+- **THEN** root request is not drained; child focus, draft, and click remain.
+
+#### Scenario: Parent mode change
+- **WHEN** parent AlwaysApprove is enabled while a child Ask request is queued
+- **THEN** parent session becomes AlwaysApprove but child request remains pending/unresponded.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `set_always_approve_mode_on_drains_permission_queue_with_allow_once`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `permission_select_clears_double_click_tracker_for_next_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `drain_root_permission_queue_clears_double_click_tracker`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `root_turn_drain_preserves_child_permission`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `draining_root_request_behind_child_preserves_front_followup_state`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `enabling_parent_always_approve_preserves_queued_child_ask`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `drain_root_permission_queue`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `AgentSession::push_permission`。
+
+
+### Requirement: PermissionSelect and PermissionCancel SHALL remove the selected front request even when its requester response channel is disconnected, and SHALL toast the standardized requester-disconnected message instead of silently swallowing the action.
+
+The implementation SHALL satisfy the following tested behavior: Both answer and cancel paths pop the dead permission request, attempt the response, detect the closed oneshot sender, and set the Agent toast to "This permission request is no longer valid (the requester disconnected)". The queue is empty afterward and no successful approval/cancel response is asserted because the requester no longer exists.
+
+#### Scenario: Disconnected select
+- **WHEN** front request response receiver is dropped before PermissionSelect(AllowOnce)
+- **THEN** request is removed and the requester-disconnected toast is shown.
+
+#### Scenario: Disconnected cancel
+- **WHEN** front request receiver is dropped before PermissionCancel
+- **THEN** request is removed and the same toast is shown.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `permission_select_toasts_when_requester_disconnected`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `permission_cancel_toasts_when_requester_disconnected`。
+
+
+### Requirement: SetPermissionMode SHALL update only the active session, leave the future default/current UI mirror as defined, downgrade Auto to Ask when auto_mode_gate is disabled, and emit one canonical NotifySessionPermissionMode effect; Ask transitions SHALL use the branded Permission mode toast.
+
+The implementation SHALL satisfy the following tested behavior: With the auto gate enabled, SetPermissionMode(Auto) makes the active session auto, leaves current_ui.permission_mode None and emits canonical "auto" notification. With the gate disabled the same request becomes Ask and emits canonical "ask". A real AlwaysApprove→Ask transition clears active always-approve, leaves current_ui.permission_mode None, emits canonical "ask", and sets toast text exactly "✓ Permission mode: Ask"; the test avoids the idempotent fast path by changing mode first.
+
+#### Scenario: Auto enabled
+- **WHEN** auto_mode_gate is true and active session receives Auto
+- **THEN** session is auto, no future default mirror is changed, and NotifySessionPermissionMode canonical is auto.
+
+#### Scenario: Auto gated off
+- **WHEN** auto_mode_gate is false and Auto is requested
+- **THEN** session is not auto and notification canonical is ask.
+
+#### Scenario: Ask branding
+- **WHEN** session is first changed to AlwaysApprove, then Ask is dispatched
+- **THEN** session no longer always-approves, canonical ask is notified, and toast uses Permission mode: Ask branding.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `set_permission_mode_auto_notifies_without_changing_default`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `set_permission_mode_auto_degrades_to_ask_when_gated_off`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `set_permission_mode_ask_emits_brand_consistent_toast`。
+
+
+### Requirement: A failed permission_mode persistence SHALL roll back the future-session default and current UI canonical value, safely map an unknown canonical to Ask, retain the active session mode, and refresh an open Settings modal UI snapshot without rewriting its pager snapshot.
+
+The implementation SHALL satisfy the following tested behavior: TaskComplete(SettingPersistFailed) with permission_mode applies typed rollback. Unknown enum values defensively become Ask and set the standard failure toast; the active AgentSession remains AlwaysApprove when it was independently set. If Settings is open, pager_snapshot preserves the pre-rollback session-facing AlwaysApprove state while ui_snapshot.permission_mode becomes "ask". The test acknowledges the warning log as non-contractual and does not assert it.
+
+#### Scenario: Unknown rollback
+- **WHEN** active session is AlwaysApprove and rollback_value is garbage-value
+- **THEN** future default becomes Ask, current_ui.permission_mode is ask, active session remains AlwaysApprove, and failure feedback uses the standard path.
+
+#### Scenario: Open modal rollback
+- **WHEN** Settings opens after optimistic AlwaysApprove, then persistence failure rolls back to ask
+- **THEN** modal stays open; ui_snapshot refreshes to ask while pager_snapshot and live session stay AlwaysApprove.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `rollback_permission_mode_unknown_canonical_defaults_to_ask`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `rollback_permission_mode_refreshes_open_modal_snapshots`。
+
+
+### Requirement: A non-empty top-level permission queue SHALL classify an agent as NeedsInput, and rejecting a permission SHALL not move the process-level sticky permission cursor away from the last affirmative selection.
+
+The implementation SHALL satisfy the following tested behavior: classify_top_level returns RowState::NeedsInput whenever permission_queue is non-empty. PermissionSelect for AllowOnce records DefaultSelectedPermission::AllowOnce; a subsequent reject-once selection resolves the request but leaves last_used_permission at AllowOnce, so reject choices do not steer the sticky cursor.
+
+#### Scenario: Needs input
+- **WHEN** synthetic permission is pushed into an agent queue
+- **THEN** dashboard classification is NeedsInput.
+
+#### Scenario: Allow selection
+- **WHEN** sticky cursor starts at AlwaysAllowAllSessions and AllowOnce is selected
+- **THEN** last_used_permission becomes AllowOnce.
+
+#### Scenario: Reject selection
+- **WHEN** next queued request is answered with RejectOnce
+- **THEN** last_used_permission remains AllowOnce.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `classify_top_level_permission_queue_non_empty_is_needs_input`；`crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs` — `permission_select_reject_does_not_steer_sticky_cursor`。
+
+
+### Requirement: Todo status styling, list entries, icons, and search identity
+
+TodoPaneStyle SHALL map Pending to primary icon/text, InProgress to warning icon and bold primary text, Completed to success icon and bright-gray text, and Cancelled to error icon and crossed-out bright-gray text. TodoListEntry SHALL cache styled content, expose status icons (□, ▶, check mark, ballot X) with a trailing space, preserve the supplied id as stable_id, and return the canonical content for search.
+
+#### Scenario: Status style
+- **WHEN** a TodoItem has any supported status
+- **THEN** the corresponding icon color and content style are selected from TodoPaneStyle.
+
+#### Scenario: Entry rendering
+- **WHEN** a TodoListEntry is constructed
+- **THEN** content is cached from item.content, prefix contains icon plus space, and stable_id/search_text expose id/content.
+
+#### Scenario: Theme default
+- **WHEN** TodoPaneStyle is default-constructed
+- **THEN** colors come from the current theme with the documented modifiers.
+
+证据：`crates/codegen/pager/src/views/todo_pane.rs` — `TodoStatusStyle`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoPaneStyle`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoPaneStyle::default`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoListEntry`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoListEntry::new`；`crates/codegen/pager/src/views/todo_pane.rs` — `icon`；`crates/codegen/pager/src/views/todo_pane.rs` — `content`；`crates/codegen/pager/src/views/todo_pane.rs` — `prefix`；`crates/codegen/pager/src/views/todo_pane.rs` — `stable_id`；`crates/codegen/pager/src/views/todo_pane.rs` — `search_text`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoStatus::Pending`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoStatus::InProgress`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoStatus::Completed`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoStatus::Cancelled`；`crates/codegen/pager/src/views/todo_pane.rs` — `check_mark`；`crates/codegen/pager/src/views/todo_pane.rs` — `ballot_x`。
+
+
+### Requirement: Todo counts, progress denominator, and empty placeholder messages
+
+TodoCounts::total SHALL include every status while total_excluding_cancelled SHALL omit cancelled items. empty_placeholder_message SHALL say `No todo items.` for an empty source list; for a non-empty list it SHALL say `All done.` when cancelled is zero, `{N} cancelled.` when only cancelled items exist, and `{D} done. {C} cancelled.` otherwise. The status badge SHALL render completed over the non-cancelled total and disappear for no todos or all-cancelled lists.
+
+#### Scenario: Empty list
+- **WHEN** todos_empty is true
+- **THEN** the placeholder is `No todo items.` and the badge has no denominator.
+
+#### Scenario: All completed
+- **WHEN** completed > 0 and cancelled = 0
+- **THEN** the empty-state placeholder says `All done.` and badge denominator includes all non-cancelled tasks.
+
+#### Scenario: Mixed statuses
+- **WHEN** completed and cancelled are both nonzero
+- **THEN** the placeholder includes both done and cancelled counts and the badge denominator excludes cancelled.
+
+#### Scenario: Only cancelled
+- **WHEN** completed = 0 and cancelled > 0
+- **THEN** the placeholder reports cancelled count and the all-cancelled badge is absent.
+
+证据：`crates/codegen/pager/src/views/todo_pane.rs` — `TodoCounts`；`crates/codegen/pager/src/views/todo_pane.rs` — `total`；`crates/codegen/pager/src/views/todo_pane.rs` — `total_excluding_cancelled`；`crates/codegen/pager/src/views/todo_pane.rs` — `empty_placeholder_message`；`crates/codegen/pager/src/views/todo_pane.rs` — `render`；`crates/codegen/pager/src/views/todo_pane.rs` — `counts`；`crates/codegen/pager/src/views/todo_pane.rs` — `completed`；`crates/codegen/pager/src/views/todo_pane.rs` — `cancelled`；`crates/codegen/pager/src/views/agent.rs` — `todo_badge_default_renders_done_over_total_fraction`；`crates/codegen/pager/src/views/agent.rs` — `todo_badge_absent_when_no_todos`；`crates/codegen/pager/src/views/agent.rs` — `todo_badge_absent_when_all_cancelled`。
+
+
+### Requirement: Todo pane initialization, updates, counts, and badge flash lifecycle
+
+TodoPane::new SHALL create a hidden pane with show_done enabled, an empty NoWrap ListPane configured for search/copy/filter without follow/wrap-toggle/visual selection/goto-line, a system clipboard provider, default counts/styles, and current theme kind. update_todos SHALL replace the raw list, recompute all-status counts, and arm a 1200ms absolute badge flash only when counts change; it SHALL not auto-show the pane. badge_flash_active_at SHALL use a strict before-deadline check, maintain_badge SHALL clear and report expiry at/after the deadline, and counts/deadline accessors SHALL expose current snapshots.
+
+#### Scenario: Initialization
+- **WHEN** a pane is newly created
+- **THEN** overlay is hidden, show_done is true, todos/counts/entries are empty, and list configuration matches the pane contract.
+
+#### Scenario: First/change update
+- **WHEN** incoming items change aggregate counts
+- **THEN** todos and prev_counts are replaced and badge flash is armed until now plus 1200ms.
+
+#### Scenario: Same counts
+- **WHEN** incoming item content/order changes but aggregate counts remain equal
+- **THEN** raw todos are replaced without rearming the count flash.
+
+#### Scenario: Expiry
+- **WHEN** now reaches or passes the deadline
+- **THEN** maintain_badge clears the deadline and returns true; before deadline it leaves it armed and returns false.
+
+证据：`crates/codegen/pager/src/views/todo_pane.rs` — `TodoPane`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoPane::default`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoPane::new`；`crates/codegen/pager/src/views/todo_pane.rs` — `update_todos`；`crates/codegen/pager/src/views/todo_pane.rs` — `compute_counts`；`crates/codegen/pager/src/views/todo_pane.rs` — `counts`；`crates/codegen/pager/src/views/todo_pane.rs` — `badge_flash_active_at`；`crates/codegen/pager/src/views/todo_pane.rs` — `badge_deadline`；`crates/codegen/pager/src/views/todo_pane.rs` — `maintain_badge`；`crates/codegen/pager/src/views/todo_pane.rs` — `expire_badge_flash_for_test`；`crates/codegen/pager/src/views/todo_pane.rs` — `BADGE_FLASH_DURATION`；`crates/codegen/pager/src/views/todo_pane.rs` — `ListPaneConfig`；`crates/codegen/pager/src/views/todo_pane.rs` — `ListPaneState::new_with_config`；`crates/codegen/pager/src/views/todo_pane.rs` — `OverlayState::hidden`；`crates/codegen/pager/src/views/todo_pane.rs` — `set_clipboard_provider`；`crates/codegen/pager/src/views/todo_pane.rs` — `prev_counts`；`crates/codegen/pager/src/views/todo_pane.rs` — `badge_flash_until`；`crates/codegen/pager/src/views/todo_pane.rs` — `last_theme`。
+
+
+### Requirement: Todo visibility filter, stable entry rebuild, and bounded desired height
+
+TodoPane SHALL report visibility from overlay.visible, preserve accepted list filters while closing an active input bar when hidden, and toggle show_done independently. When show_done is false, completed/cancelled items SHALL be filtered without reordering pending/in-progress items and entry IDs SHALL retain original todo indices. desired_height SHALL be zero when hidden, one for a visible empty/filter-empty pane, otherwise cap visible rows by floor(15% of view height) and 10 with a minimum of one.
+
+#### Scenario: Visibility/input state
+- **WHEN** overlay becomes hidden
+- **THEN** is_visible is false and on_state_change closes only the active input bar while accepted filters remain.
+
+#### Scenario: Filter toggle
+- **WHEN** show_done is toggled
+- **THEN** completed/cancelled visibility changes and entries are rebuilt in original order.
+
+#### Scenario: Stable IDs
+- **WHEN** items are filtered
+- **THEN** each visible entry uses its original index as id so ListPane selection can survive rebuilds.
+
+#### Scenario: Height
+- **WHEN** pane is hidden, visible but empty, or contains items
+- **THEN** desired_height returns 0, 1, or bounded visible count respectively.
+
+证据：`crates/codegen/pager/src/views/todo_pane.rs` — `is_visible`；`crates/codegen/pager/src/views/todo_pane.rs` — `on_state_change`；`crates/codegen/pager/src/views/todo_pane.rs` — `show_done`；`crates/codegen/pager/src/views/todo_pane.rs` — `toggle_show_done`；`crates/codegen/pager/src/views/todo_pane.rs` — `desired_height`；`crates/codegen/pager/src/views/todo_pane.rs` — `visible_count`；`crates/codegen/pager/src/views/todo_pane.rs` — `rebuild_entries`；`crates/codegen/pager/src/views/todo_pane.rs` — `OverlayState::visible`；`crates/codegen/pager/src/views/todo_pane.rs` — `close_input_bar`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoListEntry::new`；`crates/codegen/pager/src/views/todo_pane.rs` — `MAX_TODO_HEIGHT`；`crates/codegen/pager/src/views/todo_pane.rs` — `MAX_TODO_FRACTION`；`crates/codegen/pager/src/views/todo_pane.rs` — `DisplayMode`；`crates/codegen/pager/src/views/todo_pane.rs` — `show_done`。
+
+
+### Requirement: Todo pane keyboard, paste, scroll, and mouse delegation
+
+handle_key SHALL consume `h` only when the ListPane input bar is closed by toggling show_done and rebuilding entries; empty panes SHALL reject other keys, while non-empty panes delegate to ListPaneState. handle_paste and handle_mouse SHALL delegate with current entries. handle_scroll SHALL cap absolute deltas to one line for viewports up to five rows, two for six-to-ten rows, and leave larger viewport deltas unchanged before delegation.
+
+#### Scenario: Toggle key
+- **WHEN** key is `h` and no search/filter input is active
+- **THEN** show_done toggles, entries rebuild, and the event is consumed.
+
+#### Scenario: Empty/key delegation
+- **WHEN** entries are empty or a non-toggle key arrives
+- **THEN** empty panes return false; populated panes delegate the key event.
+
+#### Scenario: Paste/mouse
+- **WHEN** paste text or a mouse event is supplied
+- **THEN** the corresponding ListPaneState handler receives current entries and mouse area.
+
+#### Scenario: Scroll cap
+- **WHEN** viewport height is 0..5, 6..10, or above 10
+- **THEN** the delegated delta is capped to ±1, ±2, or the original absolute magnitude respectively.
+
+证据：`crates/codegen/pager/src/views/todo_pane.rs` — `handle_key`；`crates/codegen/pager/src/views/todo_pane.rs` — `handle_paste`；`crates/codegen/pager/src/views/todo_pane.rs` — `handle_scroll`；`crates/codegen/pager/src/views/todo_pane.rs` — `handle_mouse`；`crates/codegen/pager/src/views/todo_pane.rs` — `KeyCode::Char`；`crates/codegen/pager/src/views/todo_pane.rs` — `input_mode`；`crates/codegen/pager/src/views/todo_pane.rs` — `handle_key_event`；`crates/codegen/pager/src/views/todo_pane.rs` — `handle_paste`；`crates/codegen/pager/src/views/todo_pane.rs` — `handle_scroll_event`；`crates/codegen/pager/src/views/todo_pane.rs` — `handle_mouse_event`；`crates/codegen/pager/src/views/todo_pane.rs` — `viewport_height`；`crates/codegen/pager/src/views/todo_pane.rs` — `lines.signum`；`crates/codegen/pager/src/views/todo_pane.rs` — `lines.abs`；`crates/codegen/pager/src/views/todo_pane.rs` — `entries`。
+
+
+### Requirement: Todo pane theme-aware rendering and padded layout projection
+
+render SHALL detect theme-kind changes and recreate both TodoPaneStyle and ListPaneStyle before rebuilding entries. It SHALL compute an inner area using HorizontalLayout accent plus left padding and right block padding with saturating width. Empty entries SHALL render a muted gray-bight placeholder only when the inner area has positive dimensions; non-empty entries SHALL prepare ListPane layout with inner dimensions and render a focused/styled ListPane.
+
+#### Scenario: Theme switch
+- **WHEN** current theme kind differs from last_theme
+- **THEN** cached status/list styles refresh before entries rebuild.
+
+#### Scenario: Empty render
+- **WHEN** filtered entries are empty and inner width/height are positive
+- **THEN** the correct no-items/all-done/counts placeholder is painted in gray_bright.
+
+#### Scenario: Zero area
+- **WHEN** inner width or height is zero
+- **THEN** empty placeholder painting is skipped.
+
+#### Scenario: Non-empty render
+- **WHEN** visible entries exist
+- **THEN** ListPaneState prepares layout and ListPane renders with focus and list style in the padded inner area.
+
+证据：`crates/codegen/pager/src/views/todo_pane.rs` — `render`；`crates/codegen/pager/src/views/todo_pane.rs` — `content_area`；`crates/codegen/pager/src/views/todo_pane.rs` — `Theme::current_kind`；`crates/codegen/pager/src/views/todo_pane.rs` — `TodoPaneStyle::default`；`crates/codegen/pager/src/views/todo_pane.rs` — `ListPaneStyle::default`；`crates/codegen/pager/src/views/todo_pane.rs` — `rebuild_entries`；`crates/codegen/pager/src/views/todo_pane.rs` — `empty_placeholder_message`；`crates/codegen/pager/src/views/todo_pane.rs` — `Buffer::set_span`；`crates/codegen/pager/src/views/todo_pane.rs` — `ListPaneState::prepare_layout`；`crates/codegen/pager/src/views/todo_pane.rs` — `ListPane::new`；`crates/codegen/pager/src/views/todo_pane.rs` — `focused`；`crates/codegen/pager/src/views/todo_pane.rs` — `style`；`crates/codegen/pager/src/views/todo_pane.rs` — `HorizontalLayout::ACCENT`；`crates/codegen/pager/src/views/todo_pane.rs` — `block_pad_left`；`crates/codegen/pager/src/views/todo_pane.rs` — `block_pad_right`；`crates/codegen/pager/src/views/todo_pane.rs` — `inner`。

@@ -3877,7 +3877,19 @@
       "Quote prefix selection range and span splitting",
       "Wrapped quote continuation copy reconstruction",
       "Blank quote preservation and literal/table content safety",
-      "Raw markdown quote rows remain source-selectable"
+      "Raw markdown quote rows remain source-selectable",
+      "ConfirmResetSetting(Reset) for the permission_mode Enum SHALL reset the future-session default to canonical ask and persist it without changing an active session that is currently AlwaysApprove.",
+      "Enabling AlwaysApprove SHALL drain queued permissions owned by the root session by selecting AllowOnce, while leaving child-session requests queued; queue transitions SHALL invalidate the double-click tracker only when the resolved root request is removed and SHALL preserve front-child follow-up input, draft text, and click state.",
+      "PermissionSelect and PermissionCancel SHALL remove the selected front request even when its requester response channel is disconnected, and SHALL toast the standardized requester-disconnected message instead of silently swallowing the action.",
+      "SetPermissionMode SHALL update only the active session, leave the future default/current UI mirror as defined, downgrade Auto to Ask when auto_mode_gate is disabled, and emit one canonical NotifySessionPermissionMode effect; Ask transitions SHALL use the branded Permission mode toast.",
+      "A failed permission_mode persistence SHALL roll back the future-session default and current UI canonical value, safely map an unknown canonical to Ask, retain the active session mode, and refresh an open Settings modal UI snapshot without rewriting its pager snapshot.",
+      "A non-empty top-level permission queue SHALL classify an agent as NeedsInput, and rejecting a permission SHALL not move the process-level sticky permission cursor away from the last affirmative selection.",
+      "Todo status styling, list entries, icons, and search identity",
+      "Todo counts, progress denominator, and empty placeholder messages",
+      "Todo pane initialization, updates, counts, and badge flash lifecycle",
+      "Todo visibility filter, stable entry rebuild, and bounded desired height",
+      "Todo pane keyboard, paste, scroll, and mouse delegation",
+      "Todo pane theme-aware rendering and padded layout projection"
     ],
     "reviewed_files": [
       {
@@ -6099,6 +6111,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
         "sha256": "a796a1f52e85864c48de228130c00bf69f634c19804dfca3da0c7d2898a904fe"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/bg_task.rs",
+        "sha256": "b3b0a4fbfcd2d746e870df6e12282be6d268a864b016369448cf2df8850dea87"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/permissions.rs",
+        "sha256": "b8b7ee0ee342d8c233ec6993cda034c15eee317a315c8bb1f8cbda86015d014a"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/todo_pane.rs",
+        "sha256": "9e5b49f07dec6d4953723b0936336d8984a98bfeb35b117479fc378a6e8b12cc"
       }
     ],
     "review": "reviews/pager.md"
