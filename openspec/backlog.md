@@ -1061,3 +1061,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The test registers AgentTurnExpectation handles but drops them without awaiting satisfaction, so the UI path and scripted backend path are only loosely synchronized.
 - Pager 审计债务：Fixed 100 ms update loops, a 60-second parking wait, a 40-second first-turn wait, and a 20x100 geometry make the scenario sensitive to scheduler and PTY timing.
 - Pager 审计债务：One test combines filesystem seeding, initial session creation, two tool calls, revision input, approval, scrollback completeness, duplicate detection, and shutdown, giving failures a broad diagnosis surface.
+- Pager 审计债务：The regression test is ignored, leaving minimal /new session transition behavior outside routine automated coverage.
+- Pager 审计债务：The test identifies a new session with a broad `Grow` substring count rather than a typed welcome-card marker or session identity, so unrelated banner text could satisfy the condition.
+- Pager 审计债务：History preservation and frontier reset are inferred from text reachability and a second banner; the test has no structured session snapshot or committed-frontier assertion.
+- Pager 审计债务：Fixed tall-response generation, polling loops, and long waits make the scenario sensitive to terminal scheduling and content/render timing.
+- Pager 审计债务：One end-to-end test combines tall markdown rendering, native scrollback entry, slash command pacing, session creation, history preservation, fresh streaming, panic detection, and shutdown, broadening the failure diagnosis surface.

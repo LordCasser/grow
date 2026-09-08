@@ -30732,3 +30732,235 @@ The relaunch test SHALL fail with captured screen/full-text diagnostics if the m
 - **THEN** quit_minimal sends the confirmation chord and waits up to 15 seconds before its harness-kill fallback.
 
 证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `unwrap_or_else`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `quit_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_exit_code`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`。
+
+
+### Requirement: Tall minimal-session fixture reaches native scrollback
+
+The implementation SHALL satisfy the following tested behavior: The test starts ContentController, sets a fenced-code tall_response for turn_sentinel(1) with 80 payload rows, spawns minimal through spawn_minimal, waits for minimal readiness, submits PROMPT, and pumps 100 ms updates for at most 40 seconds until scrollback_text contains the first-turn sentinel. It then asserts that the first-turn sentinel is present in native scrollback before issuing /new. tall_response puts the sentinel on the first fenced-code row and emits one source line per payload row so the response is intended to exceed the default terminal height.
+
+#### Scenario: Tall first response
+- **WHEN** the mock response is configured with turn_sentinel(1) and 80 fenced-code payload rows
+- **THEN** the response is rendered as a block whose head can enter native scrollback.
+
+#### Scenario: Minimal readiness
+- **WHEN** spawn_minimal completes
+- **THEN** wait_minimal_ready gates the first prompt submission on the minimal idle sentinel.
+
+#### Scenario: Native scrollback frontier
+- **WHEN** the 40-second polling loop observes turn_sentinel(1) in scrollback_text
+- **THEN** the test proceeds only after the first turn has reached native scrollback.
+
+#### Scenario: Scrollback timeout
+- **WHEN** the sentinel is absent when the deadline expires
+- **THEN** the assertion fails and reports the captured native scrollback.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `tall_response`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `turn_sentinel`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::start`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::scrollback_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`。
+
+
+### Requirement: New-session welcome reset preserves prior history
+
+The implementation SHALL satisfy the following tested behavior: The test defines WELCOME_BANNER as `Grow`, injects `/new` one byte at a time with inject_keys_paced, submits carriage return, and pumps for up to ten seconds until full_text contains at least two occurrences of the banner. It asserts the second welcome card exists and separately requires contains_full_text(turn_sentinel(1)), establishing that the prior turn remains reachable across the new-session transition.
+
+#### Scenario: New-session request
+- **WHEN** the first turn has reached native scrollback and paced `/new` is submitted
+- **THEN** the minimal client begins the fresh-session path.
+
+#### Scenario: Second welcome card
+- **WHEN** full_text is pumped until the banner count reaches two or the ten-second deadline
+- **THEN** the assertion requires at least two `Grow` occurrences across scrollback and screen.
+
+#### Scenario: Prior history retained
+- **WHEN** the fresh-session banner assertion passes
+- **THEN** the first-turn sentinel remains in combined scrollback plus visible screen text.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_new_session_keeps_history_and_resets.rs` — `minimal_new_session_keeps_history_and_resets`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_new_session_keeps_history_and_resets.rs` — `WELCOME_BANNER`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `inject_keys_paced`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `turn_sentinel`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::contains_full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`。
+
+
+### Requirement: Fresh turn streams after new-session reset
+
+The implementation SHALL satisfy the following tested behavior: After the new-session history assertions, the test changes the mock response to turn_sentinel(2) followed by ` new session payload.`, injects `hi` plus carriage return, and waits up to 30 seconds for turn_sentinel(2) in full_text. This is the only post-/new turn behavior asserted by the file.
+
+#### Scenario: Post-reset prompt
+- **WHEN** the second welcome banner and prior turn are present
+- **THEN** the test submits `hi` in the new session.
+
+#### Scenario: New-session streaming
+- **WHEN** the response sentinel is not yet in full_text
+- **THEN** the harness pumps until turn_sentinel(2) appears or the 30-second wait fails.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `turn_sentinel`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_full_text`。
+
+
+### Requirement: Minimal session health and cleanup
+
+The implementation SHALL satisfy the following tested behavior: After the new-session turn wait, the test rejects a visible `panicked` marker from screen_contents and calls quit_minimal. The test is marked #[ignore], so it is not part of the default integration test run.
+
+#### Scenario: No panic marker
+- **WHEN** the fresh turn has streamed
+- **THEN** screen_contents does not contain `panicked`.
+
+#### Scenario: Minimal cleanup
+- **WHEN** the health assertion passes
+- **THEN** quit_minimal performs the Ctrl+Q confirmation and waits for or kills the child according to the shared helper.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::contains_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: The ignored minimal PTY test SHALL start an isolated ContentController with a terminally blocked first turn and a second expected agent turn, spawn the default minimal fixture, submit the first PROMPT, wait for its streamed prefix and completion barrier, queue a follow-up prompt, and require the queued indicator before releasing the first turn.
+
+The implementation SHALL satisfy the following tested behavior: minimal_double_esc_committed_queued_prompt_single_render registers expect_agent_turn_blocked for `STEPONE first reply.` and expect_agent_turn for a second response that should not stream before cancellation. It starts ContentController, spawns minimal, waits for readiness, submits PROMPT, waits for `STEPONE` within 30 seconds, waits for the first expectation's blocked terminal barrier within 10 seconds, injects `bravo promoted block` plus carriage return, and waits for `1 queued` within 10 seconds. The second expectation is retained as `_turn_two` so the mock can match the logical follow-up turn, but the test does not await its receipt or satisfaction.
+
+#### Scenario: Blocked first turn
+- **WHEN** the test begins
+- **THEN** the first mock response streams its prefix but remains held immediately before its terminal event.
+
+#### Scenario: First turn reaches barrier
+- **WHEN** STEPONE is visible
+- **THEN** wait_blocked completes within ten seconds before the follow-up is queued.
+
+#### Scenario: Queue follow-up
+- **WHEN** the first turn is still held
+- **THEN** the follow-up prompt is typed and the screen shows `1 queued`.
+
+#### Scenario: Pre-token cancellation window
+- **WHEN** the queue indicator is visible
+- **THEN** the test is ready to release turn one and promote the queued prompt before its first token.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_double_esc_committed_queued_prompt_single_render.rs` — `minimal_double_esc_committed_queued_prompt_single_render`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::start`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::expect_agent_turn_blocked`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::expect_agent_turn`；`crates/codegen/pager-pty-harness/src/content.rs` — `AgentTurnExpectation::wait_blocked`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_text`。
+
+
+### Requirement: When the blocked first turn is released and the queued prompt is promoted, minimal mode SHALL commit the promoted user block to the combined full transcript before its delayed first response token, with exactly one occurrence of the queued prompt text.
+
+The implementation SHALL satisfy the following tested behavior: Immediately before releasing turn one, the test sets ContentController::set_chunk_delay(Some(Duration::from_secs(30))) so the second response cannot emit its first token during the cancellation window. It releases turn_one, waits up to 30 seconds for the full-text marker `❯ bravo promoted block`, counts QUEUED_PROMPT occurrences in harness.full_text(), and requires the count to equal one. The count includes the harness's combined native history and current screen projection.
+
+#### Scenario: Delay promoted response
+- **WHEN** the queued indicator is visible
+- **THEN** the content controller applies a 30-second chunk delay before the first response token of the promoted turn.
+
+#### Scenario: Promote queued prompt
+- **WHEN** turn_one.release() is called
+- **THEN** the queued prompt block is committed and the `❯ bravo promoted block` marker appears in full_text within 30 seconds.
+
+#### Scenario: Single committed copy
+- **WHEN** the promoted marker is visible
+- **THEN** full_text contains QUEUED_PROMPT exactly once before cancellation.
+
+#### Scenario: Double-render fail-before
+- **WHEN** the pre-cancel count is measured
+- **THEN** a second visible composer copy would fail the test before Ctrl-C is sent.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_double_esc_committed_queued_prompt_single_render.rs` — `minimal_double_esc_committed_queued_prompt_single_render`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_chunk_delay`；`crates/codegen/pager-pty-harness/src/content.rs` — `AgentTurnExpectation::release`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::full_text`。
+
+
+### Requirement: After the promoted user block has committed and before its first model token, Ctrl-C SHALL render the user cancellation marker without restoring the committed prompt into the composer; the queued prompt occurrence count SHALL remain unchanged after a repaint settle.
+
+The implementation SHALL satisfy the following tested behavior: The test injects keys::CTRL_C after the committed count is one, waits up to 15 seconds for `Turn cancelled by user`, pumps the harness for 500 ms, and requires harness.full_text().matches(QUEUED_PROMPT).count() to equal the saved committed count. The intended evidence is the standard cancel path for an already committed in-flight block: the block stays on screen, the composer is not refilled, and no second prompt copy appears. The source does not directly inspect composer text, in_flight_committed, rewind state, or the turn-two response.
+
+#### Scenario: Cancel before first token
+- **WHEN** the promoted block is present and its response is delayed 30 seconds
+- **THEN** Ctrl-C is injected into the focused minimal prompt.
+
+#### Scenario: Visible standard cancellation
+- **WHEN** Ctrl-C processing completes within 15 seconds
+- **THEN** the screen/full transcript contains `Turn cancelled by user`.
+
+#### Scenario: No composer refill
+- **WHEN** the harness is pumped for 500 ms after the marker
+- **THEN** the queued prompt count remains equal to its pre-cancel count of one.
+
+#### Scenario: No rewind double render
+- **WHEN** the final count is compared
+- **THEN** cancellation does not add a second copy of the committed prompt text.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_double_esc_committed_queued_prompt_single_render.rs` — `minimal_double_esc_committed_queued_prompt_single_render`；`crates/codegen/pager-pty-harness/src/lib.rs` — `keys::CTRL_C`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::full_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::update`。
+
+
+### Requirement: The ignored minimal queued-prompt cancellation scenario SHALL reject a visible panic marker after cancellation and request clean minimal shutdown once the no-duplicate assertion passes.
+
+The implementation SHALL satisfy the following tested behavior: After the post-cancel count check, the test asserts !harness.contains_text("panicked") with the current screen in the failure diagnostic and calls quit_minimal(&mut harness). quit_minimal owns the Ctrl-Q confirmation and exit polling; this source does not assert the child exit code or durable session state.
+
+#### Scenario: No panic
+- **WHEN** the cancellation and duplicate-count checks complete
+- **THEN** the visible screen does not contain `panicked`.
+
+#### Scenario: Clean shutdown
+- **WHEN** all assertions pass
+- **THEN** quit_minimal is invoked to confirm and wait for pager exit, with a harness kill fallback.
+
+#### Scenario: Ignored execution gate
+- **WHEN** the default PTY test target discovers this function
+- **THEN** the #[ignore] attribute excludes it unless explicitly selected.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_double_esc_committed_queued_prompt_single_render.rs` — `minimal_double_esc_committed_queued_prompt_single_render`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::contains_text`。
+
+
+### Requirement: Minimal-to-fullscreen PTY fixture and seeded session history
+
+The ignored Tokio PTY test SHALL start an isolated ContentController, configure a deterministic turn_sentinel(1) response, create a temporary project directory containing .git, spawn the pager through spawn_minimal_in_dir at DEFAULT_ROWS by DEFAULT_COLS, wait for minimal readiness, submit PROMPT, and observe the first sentinel in harness full text within 30 seconds before attempting the mode switch.
+
+#### Scenario: Isolated project fixture
+- **WHEN** minimal_slash_switches_to_fullscreen starts
+- **THEN** a temporary project directory with a .git child is created and passed as the pager working directory.
+
+#### Scenario: Minimal readiness
+- **WHEN** the minimal pager is spawned
+- **THEN** spawn_minimal_in_dir uses the shared minimal/no-leader PTY fixture and wait_minimal_ready observes the minimal idle state before input.
+
+#### Scenario: History seed
+- **WHEN** PROMPT is submitted and the mock response is available
+- **THEN** the first turn sentinel appears in full text within the 30-second wait, providing committed conversation content for the resume path.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `minimal_slash_switches_to_fullscreen`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `ContentController::start`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `ContentController::set_response`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `turn_sentinel`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `tempfile::tempdir`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `spawn_minimal_in_dir`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/pty_e2e_minimal.rs` — `pty_e2e_minimal`。
+
+
+### Requirement: Pager minimal-to-fullscreen slash relaunch preserves session history
+
+From a live minimal session, paced `/fullscreen` input SHALL expose the slash suggestion described as `Reopen this session in fullscreen mode`; after carriage return confirms the suggestion, the same PTY session SHALL leave minimal mode and reopen through the fullscreen path while retaining the prior turn sentinel in either the visible screen or harness full text.
+
+#### Scenario: Fullscreen slash discovery
+- **WHEN** the seeded minimal turn has completed and `/fullscreen` is injected one byte at a time
+- **THEN** the exact fullscreen reopen suggestion becomes visible within five seconds.
+
+#### Scenario: Minimal-to-fullscreen relaunch
+- **WHEN** the suggestion is visible and carriage return is submitted
+- **THEN** the PTY remains observable while the process is replaced or handed off and the minimal idle/switch-back/dropdown markers eventually disappear.
+
+#### Scenario: History retention
+- **WHEN** the minimal markers and dropdown marker have disappeared
+- **THEN** the original turn sentinel is still present on screen or in full text before the 45-second deadline.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `inject_keys_paced`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `Reopen this session in fullscreen mode`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `left_minimal`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `history_present`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::full_text`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `inject_keys_paced`；`crates/codegen/pager/src/slash/commands/screen_mode_switch.rs` — `ScreenModeSwitchCommand::fullscreen`；`crates/codegen/pager/src/app/screen_mode_relaunch.rs` — `exec_screen_mode_relaunch`。
+
+
+### Requirement: Slash fullscreen relaunch remains session-scoped and does not persist screen mode
+
+After `/fullscreen` completes, the test SHALL allow a two-second settling window, read the content controller's `.grow/config.toml`, and require that the file body contains no `screen_mode` key text, preserving the distinction between a session-scoped slash relaunch and manual `[ui] screen_mode` configuration.
+
+#### Scenario: No mode persistence
+- **WHEN** the fullscreen relaunch has been observed and the settling window has elapsed
+- **THEN** the config body does not contain `screen_mode`.
+
+#### Scenario: Session-scoped command
+- **WHEN** the mode is changed through the slash command
+- **THEN** the test treats the command as a one-shot relaunch and does not accept a persisted UI mode setting as evidence of success.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `config_path`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `std::fs::read_to_string`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `screen_mode`；`crates/codegen/pager/src/slash/commands/screen_mode_switch.rs` — `ScreenModeSwitchCommand::run`；`crates/codegen/pager/src/app/screen_mode_relaunch.rs` — `build_screen_mode_relaunch_args`。
+
+
+### Requirement: Minimal-to-fullscreen switch liveness, panic absence and cleanup
+
+The relaunch test SHALL fail with current screen and full-text diagnostics when the mode transition is not observed within 45 seconds, SHALL reject a visible `panicked` marker after the switch, SHALL keep updating the PTY during the two-second config settle, and SHALL finish by invoking PtyHarness::quit for clean shutdown.
+
+#### Scenario: Mode switch timeout
+- **WHEN** the minimal idle/switch-back/dropdown markers do not all disappear before the deadline
+- **THEN** the test panics with the current screen and full-text captures rather than accepting an indeterminate mode.
+
+#### Scenario: No visible panic
+- **WHEN** the post-switch screen is available
+- **THEN** contains_text(`panicked`) is false.
+
+#### Scenario: Clean quit
+- **WHEN** all transition and persistence assertions pass
+- **THEN** PtyHarness::quit is invoked and its result must be successful.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `deadline`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `panic!`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::update`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::quit`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `PtyHarness::quit`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`。
