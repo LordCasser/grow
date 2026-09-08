@@ -30,8 +30,6 @@ pub struct Announcement {
     pub expires_at: Option<String>,
     #[serde(default)]
     pub dismissible: Option<bool>,
-    #[serde(default)]
-    pub persistent: Option<bool>,
 }
 
 /// Optional call-to-action rendered as a clickable link or button.
@@ -64,7 +62,6 @@ pub fn default_announcements() -> Vec<Announcement> {
         ),
         severity: Some("info".to_owned()),
         dismissible: Some(true),
-        persistent: Some(false),
         ..Default::default()
     }]
 }

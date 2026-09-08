@@ -44,3 +44,6 @@ Diagnostics id module has no internal callers; mid is declared only by diagnosti
 
 ## R26 reviewed boundary
 snapshot_session_log has no callers, while snapshot_log and writer/trimming are active and retain tests. Remove only the unused filter function and its doc comment; run the retained unified_log tests (the crate installs a pre-main temporary-log redirect).
+
+## R28/R29 reviewed boundary
+read_optional_json_sync, summary_lock_file and workflows_dir are private and uncalled across Rust sources. Remove R28 reader in its own commit, then R29 path helpers in another. Retain actual directory-capability reads, Timeline/control restoration, writer lease and rewind_points_file (test consumers). Run relevant JSONL storage regressions for each deletion; never delete user files or directories.

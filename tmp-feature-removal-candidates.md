@@ -228,7 +228,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：字段参与serde传输，默认Some(false)；当前共享过滤、pager公告/welcome展示和隐藏控制路径没有读取它。
 - 删除理由：配置表面暴露了当前无实现语义的开关，容易让使用者误以为可控制公告持久展示。
 - 拟删除范围：仅该字段及专属默认赋值/说明；保留dismissible、expires_at、公告传输、所有展示入口和hidden_ids真实持久化。
-- 状态：等待用户确认，尚未删除。仓库外配置/ACP消费者可能使用该字段，使用情况未知；证据见audit-announcement-storage-boundaries。
+- 状态：已获批并删除；公告库 13/13、客户端公告 60/60 回归通过。仓库外配置/ACP消费者可能使用该字段，使用情况未知；证据见audit-announcement-storage-boundaries。
 
 ## R25 · 未找到调用方的诊断设备标识模块
 

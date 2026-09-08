@@ -33,3 +33,6 @@ Removed redundant scroll-debug alias module/registry/classification and changed 
 
 ## R23
 Removed only unconstructed ActivePaneSnapshot::Other. Fresh input_log regressions 7/7 passed; all actual pane variants and their explicit input mapping remain.
+
+## R24
+Removed unconsumed Announcement.persistent and default assignment. Fresh announcement library 13/13 and Pager announcement regressions 60/60 passed; dismissibility, expiry, hidden-ID persistence and client display retained.
