@@ -57141,6 +57141,26 @@
         "Complete notes",
         "runtime or color evidence is unavailable and the relevant terminal/Wayland probes are incomplete",
         "probe_notes retains each unavailable/unsupported/error probe in its source ordering, including runtime.fullscreen-active, runtime.kitty-flags-pushed, runtime.xtversion, terminal.color, and Wayland data-control when applicable."
+      ],
+      [
+        "Standalone report",
+        "collect_standalone is called with a terminal",
+        "the snapshot uses unavailable tmux facts and independently collected host, display, Wayland, clipboard, container, and color evidence without running live tmux queries."
+      ],
+      [
+        "Targeted fix probe",
+        "collect_standalone_fix receives no diagnostic ID or one of the known tmux IDs",
+        "the matching set-clipboard, extended-keys, or passthrough probe is queried while non-target fields remain Unavailable."
+      ],
+      [
+        "Non-tmux fix",
+        "collect_standalone_fix receives a non-tmux terminal",
+        "the tmux fact set is entirely Unavailable and the query backend is not used."
+      ],
+      [
+        "Assembly boundary",
+        "collect_standalone_from is given precomputed probe facts",
+        "it stores those facts in the documented common, clipboard, host, display, container, and color fields without recomputation."
       ]
     ],
     "sources": [
@@ -57187,6 +57207,26 @@
       [
         "crates/codegen/pager/src/diagnostics/view_tests.rs",
         "tests::unavailable_and_error_probe_evidence_is_retained_without_findings"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "collect_standalone"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "collect_standalone_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "collect_tmux_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "collect_standalone_with_tmux"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "collect_standalone_from"
       ]
     ]
   },
@@ -100111,6 +100151,21 @@
         "Clipboard preflight",
         "a route/environment is supplied to format_clipboard_diagnostics",
         "the output reports native, tmux, OSC 52, wrap, optional Wayland data-control, and a confirmed/unverified/unavailable status without claiming that a copy occurred."
+      ],
+      [
+        "Startup collection",
+        "collect_startup_tui receives a terminal, runtime evidence, control-mode value, and tmux query",
+        "the returned ProbeSnapshot contains common terminal facts, the supplied control mode as the sole control-mode fact, and runtime evidence."
+      ],
+      [
+        "Doctor collection",
+        "collect_doctor_tui receives a terminal, runtime evidence, and tmux query",
+        "the returned DoctorProbeSnapshot combines common evidence with clipboard, host, display, container, and color facts while allowing the tmux backend to provide control mode."
+      ],
+      [
+        "Native tool gate",
+        "startup collection runs on a non-Wayland or Wayland display server",
+        "the native clipboard tool callback is not invoked for non-Wayland and is invoked once for Wayland."
       ]
     ],
     "sources": [
@@ -100533,6 +100588,42 @@
       [
         "crates/codegen/pager/src/diagnostics/mod.rs",
         "tests::supports_focus_tracking_known_terminals"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "collect_startup_tui"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "collect_doctor_tui"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "osc52_sink_active"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "collect_common"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "startup_native_tool"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "tests::supplied_control_mode_is_the_only_snapshot_fact"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "tests::missing_control_mode_uses_backend"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "tests::non_wayland_startup_does_not_resolve_native_tool"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "tests::wayland_startup_resolves_native_tool_for_warning"
       ]
     ]
   },
@@ -192491,6 +192582,21 @@
         "Runtime evidence",
         "kitty/xtversion are Available or Unavailable",
         "TuiProbeEvidence maps Available xtversion to Some and Unavailable to None while runtime keeps the original evidence."
+      ],
+      [
+        "Runtime evidence conversion",
+        "a TuiProbeEvidence value is converted into DiagnosticRuntimeEvidence",
+        "fullscreen_active, kitty_flags_pushed, and xtversion are each retained as RuntimeEvidence::Available values."
+      ],
+      [
+        "Snapshot composition",
+        "a caller assembles ProbeSnapshot, CommonProbeSnapshot, StandaloneDiagnosticSnapshot, or DoctorProbeSnapshot",
+        "the snapshot carries the supplied terminal reference and typed tmux, Wayland, runtime, clipboard, host, display, container, and color facts without performing additional probes."
+      ],
+      [
+        "Typed fact representation",
+        "a probe outcome is available, unavailable, unsupported, or an error",
+        "the TmuxProbeResult-bearing fact fields preserve that typed outcome for downstream diagnostics."
       ]
     ],
     "sources": [
@@ -192557,6 +192663,50 @@
       [
         "crates/codegen/pager/src/diagnostics/view_tests.rs",
         "ColorLevel::TrueColor"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "TuiProbeEvidence"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "RuntimeEvidence"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "DiagnosticRuntimeEvidence"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "From<TuiProbeEvidence<'a>> for DiagnosticRuntimeEvidence<'a>"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "ProbeSnapshot"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "CommonProbeSnapshot"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "StandaloneDiagnosticSnapshot"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "DoctorProbeSnapshot"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "TmuxProbeFacts"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "ClipboardProbeFacts"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "WaylandProbeFacts"
       ]
     ]
   },
@@ -192752,6 +192902,21 @@
         "Probe error/unsupported",
         "tmux clipboard probe errors, passthrough support is Unsupported, and Wayland data-control is unavailable",
         "findings remain empty while six ordered probe notes preserve Error message, Unsupported status, and probe names."
+      ],
+      [
+        "Non-tmux fail-open",
+        "collect_common receives a terminal that is not tmux-backed",
+        "all TmuxProbeFacts fields are Unavailable and the TmuxOptionQuery receives no calls."
+      ],
+      [
+        "Support-gated option",
+        "tmux allow-passthrough support is Unsupported, Unavailable, Error, or Available",
+        "the support result is retained and the option value is respectively not queried or mapped to the backend's typed result."
+      ],
+      [
+        "Wayland gate",
+        "standalone_data_control or collect_common runs with is_wayland=false",
+        "the data-control result is Unavailable and no Wayland data-control probe is attempted."
       ]
     ],
     "sources": [
@@ -192810,6 +192975,26 @@
       [
         "crates/codegen/pager/src/diagnostics/view_tests.rs",
         "server unreachable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "collect_tmux"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "unavailable_tmux"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "collect_common"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "standalone_data_control"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "tests::non_tmux_snapshot_skips_tmux_backend"
       ]
     ]
   },
@@ -196014,6 +196199,643 @@
       [
         "crates/codegen/pager/src/views/welcome/logo.rs",
         "load_logo_assets_from_dir"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "ScrollbackState::timeline_entries SHALL enumerate turns oldest-first, expose each turn ordinal and stable prompt EntryId, and derive a bounded first-line preview from the corresponding UserPrompt; missing or non-prompt turn anchors SHALL be omitted rather than targeting a shifted index.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: timeline_entries iterates self.turns with enumerate, resolves turn.prompt_index through entries.get_index, returns None for missing positions, extracts UserPrompt text via prompt_preview and stores the EntryId rather than an ephemeral index. turn_preview performs the same stable turn lookup for one requested index and returns None for out-of-range turns or non-UserPrompt anchors. Appends/removals are therefore resolved by EntryId at the caller boundary.",
+    "scenarios": [
+      [
+        "One per turn",
+        "scrollback contains a pre-turn banner, two user prompts and intervening agent/tool blocks",
+        "timeline has two entries in conversation order with turn_idx 0/1 and IDs resolving to prompt indices 1/3."
+      ],
+      [
+        "Missing anchor",
+        "a turn prompt index no longer resolves in entries",
+        "that turn is filtered out rather than producing a stale target."
+      ],
+      [
+        "Single preview",
+        "turn_preview is requested for a valid UserPrompt turn",
+        "the bounded first nonempty line is returned."
+      ],
+      [
+        "Invalid preview",
+        "turn index is out of range or anchor block is not UserPrompt",
+        "turn_preview returns None."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "TimelineEntry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "ScrollbackState::timeline_entries"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "ScrollbackState::turn_preview"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "timeline_entries_one_per_turn_in_order"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "prompt_preview SHALL select the first non-empty trimmed logical line, preserve its internal text, cap stored preview length at PREVIEW_MAX_CHARS=120 characters, and replace the final retained character with an ellipsis when truncation occurs.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The helper traverses text.lines(), trims each line, chooses the first non-empty value or empty string, collects at most 120 chars, then checks whether a 121st char exists; if so it pops the 120th character and pushes U+2026, keeping the result at 120 chars. The cap is by Unicode scalar count rather than display width, intentionally bounding snapshot work; renderers may truncate again for available width.",
+    "scenarios": [
+      [
+        "Leading blank lines",
+        "prompt begins with blank lines and whitespace before a meaningful line",
+        "preview is the trimmed first meaningful line, ignoring later lines."
+      ],
+      [
+        "Long prompt",
+        "first nonempty line exceeds 120 characters",
+        "preview has 120 chars and ends in an ellipsis."
+      ],
+      [
+        "Short prompt",
+        "first meaningful line is within the cap",
+        "preview contains the full trimmed line without an ellipsis."
+      ],
+      [
+        "All blank",
+        "prompt has no nonempty line",
+        "preview is empty."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "PREVIEW_MAX_CHARS"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "prompt_preview"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "preview_takes_first_nonempty_line_and_caps_length"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "active_turn_for_viewport SHALL identify the turn whose prompt owns the viewport top: in SingleTurn mode it SHALL return current_turn, while normal mode SHALL choose the last prompt at-or-above the top, pin pre-turn content to the first turn, and keep a top-anchored active turn at the bottom instead of clamping to the newest turn.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: SingleTurn returns current_turn directly. Normal mode returns None for no turns, otherwise uses prompts_above_top(false).saturating_sub(1); prompts_above_top requires layout cache and visible range, computes top as cached base virtual_y plus scroll_offset, and partition_points monotone prompt positions. With content before the first prompt, count is zero and saturating_sub yields turn 0. At bottom, the active turn is whichever prompt actually owns top, including a non-newest turn when trailing short turns fit below it; a one-row nudge changes the active boundary by at most one.",
+    "scenarios": [
+      [
+        "Top/middle/bottom",
+        "three tall turns are laid out, then viewport is top, prompt 2 top, and bottom",
+        "active turns are 0, 1, and 2 respectively."
+      ],
+      [
+        "Short trailing turns at bottom",
+        "one tall response is followed by clustered short turns and viewport goes bottom",
+        "active remains the top-anchored turn, not an unconditional newest-turn clamp."
+      ],
+      [
+        "Pre-turn content",
+        "banner blocks precede the first prompt at top or bottom",
+        "active turn is the first turn, index 0."
+      ],
+      [
+        "Single-turn view",
+        "view_mode is SingleTurn with current_turn set",
+        "active returns current_turn rather than layout-derived state."
+      ],
+      [
+        "No turns/no layout",
+        "turn list is empty or layout cache is unavailable",
+        "active returns None rather than guessing a turn."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "ScrollbackState::active_turn_for_viewport"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "ScrollbackState::prompts_above_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "active_turn_tracks_viewport_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "active_turn_stays_top_anchored_at_the_bottom"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "active_turn_is_first_before_first_prompt"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "turn_above_viewport_top SHALL return the nearest turn prompt strictly above the viewport top, and turn_below_viewport_top SHALL return the nearest turn below it; both SHALL use current_turn adjacency in SingleTurn mode and preserve pre-turn, mid-turn, trailing-turn and end-stop semantics.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: Normal above uses prompts_above_top(true)?.checked_sub(1), so an up action from mid-response first snaps to the current prompt and never targets an unreachable trailing turn. Normal below uses prompts_above_top(false) and returns the next turn if it exists; before the first prompt this is turn 0. SingleTurn uses current_turn.checked_sub(1) and current_turn+1 bounded by turns.len(). None denotes a dim/no-op chevron. These targets are later consumed by timeline chevron_target/jump_to_turn, while this state module only computes them.",
+    "scenarios": [
+      [
+        "Mid-turn up",
+        "viewport is partway through the first tall response",
+        "up target is turn 0, snapping to its prompt; the next up is None at top."
+      ],
+      [
+        "Bottom trailing turns",
+        "bottom viewport top is an earlier turn while later short turns remain below",
+        "down target is active+1 and jump enters it instead of dimming."
+      ],
+      [
+        "Everything fits",
+        "two turns fit in one screen and first turn owns top",
+        "up is None, down targets turn 1."
+      ],
+      [
+        "Pre-turn down",
+        "viewport top is before all prompts",
+        "up is None and down targets first turn 0."
+      ],
+      [
+        "End stops",
+        "viewport is at first/last reachable turn",
+        "corresponding above/below target is None."
+      ],
+      [
+        "End-to-end walk",
+        "repeated chevron clicks rebuild rail and jump targets",
+        "up visits strictly decreasing turn boundaries to 0 without sticking; down visits strictly increasing targets and terminates."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "ScrollbackState::turn_above_viewport_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "ScrollbackState::turn_below_viewport_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "prompts_above_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "chevrons_walk_the_conversation_end_to_end_without_sticking"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "down_chevron_enters_trailing_turns_at_the_bottom"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "up_chevron_snaps_to_the_current_prompt_mid_turn"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "chevrons_when_everything_fits_on_one_screen"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "pre_turn_content_dims_up_and_down_enters_the_first_turn"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "prompts_above_top SHALL derive its partition from the prepared layout cache and visible-entry range, using cached virtual_y plus scroll_offset and monotone turn prompt indices; missing cache or missing base geometry SHALL return None so callers cannot navigate from stale/unprepared layout.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The helper obtains layout_cache, visible_entry_range and virtual_y at range.start with ?; computes the viewport top from the range base and scroll offset; then partition_points turns by prompt_y <= top or prompt_y < top according to strictness. It assumes turns are ordered by prompt positions and does not repair layout, clamp the viewport, mutate selection, or jump. The public active/above/below methods propagate None where geometry is unavailable (except SingleTurn paths).",
+    "scenarios": [
+      [
+        "Prepared cache",
+        "layout cache and visible range contain prompt virtual positions",
+        "partition count identifies prompts at-or-above or strictly above the viewport top."
+      ],
+      [
+        "Strict boundary",
+        "prompt virtual_y equals viewport top",
+        "strict query excludes it while non-strict query includes it."
+      ],
+      [
+        "Missing cache",
+        "normal multi-turn query occurs before prepare_layout",
+        "helper returns None and public target/active methods do not invent an index."
+      ],
+      [
+        "Monotone turns",
+        "turn prompt positions are ordered",
+        "partition point yields the nearest boundary without scanning or reordering turns."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "ScrollbackState::prompts_above_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "ScrollbackState::active_turn_for_viewport"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "ScrollbackState::turn_above_viewport_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "ScrollbackState::turn_below_viewport_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "layout_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "visible_entry_range"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "MCP section identity, ordering, labels, descriptions, and removability",
+    "contract": "McpSectionId SHALL distinguish Plugin(name) from Local, order plugin sections alphabetically before Local, and compare Local equal to itself. section_key SHALL produce stable plugin/local collapse keys; section_label SHALL include the section name and count; section_description_lines SHALL currently return no descriptions; section_for SHALL classify plugin_name servers into Plugin and others as Local. is_removable SHALL currently permit deletion for every server.",
+    "scenarios": [
+      [
+        "Section identity",
+        "a server has plugin_name or not",
+        "section_for returns Plugin(name) or Local."
+      ],
+      [
+        "Ordering",
+        "plugin/local sections are compared",
+        "plugins sort lexicographically before Local and Local equals Local."
+      ],
+      [
+        "Presentation",
+        "a section and count are supplied",
+        "stable collapse key and label are produced, with no description lines."
+      ],
+      [
+        "Removal",
+        "any server is checked",
+        "is_removable returns true."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpSectionId"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "PartialOrd::partial_cmp"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "Ord::cmp"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "section_key"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "section_label"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "section_description_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "section_for"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "is_removable"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "Plugin"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "Local"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "mcp-section:plugin:"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "mcp-section:local"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "MCP wire models, setup metadata, tool details, and status presentation",
+    "contract": "MCP wire structs SHALL deserialize camelCase fields while applying defaults for optional display/source/config/setup/session data, setup fields/options, session tools, and setup_required. McpServerDisplayStatus SHALL map Ready/SetupRequired/Unavailable/Initializing to theme success/warning/error/running colors and stable labels ready/setup required/unavailable/initializing.",
+    "scenarios": [
+      [
+        "Wire defaults",
+        "a response omits optional/defaulted fields",
+        "deserialization supplies None/empty/default values while preserving required name/enabled fields."
+      ],
+      [
+        "Setup metadata",
+        "a server declares setup fields/options",
+        "field id/label/type/required/default/options and option label/value are retained and serde-compatible."
+      ],
+      [
+        "Status presentation",
+        "a display status is rendered",
+        "the correct theme color and human label are returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpsListResponse"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpsServerEntry"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpsServerSession"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpSetupConfig"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpSetupField"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpSetupOption"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpToolDetail"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpServerInfo"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpServerDisplayStatus"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "serde::Deserialize"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "serde::Serialize"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "rename_all = \"camelCase\""
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "setup_required"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "theme_color"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "label"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "accent_success"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "warning"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "accent_error"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "running"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "MCP list response conversion, status precedence, plugin parsing, and stable sorting",
+    "contract": "convert_list_response SHALL convert each wire entry into McpServerInfo. Session setup_required SHALL take priority and produce SetupRequired with zero tools; disabled sessions SHALL become Unavailable, zero tools, and enabled=false; enabled sessions SHALL map ready/initializing statuses, unknown statuses to Unavailable, preserve enabled, map each tool with safe defaults, and count tools. Missing sessions SHALL be unavailable and disabled. source SHALL preserve source_label or use local; plugin_name SHALL parse only non-empty `plugin:` labels; setup_required SHALL mirror the session flag/status. The result SHALL sort plugins before local entries, then by display name (falling back to name), then name.",
+    "scenarios": [
+      [
+        "Plugin parsing",
+        "source_label is `plugin: name`",
+        "plugin_name is the trimmed name and source preserves the original label."
+      ],
+      [
+        "Setup priority",
+        "session.setup_required is true even with another status",
+        "status is SetupRequired, tools/count are empty, setup metadata survives."
+      ],
+      [
+        "Disabled/missing",
+        "session is disabled or absent",
+        "status is Unavailable, tool count/tools are zero/empty, and enabled is false."
+      ],
+      [
+        "Ready tools",
+        "session is enabled and status is ready/initializing",
+        "status and enabled are preserved and each JSON tool maps name/displayName/description/enabled with defaults."
+      ],
+      [
+        "Stable order",
+        "multiple plugin/local entries have display names/names",
+        "plugins precede local and ties use display name then canonical name."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "convert_list_response"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "parse_plugin_name"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpsListResponse"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpsServerEntry"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpsServerSession"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpServerDisplayStatus::SetupRequired"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpServerDisplayStatus::Unavailable"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpServerDisplayStatus::Ready"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "McpServerDisplayStatus::Initializing"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "setup_required"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "session.status"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "session.tools"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "displayName"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "description"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "enabled"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "tool_count"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "source_label"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "plugin_name"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "sort_by"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "section_for"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "display_name"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "name"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "MCP server status push patching and tool preservation",
+    "contract": "patch_server_row SHALL find only the first server whose name equals the pushed name, update its status, and return true. When new_tools is Some it SHALL replace the tool list and derive tool_count from its length; when None it SHALL preserve existing tools/count. A missing name SHALL be a silent no-op returning false without mutating any row.",
+    "scenarios": [
+      [
+        "Existing status/tools",
+        "a matching name and new_tools are supplied",
+        "only the first matching row changes status, tools are replaced, and tool_count equals the new vector length."
+      ],
+      [
+        "Status-only push",
+        "a matching name and new_tools is None are supplied",
+        "status changes while existing tools and tool_count remain untouched."
+      ],
+      [
+        "Missing push",
+        "no row has the pushed name",
+        "the function returns false and all rows remain unchanged."
+      ],
+      [
+        "Duplicate names",
+        "multiple rows share a name",
+        "only the first occurrence is mutated."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "patch_server_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "servers.iter_mut().find"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "name"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "new_status"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "new_tools"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "tool_count"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "tools"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "true"
+      ],
+      [
+        "crates/codegen/pager/src/views/mcps_modal.rs",
+        "false"
       ]
     ]
   }

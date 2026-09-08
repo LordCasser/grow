@@ -24115,3 +24115,222 @@ assets SHALL use OnceLock so the selected built-in or user-overridden pair is st
 - **THEN** LogoSize and geometry use compiled LOGO/LOGO_SMALL; explicit loader tests still exercise overrides.
 
 证据：`crates/codegen/pager/src/views/welcome/logo.rs` — `assets`；`crates/codegen/pager/src/views/welcome/logo.rs` — `USER_LOGOS`；`crates/codegen/pager/src/views/welcome/logo.rs` — `OnceLock::get_or_init`；`crates/codegen/pager/src/views/welcome/logo.rs` — `cfg(test)`；`crates/codegen/pager/src/views/welcome/logo.rs` — `cfg(not(test))`；`crates/codegen/pager/src/views/welcome/logo.rs` — `LogoSize::art`；`crates/codegen/pager/src/views/welcome/logo.rs` — `load_logo_assets_from_dir`。
+
+
+### Requirement: ScrollbackState::timeline_entries SHALL enumerate turns oldest-first, expose each turn ordinal and stable prompt EntryId, and derive a bounded first-line preview from the corresponding UserPrompt; missing or non-prompt turn anchors SHALL be omitted rather than targeting a shifted index.
+
+The implementation SHALL satisfy the following tested behavior: timeline_entries iterates self.turns with enumerate, resolves turn.prompt_index through entries.get_index, returns None for missing positions, extracts UserPrompt text via prompt_preview and stores the EntryId rather than an ephemeral index. turn_preview performs the same stable turn lookup for one requested index and returns None for out-of-range turns or non-UserPrompt anchors. Appends/removals are therefore resolved by EntryId at the caller boundary.
+
+#### Scenario: One per turn
+- **WHEN** scrollback contains a pre-turn banner, two user prompts and intervening agent/tool blocks
+- **THEN** timeline has two entries in conversation order with turn_idx 0/1 and IDs resolving to prompt indices 1/3.
+
+#### Scenario: Missing anchor
+- **WHEN** a turn prompt index no longer resolves in entries
+- **THEN** that turn is filtered out rather than producing a stale target.
+
+#### Scenario: Single preview
+- **WHEN** turn_preview is requested for a valid UserPrompt turn
+- **THEN** the bounded first nonempty line is returned.
+
+#### Scenario: Invalid preview
+- **WHEN** turn index is out of range or anchor block is not UserPrompt
+- **THEN** turn_preview returns None.
+
+证据：`crates/codegen/pager/src/scrollback/state/timeline.rs` — `TimelineEntry`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `ScrollbackState::timeline_entries`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `ScrollbackState::turn_preview`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `timeline_entries_one_per_turn_in_order`。
+
+
+### Requirement: prompt_preview SHALL select the first non-empty trimmed logical line, preserve its internal text, cap stored preview length at PREVIEW_MAX_CHARS=120 characters, and replace the final retained character with an ellipsis when truncation occurs.
+
+The implementation SHALL satisfy the following tested behavior: The helper traverses text.lines(), trims each line, chooses the first non-empty value or empty string, collects at most 120 chars, then checks whether a 121st char exists; if so it pops the 120th character and pushes U+2026, keeping the result at 120 chars. The cap is by Unicode scalar count rather than display width, intentionally bounding snapshot work; renderers may truncate again for available width.
+
+#### Scenario: Leading blank lines
+- **WHEN** prompt begins with blank lines and whitespace before a meaningful line
+- **THEN** preview is the trimmed first meaningful line, ignoring later lines.
+
+#### Scenario: Long prompt
+- **WHEN** first nonempty line exceeds 120 characters
+- **THEN** preview has 120 chars and ends in an ellipsis.
+
+#### Scenario: Short prompt
+- **WHEN** first meaningful line is within the cap
+- **THEN** preview contains the full trimmed line without an ellipsis.
+
+#### Scenario: All blank
+- **WHEN** prompt has no nonempty line
+- **THEN** preview is empty.
+
+证据：`crates/codegen/pager/src/scrollback/state/timeline.rs` — `PREVIEW_MAX_CHARS`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `prompt_preview`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `preview_takes_first_nonempty_line_and_caps_length`。
+
+
+### Requirement: active_turn_for_viewport SHALL identify the turn whose prompt owns the viewport top: in SingleTurn mode it SHALL return current_turn, while normal mode SHALL choose the last prompt at-or-above the top, pin pre-turn content to the first turn, and keep a top-anchored active turn at the bottom instead of clamping to the newest turn.
+
+The implementation SHALL satisfy the following tested behavior: SingleTurn returns current_turn directly. Normal mode returns None for no turns, otherwise uses prompts_above_top(false).saturating_sub(1); prompts_above_top requires layout cache and visible range, computes top as cached base virtual_y plus scroll_offset, and partition_points monotone prompt positions. With content before the first prompt, count is zero and saturating_sub yields turn 0. At bottom, the active turn is whichever prompt actually owns top, including a non-newest turn when trailing short turns fit below it; a one-row nudge changes the active boundary by at most one.
+
+#### Scenario: Top/middle/bottom
+- **WHEN** three tall turns are laid out, then viewport is top, prompt 2 top, and bottom
+- **THEN** active turns are 0, 1, and 2 respectively.
+
+#### Scenario: Short trailing turns at bottom
+- **WHEN** one tall response is followed by clustered short turns and viewport goes bottom
+- **THEN** active remains the top-anchored turn, not an unconditional newest-turn clamp.
+
+#### Scenario: Pre-turn content
+- **WHEN** banner blocks precede the first prompt at top or bottom
+- **THEN** active turn is the first turn, index 0.
+
+#### Scenario: Single-turn view
+- **WHEN** view_mode is SingleTurn with current_turn set
+- **THEN** active returns current_turn rather than layout-derived state.
+
+#### Scenario: No turns/no layout
+- **WHEN** turn list is empty or layout cache is unavailable
+- **THEN** active returns None rather than guessing a turn.
+
+证据：`crates/codegen/pager/src/scrollback/state/timeline.rs` — `ScrollbackState::active_turn_for_viewport`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `ScrollbackState::prompts_above_top`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `active_turn_tracks_viewport_top`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `active_turn_stays_top_anchored_at_the_bottom`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `active_turn_is_first_before_first_prompt`。
+
+
+### Requirement: turn_above_viewport_top SHALL return the nearest turn prompt strictly above the viewport top, and turn_below_viewport_top SHALL return the nearest turn below it; both SHALL use current_turn adjacency in SingleTurn mode and preserve pre-turn, mid-turn, trailing-turn and end-stop semantics.
+
+The implementation SHALL satisfy the following tested behavior: Normal above uses prompts_above_top(true)?.checked_sub(1), so an up action from mid-response first snaps to the current prompt and never targets an unreachable trailing turn. Normal below uses prompts_above_top(false) and returns the next turn if it exists; before the first prompt this is turn 0. SingleTurn uses current_turn.checked_sub(1) and current_turn+1 bounded by turns.len(). None denotes a dim/no-op chevron. These targets are later consumed by timeline chevron_target/jump_to_turn, while this state module only computes them.
+
+#### Scenario: Mid-turn up
+- **WHEN** viewport is partway through the first tall response
+- **THEN** up target is turn 0, snapping to its prompt; the next up is None at top.
+
+#### Scenario: Bottom trailing turns
+- **WHEN** bottom viewport top is an earlier turn while later short turns remain below
+- **THEN** down target is active+1 and jump enters it instead of dimming.
+
+#### Scenario: Everything fits
+- **WHEN** two turns fit in one screen and first turn owns top
+- **THEN** up is None, down targets turn 1.
+
+#### Scenario: Pre-turn down
+- **WHEN** viewport top is before all prompts
+- **THEN** up is None and down targets first turn 0.
+
+#### Scenario: End stops
+- **WHEN** viewport is at first/last reachable turn
+- **THEN** corresponding above/below target is None.
+
+#### Scenario: End-to-end walk
+- **WHEN** repeated chevron clicks rebuild rail and jump targets
+- **THEN** up visits strictly decreasing turn boundaries to 0 without sticking; down visits strictly increasing targets and terminates.
+
+证据：`crates/codegen/pager/src/scrollback/state/timeline.rs` — `ScrollbackState::turn_above_viewport_top`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `ScrollbackState::turn_below_viewport_top`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `prompts_above_top`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `chevrons_walk_the_conversation_end_to_end_without_sticking`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `down_chevron_enters_trailing_turns_at_the_bottom`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `up_chevron_snaps_to_the_current_prompt_mid_turn`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `chevrons_when_everything_fits_on_one_screen`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `pre_turn_content_dims_up_and_down_enters_the_first_turn`。
+
+
+### Requirement: prompts_above_top SHALL derive its partition from the prepared layout cache and visible-entry range, using cached virtual_y plus scroll_offset and monotone turn prompt indices; missing cache or missing base geometry SHALL return None so callers cannot navigate from stale/unprepared layout.
+
+The implementation SHALL satisfy the following tested behavior: The helper obtains layout_cache, visible_entry_range and virtual_y at range.start with ?; computes the viewport top from the range base and scroll offset; then partition_points turns by prompt_y <= top or prompt_y < top according to strictness. It assumes turns are ordered by prompt positions and does not repair layout, clamp the viewport, mutate selection, or jump. The public active/above/below methods propagate None where geometry is unavailable (except SingleTurn paths).
+
+#### Scenario: Prepared cache
+- **WHEN** layout cache and visible range contain prompt virtual positions
+- **THEN** partition count identifies prompts at-or-above or strictly above the viewport top.
+
+#### Scenario: Strict boundary
+- **WHEN** prompt virtual_y equals viewport top
+- **THEN** strict query excludes it while non-strict query includes it.
+
+#### Scenario: Missing cache
+- **WHEN** normal multi-turn query occurs before prepare_layout
+- **THEN** helper returns None and public target/active methods do not invent an index.
+
+#### Scenario: Monotone turns
+- **WHEN** turn prompt positions are ordered
+- **THEN** partition point yields the nearest boundary without scanning or reordering turns.
+
+证据：`crates/codegen/pager/src/scrollback/state/timeline.rs` — `ScrollbackState::prompts_above_top`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `ScrollbackState::active_turn_for_viewport`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `ScrollbackState::turn_above_viewport_top`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `ScrollbackState::turn_below_viewport_top`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `layout_cache`；`crates/codegen/pager/src/scrollback/state/timeline.rs` — `visible_entry_range`。
+
+
+### Requirement: MCP section identity, ordering, labels, descriptions, and removability
+
+McpSectionId SHALL distinguish Plugin(name) from Local, order plugin sections alphabetically before Local, and compare Local equal to itself. section_key SHALL produce stable plugin/local collapse keys; section_label SHALL include the section name and count; section_description_lines SHALL currently return no descriptions; section_for SHALL classify plugin_name servers into Plugin and others as Local. is_removable SHALL currently permit deletion for every server.
+
+#### Scenario: Section identity
+- **WHEN** a server has plugin_name or not
+- **THEN** section_for returns Plugin(name) or Local.
+
+#### Scenario: Ordering
+- **WHEN** plugin/local sections are compared
+- **THEN** plugins sort lexicographically before Local and Local equals Local.
+
+#### Scenario: Presentation
+- **WHEN** a section and count are supplied
+- **THEN** stable collapse key and label are produced, with no description lines.
+
+#### Scenario: Removal
+- **WHEN** any server is checked
+- **THEN** is_removable returns true.
+
+证据：`crates/codegen/pager/src/views/mcps_modal.rs` — `McpSectionId`；`crates/codegen/pager/src/views/mcps_modal.rs` — `PartialOrd::partial_cmp`；`crates/codegen/pager/src/views/mcps_modal.rs` — `Ord::cmp`；`crates/codegen/pager/src/views/mcps_modal.rs` — `section_key`；`crates/codegen/pager/src/views/mcps_modal.rs` — `section_label`；`crates/codegen/pager/src/views/mcps_modal.rs` — `section_description_lines`；`crates/codegen/pager/src/views/mcps_modal.rs` — `section_for`；`crates/codegen/pager/src/views/mcps_modal.rs` — `is_removable`；`crates/codegen/pager/src/views/mcps_modal.rs` — `Plugin`；`crates/codegen/pager/src/views/mcps_modal.rs` — `Local`；`crates/codegen/pager/src/views/mcps_modal.rs` — `mcp-section:plugin:`；`crates/codegen/pager/src/views/mcps_modal.rs` — `mcp-section:local`。
+
+
+### Requirement: MCP wire models, setup metadata, tool details, and status presentation
+
+MCP wire structs SHALL deserialize camelCase fields while applying defaults for optional display/source/config/setup/session data, setup fields/options, session tools, and setup_required. McpServerDisplayStatus SHALL map Ready/SetupRequired/Unavailable/Initializing to theme success/warning/error/running colors and stable labels ready/setup required/unavailable/initializing.
+
+#### Scenario: Wire defaults
+- **WHEN** a response omits optional/defaulted fields
+- **THEN** deserialization supplies None/empty/default values while preserving required name/enabled fields.
+
+#### Scenario: Setup metadata
+- **WHEN** a server declares setup fields/options
+- **THEN** field id/label/type/required/default/options and option label/value are retained and serde-compatible.
+
+#### Scenario: Status presentation
+- **WHEN** a display status is rendered
+- **THEN** the correct theme color and human label are returned.
+
+证据：`crates/codegen/pager/src/views/mcps_modal.rs` — `McpsListResponse`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpsServerEntry`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpsServerSession`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpSetupConfig`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpSetupField`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpSetupOption`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpToolDetail`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpServerInfo`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpServerDisplayStatus`；`crates/codegen/pager/src/views/mcps_modal.rs` — `serde::Deserialize`；`crates/codegen/pager/src/views/mcps_modal.rs` — `serde::Serialize`；`crates/codegen/pager/src/views/mcps_modal.rs` — `rename_all = "camelCase"`；`crates/codegen/pager/src/views/mcps_modal.rs` — `setup_required`；`crates/codegen/pager/src/views/mcps_modal.rs` — `theme_color`；`crates/codegen/pager/src/views/mcps_modal.rs` — `label`；`crates/codegen/pager/src/views/mcps_modal.rs` — `accent_success`；`crates/codegen/pager/src/views/mcps_modal.rs` — `warning`；`crates/codegen/pager/src/views/mcps_modal.rs` — `accent_error`；`crates/codegen/pager/src/views/mcps_modal.rs` — `running`。
+
+
+### Requirement: MCP list response conversion, status precedence, plugin parsing, and stable sorting
+
+convert_list_response SHALL convert each wire entry into McpServerInfo. Session setup_required SHALL take priority and produce SetupRequired with zero tools; disabled sessions SHALL become Unavailable, zero tools, and enabled=false; enabled sessions SHALL map ready/initializing statuses, unknown statuses to Unavailable, preserve enabled, map each tool with safe defaults, and count tools. Missing sessions SHALL be unavailable and disabled. source SHALL preserve source_label or use local; plugin_name SHALL parse only non-empty `plugin:` labels; setup_required SHALL mirror the session flag/status. The result SHALL sort plugins before local entries, then by display name (falling back to name), then name.
+
+#### Scenario: Plugin parsing
+- **WHEN** source_label is `plugin: name`
+- **THEN** plugin_name is the trimmed name and source preserves the original label.
+
+#### Scenario: Setup priority
+- **WHEN** session.setup_required is true even with another status
+- **THEN** status is SetupRequired, tools/count are empty, setup metadata survives.
+
+#### Scenario: Disabled/missing
+- **WHEN** session is disabled or absent
+- **THEN** status is Unavailable, tool count/tools are zero/empty, and enabled is false.
+
+#### Scenario: Ready tools
+- **WHEN** session is enabled and status is ready/initializing
+- **THEN** status and enabled are preserved and each JSON tool maps name/displayName/description/enabled with defaults.
+
+#### Scenario: Stable order
+- **WHEN** multiple plugin/local entries have display names/names
+- **THEN** plugins precede local and ties use display name then canonical name.
+
+证据：`crates/codegen/pager/src/views/mcps_modal.rs` — `convert_list_response`；`crates/codegen/pager/src/views/mcps_modal.rs` — `parse_plugin_name`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpsListResponse`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpsServerEntry`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpsServerSession`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpServerDisplayStatus::SetupRequired`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpServerDisplayStatus::Unavailable`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpServerDisplayStatus::Ready`；`crates/codegen/pager/src/views/mcps_modal.rs` — `McpServerDisplayStatus::Initializing`；`crates/codegen/pager/src/views/mcps_modal.rs` — `setup_required`；`crates/codegen/pager/src/views/mcps_modal.rs` — `session.status`；`crates/codegen/pager/src/views/mcps_modal.rs` — `session.tools`；`crates/codegen/pager/src/views/mcps_modal.rs` — `displayName`；`crates/codegen/pager/src/views/mcps_modal.rs` — `description`；`crates/codegen/pager/src/views/mcps_modal.rs` — `enabled`；`crates/codegen/pager/src/views/mcps_modal.rs` — `tool_count`；`crates/codegen/pager/src/views/mcps_modal.rs` — `source_label`；`crates/codegen/pager/src/views/mcps_modal.rs` — `plugin_name`；`crates/codegen/pager/src/views/mcps_modal.rs` — `sort_by`；`crates/codegen/pager/src/views/mcps_modal.rs` — `section_for`；`crates/codegen/pager/src/views/mcps_modal.rs` — `display_name`；`crates/codegen/pager/src/views/mcps_modal.rs` — `name`。
+
+
+### Requirement: MCP server status push patching and tool preservation
+
+patch_server_row SHALL find only the first server whose name equals the pushed name, update its status, and return true. When new_tools is Some it SHALL replace the tool list and derive tool_count from its length; when None it SHALL preserve existing tools/count. A missing name SHALL be a silent no-op returning false without mutating any row.
+
+#### Scenario: Existing status/tools
+- **WHEN** a matching name and new_tools are supplied
+- **THEN** only the first matching row changes status, tools are replaced, and tool_count equals the new vector length.
+
+#### Scenario: Status-only push
+- **WHEN** a matching name and new_tools is None are supplied
+- **THEN** status changes while existing tools and tool_count remain untouched.
+
+#### Scenario: Missing push
+- **WHEN** no row has the pushed name
+- **THEN** the function returns false and all rows remain unchanged.
+
+#### Scenario: Duplicate names
+- **WHEN** multiple rows share a name
+- **THEN** only the first occurrence is mutated.
+
+证据：`crates/codegen/pager/src/views/mcps_modal.rs` — `patch_server_row`；`crates/codegen/pager/src/views/mcps_modal.rs` — `servers.iter_mut().find`；`crates/codegen/pager/src/views/mcps_modal.rs` — `name`；`crates/codegen/pager/src/views/mcps_modal.rs` — `new_status`；`crates/codegen/pager/src/views/mcps_modal.rs` — `new_tools`；`crates/codegen/pager/src/views/mcps_modal.rs` — `tool_count`；`crates/codegen/pager/src/views/mcps_modal.rs` — `tools`；`crates/codegen/pager/src/views/mcps_modal.rs` — `true`；`crates/codegen/pager/src/views/mcps_modal.rs` — `false`。

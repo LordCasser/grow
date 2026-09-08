@@ -969,3 +969,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：output() and diagram_affordances() independently rebuild rendered_output for diagram messages, trading deterministic consistency for repeated work on each frame.
 - Pager 审计债务：The block couples presentation to process-global appearance and terminal-image flags, making pure rendering isolation and test parallelism harder.
 - Pager 审计债务：The Mermaid affordance row carries source text but no render state or path; action/render lifecycle remains split across block, renderer, worker, and input layers.
+- Pager 审计债务：The collector API passes many independently computed facts through large snapshot structs and a high-arity collect_standalone_from constructor, increasing assembly drift risk.
+- Pager 审计债务：Startup and doctor collection duplicate display-server/native-tool and host probing decisions, while standalone collection uses a separate path with different availability semantics.
+- Pager 审计债务：Targeted fix probing is keyed by diagnostic IDs in this low-level collector, coupling probe selection to diagnostics policy constants rather than a typed probe plan.
+- Pager 审计债务：RuntimeEvidence and TmuxProbeResult represent availability at different layers; downstream conversion must preserve distinctions manually, leaving room for inconsistent unavailable/error presentation.

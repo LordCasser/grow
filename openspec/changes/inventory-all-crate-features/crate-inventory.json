@@ -3899,7 +3899,16 @@
       "Measured logo geometry, tiers, and layout gate constants",
       "Logo shine sweep, pulse, and bounded opacity",
       "Logo rendering, centering, padding, and frame-driven colors",
-      "Process-scoped asset cache and deterministic test assets"
+      "Process-scoped asset cache and deterministic test assets",
+      "ScrollbackState::timeline_entries SHALL enumerate turns oldest-first, expose each turn ordinal and stable prompt EntryId, and derive a bounded first-line preview from the corresponding UserPrompt; missing or non-prompt turn anchors SHALL be omitted rather than targeting a shifted index.",
+      "prompt_preview SHALL select the first non-empty trimmed logical line, preserve its internal text, cap stored preview length at PREVIEW_MAX_CHARS=120 characters, and replace the final retained character with an ellipsis when truncation occurs.",
+      "active_turn_for_viewport SHALL identify the turn whose prompt owns the viewport top: in SingleTurn mode it SHALL return current_turn, while normal mode SHALL choose the last prompt at-or-above the top, pin pre-turn content to the first turn, and keep a top-anchored active turn at the bottom instead of clamping to the newest turn.",
+      "turn_above_viewport_top SHALL return the nearest turn prompt strictly above the viewport top, and turn_below_viewport_top SHALL return the nearest turn below it; both SHALL use current_turn adjacency in SingleTurn mode and preserve pre-turn, mid-turn, trailing-turn and end-stop semantics.",
+      "prompts_above_top SHALL derive its partition from the prepared layout cache and visible-entry range, using cached virtual_y plus scroll_offset and monotone turn prompt indices; missing cache or missing base geometry SHALL return None so callers cannot navigate from stale/unprepared layout.",
+      "MCP section identity, ordering, labels, descriptions, and removability",
+      "MCP wire models, setup metadata, tool details, and status presentation",
+      "MCP list response conversion, status precedence, plugin parsing, and stable sorting",
+      "MCP server status push patching and tool preservation"
     ],
     "reviewed_files": [
       {
@@ -6145,6 +6154,18 @@
       {
         "path": "crates/codegen/pager/src/views/welcome/logo.rs",
         "sha256": "3944e4fa75c58249214a34ea7977dd5b232ae041b731d29a00e59b640013f50c"
+      },
+      {
+        "path": "crates/codegen/pager/src/diagnostics/probes/mod.rs",
+        "sha256": "d12965bf0b80b669b71acd1ae1db1126fbede1262f3b0ae9be31229862615a60"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/state/timeline.rs",
+        "sha256": "e22271b1c5f023852e8d6eed9f0be18672d6aaebb129b817b914e4add40d0637"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/mcps_modal.rs",
+        "sha256": "3e99d6a7fff214fa3454c7a21353a9cd9ca2c7468e9503c1b2530dd1b43c9fc8"
       }
     ],
     "review": "reviews/pager.md"
