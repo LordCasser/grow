@@ -1,0 +1,120 @@
+[
+  {
+    "index": "flat",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=2",
+    "rows": [
+      [
+        1,
+        2.8284270763397217
+      ],
+      [
+        2,
+        5.656854152679443
+      ]
+    ]
+  },
+  {
+    "index": "flat",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=-1",
+    "error": "k value in knn queries must be greater than or equal to 0."
+  },
+  {
+    "index": "flat",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=4097",
+    "error": "k value in knn query too large, provided 4097 and the limit is 4096"
+  },
+  {
+    "index": "flat",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=2 and rowid in (3)",
+    "rows": []
+  },
+  {
+    "index": "flat",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=2 and distance>100",
+    "rows": []
+  },
+  {
+    "index": " indexed by diskann(neighbor_quantizer=binary)",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=2",
+    "rows": [
+      [
+        1,
+        2.8284270763397217
+      ],
+      [
+        2,
+        5.656854152679443
+      ]
+    ]
+  },
+  {
+    "index": " indexed by diskann(neighbor_quantizer=binary)",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=-1",
+    "rows": []
+  },
+  {
+    "index": " indexed by diskann(neighbor_quantizer=binary)",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=4097",
+    "rows": [
+      [
+        1,
+        2.8284270763397217
+      ],
+      [
+        2,
+        5.656854152679443
+      ],
+      [
+        3,
+        8.0
+      ]
+    ]
+  },
+  {
+    "index": " indexed by diskann(neighbor_quantizer=binary)",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=2 and rowid in (3)",
+    "rows": []
+  },
+  {
+    "index": " indexed by diskann(neighbor_quantizer=binary)",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=2 and distance>100",
+    "rows": [
+      [
+        1,
+        2.8284270763397217
+      ],
+      [
+        2,
+        5.656854152679443
+      ]
+    ]
+  },
+  {
+    "index": "flat",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=2 and rowid in (2,3)",
+    "rows": [
+      [
+        2,
+        5.656854152679443
+      ],
+      [
+        3,
+        8.485280990600586
+      ]
+    ]
+  },
+  {
+    "index": " indexed by diskann(neighbor_quantizer=binary)",
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=2 and rowid in (2,3)",
+    "rows": [
+      [
+        1,
+        2.8284270763397217
+      ],
+      [
+        2,
+        5.656854152679443
+      ]
+    ]
+  }
+]

@@ -1,0 +1,61 @@
+[
+  {
+    "sql": "select rowid from t where v match '[0,0]'",
+    "error": "A LIMIT or 'k = ?' constraint is required on vec0 knn queries."
+  },
+  {
+    "sql": "select rowid from t where v match '[0,0]' and k=1",
+    "rows": [
+      [
+        1
+      ]
+    ]
+  },
+  {
+    "sql": "select rowid from t where v match '[0,0]' and k=1 limit 1",
+    "error": "Only LIMIT or 'k =?' can be provided, not both"
+  },
+  {
+    "sql": "select rowid from t where v match '[0,0]' and k=1 order by distance desc",
+    "error": "Only ascending in ORDER BY distance clause is supported, DESC is not supported yet."
+  },
+  {
+    "sql": "select rowid from t where v match '[0,0]' and k=1 and body='x'",
+    "error": "An illegal WHERE constraint was provided on a vec0 auxiliary column in a KNN query."
+  },
+  {
+    "sql": "select rowid from t where v match '[0,0]' and k=1 and flag>0",
+    "error": "ONLY EQUALS (=) or NOT_EQUALS (!=) operators are allowed on boolean metadata columns."
+  },
+  {
+    "sql": "select rowid from t where v match '[0,0]' and k=1 and name='abcdefghijkl'",
+    "rows": [
+      [
+        1
+      ]
+    ]
+  },
+  {
+    "sql": "select rowid from t where v match '[0,0]' and k=1 and name>='abcdefghijkl'",
+    "error": "Could not filter metadata fields"
+  },
+  {
+    "sql": "select rowid from t where name>='abcdefghijkl'",
+    "rows": [
+      [
+        1
+      ]
+    ]
+  },
+  {
+    "sql": "select rowid from t where v match '[0,0]' and k=1 and distance=0",
+    "error": "Illegal WHERE constraint on distance column in a KNN query. Only one of GT, GE, LT, LE constraints are allowed."
+  },
+  {
+    "remaining_tables": [
+      [
+        "sqlite_sequence"
+      ]
+    ]
+  }
+]

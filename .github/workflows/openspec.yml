@@ -1,0 +1,26 @@
+name: OpenSpec
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned OpenSpec
+        run: npm install --global @fission-ai/openspec@1.11.0
+      - name: Validate active changes and current specifications
+        run: openspec validate --all --strict --no-interactive
+      - name: Validate archived task completion
+        run: openspec validate --archived --no-interactive

@@ -1,0 +1,2288 @@
+
+
+## Messages usage适配
+
+完整阅读headless/reducer/messages/usage.rs并登记hash。缺失费用回退0、incomplete只告警，不能解释为免费；最终wire仍待续。ACP reducer finish/error也新建line后附usage，Messages使用新scratch，已查调用处无旧cost复用。未执行测试。
+
+
+## Messages最终usage wire证据
+
+核对messages/mod.rs:695–757两处ResultLine构造及wire.rs:16–21、184–225字段。成功和错误均输出数值总费用、usage及modelUsage，缺失费用回退零确实到达wire；无incomplete字段，不只是中间结构遗漏。finite serializer仅替换NaN/无限值，不拒绝负数。普通日志告警不能替代客户端可信标记，未来若调整需独立change。未运行测试。
+
+
+## Messages wire全文件
+
+完整阅读wire.rs并登记hash；新增tag、nullable与省略字段、权限映射及partial工具空对象契约。SystemInit还携带session/model/cwd/tools/slash_commands/mcp_servers/skills，apiKeySource与permissionMode特定rename；compact metadata含trigger/pre_tokens，ToolResultBlock保留任意Value content及is_error。上述DTO无本地测试，生产事件顺序仍属reducer待审范围。ResponseUsage到MessageUsage直接丢弃单独reasoning字段，不在此额外相加。未运行Rust测试。
+
+
+## Messages reducer前部与状态全文件
+
+阅读messages/mod.rs:1–329及state.rs全文件，登记后者hash。new初始化无session、Idle response/framing、各计数0；ensure_init先置已输出标志再构造init，字段apiKeySource固定user，model缺失/空为unknown。append_text在kind切换或待处理signature-only时先finalize；空text不成块，空thinking仅有signature时保留；signature-only产生空thinking块。tool use先finalize，客户端工具ID到order HashMap insert可覆盖同ID旧order，下层配对待续。
+
+flush无blocks时仅started响应计completed次数并reset；有blocks先保存identity与usage，再take_pending重置状态；fallback签名只填最后thinking块的空signature，不覆盖已有签名。last_text拼接Text块无分隔，ID优先terminal pending、其次started identity、最后msg_seq自增合成msg_N；assistant_frames和completed_responses均加1。resolved_stop_reason在default=None时立即None，即使pending含reason也忽略；不能照注释概括为始终优先provider。
+
+ResponseState只有Idle/Started/Completed；open只debug_assert Idle，release可覆盖活动状态。complete保留identity和started但替换pending，允许从Idle完成；take_pending无论状态均reset Idle，只有Completed返回原pending。input_usage复制三个input桶，output默认0。PartialFraming类型防止无message的open block，但不验证index连续性。上述调用顺序尚需后半reducer证据，暂记录审计事实，不声称整个状态机已验证。未运行测试。
+
+
+## Messages coordinator全文件阅读闭合
+
+续读329–695与760–772，结合此前范围完成mod.rs全文件阅读并登记hash（测试独立文件未计入）。begin仅debug_assert单次，设置session但不输出init；AvailableCommands/ResponseStarted/ReasoningCompleted/ResponseCompleted不在统一入口强制init，其余事件包括空文本和被忽略Plan也可能先输出init。非空tools才替换，commands非空才同时替换commands和skills，因此单独skills更新或空commands不会清旧值。
+
+工具结果仅Completed/Failed处理，先close_and_flush(tool_use)再缓存；ID匹配移除原order，否则分配新order，因此重复或孤立terminal不会被本地去重。终端reconcile把剩余ID补为error结果，按原order排序后合为一个user frame；同ID重复ToolCall覆盖HashMap但此前block保留，不能推断任意异常输入均一一配对。raw output字符串原样，null仅非空content数组变紧凑JSON字符串，否则空字符串；其他output变JSON字符串。
+
+ResponseStarted若旧状态未flush先输出init、close旧响应和tool results，再采用非空model并open身份。ResponseCompleted先flush_boundary，再仅在当前Started且双方ID均Some不等时丢弃；缺ID或Idle不被该stale条件拒绝。stop_sequence直接进入PendingResponse，不在此执行state注释所称仅stop_sequence原因保留。ReasoningCompleted已有signature时先finalize旧块，再替换signature。partial子模块仍需完整阅读才能验证帧索引和生命周期。
+
+finish优先max_turns、refusal、cancelled、structured error、success选择结果；前四情况assistant flush default=None会覆盖provider reason为null，正常max_tokens保留该默认否则end_turn。终端result.stop_reason仍复制end原值。成功result文本无assistant frame且last_text空才用caller buffer，否则用最后frame Text拼接；structured output只在成功时保留。error独立入口只对max_tokens传flush默认，其他None。未执行测试，下一步将这些源码事实形成分组契约并核对partial实现。
+
+
+## Partial framing全文件
+
+完整阅读partial.rs并登记hash，新增消息开闭、block索引、signature与tool JSON delta契约。partial_open_message/delta/tool_use本身无include_partials gate，依赖coordinator调用条件；close_message和signature-only自带gate。signature-only clone而不消费签名，最终block由finalize_open形成。contentless started会输出partial空消息但flush_assistant无内容不产生frame，两个合成ID计数因此不能仅由命名推断同步，待测试矩阵核对。未运行测试。
+
+
+## 工具分组契约与测试入口
+
+将此前coordinator工具路径审计形成delta。独立测试实际为tests目录，已定位content/result_usage/init/partial/tool_calls/acp_reducer六模块；读取tests/mod.rs前125行fixture，直接构造reducer、固定session、模型及工具事件，不能据此称网络/CLI集成测试。fixture后段和具体测试仍待续，未登记hash或运行测试。
+
+
+## 工具测试模块全文件核验
+
+完整阅读tests/mod.rs尾部及tool_calls.rs六项测试，登记两文件hash。首项实际无ToolCall只发送terminal update，证明孤立结果仍被缓存，非进行中不输出user；两轮测试检查assistant/user交替和ID；并行逆序完成检查两个结果按t1/t2排序；finish未匹配工具检查补齐错误文字。另两项分别确认连续ResponseCompleted划分msg_a/msg_b，以及最后无Text frame时result为空而不复用早先hi。均为直接reducer测试，无真实工具执行/网络/CLI进程；未覆盖重复ID、error入口补齐或所有content类型。六项仅源码审阅，未运行测试。
+
+
+## Init契约与六项测试
+
+完整阅读tests/init.rs并登记hash，新增延迟init与空列表保留契约。六测试覆盖延迟tools/MCP字段、fixture skill提取、真实skills、空skills、auto权限映射及后续空commands保留。JSON索引is_null断言无法区分键不存在与显式null，不能据此声称claude_code_version/output_style/plugins字段序列化为null；实际DTO无这些字段。子集测试只给合法初始列表，不证明reducer验证任意skills子集。skill_names下层实现仍需阅读。未执行测试。
+
+
+## AvailableCommands传输映射
+
+阅读reducer/mod.rs:260–305，skill_names只检查scope/path键存在，不检查值类型或非null；此前fixture测试覆盖正常skill/workflow/builtin，不覆盖伪造或null标记。tools只筛字符串，command/skill名称不去重保序。map_session_update仅ToolCall/ToolCallUpdate/Plan/AvailableCommands四类，其余返回None；文本与Grow事件并非此函数负责，不据此宣称丢失。另读1–140，to_line序列化失败转type:error消息，structured output失败写null和error但成功不移除既有error键。模块其余函数待续，不登记全hash。未运行测试。
+
+
+## 公共reducer全文件
+
+补读137–260及316–文件尾，连同已读范围完成reducer/mod.rs并登记hash。新增工具名/kind优先级、序列化回退及格式选择契约。json_array_or_empty名称不代表强制数组，成功序列化结果原样；tool metadata接受空白及未知非空kind。Lifecycle plain_message将async完成独立文案，失败error trim为空时用通用句，其余保留原error，ImageCompressed原样message。模块无本地测试，映射测试位于下层测试目录待续。未构建Rust。
+
+
+## ACP reducer全文件
+
+完整阅读acp.rs并登记hash，新增逐事件保留、可选字段省略及终端行契约。实现是派生ACP事件的自定义type行，不是直接序列化原ACP SessionNotification；无session meta/eventId透传，字段来自公共StreamEvent。usage行外层camelCase而ResponseUsage内层snake_case；工具status None显式null。测试另在messages/tests/acp_reducer.rs尚待审，未运行测试。
+
+
+## ACP reducer五项测试
+
+完整阅读tests/acp_reducer.rs并登记hash。前三项对首条text/ToolCall/Completed update执行完整JSON相等断言；usage测试检查type、ID、stopReason、input及signature，不完整比较全部usage桶；finish检查末条end的身份字段、structuredOutput.name及usage为对象，不验证费用可信门控或token数值。全部通过直接构造StreamEvent绕过公共ACP映射，不能用于证明grow/tool元数据提取。未覆盖空文本、None字段、ResponseStarted忽略、Lifecycle/max turns/error等分支。五项仅阅读，未执行测试。
+
+
+## Assistant frame契约与内容测试前段
+
+阅读tests/content.rs:1–210，前九项完整测试覆盖文本合并、completion字段、最后thinking fallback签名、响应ID消费、两种signature-only、空flush、逐响应模型和各块签名；第十项stop_sequence测试尚未读到结束。新增frame契约来自完整已读coordinator，不因测试部分读取提前登记测试文件hash。默认None覆盖pending reason目前为实现证据，本轮前九测试无对应断言。未运行测试。
+
+
+## 内容测试文件尾部
+
+完成content.rs余下范围，合计18项测试并登记hash。补齐stop_sequence正常组合、连续文本、不同ID的连续Started、带thinking文本的signature restart、迟到Started、连续签名两块、auto/async compact和迟到completion测试。duplicate_started实际使用不同ID，不覆盖同ID重复；signature_only_restart实际带mull文本；迟到completion仅断言B input不等99，未断言完整usage正确或缺ID情形。stop_sequence只用匹配reason，不能证明不匹配组合被过滤。compact测试检查边界字段，未证明所有未完成内容立即flush（实现flush_boundary仅flush completed响应）。十八项仅源码审阅，未执行。
+
+
+## Result usage测试前段
+
+阅读tests/result_usage.rs:1–205，前九项完整。核对reasoning不另加output、refusal省略result、成功字段存在、100 input扣10 cache read和5 creation得85、model映射context与费用、原始apiDurationMs及wall duration，以及普通error/null stop和max_tokens error覆盖。名为incomplete_aggregate_zeroes_buckets的测试实际end_usage=None，只证明终端不从per-response usage回填aggregate，未构造usageIsIncomplete=true。model_maps_and_zero_fills使用字段完整行及None rows，不验证不完整行各字段补零。permission_denials/maxOutputTokens的JSON索引is_null仍无法区分缺失与显式null，DTO无这些字段。第十项partial错误测试仅读开头，文件不登记hash；未运行测试。
+
+
+## Result usage测试中段
+
+续读205–405，完成第10–16项：两项max_tokens partial分别断言message_start/assistant身份与输入缓存桶，以及message_delta输入桶；普通partial error断言delta/frame stop为null。两者均无ResponseCompleted pending reason，不能证明覆盖已存在provider stop。结构化错误测试手动提供Err，验证error_max_structured_output_retries及省略result/structured_output，不执行schema验证或重试；max_turns测试与cancelled组合验证max_turns优先。AlwaysFails验证to_line错误回退；费用测试分别用总Infinity和model NaN验证0.0，未测负数及负Infinity。第17项异常finish矩阵仅读前部待续。未运行测试，未登记部分读取文件hash。
+
+
+## Result usage测试全文件闭合
+
+读完405–文件尾，合计21项测试并登记hash。第17矩阵检查refusal/cancelled/max_turns默认null及正常end_turn；取消结果检查error_during_execution、cancelled消息和无result。contentless响应测试有Started/Completed两轮但仅一frame，num_turns为2。关键retry_exhausted测试对partials false/true均先保留completion end_turn再注入structured Err，断言assistant及partial delta都被null覆盖，补齐此前缺少的直接覆盖；没有实际重试执行。孤立completion测试在工具响应已flush后late completion不增轮数，断言num_turns1。所有测试为reducer直接驱动，未执行Rust测试。
+
+
+## Partial测试前段
+
+阅读tests/partial.rs:1–205，完成前七项。验证首text delta索引0及空text block；下一文本触发前消息delta的input/output和message_stop；工具partial测试只查tool name和input_json_delta存在，不核对完整JSON或stop索引；无pending工具flush时delta/frame都tool_use；thinking转text索引0到1并有stop。迟到completion签名测试直接断言partial start合成msg_0而最终frame为msg_real，证明无ResponseStarted时两者ID可不同，signature不追补已关闭partial thinking。真实ResponseStarted测试检查input缓存桶与零output、签名事件先于首block stop及最终frame签名。第八测试仅读前段待续。部分测试直接flush_assistant绕开partial_close_message，不据此验证完整message_stop时序。未运行Rust测试。
+
+
+## Partial测试第8至14项
+
+续读205–400，完成七项：下一无身份响应回退msg_0且输入缓存桶清零；terminal thinking签名先于stop；两个合成partial ID为msg_0/msg_1（不证明与真实ID混用无冲突）；signature-only检查start在签名前及最终thinking/text；各块签名数组严格sig-1/sig-2。空响应检查message_start/delta/stop存在、无content_block事件且无assistant frame；空响应后真实响应检查两个start各自ID和input11/22。事件存在性测试不自动证明完整顺序，未运行重建客户端。第15停止序列测试仅读前半待续。未运行Rust测试或登记完整hash。
+
+
+## Partial测试全文件完成
+
+读完文件尾，合计16项测试并登记hash。停止序列测试断言delta与frame一致，但后继start清序列仅if Some条件断言，不保证实际存在start。连续signature测试严格检查两条signature delta及两块最终签名。独立测试六模块与fixture均已读完；这是reducer测试源码覆盖完成，不是执行测试或pager整体完成。所有测试只在内存直接驱动，无CLI/网络输出重建验证。
+
+
+## HeadlessEmitter前部
+
+阅读headless.rs:1–265，构造格式对应reducer及空缓存。stdout write_all可选flush，任何错误置output_closed；BrokenPipe返回Ok，其他错误保留首个kind/message副本并返回原错，后续write_out直接Ok。emit_line仍先分配紧凑JSON加换行后调用write_out，关闭stdout不自动停止序列化或模型任务；退出判定调用方待续。plain文本逐块flush、thinking忽略，json缓存文本和thinking，Messages流式还累计text_buffer，ACP流式只reduce。Lifecycle plain走stderr，json忽略，两流式reduce。
+
+structured meta仅启用时处理，字符串structuredOutputError优先于任意structuredOutput（含null）；无meta或相关键保留旧状态。usage setter无meta保留旧usage，有meta则usage键缺失清None。resolved structured缺值返回model did not produce structured output，不在此验证schema。duration用elapsed毫秒as u64，mark可重设。当前只是入口读完，尚未推断缓存重用、退出码或stdio故障端到端行为。未运行Rust测试。
+
+
+## stdout错误结果链
+
+核对headless.rs:298–334格式结束输出与1180–1217最终hard error优先检查；并完整阅读headless_tests.rs:452–500四项latch测试。均直接调用record_write_result注入io::Error，不真正写stdout/关闭管道或运行进程退出；first hard测试绕过write_out直接二次调用helper。因此验证为状态逻辑，未证明真实BrokenPipe下取消及时性。主流程其他早退尚待完整阅读，契约仅描述到达最终outcome检查路径。未运行测试。
+
+
+## Headless启动辅助前段
+
+阅读headless.rs:382–545。stop_reason_wire显式五类，未来变体告警后回退end_turn，不是错误传播。mcp_server_names加载配置中Http/Sse/Stdio名称并固定status=connected，未检查连接状态；未知server变体忽略。auto_respond_to_permissions先按调用方option_kinds优先序，再按请求options顺序取第一个相同kind，返回其ID，不在此授权所有请求。authenticate经select_eager_auth_method再AuthMethodKind::is_api_key门控，缺失或非API key同一凭据错误，发送Authenticate meta headless=true，await无此处timeout。下层方法选择仍需核对。
+
+initialize使用V1、FileSystemCapabilities默认构造、terminal=false，meta携带client标识、可选rules及nonInteractive/skipGitStatus/skipProjectLayout三true。open_session每次加载MCP配置；指定sid只发Load(noReplay=true，restore_code仅Some(true)加键)，任意Load错误统一Session does not exist而不保留原错误；成功使用输入sid和cwd，models从config_options转换。无sid才New，错误直接传播。该函数本身不检查路径存在/权限或创建worktree，启动前拒绝路径需后续主流程证据。未运行测试。
+
+
+## Headless显式ID、fork与模型effort
+
+阅读545–730。open_session_with_id先ensure_session_id_available再New meta.sessionId，响应身份使用服务端返回值，不走Load。fork_then_open根据effective_fork_new_cwd选write cwd，指定新ID先检查可用，构造parent worktree参数后调用grow/session/fork；显式fork error与缺newSessionId各自报错，成功后Load失败返回包含child ID的错误，未在此回滚child。父cwd选择和可用性helper尚需审计，不提前宣称无竞态。
+
+apply_headless_model_and_effort两参数均None直接Ok；指定模型先resolve_by_id否则原名构造ModelId，effort-only须有current。catalog空时仅认可canonical token但此函数不附effort，依赖前置stamp（调用链待续），无模型参数则直接Ok。catalog有值时Unsupported告警忽略effort，其余错误失败；指定model仍发送model config。effort-only发送reasoning config值，带effort meta；model+effort用model config值加meta。ACP调用错误按有无model参数区分提示，无本地timeout。headless_materialize_ctx只根据resume_title_pinned选择PinnedPreSandbox/Allowed并传has_worktree。未运行测试。
+
+
+## Headless主启动前段
+
+阅读731–932：先设置进程HTTP headless模式，显式cwd做dunce canonicalize，无cwd用current_dir；在此未单独检查is_dir。加载effective config、构造AgentConfig后提前stamp canonical effort与model，再resolve_runtime_fields（remote/CLI subagents等None），随后设Headless/permission、应用agent flag、自定义agents和严格权限规则。trust在spawn之前grant launch cwd。spawn/initialize/auth失败部分经emitter输出后直接返回，跳过末尾take_output_error；因此上轮错误优先契约明确只限到达最终outcome路径。
+
+session intent和materialize在agent已spawn/auth后才执行，失败用?直接传播；resume空字符串表示most recent，非空表示ID。NewAuto/NewWithId/Resume/Fork分别调对应辅助，Resume优先original_cwd，否则launch cwd；restore_code只向Resume/Fork传Some(true)。opened失败统一包装Could not create session语义并输出。GROW_TRACK_HEADLESS仅env::var成功即启用（不解析值），登记launch cwd而非session_cwd，登记结果忽略，注销后段待续。前置canonical effort覆盖已找到，remapped token仍由post-session方法处理。未运行测试。
+
+
+## Headless prompt循环与退出顺序
+
+阅读932–1184完成run_single_turn主体（此前1180–1217已读）。先begin emitter session再apply model/effort，失败早退可能发生在active登记之后、显式try_unregister之前；是否有其他清理机制待查。prompt meta始终screenMode=headless，verbatim仅true加入，schema原样。循环顶部只检查write_error，BrokenPipe仅output_closed不会因此退出；hard error则下一轮break，修正此前仅helper不取消的边界为主循环主动停止后进入清理。
+
+wait_background成功/错误prompt响应均记录done_at；空pending先drain后判定，无等待模式也有750ms grace。select biased优先ACP recv再prompt future，timeout只在prompt有结果且pending非空启用。后台预算从prompt完成起计，不是整个请求timeout；持续ACP流和同步drain行为需核对helper。channel关闭先emit error并标志，循环外仍drain、reap pending、flush log、try_unregister，之后连接错误早退，先于stdout末尾检查。
+
+正常response meta非空sessionId优先，requestId缺失/空告警输出空值；只cancellationCategory=max_turns_reached会在Ok response路径on_max_turns并返回Err，其余StopReason即使refusal/cancelled仍on_end后Ok。因此Messages error result标记不等价run_single_turn Err。prompt Result Err提取usage、context_window_exceeded override后返回Err，末尾hard stdout错误再优先。reap/grace/helper未完整读，不把调用命名当作后台进程已清理证据。未运行测试。
+
+
+## Headless后台回收与drain
+
+阅读1220–1422。BackgroundWork按Task/Subagent区分同字符串ID，completed tombstone禁止迟到backgrounded/spawned重加，is_monitor只用于日志，完成事件即使未pending也加tombstone，集合无本地cap。reap按HashSet迭代串行，每项请求最多10秒，Task走grow/task/kill、Subagent走grow/subagent/cancel；序列化/ACP/超时只告警继续，Ok(Ok(_))不解析响应payload就记reaped，不等待实际进程退出确认。故注释never outlives不是本函数保证，整体等待也可能随任务数增长。
+
+drain_pending循环try_recv直到非Ok，无条数/时间预算且不区分Empty/Disconnected；grace先完整try_recv排空才检查deadline，之后biased recv先于sleep。因此750ms grace不是同步排空或消息handler耗时的硬上界，持续生产可延迟预算检查；单条handler下层仍待审。尚未执行饥饿或回收失败故障注入，以上为源码可见控制流事实。
+
+
+## Headless消息入口与全文件阅读
+
+读完1423–文件尾，结合此前分段完成headless.rs并登记hash（外置headless_tests尚未全读）。根会话过滤仅RequestPermission显式检查，SessionNotification不检查；Ext下层解析过滤仍待审，不能宣称整个系统跨会话泄露。handler同步stdout可能阻塞，drain不具硬预算。外层忽略空文本，故ACP reducer本身保留空Text并不意味着生产CLI会输出空chunk。新增入站契约，保持helper与调用方语义区别。未运行测试。
+
+
+## Headless扩展协议全文件
+
+完整阅读ext_protocol.rs并登记hash，外置测试待审。确认无root session过滤，task/subagent身份仅载荷字符串，数字task包括负数/小数而非仅整数。compact percentage为u8不限定100，completed tokens_before/async_compact必需；subagent ID必需字符串，不检查background属性。错task载体日志仍称x.ai但实际识别grow，不应从旧日志文字写错协议名。完整调用链确认解析错误仍被handler ack Ok，但未做外部跨会话可达性验证，不能宣称实际攻击可利用。
+
+
+## Ext协议测试前八项
+
+阅读ext_protocol_tests.rs:1–243，完成fixture和前八项测试：字符串任务开始/完成、正整数4242两载体转字符串、非空monitor说明、subagent开始/完成、response完成与开始字段。completion测试使用stop_reason=tool_use同时stop_sequence=<END>并断言保留，直接证明解析器不按reason过滤sequence。usage仅断言input/cache read，未逐桶比较。所有fixture固定sessionId且直接调解析器，oneshot receiver丢弃，不能证明handler ack或根会话隔离。捕获日志fixture限制WARN级别、内存写入，日志测试后段待续；数字负数/小数尚无本轮测试覆盖。第九签名测试只读开头。未运行测试。
+
+
+## Ext协议测试全文件完成
+
+读完244–尾部，共16项测试登记hash。后八项覆盖签名、对象task_id解码失败、两个task载体错tag、response usage错误类型WARN、未知method忽略、session载体两种task tag ERROR、未知display tag无ERROR。未知tag测试只排除ERROR，不证明没有WARN或其他日志；已知解析错误检查日志级别与部分关键词，不完整比较payload。未覆盖别名grow/session/update、无sessionId、null或小数ID及compact/image全部分支。所有测试未执行。
+
+
+## 后台追踪契约与测试前四项
+
+将完整已读主循环/drain/reap形成契约；读取headless_tests.rs前四项，检查task/subagent开始完成、完成先于开始、重复task及重复subagent被tombstone抑制。independent_of_wait_flag测试只调用不接收wait参数的helper，并未分别运行两种主循环配置；无真实后台进程和回收执行。未运行测试。
+
+
+## 回收请求与权限隔离测试
+
+阅读headless_tests.rs:115–248，完成四项回收相关测试及一项子会话权限测试。numeric decoded tracked reaped实际只解析、加入集合并构造kill请求，没有发送请求或执行reaper；task请求断言method/sessionId/taskId，subagent只method/subagentId。drain测试向真实内存channel预先放一条事件，断言pending包含，不驱动真实prompt completion竞态或grace。权限测试经过drain处理child-session请求，在root AlwaysApprove下从oneshot收到Cancelled，直接覆盖会话隔离分支，无真实授权工具执行。第十项post-open错误测试仅读开头待续。未运行Rust测试。
+
+
+## Headless测试会话与结构化输出
+
+读完post_open测试及263–450：post_open直接begin reducer后error，验证session/cwd，不执行session打开或模型apply失败。materialize_ctx覆盖has_worktree/pinned四组合。七项permission parser测试分别覆盖deny先allow、单/多无效项、lenient跳过、空输入、WebFetch domain及Bash colon wildcard，解析实现仍在cli模块待审，不仅凭测试建立完整规则。三项structured测试证明不从text_buffer解析JSON、meta成功/错误投影、StreamingJson不缓存文本而从meta附结构化值；最后一项调用on_text_chunk但未捕获stdout，也未调用完整on_end。没有测试同时含成功/error键的优先级或跨轮保留。未运行Rust测试。
+
+
+## Headless CLI全文件与测试收尾
+
+读完headless_tests.rs最后schema测试：只验证对象通过、数组和非法JSON报错，不验证Schema语义；全文件登记hash，未运行。cli.rs全文件阅读登记hash，prompt选择、大小写敏感扩展名与schema对象门控形成契约。权限strict收集全部错误后整体失败，lenient逐项stderr警告保留有效规则，deny先于allow仅构造顺序，实际评估优先级须核对workspace。comma列表trim去空保留重复；agent参数仅存在普通文件走canonicalize（失败保留原path），目录/不存在路径按名字。CLI agents从HashMap迭代无稳定顺序；仅缺promptBody时将prompt改名，缺name/description用map key，解析后name强制覆盖为key。apply_agent_flag只写所选字段不清另一字段。以上辅助事实尚待调用方与测试补齐，未宣称完整启动契约。
+
+
+## CLI权限调用边界
+
+核对headless.rs:775–812：strict解析先于trust grant与spawn_shell，失败阻止后续启动；七项现有解析测试再次核对，只有辅助解析测试，没有启动失败集成测试。形成独立CLI错误策略契约，未把deny构造顺序写成评估优先级。另读取event_loop.rs:816–865，TUI同用resolve_agent_arg，文件加载失败仅warn，名字直接写agent_override；agents/tools/disallowed-tools/max-turns在TUI仅告警忽略。这一局部读取不登记event_loop全文件hash。未运行Rust测试。
+
+
+## CLI agent归一化及下游解析
+
+复核cli.rs:198–250、headless调用及TUI局部，读取agent/config.rs:1379–1400的from_json与shell配置字段：from_json检查内部name非空，移除promptBody后serde，再单独接收trim非空字符串，解析toolset并设BuiltIn。CLI随后用map key覆盖name而不复验；空key配非空内部name可绕过此层最终名称检查，尚未验证后续注册影响，不宣称系统接受空身份。形成参数及内联定义契约，未运行动态测试，未登记局部读取文件为全文件完成。
+
+
+## Emitter输出格式与meta状态
+
+复核headless.rs:155–378及三项structured测试，形成输出层契约。注释称validated meta，但本层接受任意JSON，不把上游验证当作本层保障。结构化setter缺键保留和usage setter缺键清空不同；当前每次run新建emitter，不能把可重复调用的保留行为直接宣称跨会话污染。Json错误终止无结构化附件。三个测试仅覆盖普通meta、缺结果和StreamingJson不缓存，不覆盖同时成功/error键或setter重复调用；未运行测试。
+
+
+## Headless打开及fork辅助链
+
+复核headless.rs:458–620，读取session_startup.rs:52–130、319–349，补fork载荷、summary/.git启发式、错误优先、UUID存在性预检。预检无身份预留；响应字符串无UUID/非空校验；worktree检查不解析.git文件内容，因此只说明此helper判断，不代表Git确认。未执行ACP请求或故障注入；session_startup其余部分尚待读，不登记全文件hash。
+
+
+## 共享启动意图与延迟动作
+
+读取session_startup.rs:1–51、130–318以及tests开始至ensure_rejects_non_uuid，补分类矩阵和DeferredStartupActions。测试名take_is_atomic实际是单线程mem::take结果断言，不证明并发原子性。my-id分类通过与UUID预检拒绝测试对应不同阶段；不把分类成功等同会话可创建。显式resume优先和多错误优先级来自实现，未运行组合测试。materialize与剩余测试仍待审。
+
+
+## 启动意图materialize实现
+
+读完session_startup.rs:350–522并核对已读标题wrapper；实现没有远端restore调用，旧注释local/remote不能作为事实，worktree仅返回延迟资料。明确预检与查找顺序、PinnedPreSandbox及deferred_local_miss来源。完整阅读session_title_resolve.rs登记hash，标题trim+lowercase非完整Unicode caseless，重复时唯一manual胜出否则列候选报歧义；presandbox UUID直接Unresolved，非UUID本地ID优先，再同步list，列表错误/歧义传播；Title保存所选summary sandbox_profile。外置测试与调用方待审，尚未形成该文件完整独立契约。未运行Rust测试。
+
+
+## 标题选择测试前段
+
+读取session_title_resolve_tests.rs:1–240，前九项纯选择/提示测试形成标题契约证据。接着读取pin_title_resume_finds_saved_profile_and_conflicts与materialization_consumes_pinned_id_after_concurrent_rename：fixture写summary，先pin再顺序改标题/建decoy，验证仍返回原ID；不是实际并发压力测试，也没有执行OS sandbox。pinned_local_ctx仅读开头，后段待续，不登记测试全文件hash。未运行测试。
+
+
+## 标题pin测试中段
+
+读取session_title_resolve_tests.rs:237–425。歧义pin测试断言pin函数报错，没有实际sandbox调用。pinned_no_match测试先pin未命中、再写入同标题会话，Pinned上下文拒绝，Allowed上下文能选中；pinned_non_uuid测试删除已pin legacy会话，再建立同名标题decoy，materialize仍拒绝。两项证据加入materialize契约。均为顺序fixture变更，未执行真实并发或OS沙箱。duplicate_legacy_id测试已读到saved profile保持strict的断言，后续materialize待续；不登记测试文件完整hash。未运行Rust测试。
+
+
+## 标题测试完整与pin调用方
+
+读完session_title_resolve_tests.rs，登记hash。duplicate legacy测试最终只断言materialize返回legacy-twin ID，未断言加载磁盘身份；前段确实比较profile=strict与另cwd off。读取cli.rs:650–742，确认pin后标记、profile双层Option保持无profile结果，解析错误通过问号提前返回，不清此前字段；重复调用重置语义未测试。sandbox profile解析比较和initial_prompt已读，尚待外围调用/测试核对。未运行Rust测试。
+
+
+## session_startup全文件测试收尾
+
+读完692–文件尾，全部源码及测试阅读完成并登记hash。fork测试断言child字段与workspace字段，未断言sourceCwd（该helper仍查询本地状态）；response测试覆盖顶层/嵌套ID及error字符串JSON编码，无网络fork。三个fixture异步测试分别覆盖标题恢复含title、legacy ID优先同名标题、worktree命中/非UUID未命中/UUID未命中三种provenance；实际未创建worktree或恢复远端。七项证据分别加入fork与materialize契约。未执行Rust测试。
+
+
+## Headless模型设置调用与共享解析
+
+复核headless.rs:620–710及940–976：无model/effort直接返回；只effort要求current存在。目录空仅接受canonical token但不发effort-only更新，依赖之前配置stamp；有model仍发model配置。共享model_state.rs:225–290确认ID按ASCII大小写匹配，不支持display name，headless未匹配则保留原ID交服务端。effort先检查模型meta可解析菜单，缺菜单返回Unsupported并被headless警告忽略，即使token未知也先走Unsupported；有菜单先按option ID忽略ASCII大小写，再按canonical值匹配菜单，否则UnknownToken列已提供ID。set失败在begin_session之后输出error并退出，尚未发送prompt。共享菜单解析与canonical parser待续核对，因此本轮先记审阅事实，不把未读辅助语义补成完整契约。未编译Rust。
+
+
+## ModelState前段与菜单入口
+
+读取model_state.rs:1–225，累计已读1–290。available用IndexMap；当前名字优先catalog name否则ID；context window只接meta u64，override Some包括0优先，catalog更新及set_current未清override。图像能力显式bool优先，再inputModalities数组内ASCII image匹配；无可用meta/数组默认true，空数组false。update_catalog保留仍存在current，否则直接采用fallback（未检fallback存在），只有current改变才从meta重取effort；同ID刷新保留会话effort。set_current允许未知ID且effort_override优先。effort循环按菜单声明顺序，陈旧值选首项；空菜单无position命中因此不执行取模。共享sampling-types解析入口确认reasoningEfforts需能整体反序列化为非空Vec，否则None（坏类型告警，空Vec静默）；option反序列化细节尚待复核。reasoningEffort只接字符串解析，坏类型/值warn None。未执行Rust测试，不登记ModelState全文件hash。
+
+
+## Headless effort契约与菜单option
+
+复核sampling-types:708–733、768–850，bare字符串通过FromStr lowercase不trim，full对象value必需，id/label缺失才补默认，不拒绝显式空ID或重复项；菜单整体解析失败不保留合法子集。形成headless模型设置契约，不扩展成所有服务端模型有效性保证。另读model_state.rs:290–334：next_model无current取首，有current但不在目录返回None；From重复ID插入覆盖、current只保留目录内ID、override None。ModelState实现已读完，内联测试仅读fixture开头，未登记全文件hash。未运行Rust测试。
+
+
+## ModelState测试前段及目录契约
+
+读取334–548，完成13项测试：名字、next前进/回绕、空状态、同ID刷新保留用户effort、换ID重取默认、图像缺meta默认、菜单字段映射、effort次序/回绕、无菜单None、菜单即能力、旧supports标志不造菜单、空/坏菜单拒绝。下一项remap token测试只读fixture开头。形成目录状态契约，陈旧current和无效fallback行为来自实现，尚无已读测试覆盖；未执行Rust测试。
+
+
+## ModelState全文件阅读完成
+
+读完540–文件尾，共16项内联测试。最后三项覆盖remap ID大小写、拒绝未提供none/minimal、none仅菜单包含才接受且UnknownToken只列当前菜单选项、图像显式bool及modalities。high样例同时是option ID与value，不能单凭该断言证明纯canonical回退分支；该分支已读实现。图像测试未覆盖bool与数组冲突优先或坏类型。将两项effort测试引用加入headless契约，仅证明共享解析行为，不代表实际ACP发送/错误返回测试。全文件登记hash，未运行Rust测试。
+
+
+## 模型能力实际消费边界
+
+搜索pager内调用并读取agent_view/notices.rs:1–116和acp_handler/session_notification.rs:910–943。current_model_accepts_images唯一非测试直接调用用于clipboard_image_tip_eligible，额外要求提示行可绘制且prompt.images为空；不是发送图片的统一授权/格式校验。SubagentProgress先更新已知info字段，再仅在child_view存在且context_window_tokens>0时写模型override，故setter能接受0不代表此生产入口会写0。notices前段另确认toast默认3秒委托、show_tip不可绘制时不消费seen count、undo提示优先plan nudge，plan需非plan/idle/Normal，word-select prompt变动清提示及snapshot，ambient clock在遮挡时暂停而contextual继续（session banner均阻止clock）。底层tip实现及剩余notices未审，不将局部视作全文件完成。未执行Rust测试。
+
+
+## 模型能力投影形成契约
+
+将已核对ModelState与notices/SubagentProgress消费链形成图像提示和context契约；明确0进度不清旧override、bool优先数组仅源码证据，现有图像测试分别覆盖字段但未组合冲突。复验全inventory已登记871项文件hash全部一致，不能据此推断未审文件或运行行为已验证。未编译Rust。
+
+
+## notices可见性与瞬态状态中段
+
+读取notices.rs:117–383。tip gate列出permission/question/modal/subagent/viewers/gboom/extensions/agents/goal-detail/workflows/dropdown/session banner并检查size stale；mode banner与btw非遮挡项。draw尺寸改变（旧值非0,0）清inline媒体ID及iterm记录、reset overlay owner；resize事件只设stale，不能当实际绘制尺寸。sticky递归更新已有child；toast写sanitize内容及绝对deadline，active_toast不自行检查时间，需maintain清理。行为warning只存target并清leader，至少1ms，不乐观切换；到期同时清banner/target。clipboard debounce仍执行copy，仅抑制toast且抑制分支不更新last时间；copy交付及备用文件真实性待底层核对。图像guard按终端协议给2秒toast，tmux有专用文案。maintain_toast仅读到到期清除分支，剩余与测试待续；未登记全文件hash，未运行Rust测试。
+
+
+## notices实现及内联测试完整
+
+读取378–文件尾，notices全文件完成登记hash。maintain_toast到期清瞬态，未到期false；extensions结果提示委托modal。open_url_or_show只在BrowserUnavailable写scrollback、尝试SystemClipboard并toast；RejectedScheme静默，底层URL策略待审。六项sticky测试覆盖两个pane相同常驻提示、瞬态优先、非mouse常驻保持、tone与文本分离、三个入口控制字符清理；无到期或真实剪贴板/浏览器测试。补读pager-render/glyphs.rs:471–482确认先legacy fallback再逐控制字符映射空格，不做trim/折叠；prompt.rs:102–116确认进入prompt key handler即清瞬态toast而保留sticky，不能泛化为所有UI键盘路径均清。未运行Rust测试。
+
+
+## Toast生命周期契约与维护调用
+
+核对root/mod.rs:3487–3500主agent维护调用，将瞬态/sticky优先、到期清理和prompt键入口形成契约，沿用已有Toast control character sanitization不重复建清理需求。搜索另有child维护与settings到期测试，尚未阅读其完整上下文，未作为已验证场景证据。未运行Rust测试。
+
+
+## Toast到期测试及active视图维护范围
+
+读完settings测试mouse_reporting_toggle_off_sticky_persists_after_transient_toast：通过dispatch关闭mouse，show_toast后以now+4秒调用maintain确认清除瞬态保留sticky；所谓keypress dismissal段直接赋toast=None，没有发送键事件。重新toggle后检查sticky None和Mouse reporting on。测试引用加入toast契约，未执行。root/mod.rs:3450–3477显示维护块由ActiveView::Agent与对应agent存在门控，遍历该agent直接subagent_views，不能宣称所有非活动agent或任意深层子视图均每帧维护。磁盘剩余72GiB，本轮未编译，无新Cargo产物。
+
+
+## URL回退消费链定位
+
+确认app/mod.rs重导出crate::link_opener，实际实现位于pager-render而非app文件。复核pager-render/link_opener.rs:255–305：scheme检查trim后的字符串，try_open_url通过时仍把原url交open_url；这里只验证scheme，不代表完整URL/目标安全校验，现有link opener规范已覆盖底层。读取root/dispatch/ctx.rs:38–83：有active agent委托AgentView，无active agent仍尝试Standard opener，BrowserUnavailable走SystemClipboard报告成功值并构造app toast；与agent路径scrollback notice+固定toast不同。尚未阅读open_url及fallback文案helper本轮上下文，先记录消费差异，不声称浏览器实际成功或clipboard内容可用。未执行外部打开或Rust测试。
+
+
+## 浏览器回退UI契约
+
+复核pager-render/link_opener.rs:1–140，Opened只表示spawn或测试文件追加成功，无等待状态。BROWSER只参与环境可用性门控，此函数仍固定使用平台opener，不自行执行BROWSER值。多行notice保留完整URL，单行URL优先且copied控制后缀。形成pager消费层契约，未把clipboard reported_success升级成用户可粘贴验证；未执行打开器、剪贴板或Rust测试。
+
+
+## EphemeralTip底层实现
+
+读取tips/ephemeral.rs:1–280实现，测试仅fixture及首项开头。单槽show同key先于seen cap：替换tip全部属性、刷新完整lifetime、清暂停余量、返回false，不计数也不记录新shown；其他key先cap判断，拒绝保留旧槽，成功替换记dismissed replaced、shown，seen saturating_add。sync暂停保存deadline相对now饱和余量，不消费已到期事件；暂停时maintain可保留剩余0槽，恢复counting后到期清除。clear按key、clear_all无条件、clear_on_submit保留ambient；is_active只看slot不是可见性或deadline。tip_row_renderable严格大于SHORT_TERMINAL_ROWS且无遮挡。上层AgentView可绘制gate先于show，需结合避免把false误解为未更新；当前只记录实现，测试后段待审，不登记全文件hash。未编译Rust。
+
+
+## EphemeralTip测试全文件收尾
+
+读完285–文件尾，12项测试完整阅读登记hash。覆盖精确deadline到期、异key替换、同key延长TTL、cap累计/预置拒绝/同key不重计、无session_seen不计数、key clear/current_key/clear_all、submit保留ambient及高度16拒绝17允许。测试unkeyed实际仍有dedup key a，仅没有session_seen，不能写成无key对象。未覆盖暂停/恢复clock、remaining0暂停、日志发出或AgentView遮挡gate，计时测试直接传Instant偏移未sleep。未运行Rust测试。
+
+
+## 临时提示状态契约落盘
+
+将ephemeral单槽/cap/clock与notices可绘制gate整合为契约，明确同key返回false仍修改状态、暂停已过deadline不立即消费。计数map属于调用方，未把源注释per-session等同持久化会话级隔离；其AppView拥有者生命周期仍需外围审阅。暂停与拒绝替换保留旧槽场景为源码依据，未执行动态验证。
+
+
+## 提示seen状态所有者与消费点
+
+全pager app搜索tip_seen_counts：字段在AppView，默认构造为空；未发现按agent ID建立独立map或会话切换显式clear。读取root/mod.rs:687–702、3347–3372及dispatch/prompt.rs:210–287，undo/small-screen/ssh使用同一app map且各有contextual_hints gate，active主agent存在才show，仅show返回true记Shown诊断；同key刷新不会新计impression。clipboard apply_probe也是show成功后才note_fired提交cooldown/dedup，失败不提交。源码注释per-session在这里应理解为pager运行内共享状态，不能写成每个持久化会话独立额度。未读完SSH函数末尾及probe外围，不登记全文件hash。未运行Rust测试。
+
+
+## 提示dispatch与word-select接受入口
+
+读取dispatch/prompt.rs:280–416，完成SSH、plan、word-select及send-now展示helper。plan dispatch只检查配置/active agent，idle/模式等条件来自前序触发，不重复校验。word-select已启用则不展示；只要当前槽仍是该key即更新prompt snapshot，包括同key刷新。accept dispatch本身仅检查active主agent和key，先清tip/snapshot并记Accepted再调用设置setter，不检查snapshot或可绘制。实际input.rs:1145–1178键入口要求非Release Ctrl+y、key匹配、可绘制和snapshot等于当前prompt；因此快捷键保障不能归给直接dispatch。word_select.rs输出被截断，未按全文件阅读登记，下一步需重读完整。未执行Rust测试。
+
+
+## Word-select构造与设置效果
+
+完整重读word_select.rs含三项测试登记hash：20秒、ambient、seen cap3，文案Ctrl+Y；测试检查构造字段和文案，不证明实际计时/接受键。读取settings/setters.rs:399–432，set_keep_text_selection相同值直接空effects；不同值先改进程cache、刷新打开的settings modal、日志与toast，再返回PersistSetting含旧值rollback_value。接受提示前序已清槽并记Accepted，因此不能把Accepted诊断或即时toast当作持久化成功，实际Effect处理待核对。当前未运行Rust测试。
+
+
+## PersistSetting异步结果消费
+
+读取effects/mod.rs:1907–1926与dispatch/task_result.rs:1455–1479。Effect在tasks.spawn异步await persist_setting，成功TaskResult携key/value，失败携key/rollback_value/error；此分支无请求序号或本地timeout。消费成功只trace，普通失败调用apply_setting_rollback再警告与清理后的错误toast，best-effort失败不回滚。这里只确认消息载荷和分支，apply_setting_rollback及helpers.rs:503持久化实现待审，不能从日志rolled back宣称具体缓存已回滚或磁盘未写。旁读MCP效果局部不作为完整审阅。未运行Rust测试。
+
+
+## Word-select持久化与回滚局部分支
+
+读取effects/helpers.rs:503–582及770–777：keep_text_selection要求SettingValue::Enum，传字符串至shell::util::config::set_keep_text_selection await并将错误to_string。读取settings/ui.rs:855–913及1014–1027：对应rollback只在from_canonical成功时恢复cache，无本分支磁盘补偿或tip/Accepted诊断恢复。普通失败事件不携本次value/版本，仅旧rollback_value，当前读取链无新旧请求对照；不能认定并发设置回滚一定对应最新值，后续独立审计可核对任务顺序。helpers与ui未全读，不登记hash；shell setter及完整rollback尾部仍待核对。未运行Rust测试。
+
+
+## Word-select接受契约落盘
+
+复核shell/settings_writes.rs:213–215只是update_config写ui.keep_text_selection，不在setter额外校验字符串；rollback ui尾部刷新modal。整合已读构造、键入口、dispatch和异步失败链为契约，保存失败场景为源码路径推导，未执行故障注入。未声称Ctrl+y全局优先级或磁盘事务保证。
+
+
+## 三类提示构造全文件
+
+完整阅读small_screen/ssh_wrap/send_now三文件并登记hash，各含6/4/2项测试。small-screen band为AUTO_COMPACT_MAX_ROWS+1至28闭区间，提示compact-mode、默认3秒ambient、cap1；SSH提示doctor、10秒ambient、cap1；send-now提示Queued/Enter/send now、默认3秒非ambient、cap3。测试只验证band边界、构造字段与文案；首stable draw、SSH环境、队列真实force-send属于调用链，不能从构造注释认定已验证。相关入口条件后续继续，未运行Rust测试。
+
+
+## 首绘提示触发与clipboard轮询门控
+
+读取root/mod.rs:3214–3347。small-screen未测/size stale/非agent延迟，首稳定尺寸不在band或用户compact开启则消费evaluated；band内不可绘制延迟，可绘制先设evaluated再dispatch，故配置关闭也可能消费评估机会。SSH环境OnceLock首次计算固定，稳定尺寸后env false消费；不可绘制或slot active延迟，成功机会同样先标记再dispatch。small-screen不检查slot busy，SSH检查，不能统一描述两个提示都不替换已有提示。clipboard poll gate含image_input开关、支持平台、冷却、focused、active agent提示资格，失败在调用poll前返回；具体底层触及硬件次数须继续核对clipboard_focus实现。未运行Rust测试。
+
+
+## ClipboardFocus提示状态机实现
+
+读取clipboard_focus.rs:1–219实现，测试只fixture开头。poll每1秒最多一次cheap读取，先更新last_poll_at，即使cheap None也节流；cheap Some且不同last_seen才classify。nonimage提交cheap返回count（不是outcome count），image不提交直到show成功note_fired；两次探针count可能不同，不能宣称原子快照。should_fire要求image、30秒冷却已过及outcome count未知或不同last_fired；未知count允许展示，note_fired只更新时间而保留旧count。poll本身不检查cooldown/focus，来自AppView门控；直接调用者可越过该门控。提示默认3秒非ambient无seen cap，Ctrl+v文案来自KeyShortcut。底层clipboard_image_snapshot尚待核对，注释sub-ms/no bytes不能当测量事实。未执行Rust测试，不登记全文件hash。
+
+
+## ClipboardFocus测试前六项
+
+读取230–425，完成fake fire helper和前六项测试：Ctrl+v与is_paste_key一致、无seen cap、500ms节流及1秒边界、同count非图像只分类一次、成功image跨冷却不再分类、拒绝show后同count下一轮重新分类并在note_fired后去重。Cell计数和panic closure直接证明分类调用次数，但refused show通过省略note_fired模拟，不调用AgentView渲染gate；全部是假时钟/探针输入，未触及真实系统剪贴板。剩余测试待续，不登记全文件hash。未运行Rust测试。
+
+
+## ClipboardFocus十项测试完整
+
+读完426–文件尾，累计10项测试，全文件登记hash。冷却测试直接poll在5秒仍分类但should_fire拒绝，生产AppView gate则冷却中根本不poll，明确层次不同；31秒新count可发。no_image直接predicate，refused_show两次pure should_fire且不commit，missing_count直接outcome(None,true)后note_fired验证1秒冷却，并未证明cheap None会触发分类（实现不会）。无精确30秒测试、双探针count差异测试或真实native probe。未运行Rust测试。
+
+
+## Clipboard提示轮询契约落盘
+
+整合完整clipboard_focus状态机、fake probe测试与已读AppView资格/提交路径。契约限于提示轮询，未纳入未读native snapshot内容保障；未知cheap count不分类，与直接should_fire接受unknown outcome区分。未运行Rust测试。
+
+
+## Plan nudge关键词全文件
+
+完整读取plan_nudge.rs及四项测试登记hash。allowlist为plan/planning/design/architect/step by step/break this down/lay out/approach/strategy，逐byte ASCII小写比较且两侧非word；word包括ASCII字母数字和>=0x80，underscore不算word，因此_plan_可匹配；多词短语内部空格精确匹配，不折叠空白，不解析代码块/语义。提示默认3秒非ambient、cap3，chord label硬编码ctrl+x b。名为chord_opens_behavior_picker测试只比较字符串，不驱动picker；其余测试覆盖普通关键字和近邻，未覆盖非ASCII邻接、下划线、内部多空格。PromptWidget调用方待审，未运行Rust测试。
+
+
+## PromptWidget提示触发包装
+
+读取prompt_widget/mod.rs:1490–1573。每次handle_key先清undo/plan/completion信号，两开关都关直接inner；开启时读编辑前chars长度/图片/keyword，inner返回Edited且非completion accepted才检测。plan检测仅keyword false→true，拒paste与inline paste键、文本首字节/或!、slash dropdown；不trim前导空白，因此不能泛化为空白后命令也拒绝。before keyword每键从真实文本重读，避免programmatic/paste写入后下次键误触发；take通过mem::take消费。undo另受images_lost与can_undo限制，clear_detector实现待审。上层notices先消费undo，有undo时不消费plan；非plan/idle/Normal检查在take_plan之后，拒绝会消费信号。测试范围已定位2922–3075，下一步逐项读，未运行Rust测试。
+
+
+## Plan提示编辑测试
+
+读取prompt_widget/tests.rs:2913–3082，完成七项：typed rising edge与take一次性、slash/bash首字符抑制、set_text恢复后不触发、handle_paste后不触发、Tab文件补全含design.py当次/后次不触发、paste chord helper拒绝、默认两开关关时不检测。paste_chord测试直接set_text后传before_kw=false到helper，未读真实clipboard；others调用handle_key/handle_paste但非真实终端事件循环。第八项独立gate测试读至wipe后空文本断言，末尾待续；不登记庞大tests.rs全文件hash。未运行Rust测试。
+
+
+## Plan提示输入契约落盘
+
+读完独立gate测试末尾，确实断言undo仍触发；合计八项相关输入测试完成局部审阅。整合关键词边界、编辑边沿、AgentView抑制与dispatch配置形成契约，不把提示文案视为自动行为切换。下划线/前导空白等边界来自代码，未动态运行。
+
+
+## ClearDetector全文件审阅
+
+完整读取clear_detector.rs与八项测试登记hash。before不等last_len时peak重置为before，随后仍允许本次fire；因此恢复80字符后用户清零会触发，不能把resync说成无条件跳过本次。fire条件peak>=20且after<=5，无显式after<before检查；调用方只Edited，不从helper推导严格删除动作。fire后peak=after，否则max(after)，last=after；长度单位由已读PromptWidget chars().count提供，是Unicode标量非字节/字素。测试涵盖逐删6→5、直接清空、19不触发、程序清空后重同步、恢复后清空、重新建peak、构造gate与Ctrl+z绑定；未直接断言20边界或等长编辑。提示默认3秒非ambient、cap3。未运行Rust测试。
+
+
+## Undo提示输入级六项测试
+
+读取prompt_widget/tests.rs:2740–2909，与已读2910后闭合第六项。六项覆盖Ctrl+C纯文本可undo且信号一次性、Ctrl+U清空触发、programmatic clear不触发、Ctrl+C有图时payload及stash清空抑制、Ctrl+U有图stash非空仍触发、Tab文件补全缩到<=5不触发。can_undo与stash非空不是实际Ctrl+Z后完整恢复比较，未把测试注释fully restorable当验证。另两项image counter测试断言Ctrl+C/set_text清后编号从1重启，真实图片bytes解码不在此片段。fixture hinted_prompt直接开两个gate；未执行Rust测试。
+
+
+## 撤销提示契约落盘
+
+整合ClearDetector与PromptWidget/AgentView/dispatch已读路径，明确长度条件不是速度判断，恢复草稿后的首个用户wipe可触发，图片guard仅查看现有images/stash，不能升级为所有载荷可恢复保证。源码和测试引用写入delta，未执行Rust测试。
+
+
+## tips渲染与模块入口完整
+
+完整读取tips/render.rs与mod.rs登记hash，render含三项buffer测试。普通tip加粗Tip前缀、Paragraph wrap trim=false；tip_height先将line.width转u16再ceil，不能称任意长输入精确高度上界，单词换行也可能多于宽度除法估计。ephemeral零宽/高返回，清整个rect字符/fg/bg/modifier，再SafeBuf首行截断；测试验证两行旧内容清除、零高不变和仅Enter列bold，无零宽/Unicode宽字符测试。mod注释survives typing需结合word-select prompt变化退休例外，不能泛化所有tip。未运行Rust测试。
+
+
+## 提示实际布局与绘制消费
+
+读取agent_view/render.rs:847–886、2144–2185。已有banner_height>0且普通tip存在、无session banner时用tip_height扩大高度；ephemeral可绘制且active把高度至少提高到1，不主动压缩普通tip预留多行。普通tip先render，随后ephemeral清完整banner rect并只画首行，因此覆盖普通tip且清多余行；announcement拥有slot时两者不画。此段位于外层else，模式banner前置分支未在本次读取，不能单凭该片段说tip始终最高优先级。welcome另有调用点只定位未审。未执行渲染测试。
+
+
+## 横幅前置分支与优先级契约
+
+补读render.rs:2070–2185，mode_switch_banner的Some分支在公告与tip之前，先清公告hits；height>0且width>4才画，deadline仅影响fade，不在此清状态或回退。截断条件用UTF8字节len，take和落格用chars，不宣称Unicode显示宽度正确。无mode才进入公告/普通tip/ephemeral分支。与已读布局和tips/render整合写入契约，三项buffer测试仅覆盖底层清屏、截断和样式，不证明完整UI优先级已动态验证。未运行Rust测试。
+
+
+## 小屏幕与SSH提示调用链
+
+复核root/mod.rs:3210–3350及draw2708–2736、dispatch/prompt238–298、diagnostics ssh_wrap_hint410–450；重新完整读取small_screen与ssh_wrap构造及10项测试。draw的minimal提前返回跳过两触发器，其余先small再SSH。small区间21–28（AUTO_COMPACT_MAX_ROWS=20），无槽占用guard；SSH占槽延后。标记evaluated早于配置show检查，因此后启配置不重试。OnceLock缓存环境，不保证实时SSH/终端环境检测；diagnostics只生成建议，不执行wrap。构造测试覆盖区间/内容/seen/ambient/TTL，不验证AppView全链路，未运行Rust测试。
+
+
+## 图片提示原生探针和事件循环消费
+
+追踪pager-render clipboard包装1060–1145到client-support clipboard129–144、168–182、585–686及非macOS1188–1218；root/event_loop1803–1835、2748–2773确认poll与FocusGained预热。平台flag不保证加载成功，OnceLock缓存失败，内锁非外部原子快照，types缺失仍返回count。仅三个精确raster UTI，文件URL优先抑制。不新增重复原生读取契约，扩充现有Clipboard image tip polling and successful show commit并链接证据；本次无真实剪贴板访问、无原生probe测试或Rust构建。
+
+
+## Send-now提示展示和接受
+
+完整复读send_now.rs两项构造测试；读取dispatch/prompt374–410、771–925，agent_view/queue40–105及prompt585–618。服务器路径tip早于SendPrompt effect执行，本地路径以held_queue_count抑制，不能将Shown当ack。try_send_now的Accepted只依赖Action返回及当前tip key，未等待发送完成。空prompt回退明确trim/Normal，非空续行不发送。force_interject_queue_row的具体路由与失败恢复仍需单独核对，本轮只登记提示生命周期，不声称已完成队列全链路。未执行Rust测试。
+
+
+## 队列steering admission与确认等待
+
+读取queue.rs118–325、1–41、390–455，session/mod142–163、2380–2458及acp_handler/queue105–155。echo等待是单个Option覆盖，不是请求队列；原始广播确认先清意图，随后消费者缺running ID直接返回，不能称一定发送。本地删除发生在Action之前，此函数无恢复，不推导下游也无恢复。完整读两项测试：local仅断言SteerPrompt和current ID未变，optimistic测试直接操作session helper，不驱动真实RPC。第三项bash测试仅读前半，未算完成。剩余失败处理待继续审计，未运行Rust测试。
+
+
+## Steering dispatch与失败草稿
+
+完整读取dispatch/interject.rs并登记hash；读取router292–310、dispatch/queue950–1001、effects3166–3238与1242–1280、task_result1251–1305。区分本地SendInterject请求失败恢复与服务器QueueInterject通知仅warn。恢复分配新ID、置前并requires_review，原始blocks/images保留，图片chip仅从显式attachments生成；当前composer及optimistic echo不在此回滚。turn_pipeline失败回归仅定位未读，不算已验证；acp_send实际确认语义、append_prompt_images内部限制仍需沿现有记录继续核对。未运行Rust测试。
+
+
+## Steering响应语义与turn pipeline测试
+
+完整读取turn_pipeline.rs176行并登记hash，六项测试覆盖失败普通图片恢复显式retry、新草稿不覆盖且review阻止drain、占位文本不生附件、失败interject恢复编辑再stash保留bytes/chips、steer effect沿用turn ID、无foreground拒绝。均是dispatch模拟TaskResult/Effect断言，不运行真实RPC或图片decoder。acp-transport/channel1–59确认acp_send等待oneshot且自身无timeout，Ok正文由此调用方忽略。effects4070–4091确认Some空blocks仍优先text。另完整读取helpers18–86 append_prompt_images：最多16图、单图非零<=50,000,000、base64估算含每图1024且总<=64MiB，全部预检后读取，Unix NONBLOCK/NOFOLLOW、普通文件、同句柄take(length+1)长度相等；不验证同长度修改、decoder或已有seed blocks总预算。这些底层预算优先核对既有契约再补，不重复立项。未运行Rust测试。
+
+
+## queue.rs阅读收口
+
+补读510–694完成bash拒绝测试、干净server edit切pane产生QueueReleaseEdit测试、三项watchers计数测试；补325–390、455–475、105–118完成全文件694行并登记hash。watchers实现独立统计Running bg task按is_monitor分组、全部scheduled_tasks长度、running且无workflow ID的子agent、active workflow；子agent有任意workflow ID即排除，不要求能找到对应workflow。三测试覆盖done排除、两workflow children合并到一个workflow计数、standalone与workflow独立。队列键处理先overlay结构/navigation动作再队列操作，server删除先本地retain后version Action，本地删除无drain kick；server reorder保留非visible槽并只交换visible邻居，running不在payload。本次不把测试源码审阅记为执行通过；相关队列编辑/重排契约仍待跨调用方核对。
+
+
+## Watchers计数与标签契约
+
+核对session WorkflowRunSnapshot.is_active仅status==active，subagent.is_running仅!finished；turn_status80–166确认total五类与awaitable三类及标签固定顺序/复数。workflow ID存在即排除子agent，不做关联完整性检查，不推导实际进程存活或定时任务运行状态。将已读queue三项计数测试关联源码契约；孤立workflow ID边界来自实现而非测试。turn_status807–834可见性函数已局部读，starting_session_visible尚待读，不扩大本契约到完整渲染规则。未执行Rust测试。
+
+
+## Turn status可见性与seed超时
+
+读取turn_status750–834、981–1118五项should_show测试；session23–64读seed helper与测试，474–484确认is_idle仅Idle。非Idle覆盖命令状态而非注释所称仅running/cancelling；seed严格<30秒，测试用31秒未断言精确边界。四类watcher循环不含workflow，但total实现含第五类。is_visible真实MCP无年龄/connected完成检查，should_show额外total==0。渲染计时frame与seed判断实际elapsed不同。相关测试只源码审阅，未运行Rust。parkable helper160–166及TurnStatusArgs局部已读，完整render与更多测试仍待审。
+
+
+## 状态行绘制前置分支
+
+读取turn_status215–390，agent_view/render1116–1145，turn_status1417–1498和parked fixture1188–1208。control Some独立于should_show预留行；绘制width<10空返回，Idle seed→drain blocked→control→idle/parked顺序。parked无watcher没有click hit但仍waiting提示；held count非零但top不可发送省略Enter指令。读四项idle/parked测试及一项非parked subagent phase timer测试，均buffer文案断言，不证明click或真实队列发送；未运行Rust。剩余running chrome从390行继续。
+
+
+## Running状态行主体
+
+读取turn_status390–754完成主render及compute_activity，与此前215–390拼合。Ask标题前缀才隐藏phase timer，pending user input仅决定菱形；非tool queued hint必须完整fit才追加且位于phase/control之后。Web search/Fetch/普通Run分支详情预算至少5，可能超过剩余label预算；右侧按right_width落点且返回未clip按钮rect，不能从注释only label truncates推导全宽安全。compute_activity由state优先，提交/取消覆盖activity；Ask和非空description使用secondary，普通tool success。工具标题格式与右区窄宽风险留待相关测试核对，未执行Rust或修改运行代码。
+
+
+## 状态行buffer测试继续
+
+读取turn_status1210–1417、1498–1655及834–881。mouse cue测试核对60列hit宽度、hover颜色、buttons None无hit，未驱动click打开tasks。40列narrow测试仅断言前三类计数前缀存在，不能用来证明运行态右侧按钮在10列安全。workflow label测试直接提供workflows=1，不验证agent聚合。seed三buffer测试区分fresh、real MCP、31秒过期；动画测试仅比较两帧首字符。token五组测试与helper对应：<1k整数，1k–10k两小数，10k–100k一小数，100k–1m整数除千截断，>=1m浮点两/一小数；9999可显示10.00k、99999显示100.0k，不按舍入结果重新分档。尚有文件头、881–981及fixtures1130–1188待补读，未登记全文件hash。未执行Rust测试。
+
+
+## turn_status.rs全文件阅读完成
+
+补读1–80、881–981及1130–1188，1655行全文件完成登记hash。头部Hidden when idle注释不适用于已实现watchers/seed/control等Idle分支。parkable单测接受Subagent，但AgentView.renders_parked另排除Subagent，补入契约避免误读测试说明。五项duration测试仅共享format_duration的断言，不声称此文件定义格式；waiting label测试六reason与bash None fallback完成，测试fixture宽度只覆盖60/72/80及idle40，不提供running10列按钮安全证据。pending_diamond_color将pulse映射0.3至1.0并blend失败回退accent，pulse内部本轮未展开。所有本文件测试仅阅读，未运行Rust。
+
+
+## Queue edit入口与恢复
+
+读取queue_edit1–205、242–355、420–548、564–633。入口stash仅文本非空，dirty仅文本比较，不泛化为所有附带状态变更检测；hold是effect而非确认后进入。exit重入guard防第二次空stash覆盖，清modal仅EditConfirm。保存355–420、modal Delete后半205–242、lost-row548–564待续，未登记全文件。interject路径局部已读：shared images丢弃toast，vanished server fallback普通Interject；本地先stash图片再退出/删除，对旧不再保留图片cleanup，需待save与tests闭合再登记另项。未运行Rust测试。
+
+
+## Queue edit保存与文件收口
+
+补读355–420、205–242、548–564完成queue_edit.rs624行并登记hash（本文件无测试模块）。server保存不发release、不带images或version，router缺active session直接无effect，通知失败仅warn；不将注释LWW视作已审服务端实现。local保存清requires_review/wire/style，目标消失不重建，剩余images cleanup。modal Delete server采用镜像version或0，local retain后按之前drain_blocked决定DrainQueue；未知选择恢复modal。lost-row cancel仅server编辑并恢复旧stash，丢失当前编辑文本且toast。测试调用方尚待查阅，未运行Rust。
+
+
+## 队列编辑测试调用方
+
+完整读取PTY edit_interject_lone_queued_row_keeps_tui_alive.rs233行并登记hash：ignore用例通过带图消息建立唯一local行、编辑后CtrlEnter、随后输入/提交liveness probe，核对最终三个user_query顺序和interjection前缀。contains_image_part递归判断任意type包含image或mime_type/data，且在含EDITED的任一请求检查，不能证明精确图片字节或图片与特定消息绑定。未运行PTY。settings1555–1583单测直接rollback simple_mode，断言QueueReleaseEdit保留，无服务端hold确认；input2595–2623只验证esc_would_cancel_turn为false，非真实Esc取消。router139–180仅外部editor拒绝的局部断言。未找到可据以宣称服务器保存hold完整往返通过的执行证据。
+
+
+## QueuePane合并与身份
+
+读取queue_pane1–180、480–573、1025–1086。visible_held_server_row仅比较running ID，早前queue.rs注释“排除send-now echo”不对应独立过滤规则，以实现为准。server按传入顺序，不按position排序或跨源去重；高位hash不提供绝对无碰撞保证。自动显示比较长度边沿而非内容。底部两项测试只验证visible helper三断言及单行prompt样式无goal文案，不覆盖合并/碰撞/auto-show。剩余180–480和573–1025待审，不登记全文件hash。未运行Rust。
+
+
+## Queue row摘要与完整文本
+
+读取queue_pane180–365，结合已读构造器，记录首非空行摘要与原始lines总数差异、Command只按ASCII空格分样式、Bash前缀及多行suffix不随预算省略。ListItem复制/搜索用完整text，不使用样式Line。此处只证明接口返回内容，不证明实际系统剪贴板写入。RowActionButton读至reset开始，365后待续，无完整文件hash。未运行Rust测试。
+
+
+## QueuePane键盘与选择修复
+
+读取365–480、573–740。handle_key只code分发除首个registry match，J/K contains(NONE)恒容许修饰键集合，函数本身无Release过滤；不推导上层路由也无过滤。copy开启而search关闭，纠正不能从ListItem.search_text推导用户可搜索。desired_height先u16 cast再clamp，非任意长度min。select_after_delete末项无survivor不清selection。RowActionButton.reset清rect/id保留hover，hit以绑定id优先fallback；scroll视口<=5只滚1行并刷新row hover。mouse点击/hover消费下半740后与render尚待继续。未运行Rust。
+
+
+## QueuePane鼠标与绘制收口
+
+补读740–1027，结合此前尾部与其余区段完成queue_pane全文件并登记hash。hover优先操作行、selection仍控制preview；offscreen hover不回退。cancel/edit/send按完整label fits，send只看turn running不看kind；这与keyboard/top_sendable准入不同。empty提前return在reset前，需继续实际点击调用方判断旧hit可达性，不直接宣布可利用缺陷。content_area真实缩进ACCENT+block_pad_left.saturating_sub(1)，非对整个表达式减1。列表溢出额外1列，styles由theme kind变化刷新。两项文件内测试不覆盖hover/preview/窄按钮。本轮未执行Rust测试。
+
+
+## Queue鼠标业务路由
+
+读取mouse395–492，views/agent45–78及render1880–1942。按钮hit之前是pane_areas缓存矩形检查，queue面积0不命中；不能只见empty render不reset就推导旧按钮仍全局可点。该缓存来自last render，绘制间竞态安全尚未证明。delete重查row_ref，local分支可kick drain与键盘删除不同；send-now Changed不直接return，继续edit/general mouse处理。已有dirty编辑时edit点击受set_active_pane锁。render只queue_height>0调用QueuePane，else仅清queue close hit。没有运行动态点击测试，不作漏洞已确认或已排除声明。
+
+
+## 即时路由与drain准入
+
+读取dispatch/queue180–243、334–452，session1818–1828和2251–2268。controls_pending只看slot in_flight，不泛化所有desired配置；behavior分支写latch。current_prompt_id先拒绝意味着后面正常通过路径running为None，shared非空即阻塞。combined dequeue传编辑ID用于后续实现检查，本轮未读该实现不宣称合并边界已完整验证。开头1–132控制effect/enqueue helpers另局部读，非本文件全部。无Rust测试。
+
+
+## Local combined dequeue
+
+读取session2750–2838、3233–3388及共享prompt-queue combine1–114。九项pager测试完整读至chip offset结束：三合并、bash/command阻断、单项、首非prompt、两个编辑位置、expanded、chip字节平移。图片follower测试仅读标题未算完成，后续skill范围测试待续。helper首项不合格仍pop，requires_review和editing首项只能由上层保护；空白未trim。不重复共享combine契约，新增pager adapter载荷变换。未执行Rust。
+
+
+## 合并出队图片与技能测试闭合
+
+读取session3388–3446完成最后两项合并测试，累计十一项相关测试源码已读。图片测试只断言各自images.len为1与text/队列数，不比较bytes/identity，不证明实际解码；证明遇带图follower停止且不跳过合并其后的plain。技能测试断言多合并清ranges并保存两段原文。其后Behavior correlation测试只读前半，未算完成。另dispatch/queue452–521已读：出队后clear_follow_ups、attached_as_viewer=false、设置bash_turn、生成新UUID并note_self_originated；Prompt设TurnSubmitting/current_prompt_id/turn_started_at，multi分支按combined_texts准备逐段bubble，后半尚待续。注释local drain promotes running不可替代实际TurnSubmitting赋值。未运行Rust。
+
+
+## Prompt drain回显与wire选择
+
+读取dispatch/queue510–665，完成Prompt分支至QueueDrain返回。wire Some优先，即使空数组；只首Text注入display metadata。不含wire才建立in_flight快照，注释non-skill不等于display_as_skill条件。图片分支剥离placeholder路径并不发旧ranges；multi无图仍走blocks。combined bubble helper尚待细读，不推导复用算法。Command分支统一Compact并strip_prefix /compact提user_context，Bash仅读开头start_turn_boundary，剩余待续。未运行Rust测试。
+
+
+## Combined bubble身份复用
+
+读取dispatch/queue665–858。paint_or_reuse扫描所有UserPrompt按message_id收集，数量相等才全复用，无文本或连续性比较；部分匹配则追加整组且旧匹配保留。空segments会expect，当前multi调用>=2。apply_turn_start_shim读至single分支开头：重新按self-originated设viewer，boundary/current ID后clear/flush followups；combined传入>=2即走multi绘制，即使bash/internal不rewindable仍可绘制多段，不能只读match注释断言这些kind绝无bubble。multi快照是text-only，不带images/chips；后半858后待续。没有找到该helper专用测试引用，本次不声称动态验证。无Rust构建。
+
+
+## Server turn-start shim收口
+
+读取dispatch/queue858–957，接前段完成shim。单气泡反向同message_id复用、恢复用已显示文本；multi恢复却优先adoption text，不泛化单气泡策略。新快照无附件，最后tracker.activity Some会删除快照。pending commands/workflows/tools从tracker消费，commands generation递增。helper无Send effect，实际调用方通知身份gate仍待核对。note_peek只Someentry且dashboard存在时暂take并还原，dispatch_drain有reconnect gate，直接maybe_drain本身没有同一app gate。本轮未执行Rust。
+
+
+## Queue dispatch全文件收口
+
+补读125–180、243–334完成dispatch/queue.rs991行并登记hash。drain_prompt_state先stash再查back，chip先赋，images空不清旧图，wire Some拒图但chip已赋；只描述helper不推导通用可达数据损坏。retire_optimistic_echo只操作传入两map指定session下ID并移空key，不清agent内echo tracking，调用方需配合。控制pending_effects循环claim直到None，page flip/combine来自appearance cache。注释Cron分支已无对应QueueEntryKind，按实际三kind审计。无测试模块、未运行Rust。
+
+
+## QueueChanged入口全文件
+
+读取acp_handler/queue1–107、140–201，与此前105–155完成201行并登记hash。字段fallback取apply之前镜像；origin决定显示kind，running_turn_kind只检查Some非具体枚举值。agent匹配仅Root，镜像更新后lost-row取消用合并snapshot而非raw广播（纠正附近注释）。raw entries单独用于optimistic确认。无running ID不清current；同ID非Submitting不shim；不同ID直接adopt。apply_queue_changed内部版本或排序处理仍待读，不从此函数推导完全无过期保护。未执行Rust。
+
+
+## Shared queue快照合并
+
+读取root/mod1160–1285，完整核对apply_queue_changed与push_optimistic_prompt_echo。空广播不等于空镜像，未确认echo继续钉尾；version与position不做排序/新旧判断，重复push同ID不刷新内容。仅此层无快照序号判定，不扩张为所有上游传输都无顺序保证。status测试只定位其push调用未读，不算已验证。顺带读set_appearance与effective_compact开头，后者1285后待续，不据此标整文件。未执行Rust。
+
+
+## Idle shared queue路由测试
+
+读取dispatch/tests/status1–132，完整首项路由测试用optimistic helper填两行后直接mirror，并非实际广播；发送c断言SendPrompt effect、未设current ID/运行态、shared末尾追加c。可支持本地路由与echo次序，不证明server ack、广播新旧或多客户端总序。另完整读rename局部display测试及shared bool reset typed setter测试；后续enum仅开头不算完整。该616行测试文件尚未读完，不登记hash。未运行Rust。
+
+
+### Usage弹窗入口与usage结果身份
+
+核对status.rs入口至apply_session_usage_result、usage_modal.rs前160行及status测试相关入口。新增Usage modal opening and usage result identity。nonce 0是请求意图而非接收时模式检查；session匹配在两条结果路径前执行；仅usage结果处理已核对，Context/SessionInfo结果另行继续。计数器没有显式耗尽处理，避免把注释always>=1写成无界保证。源码测试未执行，文件仍部分审阅，不登记全文件hash。
+
+
+### Context与SessionInfo结果边界
+
+新增Context and session info result projection boundaries；核对status handlers及task_result直连分发和Session metadata revision helper。Context成功无session/revision检查且先更新实时状态；SessionInfo成功有两门槛但有效结果同样先更新再判断nonce。失败路径无session身份。status测试尾部已读：旧epoch测试只断言SessionInfo弹窗Loading/新结果Loaded，不证明所有实时状态不被旧请求更新；usage session guard测试实际只覆盖非零nonce，虽注释声称both routes。未执行Rust测试，潜在状态过期风险单列backlog。
+
+
+### Usage内容交互和复制定位
+
+新增Usage modal content navigation and copy selection。核对内容handlers、两个modal_routing调用分支、根复制dispatch及七项相关单测源码。copy_value注释称其他tab不可复制，但实现不检查active_tab；正常Enter入口检查tab，根action却全agents find_map。记录局部真实边界，不把正常单Agent测试推广为多Agent归属保证。未执行Rust测试，渲染与字段格式化继续审阅。
+
+
+### Usage字段及渲染收口
+
+完整阅读usage_modal.rs并登记SHA256。新增字段投影与渲染两契约，累计1915项。源码测试覆盖核心行/空title/backend、类别/零分母、导航、复制和100x30基本渲染；没有覆盖多行折行滚动、小区域返回旧hit及离屏选择。明确scroll按逻辑行而非视觉行、Loading/Failed也登记hit、选择不自动跟随，未把注释当成更强保证。未执行Rust测试或Cargo构建。
+
+
+### Status dispatch全文件阅读收口
+
+完成508行status.rs阅读并登记SHA256，新增辅助surface入口契约。各入口实际门槛不同：名称含minimal的update helper并不检查mode，Gboom只检查Agent与graphics，不要求session；release notes在Agent打开standalone doc。另已读scrub_error_for_toast（UTF8字节长度>120或unsafe字符则固定错误）、notify_session_ready及copy_session_id（优先active agent picker，缺索引/数据时回退app picker）。这些辅助函数继续结合调用方核对覆盖，不以整文件已读代表pager全包完成。未运行Rust或动态终端测试。
+
+
+### Queue与Tasks静态快照格式
+
+新增Queue and task scrollback snapshot formatting，累计1917项。核对两个formatter及首非空行/额外行数helper：不等于交互pane的全部字段；后台description可保留内部换行，header是逻辑项计数。workflow子Agent排除不依赖父记录存在。status_blocks生产代码已读，测试仍部分，暂不登记全文件hash。未运行Rust测试。
+
+
+### Usage ledger文本收口
+
+完整阅读status_blocks.rs、两个既存snapshot并登记源码SHA256，新增Session usage ledger display and cost absence，累计1918项。核对Some金额优先于partial、空账本仅两字段判断、totals不重算、单模型隐藏。测试只覆盖正常Some金额和None partial组合，没有覆盖矛盾Some+partial输入；源码边界不代表上游会产生该输入。快照只读，未执行Rust测试；账本生命周期需在shell审计核对。
+
+
+### Dispatch视图身份解析
+
+新增Dispatch root and child view lookup boundaries。ctx读取定位helper及switch后半；初次ctx/cta合读输出截断，不登记两文件全读。明确permission优先root、session helper不跟child、root lookup与直接child-key lookup差异，避免一概描述active等于当前子Agent。未运行Rust测试。
+
+
+### Agent切换上下文收口
+
+补齐ctx.rs中间段，285行全文件完成阅读登记。新增Agent switch permission mirror and transient context。入口debug_assert发生在未知/同target返回之前，不能承诺任何条件下同target都无操作；hint先take再检查模式/target。睡眠helper仅扫描root，不把注释any agent推广到递归。相关router测试仅读stale global auto一项，未执行Rust测试。
+
+
+### Plugin CTA候选与安装完成
+
+新增Plugin CTA candidate and install completion gates，累计1921项。cta.rs前285行已读，reload末尾及MCP/catalog后续继续。候选跨featured源合并但source URL只留最后一项；dismiss发生在单次match之后；install回报仅按path leaf而非generation检查。此处描述局部事实，不声称可达错误安装。尚未执行测试或插件安装。
+
+
+### CTA异步后续与catalog收口
+
+cta.rs全文件读取登记，新增Plugin CTA post install polling and catalog refresh，累计1922项。核对1000ms retry和4000ms dismiss effect，预算计数不等于墙钟上限，Installed不证明Ready，也没有本handler认证跳转。catalog与debounce的hit清理不同。未执行测试、网络请求或插件安装，timeout消费者及CTA动作入口待继续。
+
+
+### CTA动作与关闭消费者
+
+1922项不变，补connect_matched_plugin和CtaInstalledDismissTimeout事实到既有两契约。连接先记录点击再查session；expects_mcp缺候选为false；安装source来自全局featured_source_url而非当前candidate来源。关闭timer按name和Installed阶段匹配，不含generation。agent_view/cta.rs仅审阅此段，未登记全文件hash，相关测试位于cta_e2e及agent_view本文件待继续；无实际安装或Rust构建。
+
+
+### CTA通知与连接测试证据
+
+1922项不变，补通知发送侧与九项相关测试源码证据。notify gate仅source/candidates，generation wrapping_add；不误写为发送端检查enabled/phase/session。连接测试覆盖Matched、Error retry、无session、MCP inventory和remote未知inventory；名为skills-only的测试fixture实际components=None且remote=None，并未证明Some空inventory路径。draw_installing测试已读，后续渲染代码待核对。未执行测试，不登记agent_view/cta.rs全文件hash。
+
+
+### CTA横幅投影
+
+新增Plugin CTA banner width and hit regions，累计1923项。draw_plugin_cta完整阅读，区分严格宽度阈值、首行绘制、错误message不显示、spinner阶段清按钮；补四项完整测试源码（60x1布局）。error测试只读前半，不登记为完整测试证据。未执行渲染测试或Cargo构建。
+
+
+### CTA剩余横幅测试与输入分支
+
+1923项不变，完成Error/键提示/20列/30列横幅四测试及ctrl-slash两测试源码阅读。宽度测试不覆盖精确阈值或Hidden绘制，未声称覆盖。核对输入ctrl-slash分支与鼠标dismiss/connect局部：dismiss配置失败仍在内存隐藏，键盘分支无effect也Changed；未把局部命中推断为完整遮挡准入。agent_view/cta.rs测试尾部已读，follow-up生产逻辑仍待审计。未执行Rust或写用户配置。
+
+
+### Follow-up接收缓存与reset
+
+新增Follow up response acceptance and pending turn buffer，累计1924项。读取apply及buffer/flush/clear/reset完整实现，MAX_PENDING=16；不把newest-wins注释写成严格时间顺序保证。同显示response优先于prompt guard、seen current-turn例外和pending空建议不撤回均按源码写明；未动态复现或修改逻辑，调用方/测试继续核对。
+
+
+### Follow-up通知入口
+
+完整读取acp_handler/follow_ups.rs并登记hash，新增Follow up notification identity and ingestion limits，累计1925项。重点区分128字节身份与256字符label、先take6再清洗、完整解析后限制、Child拒绝及后台root更新却返回false。promptId仅结构必需，未检查非空；不把注释mandatory当成更强校验。未执行测试，路由helper及入口测试继续核对。另补读agent_view/cta.rs 60–88 suggestion helper，待结合既有suggestion契约确认。
+
+
+### Follow-up入口测试与路由回退
+
+1925项不变，读tests/follow_ups.rs前291行完整测试至empty current response；viewer transition仅开头，继续后续。测试覆盖active/background、当前回合重显/前回合拒绝、replay bool、畸形整包、控制字符、bidi、空label/response、ASCII cap与128边界；不能证明Unicode字节/字符差异或过滤后补位行为。核对routing helper发现全root优先child，均无匹配时active session=None回退；已扩充契约，避免精确身份过度承诺。未运行Rust测试。
+
+
+### Follow-up回合过渡测试证据
+
+完成acp_handler/tests/follow_ups.rs 334行全文件审阅登记。viewer测试通过真实handle分发构造带promptId的AgentMessageChunk，确认旧chips清除后新通知显示；不是真实网络或PTY测试。另完整读取agent_view/mod.rs三项缓存测试：手动设置current ID后flush，17 key淘汰首项且第二项可flush，非采用回合的缓存保持而不显示。不能据此宣称全部adoption调用点已验证。reload preserving测试仅开头，待继续。1925项不变，未执行Rust测试。
+
+
+### Follow-up reload保留调用证据
+
+1925项不变，完整读取两项reload保留测试、full reset pending测试及chip hit测试。reload测试直接调用reset和真实adopt_running_prompt，不经过完整SessionLoaded；另读load.rs对应foreground条件段与adopt helper确认先设置身份再flush。保留测试分开覆盖pending/已显示，未同时构造二者验证优先级；chip测试只检查渲染rect到索引/文本映射，没有发送请求。未执行测试，render_follow_ups实现待继续。
+
+
+### Follow-up chip渲染
+
+新增Follow up chip prefix rendering and original text mapping，累计1926项。读取renderer、五项完整渲染测试与前一条布局测试；预算48是显示列，helper位于pager-render而非pager本地。首个放不下即break保障前缀索引；鼠标路径用原suggestion。长label测试用ASCII，只断言chip宽<=52，不验证Unicode组合边界；未执行测试。
+
+
+### Follow-up提交分发
+
+1926项不变，扩充SubmitFollowUp三布尔参数与common funnel初段、literal guard及chips清理门槛；完整读四项router测试，证明特定fixture不执行slash/quit、running发送清chips及reconnect保留。不推广为总immediate：composer images仍参与路由，即便consume_input=false。剩余local分支与无session行为继续核对，未执行Rust。
+
+
+### Follow-up本地队列与草稿
+
+1926项不变，读prompt.rs823–938发送尾部，明确consume_input=false在immediate/local均跳过composer清理及history；local不搬附件，仍计算skill token ranges。无session chip测试只断言无SendPrompt且chips仍在，没有断言queue为空；生产分支实际入队，不能把可重试chips描述为完全无副作用。另读无session普通prompt队列测试与project-picker绕过测试。未运行Rust测试，无构建。
+
+
+### Agent CTA与建议文件收口
+
+agent_view/cta.rs1068行已分段全读，登记SHA256。新增Agent suggestion mode gates and shown diagnostics，累计1927项。明确controller enabled与active两个字段，Shown由逻辑ghost与latch判断而非像素曝光；Bash suggestions与下一prompt建议是不同入口。controller详细行为与调用时序另行核对，不把此helper注释当作所有调用方保证。未运行Rust测试。
+
+
+### Prompt suggestion控制器
+
+新增Prompt suggestion controller generation and prefix semantics，累计1928项。生产实现已读，测试仅fixture开头。源码与注释差异明确：完整键入只是ghost隐藏；begin_fetch不清旧text；dismiss不作废generation；resolve_model忽略catalog且仅环境返回，不存在注释所称catalog默认。上游清洗/请求门槛待继续，不据局部允许CR或控制字符推断实际可入站。未执行Rust测试。
+
+
+### Prompt suggestion控制器测试收口
+
+完成prompt_suggestion.rs全部14项测试源码阅读并登记全文件hash；1928项不变。覆盖前缀显示、接受/分歧保留、dismiss后新load、stale和clear invalidation、空/LF拒绝、disabled及shown latch重置。dismiss测试先begin_fetch后load，未直接覆盖同generation解除dismiss；完整输入测试只检查ghost None，没有消费断言。测试未涉及resolve_model或环境OnceLock、Unicode/control边界。未执行Rust测试。
+
+
+### Prompt suggestion异步路径
+
+新增Prompt suggestion completion fetch and response routing，累计1929项。读完成处理末段、effect和TaskResult实际消费者。记录completion前置路径尚需完整审计，不将尾段条件宣称整个完成函数充分条件；JSON result存在优先、错误转None、消费者不携session且忽略on_loaded返回值后仍刷新gate。未执行RPC或Rust测试。
+
+
+### Prompt response前置收口
+
+完整阅读handle_prompt_response从入口至尾部，1929项不变，扩充建议请求契约前置准入：Ok身份不fallback、Err用发起ID；晚到已finalized只merge窗口，其他stale退休echo；finalizer非ViewerFinalized返回；failed draft恢复提前返回。None身份不是本地直接拒绝，最终是否采纳需看共享finalizer，不依据此处猜测。此前尾段契约现已补齐函数内早退条件，未执行Rust测试。
+
+
+### 未确认提交草稿恢复
+
+新增Unconfirmed input draft restoration admission，累计1930项。核对恢复helper、queue front helper与from_submission：Normal检查为prompt_mode而非prompt_input_mode；队首helper本身不设review，调用方设置。cursor为text.len字节末尾，提交恢复不保留旧undo stash。未运行Rust测试，未读取完整prompt widget恢复实现，不把此构造器描述为所有恢复内部行为。
+
+
+### Compact完成响应
+
+新增Compaction request completion foreground ownership，累计1931项。核对两种track_foreground语义及错误分类，shell marker helper只接受object内bool true。没有session/generation比较，只靠前台command类型门槛；不把后台Completed无操作误说成请求未处理。生产建议debounce尾段也已读，待controller和调用方继续。未运行Rust测试。
+
+
+### Compact测试与全局复核
+
+1931项不变，补两项完整源码测试：Completed在track_foreground false/true均无新增scrollback；先apply AutoCompactCancelled再带published marker RPC error只留一条终止且live status为空。未断言每种错误分类、queue drain或generation，不扩大覆盖声明。TaskResult直接转发已核对。全局1931映射唯一、标题/来源存在、逐crate关联一致，900份源码hash全部匹配。未执行Rust测试或构建。
+
+
+### Shell建议wire解析
+
+新增Shell suggestion response strict wire projection，累计1932项。读取suggestion_controller/mod.rs前205行，先收录完整parser；空ghost先过滤再source验证与completion整包拒绝分开描述。range只检查正序，后续request-context校验尚待读；不将解析成功写成可安全应用。controller状态主体继续，未运行Rust测试。
+
+
+### Shell建议状态清理范围
+
+新增Shell suggestion dropdown and ghost reset scopes，累计1933项。读mod.rs203–430，completion接受主体尚未完整，暂仅记录dropdown与ghost已读方法。明确clear_ghost与invalidate_draft不同，getter不含enabled检查，close保留锚点，OneWord具体切分待helper核对。未运行Rust测试。
+
+
+### Shell completion splice与Tab
+
+新增Shell completion splice validation and Tab decisions，累计1934项。读mod.rs421–636；明确Stale接受也消费候选、单项InstaAccept尚不验证range、cursor门槛只在tab_decision。common_str_prefix helper尚未读，不对其Unicode算法作额外保证；progressive match和Tab pending已读待后续状态契约合并。未运行Rust测试。
+
+
+### Shell suggestion生产文件收口
+
+新增Shell suggestion text matching and response state updates，累计1935项；mod.rs全文件已读并登记SHA256，tests.rs独立待读。关键边界：progressive成功不升generation，landing不更新last_request_text，valid ghost保留open/hover而无ghost清除它们。OneWord全空白可全部接受，LCP按char边界回退。未执行Rust测试。
+
+
+### Shell ghost接受与progressive测试
+
+1935项不变，完整读取tests.rs接受9项与progressive9项。覆盖全空白单词接受、Unicode词、emoji单char匹配，以及零/多char追加均清ghost。测试直接调用底层方法，不证明enabled或完整键盘路由；没有把new默认环境解析当固定测试配置。随后set_ghost两测试读取至第二项末尾断言，后续仍待，不登记测试全文件hash。未运行Rust测试。
+
+
+### Shell建议输入失效测试
+
+1935项不变，读tests.rs221–370：补clear测试、8项text_changed及2项debounce源码。slash pending测试先arm debounce再begin Tab，因此旧debounce在suppression之前已经过期；后续pending Tab disarm和stale landing不回填是新增有效断言，不把第一断言独立归因于slash。disabled测试依赖new环境默认而未强制清env；clear_all_fields测试只断言text/full/source，不证明generation和所有锚点重置。未运行Rust测试，response fixture仅开头待继续。
+
+
+### Shell建议landing与解析测试
+
+1935项不变，读tests.rs373–598完整fixture、六项landing测试、accept关闭dropdown和两项JSON解析测试。no_ghost_clears与replaces_existing先text_changed已清旧ghost，故不能单凭它们证明landing对已有ghost的替换/清理；源码实现证据仍在。stale dropdown构造Source::None不经过parser，因此仅验证controller代次，不代表wire接受未知source。population未断言request_text/cursor或open/hover；不扩大覆盖。未运行Rust。
+
+
+### Shell wire异常与splice测试证据
+
+1935项不变，读tests.rs599–806的五项parser和七项validated_range测试。parser覆盖空suffix、缺generation、顶层格式、单原子edit及range形状/缺字段/未知source拒绝。旧insertText/tokenText样例同时缺replacement，不能单凭该用例证明deny_unknown_fields；也没有在本段覆盖多候选中一坏全拒绝、result:null优先、空suffix未知source，相关契约依据生产实现。range测试覆盖请求前缀漂移、尾部向replacement增长（包括空白）、分叉拒绝、中间token不扩展、越界和UTF-8 end落在é中间。没有把单个end边界测试扩成所有start边界或真实编辑路由证明。后续common_prefix_fill测试待读，不登记tests.rs全文件hash；未动态执行Rust测试。
+
+
+### Shell建议测试文件收口
+
+读完tests.rs807–1481，全文件1481行完成并登记SHA256。新增测试证据涵盖公共前缀严格扩展、大小写/模糊匹配拒绝、混合range和stale generation、UTF-8公共字节边界回退；Tab空候选、光标漂移、单项接受、混合/历史source只打开、truncated只打开、半转义回退与完整转义填充；peek不消费、token/整行splice、Stale仍消费。whole_line_and_mixed_sets并未构造AI，不能由注释声称AI独立用例；truncated测试仅单项，不证明混合截断组合。
+
+异步部分覆盖request_text锚定、接受后旧响应拒绝、清空/不匹配编辑清理、禁用输入建议时显式Tab仍落候选但忽略ghost、pending只消费一次及silent refetch不触发Tab。stale_generation_refuses_and_closes在text_changed时已关闭清空，故不能独立证明accept分支执行关闭；loaded_controller显式set_last_request_text，不能把其结果归于landing自动更新该锚点。末尾pipeline测试直接调用controller并手动设置请求文本，不是RPC或键盘端到端执行；slash_during_pending_debounce仅断言None和无ghost，未触发旧debounce。未动态运行Rust测试。1935项契约不变。
+
+
+### Completion dropdown渲染
+
+完整读取completion_dropdown.rs413行及13项源码测试，登记hash，新增布局投影契约后累计1936项。固定6行scroll_offset与实际area高度分离；label宽度排除超40项，description预算两列而实际一空格，不按注释想当然改写。resize测试只有不panic断言，scroll中心测试仅断言可见而不校验精确居中；状态close测试明确保留generation和请求锚点。render的SafeBuf/截断实现不在本轮扩大保证；无Rust测试执行。
+
+
+### Shell completion view执行路径
+
+读取shell_completion.rs生产主体1–144行，新增view接受/refetch契约后1937项。保留原子元素冲突时不消费候选，stale had_items吞键、silent deterministic和enabled debounce两路径分别描述；直接请求自身无Bash/session绑定检查，不把调用方前提当本方法检查。测试与prompt widget周边仅部分读取，待后续完整核对；本轮不登记全文件hash、不主张键盘/RPC端到端已验证，无Cargo构建。
+
+
+### Prompt补全写入与元素重叠
+
+核对prompt_widget/mod.rs742–834及tests.rs4164–4281八项源码测试，累计1938项。实现拒绝所有元素重叠，包括全覆盖和内部空range，不将clips注释理解为仅部分切断。测试实际覆盖paste部分重叠及尾端相邻普通文本；全覆盖、内部空range由生产布尔表达式支持，未宣称已有专门测试。widget不重验请求锚点；实际textarea更底层行为不在此扩大。hover setter有index裁剪，select则直接复制已有hover。两个大文件仍未全读，不新增整文件hash；无Rust测试运行。
+
+
+### Shell completion键盘测试收口
+
+完整读取shell_completion.rs907行，登记hash，补全部28项源码测试来源，1938项不变。覆盖Tab/Enter token原位替换、whole-line、stale range及generation吞键，闭合下拉无ghost打开；确定性请求字段include_ai=false/token_only=true/limit50，重复Tab仅一个effect，空Bash回FocusScrollback及Normal不fetch；单候选接受、history/mixed打开、公共前缀fill后手动landing再Tab打开。paste冲突覆盖Fill/InstaAccept/open-dropdown保留候选无refetch，换到安全selected可接受。
+
+验证限制：所有请求只检查effect，未执行RPC；fill刷新和Esc用例直接注入response/消费pending，Esc注入history尽管Tab请求token_only，故只能证明对该controller fixture的关闭行为。dir用例只证明接受后的Debounce effect，并未验证下层目录扫描。pipeline Normal/Bash共用effects但前段明确无Debounce；mouse用例验证focused prompt点击后generation和items失效，并未断言准确cursor坐标。测试由源码审阅，未动态运行。
+
+
+### Shell建议异步执行及失败投影
+
+核对effects中50ms debounce和grow/suggest分支、prompt debounce handler、task_result landing与CancelComplete消费者，新增后1939项。请求失败/解析失败无身份化失败result且不清pending，重复Tab可持续去重，独立登记backlog。合法stale响应仍在root重设progressive anchor，不能把controller内部代次检查写成整个handler无副作用；响应generation来自server，未在effect与请求generation比对。仅源码核对，未执行故障注入或RPC，不登记大文件完整hash。
+
+
+### CLI completion脚本入口
+
+完整读取completions_cmd.rs124行及生成脚本测试，登记hash；核对Command枚举、zsh/bash解析测试和CLI early return调用方。累计1940项。Zsh补丁是精确字符串首匹配替换，测试依赖生成器仍含问题pattern，非执行zsh验证；UTF8失败回退和其他shell没有本段动态证明。函数自身静态生成，但CLI分支前debug配置可写env，不沿用零启动副作用的扩大声明。未运行Rust或shell脚本。
+
+
+### Root terminal outcome收尾
+
+完整读取root/turn_completion.rs104行，登记hash，新增后1941项。queue_empty是drain前本地pending_prompts快照；notification None连idle title亦不刷新；is_active被忽略，ViewerFinalized缺Agent仍true。延迟通知是单Option替换且100ms为计划时间，不将其写成通知送达保证。title取AppView.cwd及固定focused，不假定来自agent cwd或真实焦点。未运行Rust，agent_view终态状态机继续核对。
+
+
+### Terminal marker与stop hooks身份
+
+读agent_view/turn_completion.rs1–275，先收录完整push_turn_terminal_marker路径，累计1942项。stamped mismatch先单独flush，unstamped仍可折入；event None不丢hooks。finalizer主体已读，但marker/notification helper及late PR metadata剩余待核对后单独收录，不登记全文件hash，未运行Rust。
+
+
+### Agent terminal生产文件收口
+
+读完turn_completion.rs396行，登记hash，新增身份/收尾和marker/notification/late metadata两契约，累计1944项。记录accepts_submitting=true未另设state gate、unknown durable reason按成功、cancel marker优先bash、notification success分支优先failed_error（不把任意meta组合当调用方必构造）。late metadata本方法无pid检查、逐字段fill-missing不覆盖；专用tests657行尚待读，未运行Rust。
+
+
+### Terminal身份与stop hook测试证据
+
+读取tests.rs1–310完成11项测试，补来源：driver/viewer durable完成、stale pid拒绝、pidless拒绝、两rail顺序下provider failure仅一份、重复终态无第二marker；五项stash测试覆盖相同/不同/缺ending身份、无marker独立flush及viewer完成折入。provider测试人为预置RetryFailed和model_failure_reported，不证明真实provider事件链或RPC；stop组是单个Success fixture，没有断言每项hook payload或多组顺序。marker mapping测试只读开头仍待完成，测试文件不登记整文件hash，无Rust执行；1944项不变。
+
+
+### Terminal测试文件收口
+
+完整读完tests.rs657行，补剩余六项来源并登记hash，1944项不变。marker mapping覆盖cancel/error/rate_limit/max_tokens；普通marker文案在有bg task和无任务时相同，park fixture不产marker而真实结束只一条。full teardown测试断言permission成功响应存在但未检查Cancelled具体payload，plan只try_recv成功未检查stale-cancel字段；不能沿注释扩大验证。重复终态检查Ignored及空状态，未对每个收尾副作用计数。late merge直接调用方法，meta promptId未经过调用方验证；后续Err无usage，不能单凭此测试证明冲突usage不覆盖；structuredOutputError仅独立用例，未测与structuredOutput同时存在的优先级。没有独立terminal_notification断言矩阵，无RPC或动态Rust执行。
+
+
+### ACP终态通知测试入口
+
+完整读取acp_handler/tests/turn_completion.rs96行四项源码测试，登记hash；前两项经handle chunk与handle_ext_notification确认viewer exact pid完成、重复通知false不增scrollback及异pid保持running，已链接终态契约。后两项实际属于queue changed：structured internal/goal_continuation采用普通id可adopt，缺runningTurnKind不adopt；仅检查状态/pid，不证明所有origin组合。没有运行真实transport或持久化/replay。核对session_notification的TurnCompleted分支：loading_replay只seal并记录replayed_terminal_prompts，live才进入finalizer；本轮未扩写整体session notification身份路由，1944项不变。
+
+
+### Trajectory与Export CLI
+
+完整读取trajectory_cmd.rs59行和export_cmd.rs86行并登记hash，新增两契约后1946项。trajectory测试仅验证kind分类，不测试排序/HTTP或浏览器；bind约束委托serve，未从默认loopback推导任意bind都安全。Export输出优先clipboard，copy返回值被忽略且chars实际字节数；文件写不是独占/原子。本轮只读，不访问真实会话、启动server、写导出或剪贴板；无Cargo构建。
+
+
+### Sessions CLI入口
+
+完整读取sessions_cmd.rs139行，登记hash，累计1947项。List/Search并非同接口，cwd非UTF8时List.to_str为None而Search为lossy字符串；limit无本层非零约束。分组重排组但保留组内顺序，Search Total仅本页数量。删除直接委托且无本层确认，未执行任何真实会话删除或搜索。日期字节截取依赖上游格式，不扩大为任意Unicode日期安全保证。本文件无测试，无Cargo构建。
+
+
+### Memory CLI清理入口
+
+完整读取memory_cmd.rs132行，登记hash，累计1948项。该CLI仅Clear，不从名称推测搜索/索引命令。展示existing但执行全部targets，部分成功仍Ok、全失败才Err；确认EOF取消。MemoryStorage底层范围另属已审memory crate，此处不以help文本替代具体删除证据。本轮只读，不执行清理，不读取真实memory；文件无测试，无Cargo构建。
+
+
+### Trace CLI本地归档
+
+完整读取trace_cmd.rs191行并登记hash，累计1949项。压缩128MiB限制在finish之后、mode0644仅tar成员而非外部输出文件；显式output不作tilde展开，默认使用canonical session id。metadata含当前时间，不声称归档可复现；snapshot安全/脱敏不由该层保证。文件无内嵌测试，未运行归档或访问真实trace，无Cargo构建。
+
+
+### Startup warning展示数据
+
+完整读取startup.rs142行及五项banner选择测试，登记hash，累计1950项。实际负责告警选择，不涉及日志env或缓存。Warning优先首条，Info取末条；Actionable wrapper非空ID assert由生产代码支持，无本文件专项测试，into_warning丢弃wrapper ID但保留固定doctor文案。未将建议60列或颜色注释写成该模块强制渲染保证；未运行Rust。
+
+
+### 内置教程目录
+
+完整读取tutorial_docs.rs149行及四项测试并登记hash，累计1951项。记录九项静态目录、编译期include及go_deeper引用；docs::find_doc直接核对为ASCII忽略大小写。50行和首#为测试约束，不是运行时处理。Markdown正文和overlay导航不在本轮完整覆盖，不能从目录文案推导对应产品功能已实现；未运行Rust。
+
+
+### 内置how-to目录和磁盘提取
+
+完整读取docs.rs342行及八项源码测试并登记hash，累计1952项。目录25+2，提取只USER_GUIDE；精确ASCII大小写不敏感查找。磁盘stale按命名判定而非类型检查，逐文件失败继续且不阻止清理；不扩大为事务或独占写。测试临时目录验证所有USER_GUIDE字节相同、99-removed删除和notes保留，未覆盖权限失败/特殊文件/非UTF8；仅审阅测试源码未执行。未将指南标题或正文视为实现证据，无Cargo构建。
+
+
+### Async wake与models CLI
+
+完整读取async_view.rs30行、models.rs31行、client_identity.rs4行并登记hash，累计1954项。async_view实际只有共享Notify唤醒，不是加载状态容器；单测试future-before-wake非广播/UI刷新验证。Models仅输出id与默认标记，guard失败路径也析构；核对spawn Drop为cancel加有界join，不沿注释声称必退出。未运行模型查询、后台worker或Rust测试，无Cargo构建。
+
+
+### TOML编辑读取与hint持久化
+
+完整读取config_toml_edit.rs181行及八项源码测试，登记hash，累计1955项。任何read_to_string错误均空文档，区别于可读非法TOML返回None；tests只覆盖正常读取、missing和parse错误，未覆盖读取权限/非法UTF8/hints标量/并发更新。set_hint_at malformed返回Ok不代表写成功，写操作为整文件覆盖。未操作真实配置，无Cargo构建。
+
+
+### Motion时间原语
+
+完整读取motion.rs249行及五项源码测试，登记hash，累计1956项。FPS测试对相同时间调用同一函数，不是两条真实30/60FPS事件循环；源码架构扫描仅检查pager/pager-minimal/pager-render的rs文件、排除motion.rs且截取首个cfg(test)之前，再搜固定字符串，不能证明全部私有计数器不存在。deadline u64纳秒夹值限制了极端时间严格未来保证；pulse零period只debug检查。未运行Rust，无Cargo构建。
+
+
+### Allocator release hook
+
+完整读取memory_release.rs138行及单项计数测试，登记hash，累计1957项。无hook仍可走trace采样/record，不沿模块注释声称全无副作用；生命周期调用点清单仅注释，本轮不据此证明所有cliff覆盖。测试全局OnceLock安装、线程局部计数，证明fixture线程两次调用增2，不证明allocator实际释放或跨平台RSS变化。trace内部剩余待读，无Cargo构建。
+
+
+### Memory trace平台采样
+
+读取memory_trace.rs1–243，先记录完整provider和平台采样，累计1958项。Linux读取失败None与字段解析失败Some0区分；页大小OnceLock缓存且sysconf失败4096。macOS成功仅检查返回码，不以注释声明结构兼容或实际syscall耗时已验证；采样函数本身无启用门槛。Thresholds只读开头，sink/start/record尚待，不登记整文件hash。无实际采样或Cargo构建。
+
+
+### Memtrace阈值与轮转计数
+
+读取memory_trace.rs244–405，新增后1959项。轮转条件是fetch_add返回旧计数>阈值，不能按注释说到4MiB立即轮转；换行失败仍计数，rename失败也归零重开，既存文件大小未计入。阈值严格低于half才rearm，record emit失败仍observe消耗桶；fire_threshold主体下一步继续，不登记全文件hash，未做IO故障注入或Cargo构建。
+
+
+### Memtrace启动和threshold dump
+
+读取memory_trace.rs405–584生产余部，新增后1960项。默认启用且禁用值大小写敏感；spawn失败仍Sink active。首interval前purge可懒建文件，不沿注释声称短命CLI一定无痕；start emit失败不重试。dump写失败仍记录名字，threshold footprint字段在Linux实际RSS；实现只有warn，无模块注释所称额外threshold hook调用。tests余部待继续，未登记整文件hash，无实际trace操作。
+
+
+### Memtrace测试收口
+
+完整读取memory_trace.rs728行，补五项测试来源并登记hash，1960项不变。threshold测试400MiB实际低于三个桶half，会全部rearm，随后1GiB只触发首桶；注释only that bucket不可当成只重新armed首桶的证明。轮转测试16次sample仅验证文件存在和每条JSON kind/ts，空文件循环也可通过，不证明两份都非空或256字节硬上限；旧懒重开注释与生产 eager reopen不同。purge验证reason/duration/hook布尔及受支持平台before>0，不保证hook已安装、实际释放或after下降。scoped sink Drop恢复旧Arc，依赖serial key；无启动环境/线程失败/dump失败专项测试。本轮静态审阅，未执行Rust。
+
+
+### Hyperlink route能力投影
+
+完整读取hyperlink_route.rs245行及16项源码测试，登记hash，累计1961项。模块为终端OSC8策略，不是URL路由。十项skip测试和六项resolve测试覆盖iTerm2/Apple/Warp/Screen/tmux3.3/3.4/VTE旧新/unknown及VTE优先原因；全部构造context，不是实际终端探测或OSC8渲染。未测OnceLock环境变动、SSH/Byobu组合和所有品牌；生产布尔条件与缓存按源码记录。无Cargo构建。
+
+
+### Unified log分支基线
+
+完整读取当前worktree unified_log.rs141行并登记hash，累计1962项。当前仍是ACP_TX OnceLock+BUFFER和try_current设计；其他任务报告main已修复dispatch ownership，但未将该报告当成本分支代码，合并前须重新核对并更新delta/hash。明确pre-init drain、无runtime丢批、重复init timer及flush_blocking不等全部历史批次；本文件无测试，未动态发送日志。
+
+
+### Input ring诊断快照
+
+完整读取input_log.rs277行及七项源码测试，登记hash，累计1963项。raw保存Char值，只有snapshot去字符；200是条数非10秒窗口。容量测试同一Backspace重复250次，只证明数量而不能独立辨别最旧淘汰顺序；时间测试断言非递减不验证精确1ms。InputDump只有结构，未据顶部注释声称快捷键/路径实际入口已验证。其他任务main归属修复不在本文件推导，无真实按键记录访问或Cargo构建。
+
+
+### Git cwd缓存策略
+
+读取git_info.rs1–210，新增后1964项。lazy先更新时间再尝试spawn，无runtime仍占TTL；Some覆盖无代次防护，None保留旧值。64项按刷新timestamp淘汰，不是每次读更新LRU，不沿注释保证活跃路径绝不淘汰；Mutex锁不是严格非阻塞。compute_snapshot主体与测试待继续，不登记完整hash，无Git写操作或Cargo构建。
+
+
+### Git发现和显示投影
+
+读取git_info.rs212–363生产余部，累计1965项。bare无workdir和发现失败均可None；label首个record无label不继续祖先；HOME是字符串前缀非路径边界。Nerd Font只启发式与环境override，不验证字体；品牌禁用判断不附加macOS host条件。测试余部待审，不登记全文件hash，未访问worktree DB或修改Git。
+
+
+### Git info测试收口
+
+完整读取git_info.rs537行，补10项测试来源并登记hash，1965项不变。前三项覆盖无runtime lazy None、本地map按时间淘汰和None保留旧branch；首项无Git发现执行，不能以non_repo标题证明发现器识别非repo。淘汰覆盖已有key仅assert长度，生产源码提供未淘汰条件。其余七项为纯glyph决策，不探测实际字体；没有worktree DB、HOME边界、detached/bare发现、异步乱序或notification label专项测试。无Rust执行或Cargo构建。
+
+
+### Pager crate根模块复核
+
+完整读取lib.rs79行并登记hash，不为纯mod/re-export声明新增行为requirement。确认render/terminal/clipboard/host/link_opener等实际来自pager-render重导出，后续不能假设pager/src存在同名实现；minimal_api/hook通过path映射到minimal目录，test_util仅cfg(test)。此前文件定位缺失应按该所有权映射定位，不是实现缺失。
+
+当前顶层尚未登记完整审阅的13份文件如下（目录内部文件另计，不能据此宣称pager仅剩13份）：
+- `crates/codegen/pager/src/wrap_restore.rs`
+- `crates/codegen/pager/src/test_util.rs`
+- `crates/codegen/pager/src/wrap_clipboard_image.rs`
+- `crates/codegen/pager/src/wrap_filter.rs`
+- `crates/codegen/pager/src/wrap_cmd_tests.rs`
+- `crates/codegen/pager/src/local_drafts.rs`
+- `crates/codegen/pager/src/tracing.rs`
+- `crates/codegen/pager/src/tool_usage.rs`
+- `crates/codegen/pager/src/pty_wrap.rs`
+- `crates/codegen/pager/src/plugin_cmd.rs`
+- `crates/codegen/pager/src/wrap_cmd.rs`
+- `crates/codegen/pager/src/mcp_cmd.rs`
+- `crates/codegen/pager/src/diff.rs`
+
+
+### Pager测试fixture隔离边界
+
+完整读取test_util.rs138行，结合lib.rs cfg(test)登记hash，不新增产品行为契约。make_agent_view建unbounded channel但receiver退出工厂即drop，不代表活跃ACP连接。EnvVarGuard保存OsString并Drop恢复，但自身无锁，不能单凭RAII认为跨线程隔离。GrowHomeFixture::new直接set GROW_HOME而未保存旧值，Drop只remove记录的session cwd目录，不恢复env；grow_home可能被其他测试OnceLock钉到真实目录，fixture注释也明确此限制。sessions路径依赖编码cwd，write_summary额外JSON可覆盖基础字段，cleanup在创建目录前登记，错误忽略。后续若运行使用此fixture的测试，须核对serial GROW_HOME和进程级缓存隔离，不能凭tempdir字段宣称绝不触及真实home。本轮仅读未执行fixture或改env，1965项不变。
+
+
+### Wrap CLI启动计划
+
+完整读取wrap_cmd.rs234行登记hash，累计1966项。Unix shell路由条件、首词裸露后续quote、全三TTY gate、Windows直接spawn和错误fallback分别记录；resolve_shell仅is_file不验证可执行。run包装Err全走fallback，不能先假设所有Err均来自setup；PTY主体待审以确认是否有启动后错误。独立Unix tests尚待读，未执行命令或启动PTY，无Cargo构建。
+
+
+### Wrap spawn计划测试
+
+完整读取wrap_cmd_tests.rs222行及11项测试，登记hash并补规范来源，1966项不变。覆盖单词含空白优先shell、显式路径/空首词/多参数含空白直接执行、argv原样、alias首词裸露和tail引用、plain去-i、引号元字符及shell路径回退。existing file测试用NamedTempFile，支持不检查可执行权限这一边界。最后测试源码启动/bin/sh验证printf参数，但本轮未运行；不把它扩大为fish/zsh alias实际展开或PTY/失败回退端到端验证。文件仅Unix测试编译，无Cargo构建。
+
+
+### PTY启动与writer所有权
+
+读取pty_wrap.rs1–185，先收录完整启动和writer/stdin设置，累计1967项。spawn先于reader/raw/take_writer可失败操作，结合wrap调用方任何Err fallback说明不能将失败简单标为未执行；portable-pty child Drop具体回收仍需核对，不推断残留进程。mpsc无界、线程未join均按代码记录。image handler和output loop尚未完整，后续继续，不登记整文件hash；未启动真实PTY，无Cargo构建。
+
+
+### PTY输出与退出完整审阅
+
+完整读取pty_wrap.rs 427行并登记hash。输出读错仍wait、wait错误可进入调用方fallback；image worker无数量上限；resize线程无收尾协议。恢复败者100ms不限制胜者write时间，信号仅转发pid且不wait。两项测试仅静态审阅等待helper，未运行真实PTY或信号。filter与tracker内部继续审阅，不将其注释当作已验证的协议保证。
+
+
+### Wrap模式跟踪完整审阅
+
+完整读取wrap_restore.rs及17项测试，登记hash。覆盖空/平衡状态、多参数、cursor反转、kitty计数、顺序、legacy screen、两阶段gate与crash_handler表的动态引用断言；仅审阅测试源码，未执行。单kitty深度跨screen、push原子加法回绕、深度比例分配、分离快照和输入前缀信任均记录为实现边界，不能把模块注释中的精确恢复解释为所有终端状态保证。
+
+
+### Wrap图片协议完整审阅
+
+wrap_clipboard_image.rs完整333行及10项测试源码核对并登记hash。tiny_png只是短字节fixture，往返测试不证明PNG有效；超限测试用全零数据，只证明失败路径，不覆盖真实JPEG降质成功。记录MIME未验证、padding估算可能比真实解码长度更大、48MP注释对应alloc参数而非显式面积断言。调用位置已定位paste.rs、dashboard/state.rs、task_result.rs与wrap_filter.rs，filter本轮只读至210行，后续继续核对，未登记完整hash。没有访问系统剪贴板或动态运行测试。
+
+
+### Wrap过滤器完整审阅
+
+完整读取wrap_filter.rs及28项测试并登记hash。测试源码覆盖BEL/ST、tmux BEL包装、分块、空payload、非法base64、CSI追踪和超限透传；未动态执行。超限/非tmux测试部分仅断言输出非空，不证明逐字节相等。固定DECSET列表不自动从mode表枚举；未见sink真实失败、tmux私有图片请求或完整ST嵌套协议矩阵测试。CSI final判断先于长度检查，所以128字节候选再接final仍报告；未将128写成无例外硬上限。
+
+
+### Wrap图片调用方闭环
+
+核对probe completion gate、实际OSC请求调用、Agent magic处理、Dashboard modal优先级及peek目标选择；两项Agent NoImage测试和一项completion矩阵仅读源码。响应协议无request/target身份，当前输入路由不能等同原始请求归属。涉及大文件仅审阅相关片段，不新增完整hash，不宣称动态复现跨输入误投递。
+
+
+### 本地草稿存储初审
+
+已读local_drafts.rs至660行，存储key/校验/发布/隔离入delta。256KiB元数据检查与take上限不是读取后硬长度复核；64项是名称计数，quarantine未计入且无清理策略。runtime capture、恢复和RPC归属已读实现，待核对后续测试及调用方再补完整契约。未登记全文件hash，未运行文件恢复测试。
+
+
+### 本地草稿runtime与测试完整审阅
+
+完整942行及9项测试源码登记hash；核对event loop deadline、正常退出flush和effect执行前ownership transfer。测试覆盖往返/隔离、坏记录、rekey、延迟重试、stash、恢复不入queue、两类RPC与bind窗口清理；未动态执行，不证明故障落盘恢复、跨进程竞争或删除失败后不会复活。keys/loaded/tracked没有按本轮存活Agent清理的逻辑，内存状态与磁盘容量不是同一上限。
+
+
+### 工具统计完整审阅
+
+完整读取tool_usage.rs 595行及9项测试并登记hash。文件头Thinking排除/耗时待做与实现相反，以实现记录。两项selected/latest测试只断言scope，with_turns未验证count；未覆盖Thinking/Message耗时或排序。定向搜索pager内未发现其他ToolUsageStats调用，不能认定Usage弹窗使用此统计；保留API事实，不据名称推断产品接线。未运行Cargo测试。
+
+
+### Tracing生产路径初审
+
+已读tracing.rs至455行，entry样式、批量淘汰、channel和初始化入delta。旧注释RUST_LOG默认info与固定filter不符；ring注释删hysteresis与实际删到capacity不符；条目数有界不代表字节有界。firehose独立委托不据本段推断环境开关；测试余下继续，尚未登记完整hash。
+
+
+### Tracing测试完整审阅
+
+完整文件894行及41项测试源码登记hash，其中两项ANSI颜色断言显式ignore，原因是解析RGB与预期基本色不符；不能声称所有颜色映射已测试通过。LazyJson测试使用局部subscriber及FilterlessNoOp模拟，未安装全局生产firehose。channel端到端测试只为内存writer→model，不含事件循环或终端。没有channel Full计数测试，畸形ANSI测试不调用content，不证明空解析结果首行expect安全。以上均静态审阅，未运行Cargo。
+
+
+### MCP CLI list与add初审
+
+已读mcp_cmd.rs至510行，list/add参数验证与输出入delta；scope helper与删除选择函数已读，待后续执行路径和测试核对。JSON list直接序列化config，不把文本视图未显示header等同JSON脱敏。没有调用真实配置保存或MCP连接，不登记完整hash。
+
+
+### MCP CLI完整审阅
+
+完整1074行及18项测试源码登记hash。测试主要覆盖clap/resolve_add与纯scope矩阵；enable/disable测试仅解析名称和缺参，不执行保存后有效状态核对。没有doctor真实连接或remove磁盘竞争测试。add/stdin环境误放检测函数已核对，但现有测试未覆盖该分支。CLI退出语义与底层配置持久化、连接诊断分开记录，未运行配置变更或网络探测。
+
+
+### Plugin CLI清单初审
+
+已读plugin_cmd.rs至485行，installed/available投影和lease扫描入delta。available可能git同步；安装入口普通source trust gate已读，marketplace分支尚未读完，后续继续。未执行插件命令、安装或连接远端，未登记完整hash。
+
+
+### Plugin安装管理路径
+
+继续读至735行，安装trust与already installed诊断、卸载确认、update部分失败Ok、启停双写、details根manifest和validate入delta。tag实现尚未读完，marketplace管理与测试继续。仅静态核对CLI，未实际安装/卸载/修改配置或创建tag。
+
+
+### Plugin tag与marketplace生产路径
+
+已读至1120行，生产路径全部读完；记录status未检查退出状态、配置读失败空文档、卸载先于配置删除和同步失败Ok等边界。测试部分继续，不登记完整hash；没有创建tag、push、卸载或写用户配置。
+
+
+### Plugin CLI测试完整审阅
+
+完整1290行及8项测试源码登记hash：5项remove选择、2项trust文案、1项fresh git cache强制同步。git测试使用临时本地repo，新commit后断言cache HEAD改变；无git时直接return，不能将测试进程成功等同场景执行。未覆盖tag/status失败、marketplace写失败、启停有效状态、卸载/安装真实过程。本轮未运行测试。pager顶层仅diff.rs尚未完整登记，子目录仍有待审阅内容，不能据顶层完成推断crate完成。
+
+
+### Diff构建与拼接初审
+
+已读diff.rs至310行，结构化edit生成与保守拼接入delta。前缀Equal分支仅置delete标记，不以注释推断双侧均处理；行号构建使用饱和运算但stitch max加1为普通加法。ACP提取、调用方及测试继续，不登记完整hash或执行测试。
+
+
+### Diff提取和patch序列化
+
+已读diff.rs至540行，生产实现完整，测试部分继续。记录raw优先即使空、首Diff短路、count至少1、path未转义及换行归一化；不把注释suitable for git apply当作已验证保证。定向定位tracker提取/拼接与edit.copy patch调用，尚待读取调用片段。未执行git apply或Cargo。
+
+
+### Diff测试完整审阅
+
+完整1373行及29项测试源码登记hash，覆盖行号、空白插入、空文件、单行连续拼接及冲突回退、三种ACP提取、prefix普通替换。未见diff_hunks_to_patch直接测试；没有git apply验证。prefix测试缺首个Equal后再Insert的分支，多行prefix断言starts_with不能全面证明完整输出一致。ACP三策略分别测试，不含raw与content冲突优先级或多个Diff矩阵。pager顶层.rs现全部登记完整证据；子目录、调用方和其他crate仍未完成，不提前将pager标为reviewed。
+
+
+### Diff调用方闭环
+
+核对tracker相邻Edit门槛、前后邻合并、counts/高亮维护及ToolKind::Edit路径与summary信任；核对Edit.copy_text/set_hunks。多Diff被标summary不可信不能补回提取时忽略的后续Diff，只限制合并。仅相关片段，未登记大文件完整hash，关联测试与其余tracker继续。
+
+
+### 子目录覆盖复核与ACP meta
+
+按已登记完整文件证据对比src递归.rs，ACP尚有leader_bridge/mod/spawn/tracker，app、scrollback、views、slash等仍有大量未完整登记文件，不能以已有需求数量判断完成。完整读meta.rs 235行及7项测试，登记hash；测试覆盖缺失、正常字段、replay及event id后缀，不覆盖错误字段类型、纯数字id或派生serde与wire差异。高水位去重由调用方负责，此模块仅解析。
+
+
+### ACP worker完整审阅
+
+完整392行及4项测试源码登记hash。测试覆盖join正常/Err、50ms超时对30秒worker、panic payload分类；未验证真实SessionEnd完成、watcher reload或gateway退出。Joined只证明线程Ok，不能单凭此枚举注释推断所有flush成功。guard None仍cancel，与no-op注释区分。未启动agent或运行Cargo。
+
+
+### Leader bridge完整审阅
+
+完整479行及6项async测试源码登记hash；测试包含fake leader initialize往返、断线cancel、helper swap丢旧行。writer存活测试仅断言token未cancel，不证明writer task仍活着；测试不join bridge线程，未覆盖真实reconnector/notify顺序或单项8MiB以上输入。仅静态审阅，无实际连接或Cargo构建。
+
+
+### ACP connect生产路径
+
+已读mod.rs至515行，初始化、认证、leader默认identity及installer写回入delta。初始commentary提及会话创建/提交，经实际文件核对本模块只负责连接初始化，不虚构相关功能。connect错误收尾不等同成功调用方guard；测试继续，未登记完整hash，未连接或改配置。
+
+
+### ACP connect测试完整审阅
+
+完整691行及17项测试源码登记hash。四项availableCommands、四项recap bool/default、一项preferred auth、三项unsupported flags、三项initialize meta、两项hunk mode。unsupported detects_all只设置三bool，未覆盖permission rules；auth测试不覆盖空列表或实际Authenticate失败。测试未启动connect/leader或写installer，不能证明失败路径清理。当前ACP目录仅tracker.rs仍未完整登记，其他目录继续保留pending。无Cargo构建。
+
+
+### Tracker状态与活动投影
+
+已读tracker.rs至500行；活动优先级、wait选择和标签规则入delta。Utf8Decoder实现已读，末尾invalid片段保留而非立即替换，待后续调用和测试核对再写独立契约。大文件未完整登记，不宣称活动矩阵动态通过。
+
+
+### Tracker切流与结束
+
+继续读500–615及748–925行，结合已读合并部分，记录update先行副作用与false返回、snapshot不同保留规则和finish_turn清理集合。agent chunk读取仅开头，后续继续；无完整hash或动态场景声明。
+
+
+### Tracker消息与工具start
+
+读至1100行，消息/思考空白差异、时间戳处理与tool start入delta。pending entry注释称延迟创建但当前start实现立即push，以代码为准。orphan合并无status二次检查；抑制分类helper和后续update仍待读，不声称整个工具生命周期已验证。
+
+
+### Tracker工具更新
+
+读至1290行，update完整分支入delta；后台deferred入口、非terminal未知id丢弃与terminal orphan单项覆盖已区分。用户消息仅读到display_override前，待继续；Bash提取helper及decoder测试尚未核对，未作完整UTF8流验证。
+
+
+### Tracker用户回声与展示顺序
+
+审阅tracker.rs 1217–1403：同messageId去重仍收尾运行状态；combined多段分支早于隐藏判断，且无普通分支时间赋值；display override优先cron。已登记功能与场景。仅静态源码证据，未运行回声或隐藏组合测试；tracker整文件尚未完成，不登记完整hash。
+
+
+### Tracker工具结果投影
+
+审阅1404–1880及extract_raw_field/Bash解析辅助函数。新增update合并、Execute/Read状态与payload优先级、Search/Fetch及fallback选择契约；Edit已由既有条目覆盖。特别记录signal单独不触发失败、Read结构化结果绕过status fallback、SearchTool u64到u8截断，以及UseTool失败输出转移。未运行动态测试，未登记tracker完整hash。后续继续1880起分类和输出解析。
+
+
+### Tracker分类与辅助解析
+
+已审阅至2401测试模块前，补充抑制工具分类、wait参数、搜索/集成输出、相对路径字符串前缀及摘要日志边界。tools空数组语义以实现为准；5179附近shape测试仅正常/缺失/非数组/混合数组，未覆盖全非字符串数组。摘要中的id/title/URI未截断，不能从大raw_output测试推导固定长度。未运行测试，tracker测试模块尚待完整审阅，无整文件hash登记。
+
+
+### Tracker测试源码第一段（2402–3199）
+
+完整阅读该段36个测试函数及辅助构造器；这里只登记测试源码覆盖，未执行cargo test。
+
+- workflow分类测试覆盖run/control_run被抑制、validate/draft/search/inspect不被抑制；hook测试仅同实例集合去重，没有实际断线重连。
+- optimistic/repeated echo只断言返回值和单块数量，未验证prompt_index补齐、已有正文不替换、组合展示加隐藏标志或生命周期副作用。
+- streaming agent/thinking断言数量和tracker当前标识，未核对拼接后的完整文字。thinking配置开关、2000ms replay elapsed、本地timer存在有直接断言；没有负时间戳和缺失时间戳对保留旧elapsed的组合测试。
+- tool lifecycle与逆序Completed-before-start覆盖pending/orphan数量及Execute kind保留；未覆盖重复orphan覆盖、多种terminal冲突。finish_turn测试实际覆盖清orphan、保留task background标记及无running动画，但pending在该测试中原本为空。
+- 两turn测试分别断言不同entry id或两个AgentMessage；session_replay_creates_user_entries以及user_message_replay使用默认meta而非is_replay=true，不能凭测试名主张真实replay路径覆盖。
+- 时间戳测试直接验证agent_timestamp及user turn_start的秒级timestamp相等、缺失时在before/after Local::now之间；未验证两种用户时间戳同时存在的优先级或无法转换的极端输入。
+- Execute增量测试使用output_delta=None的完整output快照，断言第二快照替换、pending/running保持、完成清理和exit1错误、description提取；不证明UTF8分片增量路径。passes_output_through只输入普通green text，没有ANSI转义序列。
+- in_progress_update_ignored_for_non_execute只断言Read收到Bash payload时返回false，未比较block重建前后状态，不能把false解释为绝对无副作用。
+
+下一段从3200的Bash serde roundtrip起继续。tracker尚未全文件审阅，不登记完整hash；已有1999项契约不因重复测试证据增加条目。
+
+
+### Tracker测试源码第二段（Bash、搜索与Edit展示）
+
+完整审阅3200起至multi_diff_and_title_fallback_edits_default_expanded的13个测试及后续Edit构造辅助函数；相邻Edit合并测试已开始但将在下一段完整核对。累计完整核对49个测试源码，未运行。
+
+- Bash serde roundtrip断言type=Bash、output字段存在和output/command恢复，并非全字段相等。
+- production_execute_sequence在本地直接调用tracker，覆盖Pending、两次InProgress完整快照和一次Completed；没有启动生产notification bridge或terminal backend。注释列出的第二次Completed在实际函数中没有发送，不将此测试作为重复完成通知覆盖。
+- 七个Utf8Decoder单元测试覆盖ASCII、完整多字节、2/3/4字节拆分、a-FF-b中间非法字节替换和多次完整feed，未覆盖最后非法字节、EOF残片flush或tracker output_delta集成路径。
+- Search流程确实断言Other→Search中间转换、完成后pattern、match_count、文件路径、行号和文字保留；输入raw path不是进程cwd，不能据此证明路径组件边界正确。
+- Edit升级测试直接覆盖Other→Edit→Completed和Other→Completed两条路径、expanded_by_default false/true两种配置；手动展开测试在升级后直接set_display_mode，断言完成后仍Expanded，不是实际键盘事件测试。
+- 多Diff和title fallback测试分别隔离两种summary_untrusted来源，在配置false时验证Expanded；未检查多个Diff的内容全部出现在最终hunks中，也未执行复制patch。
+
+现有契约数量保持1999；tracker后续Edit合并测试及其余测试未完成，不登记整文件hash。本轮无Cargo构建。
+
+
+### Tracker测试源码第三段（Edit合并与手动折叠）
+
+完整核对adjacent_same_file_edits_coalesce至stream_start_breaks_agent_msg_across_streams共15个测试，累计64个测试源码；未执行。
+
+- 同文件相邻调用验证一个条目、两个hunk/edit_count及顺序；连续5行调用验证拼成一个hunk而edit_count仍5，精确断言Delete/Insert标签及新行号序列。三次不连续调用验证3个hunk顺序。
+- 不同文件、可见AgentMessage隔断、失败、已commit旧行、multi-Diff不可信摘要均有不合并断言。逆序完成通过顺序调用模拟e2先完成，验证e1运行时不合并、随后按push顺序[5,40]合并；不是并发线程调度竞态测试。
+- replay测试确实设置is_replay=true，验证两预完成Edit合并且高亮队列为空；live队列测试验证仅保留survivor一次。这里未覆盖路径canonical化失败的两侧组合、prefix不同、pending user input、hook关联或无hunk的隔断。
+- respect_manual_folds开启时通过prepare_layout/select/expand设置pin，分别验证thinking被agent/tool/finish_turn/stream restart结束后保留Expanded，并对未pin自动Collapsed作对照。
+- Execute在首次完整output快照后才展开并pin，后续快照和Completed保留展开；未覆盖pin前没有输出以及跨工具类型全部组合。
+- 关闭respect_manual_folds测试先得到pinned Truncated，再改配置false，完成后变Collapsed；没有把该配置理解为删除所有历史pin标记。
+- stream_start_breaks_agent_msg_across_streams验证两个不同Some时间戳产生四条目、两个不同AgentMessage id，未断言拼接正文或Some/None边界。
+
+下次从same_stream_start_appends_normally继续；tracker全文件仍未完成。契约1999项不变，本轮无Cargo缓存。
+
+
+### Tracker测试源码第四段（切流与活动优先级）
+
+完整核对same_stream_start_appends_normally至stream_start_does_not_pre_create_thinking_during_blocking_wait，共21个测试，累计85个测试源码，未执行。
+
+- 相同Some stamp与双方无stamp仅断言一个条目；thinking跨stamp、直接agent跨stamp另断言旧条目停止running。finish_turn直接验证stamp清None及相同stamp新turn创建第二条目。
+- activity基础测试验证None、Thinking、Responding、ToolRunning、thinking到response、finish清理及compaction覆盖response；尚不能代表retry、多个wait、多个pending工具完整优先级矩阵。
+- raw command优先于工具名、不依赖kind，description单例、Unix与Windows形状冗余cd均有断言；Windows形状测试只是字符串输入，不运行Windows shell。Execute header剥离测试同时验证command、copy_meta及searchable_text保留完整命令。
+- Await/Sleep直接给出Sleep wait；两种TaskOutput title在无timeout时None、补30000后TaskOutput wait。known blocking wait优先于预建thinking、同stamp thought不清等待均有断言。
+- 切流期间不预建thinking测试发送的是不同stamp的timeout tool update，并断言等待保持；并未证明不同stamp ThoughtChunk仍保留等待，因为其走另一清理分支。
+
+下一段从resumed_thought_without_stream_start_clears_stale_wait继续。未登记tracker整文件hash，契约1999项不变，无Cargo构建。
+
+
+### Tracker测试源码第五段（等待清理与标签）
+
+完整核对resumed_thought_without_stream_start_clears_stale_wait至format_waiting_for_subject_matches_label_shape共10个测试，累计95个源码测试，未执行。
+
+- 无stamp thought恢复验证Waiting转Thinking；Completed和finish_turn各验证活动变None。kill测试仅验证活动None，并未直接断言scrollback为空。
+- streaming_overrides_blocking_wait以agent chunk触发Responding；实现先清waiting，不能按注释误读为activity优先级中Responding高于仍保留的wait。
+- 同stamp thought测试携带bg-1，直接断言等待ids及waits保留；raw_input更新测试验证两id顺序。未覆盖trim/去重、单数fallback或后续空ids更新。
+- timeout测试覆盖无raw、缺字段、0、1，未覆盖负数、浮点、字符串和超过u64范围。这里只证明解析与tracker活动，不是实际interject入口测试。
+- 标签测试验证subject优先、缺省文案、取首非空行、80个ASCII字符裁到MAX_ACTIVITY_SUBJECT_CHARS再加省略号；没有多字节边界测试。format helper覆盖普通文字与全空白fallback。
+
+后续从foreground_stamp_waits_on_subagent_from_frame_one继续。契约1999项不变，tracker尚未整文件登记hash，无Cargo构建。
+
+
+### Tracker测试源码第六段（子Agent与能力快照）
+
+完整核对foreground_stamp_waits_on_subagent_from_frame_one至tracker_tools_meta_absent_when_meta_missing共14个测试，累计109个测试源码，未执行。
+
+- subagentBackground显式false立即Waiting(Subagent)、true立即None、缺失采用临时前台等待且finish清理，后续Task raw_input明确后台会移除等待。这些断言只观察tracker.activity，不是逐帧终端渲染测试；后台更新测试没有断言task_tool_background映射内容或后续SubagentSpawned接入。
+- AvailableCommands验证顺序、take一次后None、未消费时新快照覆盖旧值；工具meta验证字符串列表及单次drain，meta缺失测试从全新tracker开始，未测试已存在tools时缺meta保留旧值。
+- SearchTool grouped解析断言三个结果顺序和部分name/server/description/score，旧flat结果为空有直接断言；未覆盖缺name、空名称、重复或错误score。
+- Workflow definitions验证一项id/focused及drain；diagnostics验证code/scope及drain，并未逐字段断言所有输入字段。BehaviorAvailability验证Goal、Normal不可用和reason，未覆盖坏格式更新是否保留旧投影。
+
+下一段从parse_tools_meta_handles_shape_variants继续，tracker尚未整文件登记hash。契约1999项不变，无Cargo构建。
+
+
+### Tracker测试源码第七段（摘要、快照保留与后台占位）
+
+完整核对parse_tools_meta_handles_shape_variants至eager_execute_function_name_is_loading_placeholder_not_label共15个测试，累计124个源码测试，未执行。
+
+- tools shape测试覆盖正常、缺失、非数组和混合数组；仍未覆盖空或全非字符串数组。roundtrip由测试自行构造JSON，未调用shell生产构造函数。
+- 大raw_output摘要测试是100000个零组成的顶层数组，断言摘要<200及arr计数；文本摘要5000字节断言<100。均无长title/id/URI，因此不支持日志长度固定上限。json_size_hint覆盖null/string/array/直接成员object，未覆盖嵌套或bool/number。
+- finish_turn保留pending commands和tools有直接测试；meta-less更新保留此前tools也有直接断言，补上上一段仅新tracker缺meta测试的证据缺口。
+- Task正反分类、bg plumbing规范名、Pascal Task抑制与Completed仍零scrollback、task/Task显示Subagent等待而非ToolRunning有断言；未覆盖所有大小写/前缀组合。
+- eager execute测试验证无raw command的函数名建立空command Execute，随后后台更新携带真实sleep命令时保留一个条目、填description，并同时保留pending及bg_deferred。没有实际终端逐帧显示、后续Completed或后台通知接入，不能由测试名称推导全程无闪烁。
+
+下一段从5461继续后台执行测试。契约1999项不变，tracker整文件hash仍待全部测试读完，无Cargo构建。
+
+
+### Tracker测试源码第八段（后台Execute生命周期）
+
+完整核对5461–5713的7个测试，累计131个测试源码，未执行。
+
+- 空command更新仍为Execute占位且description保留；真实raw command=bash背景更新保留条目、pending与deferred，不将函数名形状本身当作删除依据。
+- Completed Other函数名携带Bash exit3测试直接断言command、output及exit code错误；证明非零exit独立于Completed状态触发error，不涉及实际shell运行。
+- late bg测试验证返回false但保留entry、pending和deferred，未检查重建后的输出是否等于more output，也未实际调用task_backgrounded降级handler。非bg对照验证两次快照后无deferred，但未逐字断言最后输出。
+- 用户消息结束pending Execute测试直接断言旧entry停止running、pending为空、无动画，补充此前仅普通回声去重测试缺少的生命周期证据；不覆盖重复id回声或hidden消息路径。
+- finish_turn结束bg deferred Execute测试验证停止running、pending清空、无动画，同时deferred映射仍保留。这不是验证后台任务被取消或进程结束。
+
+下一段从5714的user_message_with_display_text辅助构造器继续。契约1999项不变，tracker仍未完整登记hash，无Cargo构建。
+
+
+### Tracker测试源码末段与完整文件登记
+
+完整阅读5714–6003末段12个测试，累计143个，与全文件#[test]数量一致。至此tracker.rs生产代码与测试源码已逐段审阅，登记当前完整SHA256；不表示143个测试运行通过。
+
+- displayText skill/non-skill、XML与slash文本不推断协议、显式hideFromScrollback、skillTokenRanges正确范围/错误范围、display override忽略wire范围均有直接字段断言。这些名称以replay开头的测试使用默认meta，未设置is_replay=true，不能据此主张真实回放集成覆盖。
+- 隐藏测试还验证prompt_id形如task-completed-bg-1仍可见；未覆盖combinedDisplayTexts加隐藏、cron/skill双标志、空原文但非空displayText。
+- 范围降级测试仅包含越界、字符串项、长度1数组；未覆盖UTF8中间字节、反向范围和多范围重叠。
+- MCP coerced测试由测试直接构造UseTool raw_input，断言块类型和tool_name，不测试实际coercion生产方；缺raw_input仅调用无panic，无输出类型/字段断言。
+- Todo标题及variant分类有直接断言，Think kind下两种标题都不加入scrollback；未测试完成清理整个生命周期。
+
+整文件143个测试均为静态源码核对。本轮不启动Cargo构建。现有1999项契约不变；pager其余目录及剩余crate仍待遍历，不能将tracker完成当作全仓库完成。
+
+
+### Notification progress与tmux透传
+
+完整审阅progress.rs 207行及11个测试、tmux.rs 100行及9个测试并登记hash；mod.rs仅核对进度调用分支及clear，整文件待审。测试覆盖品牌、构建序列和ESC编码、tmux版本边界；emit类测试只有无panic调用，未捕获stderr断言，未运行真实终端。进度文件没有Iterm2旧版本拒绝专门测试，不能从新版本正例扩张推断测试覆盖。功能累计2000项，无Cargo构建。
+
+
+### Notification焦点状态
+
+完整审阅focus.rs 285行及17个测试并登记hash；阈值、重复focus loss重计时、shown阻断、90秒退避后重试有源码测试，时间通过直接写Instant模拟，未运行实际焦点事件。严格依据本worktree单一shown/attempt字段记录，不混用其他分支按SessionId改造的事实。当前helper无会话或away epoch身份；调用方已定位，完整通知服务与接入仍待核对。累计2001项，无Cargo构建。
+
+
+### Notification协议选择与输出
+
+protocol.rs完整373行及24个测试源码审阅登记。emit测试仅无panic调用，无stderr捕获或真实桌面接收断言；all_brands测试表不是完整枚举（如Terminator及若干编辑器品牌不在表），Zellij all_osc列表也不含Foot/Terminator。源码明确notification透传不检查tmux版本，title/body本函数无过滤；调用方清理与可达性另待核对，不在此断言已复现注入。累计2002项，无Cargo构建。
+
+
+### Notification配置与模板
+
+config.rs完整404行及10个测试源码核对登记hash。测试含自定义配置完整TOML往返、缺字段、部分字段、hook默认、method/condition全部枚举、部分title拼写。模板默认匹配测试只检查idle/sleep/progress/title.enabled四项；取消hook注释测试只parse为toml::Value并断言数组，不验证实际命令执行或所有typed配置默认一致。本轮未运行测试，累计2003项，无Cargo构建。
+
+
+### Notification hook执行辅助
+
+hooks.rs完整312行及9个测试源码核对。None session测试假设父环境无同名变量；timeout clamp测试等待2.5秒后无marker，不能证明线程已结束或下限恰好1秒（sleep100在未结束时同样无marker）。timeout测试只计函数返回时间，未验证子孙全部退出；线程env测试读取文件一旦成功就停止，存在读到未写完内容的可能。pager/src检索run_hook仅发现本文件测试；mod.rs公开模块但不引用执行函数，实际通知服务接入需继续核对。未运行shell命令测试，无Cargo构建，累计2004项。
+
+
+### Notification服务入口
+
+已核对mod.rs生产服务入口至resolve_protocol；notify确认没有hook执行，权限flag由调用方管理，NotificationEmitted是调用记录而非输出成功确认。build idle也会变更内部状态，shutdown直接reset标题。测试模块尚待审阅，不登记整文件hash。累计2005项，无Cargo构建或通知发送。
+
+
+### Notification服务完整测试与加载回退
+
+mod.rs完整779行及30个测试源码核对登记hash。补充配置加载整体失败回退默认的契约。协议映射、事件包含判断和condition是直接helper断言；notify用None协议仅无panic，不证明过滤后零输出或diagnostics内容。配置测试覆盖有效、缺ui、缺notifications、字符串形状和空配置，未测试单字段坏值导致整体回退。进度测试多数只观察内部active/timestamp，重复tick测试不捕获输出；keepalive模拟旧Instant，不能证明终端接收。flush名称包含title但断言仅进度字段；权限生命周期直接操作flag，没有并发权限调用方测试。未执行动态测试，2005项不变，无Cargo构建。
+
+
+### Notification休眠抑制
+
+sleep.rs完整283行与8个测试源码核对登记，其中2个仅Linux、1个仅非macOS/Linux。通用测试允许获取失败，drop测试无资源泄漏断言；Linux测试仅检查child Option/active清理，没有pid存活探测或实际抑制锁检查。源码Linux spawn成功不等于systemd接纳，release wait无超时。未执行IOKit或systemd命令，无Cargo构建，累计2006项。
+
+
+### Notification标题生产逻辑
+
+核对title.rs生产代码至测试模块入口：组合顺序、Unicode字符截断、未清理前去重、最终控制字符过滤、焦点影响attention、静态reset均入delta。manager本身不检查enabled，且cwd只按/拆分；与桌面notification raw插值不同，标题最终有控制字符过滤。测试模块尚待完整审阅，不登记整文件hash。累计2007项，无Cargo构建。
+
+
+### Notification标题测试完整核对
+
+title.rs全部832行及35个测试源码已阅读登记hash。测试覆盖组合顺序、缺失项、spinner周期/持帧/回绕、基本活动标签、busy无activity、unfocused attention两相、timer、ASCII截断及控制字符清理。dedup测试仅比last_title未断言返回None；reset仅比cache未断言escape。tool标题截断测试只检查前后缀未检查30字符；Unicode截断无直接测试。focused attention只有首相显示，未覆盖跨phase静态保持；description优先、Waiting/Compacting、cwd尾斜杠、过滤前去重差异待动态验证。控制字符测试直接断言OSC0 framing和清理后正文，是字符串层验证而非真实终端。未运行测试。至此notifications目录九个文件均已登记完整hash，pager其他目录仍待遍历；2007项不变，无Cargo构建。
+
+
+### Search基础匹配与位置遍历
+
+search两文件完整184行与8个测试源码核对登记。6个matcher测试覆盖字面转义、ASCII smart case、regex与语法错误，不覆盖Unicode uppercase、用户inline flags或Substring编译资源失败分支；2个导航测试覆盖普通升序、环回、单项和空，未覆盖重复值或乱序输入。源码Substring fallback为空匹配与Regex失败永不匹配不同，已据实记录；没有用注释概括掩盖该差异。未运行测试，累计2008项，无Cargo构建。
+
+
+### Project picker
+
+两文件完整190行及3个测试源码登记hash。测试仅覆盖空recent的cwd、两个recent索引对齐及末项Dont ask；无聚合I/O、hidden过滤、时间排序、5项截断、重复/cwd过滤、display_path或未来时间测试。collect_recent_dirs依赖实际session历史，本轮没有调用以免将源码审阅混为真实数据测试。累计2009项，无Cargo构建。
+
+
+### du命令生产代码
+
+完整核对mod/human/json三文件并登记hash。区分根symlink跟随与子symlink不跟随、Unix物理块与其他平台逻辑长度、根自身不计费、硬链接无去重、warning部分结果和JSON双通道输出。测试文件尚待审阅；未调用真实Grow home扫描。累计2010项，无Cargo构建。
+
+
+### du测试完整核对
+
+8个测试源码完整阅读并登记tests.rs hash。子symlink含目录/文件/悬空链，直接比链接自身bill与total；volume边界用probe模拟而非实际挂载。SQLite形状fixture前后比较路径→文件字节，证明该fixture文件未变化，不是系统调用追踪且不覆盖空目录/metadata变化；物理块测试普通文件没有稀疏/压缩案例，其bill>=len断言并非所有文件系统普遍性质。排序有同费用名称tie断言；human只检查文本片段，JSON逐字段检查及顺序，无writer失败/warnings/root symlink/硬链接/权限失败测试。发现移植边界：symlinks测试未cfg(unix)但调用仅cfg(unix)定义的symlink，Windows helper另名且未被调用；需后续独立验证Windows test target编译，不在本次审计修改运行时代码。本轮未运行Cargo，2010项不变。
+
+
+### Worktree CLI生产入口
+
+审阅mod.rs生产入口至测试模块；记录ACP初始化guard、扩展封套、rm部分失败仍Ok及show双Option空值边界。测试与display文件待完整核对，不登记整文件hash。未运行worktree命令或修改任何worktree。累计2011项，无Cargo构建。
+
+
+### Worktree CLI测试核对
+
+mod.rs剩余16个测试完整核对并登记全文件hash。5个ext_request测试由测试自行构造JSON，不调用cmd_list/gc/rm/show/db；部分字段未断言，stats空参数测试只断言method而非null payload。RemoveResponse两例和ExtEnvelope五例为反序列化测试，未调用ext_call，没有show嵌套Option null、result/error同时存在、错误类型字段或传输失败测试。4个clap测试验证rm短/长force、gc短force及list JSON默认其他值，无完整CLI初始化/guard测试。rm逐项失败仍Ok属于源码事实，尚无handler集成回归。display.rs继续待审，本轮未运行worktree操作或Cargo构建，2011项不变。
+
+
+### Worktree展示完整审阅
+
+display.rs全部源码及10个测试核对登记hash。bytes测试到GB，age只测后缀；truncate覆盖ASCII和多字节，HOME测试环境缺失时跳过；长ID测试重写宽度表达式而不调用print_table，不算实际输出回归。没有show/json/stdout捕获、目录失败部分统计、HEAD非ASCII切片或未来时间测试。明确show逻辑文件大小与du物理块并非同一口径。worktree_cmd两文件完整登记，累计2012项，无Cargo构建。
+
+
+### Doctor CLI入口
+
+mod.rs完整206行核对登记hash；单独tests.rs与格式输出文件尚待审阅。记录preview先于交互门禁、writer入口拒绝Fix、按outcome后验证及无rollback。未运行doctor采集或修复，不访问真实shell配置。累计2013项，无Cargo构建。
+
+
+### Doctor人类输出
+
+human.rs完整245行核对登记hash，测试位于独立tests.rs待审。区分格式文本与真实探测结论：macOS rescue标签由OS判断，theme all由数量判断，三个probe notes按名固定隐藏。记录remediation优先级与原字符串输出边界，未执行终端探测或输出。累计2014项，无Cargo构建。
+
+
+### Doctor JSON
+
+json.rs完整432行核对登记hash。记录nullable字段、完整probeNotes与计数、状态及枚举映射、人类输出差异和原automatic command保留。测试位于tests.rs仍待核对；未执行真实诊断或写外部文件。累计2015项，无Cargo构建。
+
+
+### Doctor测试第一段
+
+完整阅读tests.rs开头fixture及前4个测试（至standalone_runtime_and_tmux_are_unavailable_without_false_wezterm_finding结束）。假standalone快照通过shared view验证tmux clipboard finding；Wayland三种人工probe值区分Missing产生issue、Unavailable/Error只留note及错误文本；human Wayland error使用全字符串相等验证只显示一次详情。WezTerm unavailable快照验证不误报kitty/control-mode，检查tmux/runtime note顺序及live-TUI分类。全部以注入事实或手建report为输入，不证明实际探测进程或Wayland服务行为。下一段从human_healthy_fixture_is_exact继续；测试文件尚未完整，不登记hash。2015项不变，未运行Cargo测试。
+
+
+### Doctor测试完整核对（doctor_cmd/tests.rs）
+
+已读完1043行、17个测试，登记完整文件SHA256。本轮补完剩余13项：healthy/mixed/incomplete三个人类报告使用整串精确比较；incomplete证明重复probe行被省略，但仍出现运行中会话提示。预览测试比较共享formatter结果，并检查alias区块及绕过、后台SSH、ControlPersist和挂起提示片段；不证明实际修复成功。拒绝测试注入TTY与n输入，断言成功返回、取消结尾及临时目录.bashrc不存在；非TTY未确认测试断言错误及文件不存在。未覆盖yes/y确认、EOF、写入后验证失败或回滚。
+
+JSON空值及mixed fixture使用完整结构比较，覆盖null、空数组、字段命名、计数和原始自动修复command；mixed另检查部分findings/probe序次及无原始ESC、无人类报告标题。此ANSI断言使用不含控制字符的fixture，不能证明任意输入经过语义净化。映射表逐个枚举当前列出的terminal/multiplexer/byobu/clipboard/OS/modifier值；测试名complete不代表未来新增枚举自动纳入。newline检查Vte有版本、XtermJs Cursor及NoKittyKeyboardProtocol，未断言Vte缺版本。
+
+clipboard失败fact计数为1，加入对应命名finding后仍为1；新增unverified finding检查schema仍为1及指定字段。BrokenWriter检查人类和JSON写入错误传播，flush实现成功，未覆盖flush失败。以上均为测试源码证据，本轮未执行任何测试，也未触发真实终端探测或配置写入。
+
+
+### Minimal hook注册与调用
+
+完整核对minimal/hook.rs，登记SHA256；核对AppView::draw入口及pager-minimal::install。OnceLock首次注册生效，缺hook直接返回，但draw前已有notification与announcement gate更新；不能把注释no-op解释成整个入口无副作用。仅draw回调，无transcript回调。hook文件无测试，本轮未执行动态测试。minimal/api.rs读取输出被截断，尚未登记完整核对，后续需按段读取。
+
+
+### Minimal API生命周期段
+
+核对api.rs 395–790及minimal输入Occluded、BTW响应调用点，补充request/revision相关性与suspend/restore契约。finish匹配request后使用take，非Loading异常状态会丢弃面板，此处如实记录，不推断正常可达或顺带修复。测试位置已定位，尚未逐项核对或执行；api全文件仍未登记hash。transcript请求/队列段已读，后续对照既有pager-minimal契约再补充，避免重复要求。
+
+
+### Minimal transcript与Ctrl+O
+
+核对api.rs 300–415并结合已读请求/谓词段，补充owner ID快照、in-flight优先、空notice及重试前置不去重；既有pager-minimal要求描述pump/render/file handoff，本次补的是请求端。核对interjection_possible和held_queue_top_sendable，不能将任意后续Prompt视作可发送队首。完整核对minimal_ctrl_o_transcript_predicate_tracks_interject_binding测试：非Apple绑定、idle空、running空、running本地队列、running文本及idle编辑六个状态；未覆盖server非Prompt遮挡、本地wire不匹配、agent缺失或动态按键effects。测试仅静态核对，未执行。api文件仍未完成全段登记。
+
+
+### Minimal API全文件审阅完成
+
+补读1–299和790–1148，结合此前300–790完成全文件1148行登记。新增facade投影与BTW尺寸边界：visible_height不保证返回值达到3；geometry reset不等同生命周期clear。前沿包装以entry.id查询、按index提交并委托共享ScrollbackState，不从注释推断存储实现。test/test-support条件API包含reload、模型行为、permission、context、scheduled task及thinking开关；set_agent_minimal_mode_for_test只设置prompt screen mode。文件自身没有测试函数，动态效果及所有包装的被调用实现仍随对应模块继续核对。
+
+
+### Settings registry前段
+
+完整读取settings/mod.rs并登记hash，registry.rs已读1–480，后续current/default映射与测试待读。元数据包含owner/category/value kind/preview/restart/hidden flags，不能据此断言实际写入或过滤已执行。注册只强制key唯一，不执行StringValidator或关键词格式验证。搜索对label/description小写，但key/keywords依赖catalog约定。动态模型选项使用ID作label，与resolve同时接受原label有所区别。snapshot默认Ask/Normal、scroll_speed50、feature gates false、CLI覆盖None；具体current/default行为待补齐。
+
+
+### Settings current/default映射
+
+已读registry.rs 481–755，生产映射完整；default_value_for的Group实际返回Bool(false)，与上方kind注释“skip”须区分调用者规避和函数本身。读取来源混合UiConfig、PagerLocalSnapshot和appearance cache，不能按mod.rs架构概述声称全部原子快照。show_tips实际默认false，邻近CLI注释笼统true不准确。完整核对model_settings_display_canonical_provider_qualified_ids测试：current/fork值、第二模型选项ID/display及精确ID解析；未检查同名label歧义或空选项。defaults_match_ui_config_default仅读至中段，未算完成，下一段从756继续。未执行测试，未变更运行时代码。
+
+
+### Settings registry测试全部核对
+
+完整1411行、19个test已核对并登记hash。defaults_match_ui_config_default对非Pager且非Group条目逐key/kind比较，未知组合panic，新增scalar条目不会静默跳过；CLI值和动态模型部分为字面断言而非UiConfig统一解析。defaults_match_pager_state只认respect_manual_folds，比较snapshot和ScrollConfig默认，未知Pager条目panic。every_setting_has_dispatch_arm遍历非Group检查Some和类型，不检查取值正确性、写入action或持久化；default_value_for测试仅回读metadata，不证明约束有效。
+
+hunk/screen规范化覆盖canonical、大小写、空白、未知与None；主题测试覆盖auto dark/light拒绝auto及dark未知值。关键词测试保证default catalog每个现有keyword非空且小写，未要求每项有keyword，也未检查key小写。unique_keys先构造registry（构造已会panic）；重复from_entries有should_panic测试。search仅compact density单命中、无命中、空query总数，不比较全量顺序或Unicode/custom metadata。category_label_round_trip仅断言非空，未做任何反向映射。
+
+contextual_hints测试钉住七child顺序和Bool(true)，当前值只检查undo缺省/关闭及plan_mode保持true。compact描述检查包含AUTO_COMPACT_MAX_ROWS拼接文本；enum cap仅限制静态Enum，不涉及DynamicEnum。Group默认占位、未知模型label歧义和cache一致性未由这些断言证明。全部为源码审阅，本轮未运行测试。下一步核对settings/defs.rs的完整catalog。
+
+
+### Settings defs枚举目录
+
+已读defs.rs 1–440，全部静态choice数组及group children完成，default_settings条目尚在simple_mode中段。记录权限读取支持default而选择目录不含default，不推断picker实际失效，后续modal需检查。注释残留Plan-mode catalog但此段无Plan choice定义；不能从该注释新增功能。第一批metadata中screen_mode restart=true/preview=false，timeline与page_flip hidden_in_minimal=true；待读完完整catalog后统一登记各行flags。未执行测试，文件未登记完整hash。
+
+
+### Settings defs完整目录
+
+已读完整1193行并登记hash，无文件内测试。以下按源码声明顺序列出所有条目，元数据不替代写入路径验证。Pager owner注释“no disk write”不能泛化：respect_manual_folds目录说明pager.toml持久化，需在dispatch进一步核对。
+
+| Key | Owner | Category | Restart | Hidden in minimal |
+| --- | --- | --- | --- | --- |
+| compact_mode | Shared | Appearance | false | false |
+| screen_mode | Shell | Appearance | true | false |
+| show_timestamps | Shared | Appearance | false | false |
+| show_timeline | Shared | Appearance | false | true |
+| page_flip_on_send | Shared | Appearance | false | true |
+| combine_queued_prompts | Shared | Editor | false | false |
+| simple_mode | Shared | Appearance | false | false |
+| vim_mode | Shell | Appearance | false | false |
+| theme | Shared | Appearance | false | true |
+| auto_dark_theme | Shared | Appearance | false | true |
+| auto_light_theme | Shared | Appearance | false | true |
+| render_mermaid | Shell | Appearance | false | false |
+| permission_mode | Shell | Agent | false | false |
+| remember_tool_approvals | Shell | Agent | true | false |
+| default_model | Shell | Models | false | false |
+| max_thoughts_width | Shared | Appearance | false | false |
+| show_thinking_blocks | Shell | Appearance | false | false |
+| prompt_suggestions | Shell | Editor | false | false |
+| respect_manual_folds | Pager | Appearance | false | false |
+| group_tool_verbs | Shell | Appearance | false | false |
+| display_refresh_auto_cadence | Shell | Appearance | true | true |
+| scroll_speed | Shell | Mouse | false | false |
+| scroll_mode | Shell | Mouse | false | false |
+| scroll_lines | Shell | Mouse | false | false |
+| invert_scroll | Shell | Mouse | false | false |
+| keep_text_selection | Shell | Mouse | false | false |
+| default_selected_permission | Shell | Agent | false | false |
+| toolset.ask_user_question.timeout_enabled | Shell | Agent | true | false |
+| show_tips | Shell | Advanced | true | false |
+| contextual_hints | Shell | Advanced | false | false |
+| auto_update | Shell | Advanced | true | false |
+| hunk_tracker_mode | Shell | Advanced | true | false |
+| contextual_hints.undo | Shell | Advanced | false | false |
+| contextual_hints.plan_mode | Shell | Advanced | false | false |
+| contextual_hints.image_input | Shell | Advanced | false | false |
+| contextual_hints.send_now | Shell | Advanced | false | false |
+| contextual_hints.small_screen | Shell | Advanced | false | false |
+| contextual_hints.word_select | Shell | Advanced | false | false |
+| contextual_hints.ssh_wrap | Shell | Advanced | false | false |
+| fork_secondary_model | Shell | Models | false | false |
+
+
+### Respect manual folds持久化调用链定位
+
+核对app/root/dispatch/settings/setters.rs 574–608：相同值直接空effects；变化先clone appearance修改并set_appearance，refresh modal、记录日志、显示save_success_toast，再产生PersistSetting Bool新值及Bool旧值。因此toast先于磁盘完成，不能把该toast当写入成功证据。effects/mod.rs 1907分支逐次spawn异步persist_setting，成功返回SettingPersisted key/value，失败返回SettingPersistFailed key/rollback_value/error。helpers.rs 778分支强制Bool，经spawn_blocking调用appearance::persist_respect_manual_folds，join错误和内部错误均字符串传播。这已否定SettingOwner::Pager注释的普遍no disk write解释。下一步核对实际appearance持久化函数与失败TaskResult处理；本轮仅局部读取，不登记三个大文件完整hash，不声称完成rollback或并发序验证。
+
+
+### 设置异步完成和回滚
+
+核对TaskResult处理末尾及respect_manual_folds rollback arm，失败完成没有revision/current-value检查；不推断底层写入锁或磁盘最终排序。成功只trace，best effort失败保持内存值。ui.rs rollback仅读845–940，其他设置回滚仍待读；appearance持久化定义尚待跨crate定位（pager/src内未发现函数定义）。未运行测试。
+
+
+### Settings rollback完整分派
+
+读完ui.rs 938至EOF，结合前段完整核对apply_setting_rollback。模型不能解析时明确保留乐观值；无效scroll/selection/mermaid枚举静默跳过setter；未知key/type早退且不刷新modal。scroll的i64先as u8再进入inner，不能称对原i64直接clamp。通用失败处理仍显示“rolled back”日志，即使某分支没有恢复，故日志不能证明恢复完成。该函数没有版本保护；本轮未执行测试或修改运行时代码。ui.rs前段仍待读，暂不登记全文件hash。
+
+
+### Settings窗口创建和刷新
+
+已读ui.rs 1–275，完整核对open/refresh；模型来源是app.models，与registry snapshot字段注释active session不同，以调用方实际赋值为准。refresh先rebuild_rows后赋新snapshot，是否导致过期row gate需进一步检查state.rs rebuild_rows，暂不推断。command palette和howto入口均要求有效active agent，同类窗口再次打开会关闭，否则替换active_modal，返回空effects；palette使用slash_controller条目与input_active picker。reset confirm仅读注释和签名，下一段从275继续。无动态测试。
+
+
+### Settings reset状态保存
+
+已读ui.rs 275–452，确认key归modal所有，先恢复Settings再重置，幂等比较使用新snapshot而非保存窗口的旧值。debug错误路由assert发生在take后，不能把release恢复原modal行为推广到panic后。另查看state.rs rebuild_rows 286起，重建调用build_rows(&registry)，未读取pager_snapshot，前轮对refresh先重建再换snapshot的疑问不能直接认定为过期snapshot缺陷；完整state/build_rows仍待读。下一段ui.rs从452继续，未执行测试。
+
+
+### Settings快捷切换
+
+已读ui.rs 452–665。vim非agent视图仍持久化；Dashboard启用仅在有agent时focus列表。mouse输出错误忽略但状态更新，提示递归用于全部agent；注释“explicit slash only re-enable”尚未用全调用者证明，不提升为排他契约。辅助snapshot读取在无agent时multiline=false、permission=Ask、behavior=Normal、Workflow/其他behavior可用性false。下一段build_pager_snapshot从664继续；无真实终端写入或测试。
+
+
+### Settings UI全文件审阅完成
+
+补读664–845，结合前面分段完成ui.rs全文件并登记SHA256。build_pager_snapshot模型始终app模板；action_for_reset对部分枚举验证、其他字符串延后验证，不能泛化全部validated。permission default不映射；模型非空默认被拒绝；Int不在此限制范围。文件无内嵌测试，相关dispatch/tests/settings.rs尚待完整核对，不把注释测试名作为执行证据。下一步settings/setters.rs完整审阅。
+
+
+### Settings setters前段
+
+已读setters.rs 1–245。screen raw比较与hunk effective比较不同；remember None→false仍写入。vim幂等检查只顶层agent，实际更新则递归，不推断嵌套失配是否常规可达。multiline setter支持Dashboard，但此前dispatch_toggle_multiline要求Agent，不能泛化所有入口都支持Dashboard。rollback将None折为显式值的事实已记录，未修复。下一段从245 timeout setter继续，文件未登记完整hash；未运行测试。
+
+
+### Settings grouping和suggestion setters
+
+已读245–430，思考块和group invalidation为两层显式循环，不与vim递归调用混同；是否存在更深子view需在agent结构处继续确认。prompt_suggestions镜像更新与thinking/group不同，cache幂等会跳过镜像修复。selection只改cache，不能从setter证明当前selection立即清空。timeout None确认有效默认仍写入。下一段从431继续，未执行测试。
+
+
+### Scroll setters
+
+已读431–574；speed/lines clamp位于outer，inner直接委托cache setter再from_settings，cache内部防御约束待读对应实现。lines None旧态只编码为3，结合reset前置幂等比较，不能照搬注释将所有d-reset描述为必然建立3覆盖。respect_manual_folds 574–608此前已读，下一段从609继续。未执行测试，未新建Cargo产物。
+
+
+### 审批光标与显示setter源码核对
+
+已读setters.rs 609–825。default_selected_permission先共享parser再debug_assert canonical精确等于输入，release遵循parser结果；注释称garbage为安全no preselection与已登记AlwaysAllowAllSessions默认不一致，需回查parser，不据注释创建安全承诺。幂等比较current_ui解析后的canonical；inner同时更新current_ui和permission cursor cache，未直接操作当前permission队列。
+
+compact inner写用户配置/cache并调用apply_effective_compact；关闭时若短终端仍effective compact，toast明确auto-compact active。timestamps outer按current_ui.unwrap_or(true)判等，timeline outer却按appearance.show_timeline判等；两者inner都先Some(new)，appearance已相同时只更新cache，否则set_appearance再更新cache。这意味着外部镜像失配时不能用统一幂等规则描述。page_flip outer按cache判等，inner写current_ui/cache，无队列或滚动动作。combine段仅读到幂等条件，尚未完成该函数。下一段从820继续；未执行动态测试，尚未登记setters完整hash。
+
+
+### Simple与contextual hint setter
+
+读完820–1035的combine/simple及七个hint包装。simple无outer幂等，顶层agent不匹配才调用set_input_mode，附属effects在PersistSetting之前；该循环不证明被调用函数对后代的行为。hint用user Option判等、整个resolver重新解析，rollback丢失inherit状态。七包装字段/key对应一致。下一段主题从1036开始，未运行测试。
+
+
+### Theme commit与preview
+
+已读1036–1275，theme和auto_dark commit完整，dark preview尚未读取。theme无幂等gate，fallback旧值是cache当前kind，与registry显示缺省grownight不同；preview只保证此入口不改current_ui/auto flag，不代表显示层无cache修改。系统detect None时auto_*不live。取消预览的发起方仍待modal审阅，不由preview函数本身证明取消恢复。下一段从1276继续；未执行主题变更或测试。
+
+
+### 自动明暗主题剩余分支
+
+已读1276–1475，补全dark preview/light commit/light preview并扩展既有theme契约，不新增重复requirement。两类preview必须当前auto flag与系统明暗匹配，不为休眠bucket强制预览；commit重复也持久化，light旧值回退GrowDay。default_model inner及outer起始已读：先检查app catalog membership，未完成outer，从1475继续；未登记完整setter hash，未执行测试。
+
+
+### 默认模型与fork模型
+
+读完1475–1685，default模型操作app模板而fork验证active agent目录，窗口使用app目录的差异已如实记录，是否实际发生目录分歧需后续测试。default清除无条件写，fork空baseline清除不写；default startup空ID分支不刷新modal。旧reasoning_effort没有进入rollback payload，不宣称完整模型状态恢复。session_title_model/default_reasoning_effort仅有已移除注释，不新增能力。下一段1685 max_thoughts_width继续；未运行测试。
+
+
+### Settings setters全文件完成
+
+已读1685至EOF，完整setters.rs登记hash。发现show_tips显示None=false但setter prev_effective=true；auto_update helper=false却显示和setter均true，回滚Option状态不一致。按源码记录并独立登记债务，未顺带修复。width只改current_ui，本文件无独立width preview函数，渲染与stepper仍待审。全部setter读完不等于dispatch测试已通过；未运行Cargo。
+
+
+### Show tips六个回归测试源码
+
+完整核对dispatch/tests/settings.rs 1213–1336六个pr13测试：None→false的effect rollback明确true；随后true rollback false；相同false/true第二次无effects；None首次true产生一个effect；直接调用apply_setting_rollback恢复None；toast只比较Show tips/off/restart片段。它们沿用“true为default”的措辞，未对比registry读取None=false，也未执行真实失败TaskResult、磁盘写入或跨窗口刷新。因此现有断言可以支持setter局部行为，却不能排除已经登记的显示/默认值漂移。仅此六项已核对，不把测试大文件记为全读。settings/mod.rs四行导出已完整登记hash。下一步dispatch/tests/settings.rs从文件开头系统核对或转入modal实现，避免把局部测试误当全覆盖。
+
+
+### Settings分派测试开头
+
+已读tests/settings.rs 1–210，完整前五项。vim toggle检查两次新旧Bool effect、顶层agent和cache翻转，但不运行effect，不能证明config.toml写入。Tab/j测试通过handle_input及Tab动作dispatch，检查焦点和j返回SelectNext，未dispatch j或检查滚动位置。子agent测试仅一层child字段传播，不覆盖更深后代或SetVimMode的幂等失配。Dashboard测试检查两次focus/cache，带GROW_AGENT_DASHBOARD串行标记；未检查无agent dashboard。第五项虽在settings文件却是PluginCtaCatalogLoaded：手工Matched状态、唯一已安装插件返回，断言无effects、candidates空、Hidden及两个hit rect清空；应在CTA模块核对生产调用链，不能按文件名忽略该功能。第六项cancel测试只读开头，下一段从201继续，未算完成。未执行测试。
+
+
+### Settings测试cancel/model/compact段
+
+已读201–400，完整六项（cancel、slash model、switch pending、compact effect、resize derivation、threshold）。cancel首次activity前发送prompt后取消，断言唯一CancelTurn effect、恢复composer、scrollback清空、计时/activity/in-flight/current prompt清空；手工注入带旧promptId metadata的Cancelled response后仍idle且空scrollback。只覆盖一种迟到response形态，未验证实际取消RPC/持久化。slash model注入catalog项，断言唯一SwitchModel且无default_model PersistSetting、pending=true。SwitchModelComplete transport accepted后pending仍true，后续另一次匹配token本地失败才清空；测试标题success不代表模型权威投影已确认。
+
+compact test钉住Bool新旧effect和current_ui；resize 14→32检查派生appearance与用户值，handle_input结果直接丢弃，故注释“emits no effects”不是该测试断言证明。21/20/16边界明确断言。resize_derivation_never_writes_user_cache仅读开头，下一段从390继续；测试大文件仍未完整登记，未执行Cargo。
+
+
+### Compact和显示设置测试390–610
+
+完整核对十项：独立thread resize测试只检查user cache未被14行派生覆盖；user compact on在14/40行保留；hydration测试手工写current_ui再调用apply_effective_compact验证appearance与单prompt；hot reload测试手动set_appearance+rederive验证两个顶层prompt，不运行真实文件监视/配置加载。短终端关闭compact检查用户false、显示仍true、第一effect值false及toast含auto-compact，未断言完整effects数量。
+
+timestamps验证单effect新旧Bool和current_ui；timeline验证单effect、current_ui/cache/appearance，另有显式current_ui与appearance分歧测试，确实覆盖按显示状态切换而非静默跳过。page_flip检查effect新旧及mirror/cache；simple检查单effectkey/value与mirror，不检查rollback、input_mode或附属effects。十项均未执行磁盘effect或渲染快照。下一段从610的open_settings测试继续；本轮未运行测试。
+
+
+### Settings窗口测试610–810
+
+完整六项：普通open检查Settings，二次关闭仅在非debug_assertions构建执行，普通debug测试不覆盖该关闭分支。Welcome非项目cwd用temp_dir，open不产生CreateSession、挂载Settings且保留ProjectSelect；Esc后question仍在，手动选择第一项并提交只检查生成一个CreateSession，不运行创建effect，也不证明多次提交幂等。focused重入permission_mode检查焦点、PickingEnum及close_on_picker_exit；普通open检查flag false。deep-link theme Esc检查modal关闭；browse theme Esc检查仍打开且Browse。后两项未检查主题视觉恢复或preview action处理。第七项preview-revert测试仅读开头，从803继续；未执行测试。
+
+
+### Preview撤销和reset测试803–1020
+
+完整六项（最后一项仅debug编译）：preview Esc测试手动置close_on_picker_exit，断言modal消失与返回PreviewTheme(grownight)，没有导航到不同主题、dispatch恢复action或检查视觉状态，因此只证明撤销动作转发。open reset只检查modal类型/key，未比较移动前后全部state。cancel保存测试断言query、selected、scroll_offset、FilterFocused和compact快照及空effects，注释byte-identically超过实际字段断言范围。幂等reset仅compact默认场景，不能单凭此测试推及所有owner。confirm中刷新仅检查compact快照变化，没有异步失败。debug错误open reset有should_panic期望文本；release对应测试仅读开头，从1010继续，尚未完成。均为源码审阅，未执行。
+
+
+### Reset覆盖守卫与模型测试1010–1212
+
+完整七项：release无Settings时open reset验证空effects/None；reset mapping遍历非Group先断言Some，default_model随后跳过读回；其余手工move-away后dispatch再读回默认，helper和with_theme_test_env待审，不先声称所有条目都有非默认前置。rollback arm守卫只对reset实际产生的PersistSetting调用新rb_app的rollback并断言不出现NO_ARM toast；跳过无reset映射/无persist情形，不验证恢复值，也无法发现被接受但无操作的分支。
+
+clear default模型只断言一个空串effect与active模型保持，不检查toast或disk；set default测试传入ModelId并注入app目录，验证模板变化和active保持，不测试按名称解析（尽管测试名resolves_known_name）。同模型幂等只查空effects，没有设置非空reasoning_effort后验证保持。width测试10→40、9999→500、200→200镜像，不检查effect/clamp极值。1213–1336 show_tips六项此前完成；下一未读段为1337起helper。未运行Cargo。
+
+
+### Reset move-away helper验证
+
+完整读取1338–1517 helper。它没有统一断言设置已偏离默认：show_tips设false正是registry默认；show_thinking_blocks设true亦与目录缺省true一致；permission_mode调用当前session的SetPermissionMode而不是SetDefaultPermissionMode，不能证明未来默认已变化；default_model只改agent模型而非app模板，且读回守卫直接跳过该项。auto_light使用rosepine-dawn，源码搜索仅在这个测试helper出现，尚需共享theme parser确认是否支持别名，不能先声称有效变更。其他若干开关取反当前cache，也不保证与metadata默认不同。未知key会panic，但这只约束分支存在，不保证前置状态。此前reset读回和rollback守卫证据因此存在空验证路径，已独立登记测试债务。完整另读compact toast测试，仅on/off和勾字符片段；simple propagation测试仅读开头，下一段1533继续。未运行测试。
+
+
+### Simple和multiline测试1533–1740
+
+完整九项：simple双向切换active input_mode；回滚特制空EditingQueued(server q1/session s1)断言唯一QueueReleaseEdit，确实验证companion effect保留，但不执行release RPC。无agent simple检查一个PersistSetting及mirror；两顶层agent传播只验证Simple，无嵌套。fresh-thread cache测试仅compact双向、timestamps false、simple false，不覆盖全部setter或同测mirror。debug OpenSettings二次有should_panic。multiline变更检查flag与空effects；重复测试先确认toast存在再清除，第二次无toast/effect；初始false无toast/effect。相邻注释称compact outer无幂等与实际setter矛盾，已按生产代码记录，不把该比较当契约。下一段1740 toast测试继续。未运行测试。
+
+
+### Multiline与modal测试1740–1935
+
+完整六项：multiline toast精确匹配on/off；Welcome无agent分支验证空effects、三个ui字段不变及仍Welcome；Dashboard两agent测试验证局部flag双向与独立dashboard slash /multiline，说明该slash有专用路径，不能等同Agent-only dispatch_toggle_multiline。active-only测试验证第二agent不改；“absent from open settings”只检查current_value_for返回None并保持modal，未检查实际rows。compact快照测试只验证一个窗口的compact字段，不能据注释推出全部Shared/所有窗口刷新。第七项SetVimMode测试仅读到字段断言，下一段从1900继续；测试名no_effect与实际单PersistSetting断言相反，以断言为准。未运行测试。
+
+
+### Vim、selection与折叠设置测试1900–2380
+
+完整读取十三项测试：SetVimMode检查两个顶层agent与cache、唯一PersistSetting及旧新Bool，但未创建嵌套子视图，也未断言toast；重复设置另验证清空toast后无effects/新toast。selection验证Flash→Hold effect与直接rollback恢复cache，未检查现存selection区域。Vim直接rollback仅单agent/cache。thinking与group_tool_verbs各验证唯一effect、重复无effect和直接rollback cache；不执行持久化失败结果链。
+
+布局测试提供更具体的证据：两个read块的第二条从折叠高度0随group开关展开并再折叠；六read块、group_max_visible=3手动展开后，OFF不保留dense group expansion，ON恢复verb header并折叠成员。thinking块隐藏高度0、恢复大于0。collapsed thinking在六工具之前或穿插其间，隐藏后自身不占高度或header，工具header迁移/保留且group_header_count=2、三个尾工具可见；不能只凭注释推广到所有块类型与布局。最后一项thinking+两个read的手动展开随可见性切换重置，header在thinking与首read之间迁移。上述是静态审阅测试断言，未运行Cargo；对应已有thinking/tool grouping设置契约，不另建重复需求。下一未读测试从set_respect_manual_folds_applies_persists_and_rolls_back继续（约2380）。文件尚未完整审阅，不登记整文件hash。
+
+
+### Settings测试2380–3331完成及theme fixture
+
+剩余测试完整读至EOF。manual folds验证两个顶层agent appearance传播、唯一effect与幂等，rollback只检查app及agent0；不执行配置写盘。Mermaid验证Auto→Off payload、toast、重复无效果与直接rollback。scroll speed检查75 payload、250/-5夹至100/1、幂等及rollback cache，虽注释提scroll_config，未断言其重建；mode检查Wheel和Debug文本mode，invert检查Debug方向位及rollback，lines检查wheel/trackpad同为5和99/-2夹至10/1。
+
+非permission rollback仅以show_tips为例保持active Auto，不能证明所有非permission分支。permission失败测试实际dispatch SettingPersistFailed，验证默认恢复Ask、active不变、无effects、精确failure toast；其相邻旧注释声称permission rollback同步session与断言/实现不符。reset permission测试名each_canonical实际只覆盖ask、always-approve、bogus，缺auto；注释提PersistPermissionMode不作为实际effect证据。
+
+Theme三个commit测试验证canonical payload与rollback；主theme另验证关闭auto。三preview验证不写对应UI、不产生PersistSetting（主theme只计该effect，dark/light断言全空），没有验证实际预览颜色或取消恢复。auto-dark覆盖concrete父主题不生效、auto+Dark生效、auto+Light不生效；auto-light仅auto+Light生效。未知name与auto作为子主题的拒绝覆盖UI/effects；toast主theme/dark检查勾，light只检查显示label/name。rollback主theme经失败TaskResult验证UI+livecache，dark/light仅UI；auto rollback清None不检查livecache。
+
+registry测试确认无behavior/multiline条目。new_session_inherits_switched_default_model_for_welcome通过inner setter切模板再NewSession验证agent1模型名Model B，没有检查欢迎卡或模型RPC。mouse测试串行保护MOUSE_CAPTURE_ENABLED，OFF设置父agent sticky，直接调用maintain_toast未来时间及直接清toast后sticky保持，ON清sticky并显示Mouse reporting on；不等于执行真实tick/key事件、嵌套传播或验证终端接受ANSI。
+
+另完整读tests/mod.rs的with_theme_test_env函数：获取theme test mutex并容忍poison，reset/seed默认/GrowNight/clear mock，执行closure后clear/reset；清理是普通尾部调用，panic路径无RAII cleanup保证。该mod.rs只局部阅读，不登记hash。settings.rs全3331行已分段读完，登记文件hash；所有上述均为静态审阅，未运行Cargo，未把fixture/断言视作真实磁盘、终端或跨平台通过。
+
+
+### Settings modal state完整审阅
+
+完整读取state.rs（大输出中被截去的picker开头另读550–635补齐）。新增row/filter/focus与picker/validator两项契约。build_rows仅使用进程minimal gate，不使用pager_snapshot，因此dispatcher先rebuild再更新snapshot不直接证明rows过期。rebuild恢复旧key未再次filter clamp；focus_key true只说明rows找到，不保证最终选中它。动态picker warn条件仅index==1，合法首个真实模型同样可能触发stale日志，不能用该日志证明目录失效。transition_to_browse只清hover/breadcrumb/close_on_picker_exit，不清全部geometry或query；reset_hit_rects清geometry但保留hover。静态choice cap是debug assert，非release上限；当前目录没有String kind，validator是可用机制而非已暴露设置功能。state文件无内联测试，事件与render调用链仍待继续，未运行Cargo。
+
+
+### Settings input第一段1–530
+
+mod.rs完整37行登记hash；input.rs读1–530及is_close_key，agent_view/mod.rs只读apply_settings_outcome，两个大文件不登记hash。Close快捷键直接移除modal不恢复主题，与Esc返回Preview不同，已按代码写契约；尚未做端到端复现。Group空children自动退Browse，Space/Enter只对可读Bool返回toggle且保留面板。paste仅filter/string接收，int忽略。String Enter重验失败设置error却返回Unchanged；成功即退Browse，无action映射记录error。Int只接受空modifier或单SHIFT，步进saturating_add再clamp，无法解析取min；Enter解析并映射但未再次clamp，与注释buffer保证in-range不同（进入state可直接装旧值）。d仅无modifier请求reset，数字/delete/paste均不编辑。picker_choices_len每次从当前snapshot重建，注释“picker-open time”不能视作冻结目录。下一段从picker_choice_at 526附近继续；未运行Cargo。
+
+
+### Settings input剩余526–1242完整审阅
+
+choice_at每次从当前snapshot重新生成有效choice，非冻结目录。完整补齐Browse/filter及鼠标所有分支，新增两项契约。注释“picker每种鼠标均no-op”已过时，实际支持hover和click preview；“每项keyboard有mouse equivalent”也不能推广为鼠标提交，enum重点击仍noop，commit只在Enter。Group键盘遇非Bool值noop，mouse则将非true当false而可能生成true，此为防御分支差异，默认注册child均Bool，未复现实际异常。rect_contains要求正宽高并以saturating端点作半开区间。鼠标列表依赖render提供有效parallel rect/row索引，尚未核对render如何防过期geometry。input全1242行已读完并登记hash；无内联测试，settings_modal/tests.rs仍待逐段核对，未运行Cargo。
+
+
+### Settings render入口1–510
+
+读取render_settings_modal、reset overlay、shortcut构建、search bar/footer、render_rows开头。实际widened_candidate=full_area.width.saturating_sub(8)，不是state注释声称每侧8合计16；仅max_thoughts_width的EditingInt且candidate>110用100%宽，否则70%/110，最终几何还依赖ModalSizing compact/chrome算法，不先断言最终宽度。每次子面板render调用reset_hit_rects会清breadcrumb_hovered，随后高亮依赖该值，需后续render测试核对hover是否按预期呈现。overlay先清rect后render_rows会重填row rect，入口true包括chrome拒绝，不等价绘制成功；行鼠标抑制需核对caller而非依赖注释。render_rows重置parallel rect保障旧行geometry失效，无结果仅非空query绘No matches。下一未读段510起滚动与逐行渲染；文件未读完不登记hash，未运行Cargo。
+
+
+### Settings render 500–965
+
+完成render_rows、反向滚动起点计算、filtered行高、description测量及subpane header。scroll_offset实际是filtered位置，state注释line-granular不准确；row height预测按完整最多8行描述，而实际渲染可按viewport缩短、两行降一行。展开描述不纳入row hit rect，不能把整段描述称为可点击设置行。缺value走no-value renderer且不绘展开描述。scroll helper将header空行计入旧首项变为非首项的成本；选中项超高直接起点设自身。subpane header仅能容纳整个wrapped description加min_non_desc_rows时才绘描述，否则全部省略并返回2，而非部分描述；picker余下965起尚未读。registry规模约15旧注释与当前40项不符，不用作性能界限。未运行Cargo，也未登记部分render文件hash。
+
+
+### Settings picker render 965–1495
+
+完成enum/group renderer、choice layout和picker_scroll_offset；step constants读至int_step_sizes开头，下段1494继续。Enum current marker来自original_value而非即时preview/current snapshot；无choice不另绘loading/empty提示。thread-local scratch只在正常尾部写，外层take清空；提前return不写scratch，不能靠注释断言所有non-picker frame都会主动reset。正常外层每次take，其他直接调用者待测试核对。Group不滚动，键盘可移到不可见child。枚举过高单项的scroll helper不保证焦点：若当前choice始终装不下会继续offset至后续能装的项或末尾；block_rect高度未按area裁剪，仅continuation输出检查底部，不能把“defensive always show focused clipped”注释当作已证事实。已单独登记几何边界待验证，未运行测试，无整文件hash。
+
+
+### Settings integer editor与preview 1490–2055
+
+完整读取三档step计算、String编辑绘制、Int stepper、max_thoughts_width preview入口与preview block开头。String输入始终预留一列cursor；空KnownModel提示使用shell default，错误存在时输入变红且仅有额外一行空间才绘截断错误。Int箭头不仅要求宽度至少8，还要求完整“箭头+间隔+值”可容纳；否则值自身按显示宽度裁到区域，但buffer不改变。左右命中rect仅覆盖glyph本身，不含两列间隔。
+
+max_thoughts_width的preview门槛分两层：caller先要求stepper后余高至少5，helper再要求宽至少30和高至少5。无效buffer取40，超范围夹40..500。实际visible_content可占满`height-2`，所以注释声称“始终至少两行”只是在当前样本文本与门槛下的推断，不是通用切片下限；clamped note需要wrapped内容后还有两行余量。后续从render_preview_block 2055继续；render.rs仍未读完、不登记hash。未运行Cargo。
+
+
+### Settings preview与row layout 2050–2325
+
+完成preview block余段、label列宽、Enum显示回退、description wrap、value显示、row_layout及row背景选择。preview标题和内容背景仅铺effective width，区域更宽的右侧保持原背景；clamped note以完整传入wrapped切片长度定位，因此使用的是已经按高度截断后的内容行数。wrap_description只在debug断言换行/tab非法，release不会拒绝控制字符，目录metadata审阅时未发现此类值但不能称为运行时校验。
+
+row_layout的restart pill仅在调用者传true时计10列；此前列表调用仅展开且restart_required时为true，所以折叠行不为restart文字预留空间。terminal_native_locked或theme.bg_visual为Reset时，选中与hover颜色相同且选中不覆盖hover差异。render_setting_row正文从2325继续，render文件尚未完整阅读、无hash。未运行Cargo。
+
+
+### Settings row painter 2320–2635
+
+完整读取普通值行、展开描述及无current value降级行。Bool(false)灰色，其他值强调色；Int没有chevron但仍预留同样的chevron列。单行标签通过`label_end=min(label_max_x,value_x-1)`截断；极窄区域使用saturating计算，value rect仍可能声明超出area的逻辑宽度，实际Buffer绘制依赖ratatui裁剪，需由测试核对命中区是否应与viewport求交。双行value也仅在完整值可放入时绘，但返回的rect仍按原value宽度构造。
+
+restart pill只在展开时画在第一行，调用方的row rect只覆盖一或两行，不含随后展开的description。无读映射行不更新value_hit_rect，因每帧已先重置为默认rect而不可激活；它仍是selectable row，Space/Enter会由state映射逻辑决定无操作及日志。下一段2635起shortcut与footer构建；render.rs未完、无hash。未运行Cargo。
+
+
+### Settings render 2635–2881完成
+
+完整读取Group顶层行和各模式footer构建。Group顶层value hit rect只是右侧两列chevron，普通row click仍由完整row rect实现两阶段选择/激活。Group label按chevron前一格截断，极窄区域仍返回逻辑两列rect，和普通值行有相同的viewport交集待验证边界。
+
+footer所有普通设置提示均`clickable:false/id:0`；只有reset confirm的y/n带modal常量ID，Esc/F2不可点击。Browse的Enter文案只区分Bool与其他，Group也显示edit；实际Enter会打开Group子表。至此render.rs 2881行分段完整阅读，登记SHA256；未运行Cargo，测试文件仍需核对后才能评价这些渲染分支的动态覆盖。
+
+
+### Settings modal tests 1–620
+
+完整读取前十项测试与两个导航测试开头。contextual group测试验证顶层存在、所有`contextual_hints.`前缀child均不在顶层、Enter进入child 0、Space生成Undo(false)、Esc退Browse；它没有断言group实际包含全部七个child。permission gate测试覆盖off隐藏Auto、on包含Auto、theme不受过滤，并单测gate predicate；enabled fixture同时置workflows_available但predicate不读取该字段。
+
+类型动作守卫遍历当前registry：Bool两种值均只断言Some；preview Enum和commit Enum逐canonical只断言Some，不判Action variant；String目前无注册项，整个测试真空通过；DynamicEnum用单个合成模型并按两个已知key区分Clear/Set variant，新增未知key会panic；Int以值0只断言Some，即使0超出当前三个Int范围。它们证明映射分支存在，不能证明setter接受值、持久化或回滚成功。
+
+单行长标签测试以80列Bool(false)检查完整标签和无省略号，不检查值位置或hit rect。固定rows测试精确断言六个非空分类及33个顶层key顺序，Session无header；注释仍称contextual group三个child，与defs的七个child不一致，但测试只看顶层group。初始selection检查compact_mode。j导航测试已读到动态收集设置key及逐项Changed，尾部边界断言从620继续。settings_modal/tests.rs未读完、不登记hash；未运行Cargo。
+
+
+### Settings modal tests 620–1181
+
+完成j到末项后再次按键返回Unchanged；Space和Enter只以初始compact_mode=false验证SetCompactMode(true)。关闭测试分别验证F2、Ctrl逗号、Super逗号返回Close；Browse Esc仅验证该函数返回Unchanged，没有走上游ModalWindow。filter测试输入compact并验证query，Esc只检查Changed及Browse，未断言query已清空。i无modifier进入filter，Ctrl/Alt+i不进入；footer测试显式改thread-local Vim cache并只查存在`i search`，没有用guard保证panic时恢复。
+
+Bool鼠标测试手填row rect，初始selection本就是compact_mode，故只覆盖“已选行任意位置点击直接toggle”，没有覆盖不同row首击只选择或value hit rect单击激活；header点击测试覆盖Unchanged。选中标签测试只读第2列BOLD；terminal default背景函数四种selected/hover组合均覆盖。hover测试手填rect验证进入Changed/Some、同位置Unchanged、离开所有rect清None、header不设hover。真实render_rows hover测试选择非当前项并读取该行首cell背景。
+
+picker hover测试真实调用render_picking_enum并手工take scratch，验证choice1 hover与choice0 focus背景，但不经顶层render_settings_modal；Browse到Enum/Int以及Enum Esc三个状态转换分别验证清hover。两个导航helper完整读取，按当前registry找首个Int/Enum，未固定具体key。下一测试scroll wheel从1182继续。tests.rs仍未读完、不登记hash；未运行Cargo。
+
+
+### Settings modal tests 1182–1748
+
+完整scroll wheel测试：只手填list_area，从首项向下三次后按动态settings列表第4项断言selection及Changed；不覆盖ScrollUp、区域外、filter/header跳跃或边界Unchanged。restart pill两项均用合成Bool metadata和80x1 Buffer，覆盖expanded即使默认也显示、collapsed无论已编辑或默认都不显示；未覆盖真实registry restart项、窄宽截断或双行位置。
+
+String renderer夹具明确使用合成KnownModel String，因为生产目录当前没有String kind；因此以下测试证明通用编辑器能力，不证明用户能从当前设置窗口进入它。ASCII短buffer验证cursor第4列；80个A在20列分别验证起点cursor为0、末尾cursor仅大于0且至少width-2，没有精确断言末尾列。4列测试以ZWJ emoji及组合字符扫描整个Buffer确认grapheme存在、cursor x=3，但不固定y且不证明没有重复/其他裁剪。无效xyz验证前三格错误色及下一行包含unknown model；空buffer只检查保留下来的`use shell default`片段，未检查placeholder样式。
+
+Int adornment测试以真实max_thoughts_width metadata但直接transition buffer120，40x6 Buffer；只验证两个rect非零、左右顺序、严格位于area内部且同y，不检查glyph、居中值、preview或点击动作。Int fixture helper从registry取min/max并直接进入编辑，已读到step size table开始；下一段1775继续。tests.rs未完整、不登记hash，未运行Cargo。
+
+
+### Settings modal tests 1775–2220
+
+完整八组step table边界：跨度9→1/1、99→1/5、460→5/10、0→1/1、20→1/4、21→1/5、100→1/5、101→5/10。wide fixture分别验证方向键+5/-5/+10/-10；scroll_lines四方向1步往返，scroll_speed四方向1/5往返；vim kj、lh只断言buffer结果，未逐项检查outcome。min/max边界各验证Unchanged且buffer不变。数字7、Backspace、Delete/Home/End/Tab被忽略，未覆盖paste、Page键或带Ctrl/Alt/Shift的事件。
+
+40x8 Buffer测试动态扫描同时含左右glyph的行并检查125，不验证居中、样式或rect。Enter验证SetMaxThoughtsWidth(75)及Browse；Esc先步至80再验证Changed、非Action、Browse，但所谓underlying UiConfig未实际断言。左右箭头鼠标测试真实render生成rect后分别验证小步115/125；中间值点击Unchanged且buffer120。没有覆盖窄到无rect时点击或边界箭头点击。
+
+三类theme picker Esc测试直接构造PickingEnum，未先执行preview导航；它验证返回对应original Preview Action及Browse，因此证明映射与退出，不证明显示已被改变再恢复。合成Enum目录和fixture注释读至synthetic_enum_meta；下一段2221继续。tests.rs未完整、不登记hash，未运行Cargo。
+
+
+### Settings modal tests 2221–2811
+
+合成`test_enum`有三项、支持preview但没有实际preview/commit Action映射。上下/jk测试完整覆盖0→1→2、有界Unchanged、再回0；因无映射，Changed只证明索引变更。Enter从index1退Browse且Changed，明确不证明真实提交。Esc先移到index2再退Browse且Changed，也无法从Action观察original值。真实theme路径分别覆盖普通Esc返回PreviewTheme并Browse、deep-link Enter返回ActionThenClose且清flag、普通Enter返回SetTheme并Browse、直接构造deep-link index0提交具体`auto`、deep-link Esc返回grownight PreviewTheme并清flag；均只检查Action形状，没有dispatch执行主题或持久化。
+
+80x12 picker Buffer测试固定title row0、subtitle row1、row2空白以及三项显示/描述位于row3–5；注释“rows3..6”多写一行但断言正确。焦点/提交标记测试将focus置second、original first，检查●/○、条件性marker颜色、末列背景、focused BOLD，再检查两者同为first时组合状态；使用`settings_list_row_bg`使终端native也通过，但非native不同theme颜色值并未固定。
+
+String original marker测试第一部分仍用静态Enum `test_enum`，仅将original载体换成String；第二部分也用静态Enum与空canonical目录模拟clear sentinel。因此它证明renderer按String比较canonical，包括空串，不证明真实DynamicEnum目录构建或commit。下一段从browse_enter_on_enum_row 2812继续；tests.rs未完整、不登记hash，未运行Cargo。
+
+
+### Settings modal tests 2812–3213
+
+Browse合成Enum Enter验证无current_value arm时进入picker、index0、original为first；Bool Enter只匹配任意Action并保持Browse，没有固定SetCompactMode。名为“从current value seed”的测试实际再次只覆盖未知key回退index0，注释声称真实Enum current-value分支不可达已与当前theme等注册事实过时；没有测试theme非首canonical选择初始索引。非Enum直接调用只覆盖初始compact Bool返回false且Browse。
+
+zero height/width测试只调用不panic，虽注释称buffer不变但未比较Buffer。height2验证title、第二行空且无choice；20x4长subtitle测试检查title字符X和至少一个choice圆点，证明整段subtitle放不下时省略，但没验证省略后具体choice或scratch rect。40x12单choice长描述测试扫描row3以后要求无任何省略号并包含若干单词，不核对完整原文顺序、行数或hit rect。
+
+`picker_visual_smoke_debug`是`#[ignore]`，只打印60x12合成两choice Buffer且无断言，默认测试运行不提供验证证据；下一项多行wrap测试仅读到fixture开头，从3214继续。tests.rs未完整、不登记hash，未运行Cargo。
+
+
+### Settings modal tests 3214–3870
+
+多行描述测试以60x16合成两项，动态定位Opt in首行，检查separator与开头文字、下一行前两列为空，并在Opt out前汇总若干关键词且无省略号；没有逐字重建原描述。短描述测试固定row3/4连续出现Alpha/A与Bravo/B。空描述只检查Alpha存在且row3无separator，没有检查第二项或尾部全为空。
+
+多行hit rect测试真实render并take scratch，要求两rect高度至少2、不重叠，点击第二项最后一行后接受Changed或任意Action并断言index1；supports_preview=false所以实际应为Changed，但宽松匹配不能防意外Action。可变高度scroll测试以5项长描述、40x11、focus末项，验证末项rect非零且完全在area、首项rect为零；没有覆盖单项自身高于viewport的已登记边界。
+
+长display 24列测试只检查固定row3含省略号；长title 20列检查row0含省略号。overflow fixture注释说8项但实际6项、注释期望3 hidden；断言只检查整个Buffer同时含省略号和`more`，不检查数字、所在行或可见项数。下一项顶层render routing从3871继续。tests.rs未完整、不登记hash，未运行Cargo。
+
+
+### Settings modal tests 3871–4315
+
+顶层120x30 render测试预置row/list rect，验证picker模式Buffer无`/ to search`、含Test enum、所有row rect被清默认；没有检查新picker rect、breadcrumb或返回值。picker滚轮测试在未渲染/无choice rect状态验证上下均Unchanged且Browse selection不变。名为mouse click noop的测试同样未先render，无命中rect，故只证明空geometry点击noop，不能反驳已审阅的有效rect click-to-pick。随机a验证picker index0和模式不变。
+
+String编辑仍用无生产消费者的合成夹具。空buffer插a验证Changed、buffer与validation error，Enter无效保持Editor；注释称目录Grow 4 Fast与fixture实际Grow Test不符但断言仍成立。canonical edit测试验证Alt+Backspace从`alpha-beta`删到`alpha-`；Grow Tes移动cursor不改error，End后补t清error；插入RTL override返回Changed但buffer/cursor不变，说明安全策略拒绝字符时上层仍请求重绘；Enter产生SetDefaultModel并退Browse。未覆盖paste、Unicode合法输入、目录空loading错误或同名label/id冲突。
+
+picker helper测试覆盖未知key/Bool长度0、静态Enum index0/越界/未知/Bool查值；注释声称zero-choice但没有构造zero-choice。另一个Esc重复覆盖Int退Browse。compute_filtered覆盖空query保持传入索引、无匹配连header都排除、单keyword和双keyword AND返回header+compact。隐藏selection防御路径分别验证Next跳首个可见show_timestamps、Prev跳最后可见simple。后续开始Buffer helper及分类空行测试，从4315继续。tests.rs未完整、不登记hash，未运行Cargo。
+
+
+### Settings modal tests 4315–4824
+
+完成`find_text_col` helper：按grapheme/cell宽度查找，但每个grapheme后若col恰好等于右边界也判失败，因此无法匹配刚好结束在Buffer末列的needle；本段尚未看到依赖末列命中的断言。分类测试以80x60完整render当前默认rows，查每个实际header：首header在顶部，后续header上一行全空；相邻测试再次只查Appearance首行。注释称默认16 settings已过时，实际固定目录测试为33项，但60行仍足够当前fixture。row rect测试逐个非零rect，检查其y所在行含header或label，证明插入空行后纵向对齐；不检查rect高度、x/value rect或点击结果。
+
+wrap_description覆盖空文本/零宽为空、宽文本单行精确、15列长文本多行且每个word仍出现、无省略号；它不精确重组空白与顺序。合成长标签分别在35x2验证完整label第一行、off第二行近右侧及value rect y；120x2验证label/off首行、第二行全空及rect y；25x2验证label省略号和off第二行。阈值函数直接验证32/31及Bool预留chevron列的40/39分界。合成Enum helper测试只断言key，未验证布局。
+
+contextual group展开测试用真实目录、60x60，检查label行、下一行非空及从当前description取第二token出现在该行；不检查多行完整描述、最多8行、row rect仍为一行或滚动高度。随后进入footer gap测试helper，从4825继续。tests.rs未完整、不登记hash，未运行Cargo。
+
+
+### Settings modal tests 4825–5384
+
+footer helper分别找包含文本的首行和检查popup两侧border之间全为空。70x30 Browse测试确认首尾hint落在不同y、首hint恰为Tip下两行且中间内部全空；没有精确断言hint只占两行。150x30 Filter测试确认首尾hint同一行及相同单空行。宽150与窄100的Filter对比测试确认窄hint恰分两行、宽一行、窄list_area高度比宽少1；两个viewport同时改变宽度，但断言针对ModalWindow算出的list height，不检查内容行换行。
+
+分类header样式测试真实render，定位Appearance，检查label首cell gray+BOLD、存在横线且首横线gray_dim。搜索栏直接调用共享picker renderer：focused空输入检查第1格gray及第9列cursor反色；unfocused检查`/ to search`文字及斜杠、末h均gray_dim。它们证明共享组件表现，不经过设置顶层布局。
+
+Ctrl+u测试将cursor置于alpha后仍清整个`alpha beta`并归零。合成String paste在`Grow T|st`插入`e\r\n`后得Grow Test并清验证错误；再粘贴RTL override加换行返回Changed但内容/validity保持，未断言cursor。13列filter search Buffer验证ZWJ emoji与组合字符未拆、末列cursor背景，但不检查query匹配或完整文本。
+
+Bool颜色测试以合成row检查off首尾字符均gray、on首字符accent，并在主题token可区分时断言二者不同；未检查on第二字符。下一项chevron列对齐测试从5385继续，本段不计入。tests.rs未完整、不登记hash，未运行Cargo。
+
+
+### Settings modal tests 5385–5913
+
+chevron固定列测试以80列合成Bool/Enum分别检查右侧固定glyph格为空/`›`，并比较两个value rect右边界；随后同Buffer不相邻行再次查相同glyph列，但没有比较两个值文本右边界。20列双行与60列单行测试分别检查glyph位于距右边相同偏移及对应行，证明两种布局对齐；未检查Bool双行。
+
+docs footer以80/40/15三种宽度分别覆盖long、short和截断路径。80/40用Rust String字节`find("Tip")`作为leading值，文本前缀ASCII所以此处等同列；检查左右空白差不超过1。15列只要求含Tip且起点在范围，未断言省略号或实际居中。120x40顶层modal测试查Tip/Ask Grow并将上一整行去掉空格与竖边框后要求为空，未使用popup x范围，仍可发现区域内非边框字符。
+
+30x25合成Enum长setting description测试确认首末word均在Buffer，title后至首choice marker之间至少两行非空、整个Buffer无省略号；高度足够，未覆盖省略description分支或真实目录文本。`enter_picker_for`对已选row避免select_at返回false，真实theme等入口后续使用。下一项breadcrumb rect测试从5914继续，当前只读到PickingEnum宽度断言开头，未计入。本文件未完、无hash，未运行Cargo。
+
+
+### Settings modal tests 5914–6480
+
+breadcrumb几何测试用120x30顶层render，验证Browse无rect；theme picker rect高1、宽超过Settings且至少含prefix、x=popup.x+3、y=popup.y；Int editor只验高1和宽超过Settings，未检查x/y。点击theme breadcrumb返回PreviewTheme(grownight)并Browse；deep-link flag场景另断言非Close/ActionThenClose、同一Preview Action、Browse且flag清除。所谓preview后点击测试直接改`choices_idx`，没有先产生或执行Preview Action，但能证明退出仍携original canonical。
+
+picker内d验证PreviewTheme(original)与OpenResetConfirm的ActionPair及先退Browse；Int d先从75步到80，再验证OpenResetConfirm(max_thoughts_width)、Browse且无editing payload。String d合成编辑器验证插入Grod、cursor4、仍编辑且无Action。breadcrumb外左右各一格点击均Unchanged，第二次没有重复断言mode但第一次已保持picker。
+
+breadcrumb hover测试只验证Moved进入返回Changed并置true、移到area原点后清false，明确删除颜色断言。结合已完整读取的render入口，子面板下一帧先调用`reset_hit_rects()`并清`breadcrumb_hovered=false`，然后才按该值绘title，因此测试没有证明高亮可见，且源码路径显示状态在绘制前丢失；已登记独立债务。搜索divider顶层测试定位search下一行，要求横线数至少总viewport宽1/4、所有横线gray_dim且首末色相同，不要求铺满modal内部。随后进入max width preview测试，从6481继续。tests.rs未完整、不登记hash，未运行Cargo。
+
+
+### Settings modal tests 6481–7482
+
+最大思考宽度预览测试完整覆盖待提交值驱动的布局：标题固定小写preview，位于stepper下一空行；标题为粗体、斜体、下划线并用visual背景，正文仅斜体并用highlight背景。pending为50时必须实际产生至少两行且每行不超过50列；terminal只有60列而pending为85时按60列换行，标题不带旧式clamped后缀，内容后一空行再绘`note: clamped at 60 cols`。提示使用secondary前景、base背景且无modifier；垂直空间不够时保留内容而省略提示。非夹宽场景不出现note。
+
+预览尺寸边界被成对锁定：stepper header为4行时总高9显示、8隐藏；宽30显示、29隐藏。非`max_thoughts_width`的合成Int仍绘stepper但不绘preview。Up把pending 50改为55后重新render，测试要求两次均真实换行且形状不同，证明预览跟随未提交buffer实时重排。这些测试使用固定示例文本，不能证明任意语言内容的词边界或生产scrollback文本一致。
+
+顶层modal扩宽只在编辑`max_thoughts_width`时发生。200列终端得到192列popup，离开EditingValue到Browse后恢复110列标准上限；100列终端因候选92不超过标准上限而与Browse保持同宽，防止扩宽分支反而缩小。180列终端、pending85时扩宽后的内部区域无需夹宽；100列、pending200仍夹至内部宽并显示提示。扩宽测试验证render结果及popup geometry，不验证实际终端resize事件链。
+
+至此`settings_modal/tests.rs` 1–7482已完整读取并登记SHA-256 `fa94d5ed521354ed894fd2f9b79581be215bd791a1399d2b4a435d42d189ccf8`。本轮只做静态源码与测试断言审计，未执行Cargo构建。
+
+
+### Package features, build provenance and action registry
+
+完整读取`Cargo.toml`与`build.rs`。pager默认feature为jemalloc与sandbox-enforce，但本crate的jemalloc是空feature，实际global allocator在composition-root cli；sandbox-enforce只转发`sandbox/enforce`。default-bazel额外启用test-support，后者只转发pager-render/test-support；release-dist同样为空。Mermaid没有编译feature gate，只受运行时setting控制。build script只声明`.git/HEAD`与`GROW_VERSION`重跑源；短commit读取失败或非UTF-8时为unknown，版本优先GROW_VERSION、再CARGO_PKG_VERSION、最后0.0.0。
+
+完整读取`actions/mod.rs`与`actions/defaults.rs`。registry lookup对调用方提供的When精确匹配并按定义顺序优先，显式冒泡留给外部输入链；matches_id忽略context。非Vim只在scrollback/dashboard屏蔽裸字母，非字母alternate仍可用。提示列表仅收集有priority的指定context并排序。interjection gate要求turn_running与has_payload同时成立。
+
+默认动作表按终端族与screen mode变形：Minimal删除scrollback/dashboard表面、Ctrl+G改外部编辑，其余模式为tasks；Apple Terminal steer用Ctrl+O并保留Ctrl+Enter/Ctrl+I，VS Code家族独占Ctrl+L且禁用extensions chord，普通终端使用Ctrl+Enter/Ctrl+I。VS Code家族退出为Ctrl+D且half-page-down为Shift+D。本地macOS VS Code家族queue主键是Ctrl+4并保留两项备用。NewSession、Quit与overlay stop标记双击确认；registry本身只携带flag，1000ms或2s执行时序仍由消费方负责。
+
+四文件已登记SHA-256：`Cargo.toml`=`3f8c34687b8cb46f627c54cfcb10551e6ca535bc48e6971dd99d2e5d0a6285f7`，`build.rs`=`8cd8b712df42fae861dceb76c9f52ec4528ef8ff8b88a144c4f0ab7e3681ec13`，`actions/defaults.rs`=`f72f024e0d793c6e312d81c8694c81dcc8374014021e1255c2f1612e1ae356ac`，`actions/mod.rs`=`77577c2dce12fd936c90a220b636d7595103f1725dd60fe246475840508690c9`。未运行Cargo构建。
+
+
+### Application action/effect/completion protocol
+
+完整读取`app/actions.rs` 1–2632。Action是同步意图目录，Effect是事件循环异步执行目录，TaskResult将完成重新包装进Action::TaskComplete。此文件枚举了会话创建/加载/工作树、prompt和bash、cancel/compact、队列、模型/agent/behavior、扩展与MCP、session info/usage、memory、BTW/recap、fork/rewind、suggestion、clipboard、image viewer及doctor等载荷。枚举存在不等于消费方一定正确执行，因此本轮只抽取类型层能独立证明的结构与纯函数。
+
+`Effect::prompt_rpc_identity`只识别SendPrompt和SendPromptBlocks；这与local draft所有权转移既有条目一致，没有新增重复契约。控制RPC使用独立SessionControlToken，completion携带原agent/session/token与AuthoritativeUpdatePending或Superseded；session list、detail、suggestion、memory rewrite、usage等分别携带seq、generation、revision或nonce供dispatch判断时效，但是否逐项检查仍留给对应TaskResult handler审计。
+
+clipboard纯reducer按attachment、file、text顺序决策：attachment非FullMiss立即短路；FullMiss才采用可选file；之后ClipboardKey read失败优先，最后才映射显式或同步Insertion。BracketedInserted记录已同步插入且miss路径不再返回text，避免重复写入。此文件未含该reducer单元测试，当前契约来自穷尽match分支的静态证明，后续消费方仍需核对Dropped/AlreadyReported的用户反馈。
+
+PermissionModeKind精确映射三种canonical/runtime值，Auto与AlwaysApprove分离，未知值None。PermissionModePersist区分WithRollback旧canonical与BestEffort；注释约定前者磁盘失败回滚并抑制通知、后者保留乐观值并总通知，实际执行已有settings task-result条目交叉覆盖。文件SHA-256为`6dc6ac412073a8d3a10c5dda218bab326841cf239762edf6044919756c9512ec`，已登记；未运行Cargo构建。
+
+
+### Bundle, roster and display-refresh startup
+
+完整读取`app/bundle.rs`。BundleStatusResult与EntryGetResult均使用camelCase并deny_unknown_fields；status的skills可缺省为空，但hasCache、version、agents仍需存在，其中version类型可为null。BundleState默认无cache且四个展示字段为空；响应到state的转换不在本文件。两项测试验证完整status与未知legacy拒绝、entry必填shape，没有覆盖skills缺失或version null，相关行为由serde标注静态证明。
+
+完整读取`app/roster.rs`。活动枚举仅接受六个snake_case状态；entry本身不拒绝未知字段，多数展示字段有default，sessionId/cwd/activity必填。list parser先解析Value再选择result或根；这是必要的，因为直接把包裹响应反序列化为带default sessions的宽松struct会成功产生空列表。测试用shell生产端真实ExtMethodResult envelope复现该陷阱，并覆盖裸list与bare changed广播；没有测试非法JSON、未知activity或result错型，但函数均返回None。
+
+完整读取`app/display_refresh_startup.rs`。两个cadence env分别trim、parse u64、fallback默认并clamp 1..100；变量存在即set，非法值仍阻止“unset”判断。probe disabled完全跳过；auto开启且没有双env覆盖时同步probe再解析clocks；其余开启路径按无Hz固定clocks并在spawn_blocking诊断任务内probe。异步任务同时采terminal snapshot与数值归一后的刷新诊断。唯一测试只覆盖纯parse矩阵，未执行真实host探测、tokio任务或remote/user policy组合。
+
+已登记三文件SHA-256：bundle=`745c27c2f11bbab9f79867d1a98e04577ebdbcf1ea6c97db124e92f2d65d54e6`，roster=`694714e3ff1c4f369af0531eca0db931432aeaa38f87a1ff9643f01c6630f58c`，display refresh startup=`5fe5e0b16183c26561f551e300ffad66873a45efaffad1da8ec00ae60913eecf`。未运行Cargo构建。
+
+
+### TUI signal shutdown and external editor
+
+完整读取`app/signal_handler.rs`。install记录Fullscreen与terminal owned，Unix同时把SIGTTIN/SIGTTOU设为ignore；SIGPIPE保持stdlib的ignore，不安装自定义handler以免fork+exec child继承default。Unix首个INT/TERM/HUP映射130/143/129，在owned且Notify存在时只触发graceful quit，随后继续等第二信号并强退；Notify缺失或terminal已恢复则首信号即强退。Windows只有Ctrl+C使用双阶段，close/logoff/shutdown立即退出。force path先恢复terminal再注销active session，最后kill全局detached children、恢复stderr、flush日志并exit。唯一测试只覆盖owned+Notify分支，不触发真实信号、terminal teardown或process exit。
+
+完整读取`app/external_editor.rs`。编辑器按非空VISUAL、EDITOR、平台default选择并shlex解析。Prompt临时文件使用UUID/create_new，Unix0600，4MiB双重边界及UTF-8验证，Drop best-effort删除。prepare在文件物化前再次验证agent仍存在且无附件、paste pending或ownership冲突；ConfigFile绕过这项prompt检查。prompt只有child成功才读文件，且应用前再比较composer与original，避免覆盖并发更新；成功应用会关闭history search、清history、置cursor到字节末、刷新slash并清suggestion。Config child非零status不会被视为Err，仍刷新指定modal，这是源码事实；没有测试锁定非零config行为，后续如调整应单独设计。
+
+已登记signal handler SHA-256 `48487abd10e3c2658d84774f5243169b83f844a5a8fecceafe0dee59a04ef6f4` 与external editor `71a3d13cd4d9c67c1ba2677ebcad49f626ad337f31e20e079e9a1573d05236ad`。未运行真实editor、signal或Cargo测试。
+
+
+### Fragmented CSI input filter
+
+完整读取`app/csi_filter.rs` 741行。过滤候选仅为Press且modifier恰为None或Shift的Char；状态机要求SGR mouse三段数字均非空，以M/m结束。完整匹配删除tentative和同batch紧邻bare Esc；reject释放tentative并让当前字符重新从Idle尝试，因此新`[`可立即启动下一片段。深层状态跨调用保留，但批尾Bracket无条件释放，避免用户typed `[`等待下一键。
+
+同batch `Esc [ I/O`转FocusGained/Lost，事件时间取I/O final；typed `[I/[O`因无Esc保持原样，SS3 `Esc O A`也不匹配。跨batch单独Esc已经输出，下一批Bracket又会在batch末策略下原样输出，因此focus序列泄漏；文件测试明确称known limitation，已登记backlog。SGR body在`[<`建立后可跨batch完整过滤，即使M因crossterm大写规则带Shift。没有真实crossterm read边界或SSH集成测试。
+
+文件SHA-256为`14a87455938b0b4a83ce5358e201fd95ff4e96e9d837a6b16574fc351c717890`，已登记；未运行Cargo测试。
+
+
+### XTVERSION reply filter
+
+完整读取`app/xt_filter.rs` 610行。filter仅在terminal xtversion reply_pending时武装，5秒deadline延迟到首次filter调用设置；arm到期只在没有confirmed hold时record_no_reply。DCS intro接受Alt-P或split Esc/P，严格确认`>|`后收最多64字节ASCII白名单payload，以Alt-backslash或BEL的Ctrl+G结束。完整reply被吞并保存payload，disarm后同batch其余事件直接通过。
+
+staged区分Tentative与PassThrough。intro前dead hold会恢复两类并保持FIFO/时间戳；intro确认后dead hold丢掉DCS字符但释放Resize/Focus等穿插事件。mismatch先按这一规则resolve，再从Idle重新尝试rejecting event，故后续新reply仍可捕获。异步wrapper每片段最多等150ms、总hold最多1秒；完成后record_reply，并在detected存在时spawn_blocking重发terminal诊断。文件测试覆盖full/split/ESC split/BEL、timeout resolver语义、payload后键、interleaved非key顺序；未使用真实时间推进测试5秒arm或1秒wrapper，也未运行真实终端查询。
+
+文件SHA-256为`53535903d6349039e4f86eb287c390b36b4cfd3bc72a1fd8897ebff6cf1293df`，已登记；未运行Cargo测试。
+
+
+### Session activity projection
+
+完整读取`app/session/activity.rs` 310行。projection只读root lifecycle及直接child views，foreground busy同时考虑state.is_idle与turn_activity。root needs_input复用session方法；child question要求child自身question_pending、child session_id存在、且parent subagent_sessions以该ID命中的info未finished，孤立view或finished child不贡献。Running background、任意scheduled、非workflow的live subagent、active workflow及Active goal分别独立投影。
+
+working包含foreground、queue、replay、background、scheduled、subagent、workflow、goal，特意不含needs_input；animates反过来包含needs_input但不含queue。测试锁定queued-only为working且不动画、active goal/workflow、root permission/question及三种child question状态。未覆盖background/scheduled/replay/普通subagent的逐旗标测试，但分支是直接布尔投影。
+
+文件SHA-256为`a19835bb760b2fc7738c85a0130f76a035cc693585d63c11040ba246aa1442da`，已登记；未运行Cargo测试。
+
+
+### Screen mode relaunch
+
+完整读取`app/screen_mode_relaunch.rs` 884行。argv重建从Clap的PagerArgs动态缓存所有takes_values的长短flag，避免人工列表漂移；删除argv0、旧resume/session-id、两种mode、continue/fork、worktree/ref/restore-code及其相邻值/等号形式，也删除`--`和之后内容及其他裸positionals。其余flag和值保持顺序，末尾追加新的resume ID和目标mode。测试覆盖常见长短/等号/缺值/boolean/positional矩阵；没有穷尽未来所有Clap action，但分类来源是运行时同一命令定义。
+
+GROW_SCREEN_MODE与私有controls handoff读取后无论有效与否都删除。mode只接受精确小写；CLI preference顺序minimal优先于fullscreen再到config，env override又高于minimal和alt-screen，最终无偏好且不想alt时Inline。Unix cmd设置mode/handoff后exec；Windows父进程忽略console Ctrl、等待150ms、继承stdio spawn并wait后镜像退出码，其他平台报unsupported。测试不调用exec/Windows FFI，只覆盖纯argv、parser、env消费、preference与resume hint；controls handoff消费没有本文件测试。
+
+文件SHA-256为`1fe81dae635fd724f3fc2ec9c3718c0c8151ebadeecdbebc2a36f37b4a339c6a`，已登记；未执行实际relaunch或Cargo测试。
+
+
+### In-process leader cluster integration harness
+
+完整读取`app/leader_cluster/mod.rs` 617行与`scenarios.rs` 390行。夹具仅在Unix编译，四项场景均`#[ignore]`并要求`serial(GROW_HOME)`；原因是代理URL、API key、leader socket和GROW_HOME均为进程级环境，且`grow_home()`由OnceLock缓存。夹具在current-thread LocalSet内启动mock inference、真实leader server、真实MvpAgent、生产bridge和AppView dispatch/effect路径，但不提供terminal/auth handle，忽略effect的quit/meta返回，也只把成功join的TaskResult重新dispatch；JoinError仅表现为pump进展，最终可能以场景预算失败。
+
+cluster持有固定socket对应的LeaderLock，使真实LeaderReconnector不能赢得flock并spawn外部进程。server与agent用两个8MiB simplex和换行JSON互桥；socket绑定与释放各等最多10秒，connect/initialize/authenticate分别由30秒`bounded`包裹，turn pump以10ms tick在60秒预算内轮询。kill先cancel server并确认旧socket消失，再逐个abort且await同代server/agent/bridge任务，之后清认证标记；这是防止旧agent与新agent同时写同一GROW_HOME的测试约束。Drop无法await，只best-effort cancel和abort。client声明Stdio、terminal=false与三个skip startup hints；同一generation由cluster布尔值控制只做首次认证，reconnect策略为unbounded。
+
+场景的实际断言范围如下：双client用例只验证viewer attach后首轮sentinel一次，以及仍由原driver发送的第二轮在两端各一次；虽然函数名和注释写`both_ways`/角色翻转，代码没有从viewer发送第二轮。N-client用例验证三个viewer各自replay一次、driver未收到附加replay，以及live turn在四端各一次。reattach先轮询磁盘updates.jsonl含`turn_completed`，再断开driver并验证新client replay一次、Idle且inference请求数不增。leader kill用例等待reconnector generation至少1，手工重做initialize/authenticate和带permissionMode/cursor的load，再验证历史一次及新turn一次。所有断言均以AgentMessage中sentinel出现次数为代理，没有验证完整ACP帧序、并发提交总序、其他消息重复或非Unix传输；本轮没有运行ignored测试。
+
+两文件已登记SHA-256：`mod.rs`=`b48eea1e31b4b16ec6ed2b605513b5dc2b316d5729d6a1c3fef5206500f672d6`，`scenarios.rs`=`64bbcc9afe28b19009249dcf5f54acb692bbda7ce88ec633de48a5ba82a2d10f`。
+
+
+### Pager CLI parser
+
+完整读取`app/cli.rs` 1173行。Command定义交互二进制的agent、inspect、doctor、du、leader、MCP、plugin、memory、models、sessions、wrap、export、trace、trajectory、update、version、completions、worktree和dashboard入口；Parser关闭Clap默认version action，改由`-v/--version`设置early intent。leader socket、debug与debug file是global；两种leader选择、两种screen mode、memory开关、resume/continue以及三种prompt source由Clap互斥。permission只在parser层限制三个值，reasoning effort保持任意String；max turns和后台等待至少1，等待默认600秒。隐藏参数仍组成可调用CLI表面。
+
+AgentArgs的plugin-dir可重复，canonical helper逐项dunce canonicalize、只保留存在目录，向stderr报告普通文件和失败，不去重也不限定信任根。agent mode分Stdio、Serve和Leader；Serve默认127.0.0.1:2419，缺secret时从无连字符UUID字符循环取12位，显式或环境secret原样返回。这里仅解析与规范化，不证明transport、profile或plugin加载成功。
+
+apply_cwd先捕获launch cwd，将相对leader socket/debug file锚到该目录并过滤CurDir组件，保留ParentDir且不canonicalize，之后才set_current_dir。测试明确`logs/../debug.log`仍保持`..`。resume_target只把恢复/分叉源分为显式ID、当前cwd最近项或None；`--session-id`的新会话不是恢复。startup sandbox比较两边解析后的ProfileName Option，因此aliases相等，显式空串被当作未提供；只有显式值或两边都解析失败时仍Apply raw，最终合法性不在本函数处理。positional interactive prompt只trim并滤空，与headless prompt互斥；worktree可选值以空串表示。
+
+测试覆盖version early intent、doctor/du形状、resume分类、screen mode冲突、plugin目录过滤、sandbox alias、路径锚定、global socket/debug、leader管理解析、positional prompt、worktree组合、trust与reasoning字符串。它们只运行Clap与纯helper；没有执行实际子命令、切换cwd失败矩阵、环境secret随机性或sandbox安装。本轮未运行测试。文件SHA-256为`bff9df267e7110f7a5ca04945bf2abc28dceee10a08822299f81409ec3728374`，已登记。
+
+
+### Small slash command routes
+
+完整读取slash/commands下27个小文件，共859行。基础路由包括resume、config-agents、quit、home、mcps、new、rewind、view-plan和shortcuts。rewind/view-plan/trajectory/gboom/recap/btw/compact只用session_scoped元数据表达会话范围，run不自行检查session ID；delete/context/session-info/rename会再次检查ctx.session_id。gboom与scroll-debug固定visible=false，精确输入仍有run实现。所有这些文件只返回CommandResult，Action消费成功不能从此处推出。
+
+四项显示切换并不统一：compact-mode/vim-mode返回无值toggle；timestamps/timeline在run时读取appearance cache并发出取反后的typed setter。timeline额外声明FullscreenOnly与SwitchMode remedy。remember把空白参数映射为编辑模式，非空trim后直接send；btw把trim文本直接放入Action，空值阻止依赖外围args_required；recap固定auto=false；compact只用trim判空，非空时保留原始args空白拼回QueueCommand。
+
+usage、trajectory、scroll-debug、gboom对非空参数返回本地错误。rename要求session和非空trim title。release-notes同步fetch changelog，Some正文trim后进入固定标题Action，None为offline错误；其测试只断言结果属于Action或Error，未证明真实内容或来源。effort dropdown helper逐项生成行，用a/b等单字符前缀影响匹配tie-break；active只按value与mark_active决定，description None为空。`b'a' + idx as u8`无长度防御，契约不扩大为任意长菜单安全。
+
+27份文件SHA-256全部登记；本轮没有运行slash命令测试、网络/changelog读取或Cargo构建。
+
+继续完整读取help、feedback、jump、tutorial、workflow、history、queue与tasks共609行。help打开command palette；feedback固定指向仓库issue创建URL。jump是session-scoped、FullscreenOnly，但run本身不检查session；tutorial不要求session但同样以FullscreenOnly阻止minimal不可见modal。history返回OpenHistorySearch并有真实builtin registry名称解析测试。queue/tasks同时声明session scope和显式session ID gate，两个只产生Show Action，实际合并状态由下游处理。
+
+workflow命令只在workflows_available时visible，却同时session_scoped和offered_when_session_less，允许dashboard为下一primary session暂存。空参数使用固定search-first guide，非空参数trim后直接作为prompt；两者均设置Workflow behavior且prompt总为Some。测试只锁定默认prompt包含四段关键语义，不执行workflow查找或draft创建。8份文件hash已登记，本轮未运行测试。
+
+继续完整读取settings_cmd、workflows、transcript、workflow_run、permission和expand共556行。settings run直接忽略参数并OpenSettings，但真实带参是否在此前被trait executor拒绝要等统一执行器。workflows要求catalog可用且当前Workflow behavior才visible，FullscreenOnly；transcript全模式可用但显式要求session；expand同时session gate与MinimalOnly，run本身不看screen mode。
+
+workflow-run对空值和无target pause/resume/stop打开selector，其余trim后交HostCommand，解析与再次gate归Shell。permission建议固定Ask/可选Auto/Always顺序，suggestion使用AppCtx gate，执行Auto再读PagerLocalSnapshot gate；bare命令打开参数picker，Ask shortcut可sessionless offered。6文件hash已登记；未运行测试、打开外部pager或执行workflow/permission变更。
+
+继续完整读取edit_prompt、plugin、always_approve、auto、multiline及toggle_mouse_reporting共661行。edit-prompt为session+MinimalOnly入口，但run不看mode/composer；hooks/plugins/marketplace/skills只选择extensions tab及SlashCommand trigger。AlwaysApprove与Auto shortcut都可sessionless offered并无条件产生typed permission Action；尤其Auto run不复查gate，与permission聚合命令不同，是否能由统一执行路径绕过需等mod/registry审阅，当前不提前登记运行时缺陷。
+
+multiline从PagerLocalSnapshot取反并产生Set Action，可sessionless offered但无owner字段，路由仍由上层负责。mouse reporting的visible与run都读取全局atomic：关闭时精确调用只返回配置提示，开启时返回ToggleMouseCapture。测试手工切换并复位atomic，未使用panic guard。本轮登记6份hash，未运行Cargo或真实editor/terminal/extension操作。
+
+继续完整读取cd、find、dashboard和screen_mode_switch共513行。cd只在元数据上dashboard_only：空参数开位置picker，非空仅trim后传给DashboardChangeLocation，不展开路径。find为session-scoped及FullscreenOnly，但run不检查session/mode，只把trim query变成Option。agents命令的feature gate由registry外部设置，run始终OpenDashboard；其FullscreenOnly在测试中明确允许Fullscreen与Inline而排除Minimal。
+
+minimal/fullscreen命令对象按目标生成相反mode_support并用AlreadyInMode remedy，要求session后只发携带minimal bool的Relaunch Action，不带session ID也不核对ctx mode。实际进程替换已有screen_mode_relaunch契约承接。4文件hash已登记，本轮未运行测试或实际relaunch。
+
+完整读取announcements、copy、plan与agent共763行。announcements只解析首个大小写敏感token，`hide extra`仍成功；visible只看会话是否有公告而非隐藏集合。copy把空值映射latest，正usize映射ordinal并保留剩余整段path，0报错；任何usize解析失败都把完整参数当path，因此负数、溢出数字也不是ordinal错误。文件路径未展开或验证，run不检查session。
+
+plan对空参数幂等选择Plan，对非空trim后使用SetBehaviorThenPrompt；可sessionless offered。agent suggestion保留discovery顺序，scope未知回退user，current按name精确标记；run只接受一个whitespace token，允许path-style斜杠但不验证ID存在，也不自行检查session。4文件hash已登记，本轮未运行测试、复制文件或切换behavior/agent。
+
+完整读取debug、docs、doctor、export共889行。debug在release只隐藏列表，run仍支持status/scroll/fps/log且大小写敏感。docs固定建议how-to/web及所有内置title，别名ASCII大小写无关，内置文档复用ShowReleaseNotes Action。doctor的TUI报告组合live tmux/terminal/kitty/XTVERSION、notification/workspace及agent definition findings；slash语法只接受bare、fix、fix加单个可解析ID，completion在空query关闭且匹配区分大小写。
+
+export要求session，空路径表示clipboard，非空run仅保存trim PathBuf；completion才展开tilde用于列目录，跳过隐藏项、跟随symlink目录、lossy文件名。它按read_dir迭代先截1000再排序和截100，不能视为超大目录全局前100。4文件hash已登记，本轮未运行诊断、浏览器、文件导出或Cargo。
+
+完整读取behavior与fork共664行。behavior可用列表固定Normal/Clarify/Plan，再按两个availability追加Workflow/Goal；Clarify展示与wire ask分离。可选Keep current行及prefix拼接由behavior_items处理。聚合命令空值开picker，ask/clarify同义，workflow/goal按PagerLocalSnapshot再gate；suggestion使用AppCtx，因此两阶段可用性可变化。Normal/Clarify shortcut无内部gate且可sessionless offered。
+
+fork只解析开头连续的worktree flags；冲突/重复报错，`--at`固定拒绝，未知flag开始整个directive并停止后续flag解析。实现只trim_start，保留directive尾随空白，与字段注释不一致，已登记backlog。run不检查session，只包装ForkArgs；实际fork尚未由此文件证明。两文件hash已登记，未运行测试或实际fork。
+
+完整读取loop_cmd.rs 372行。只有首个token为非零u64加s/m/h/d且后面有prompt时，host才生成具体preview cadence；自然语言、非法/溢出/零值及单独interval均不解析，显示scheduling占位。空值使用tools共享usage，非空使用共享instruction并声明scheduler_create required tool；preview不是权威schedule，模型tool结果随后替换。display保留原始args而preview prompt使用trim/提取结果。文件hash已登记，未运行scheduler或Cargo测试。
+
+完整读取effort.rs 378行。命令可sessionless offered但标记session scope；suggestion只在当前模型有reasoning options时出现并使用共享row helper。run先要求current model，再处理空参数picker，因此没有current时bare命令也报错。非空token委托ModelState resolver，模型菜单控制none/minimal、id remap和非reasoning拒绝，成功只产生携带当前model ID的PatchEffort。文件hash已登记；未运行模型设置或Cargo测试。
+
+完整读取model.rs 549行。命令在模型阶段只展示、匹配和插入稳定catalog ID；reasoning meta可解析的模型追加空格进入第二阶段，第二阶段用最长ID优先识别共享前缀并生成完整`model effort`插入值。run先解析整个catalog ID，再尝试拆末token，因此完整长ID不会被短模型抢占；ID按ASCII大小写无关，display name被明确拒绝。reasoning effort经模型菜单解析，拒绝项保留具体effort错误；非reasoning模型附effort则落入Unknown model。空参数只打开picker，Action只描述session model switch，dashboard暂存和实际配置应用由外层负责。文件SHA-256为`05f56a321b8838cc79a4cc046bf7b2cb6aab9b8535cc7923ac156d47d8817602`，已登记；未运行Cargo或实际模型切换。
+
+完整读取theme.rs 584行。Theme命令只支持Fullscreen，但run自身只构造Action；候选固定以auto开头，具体主题受terminal能力的available列表约束，active标记区分auto flag与当前可见具体kind。空参数直接循环到下一具体主题，显式名称和alias规范化后返回SetTheme；truecolor-only名称仍可提交，live clamp归Theme层。预览绕过Action直接apply_kind，auto先解析系统极性；取消按之前的具体display name恢复可见主题，预览过程不改变auto flag或持久化。未知预览无操作，未知提交错误列出auto及全部名称。文件SHA-256为`bd3911e3708213eb73f60f799cd3a62a20a75d7eb4b8b6d43b413a95430f1cb0`，已登记；未运行Cargo、终端主题预览或配置持久化。
+
+完整读取slash/commands/mod.rs 787行。builtin_commands按固定顺序构造71个生产命令对象，是pager-local目录入口；当前所有builtin aliases为空且kind均为用户类别，不允许回退Extension。测试维护完整Shell reserved名称集合并锁定一批removed aliases继续未知。gboom、scroll-debug和debug即使列表不可见仍注册并可按精确名称解析；loop由scheduler_create工具需求收紧，recap由外部能力显式揭示。其余大量测试重复各子文件已记录的Action形状，不扩大为dispatcher完成效果。该文件没有统一执行gate，direct Auto的动态准入仍需完整读取slash registry/executor。文件SHA-256为`e75281454d4530d7cb5f83954a173f4f92b682b4d9cdab5a483b05ed10b2e0fd`，已登记；未运行Cargo或实际命令目录。
+
+完整读取slash/registry.rs 1192行。registry使用hard hidden、menu hidden、tier deny、mode restriction和required tool多层gate；typed dispatch只绕过menu gate，因此share可到本地handler，而auto默认不可执行并需显式feature enable。tier deny保留trigger用于发现/upsell，is_restricted绕过key map扫描全目录。工具集None和缺项均对tool-gated命令fail-closed，tools=None的ACP批量更新保留旧集合，当前不能clear回unknown。
+
+ACP更新删除上一代ACP对象但保留builtin。与builtin或blocked name冲突时，仅有合法path与非Plugin scope的skill以scope:name重新安置；plugin、普通或坏meta冲突项丢弃。Builtin exact key冲突panic；ACP间重复容许并形成last-key-wins但多trigger。发现set_available_tools API注释把unknown写成show everything，与实现、字段文档和测试的fail-closed相反，已登记backlog。文件SHA-256为`918037e04538fc1afea3728029427bb94e24d89ba782a33bb33d98e78e4a91e7`，已登记；未运行Cargo、ACP同步或slash执行。
+
+完整读取slash/command.rs 451行。SlashCommand定义同步执行与全套元数据默认；未覆写即pager-global、Both mode、visible、无alias/参数/tool/preview并默认BuiltIn，未知名称类别才落Extension。takes_args_now只参与补全，Enter完整性使用静态takes_args/args_required。AppCtx与CommandExecCtx分别承载只读suggestion状态和同步run所需session/bundle/settings快照，真实mutation仍归dispatcher。
+
+CommandResult区分本地结果、Action、queue、结构化skill注入和host command；ScheduledTaskPreview只是scheduler通知前的UI占位。HostCommandRequest生成带UUID的新invocation ID。所有类型只证明路由词汇和数据所有权，不证明下游执行。文件SHA-256为`a343dc98bd931d20ac7ad95bdd11b0648ca9257ff2efb720671589e48aa91edc`，已登记；未运行Cargo或dispatch链。
+
+完整读取slash/mod.rs 3066行。controller从文本、cursor、registry、model与surface状态构造snapshot。空query按registry顺序去重并把tagged rows稳定前置；非空query按fuzzy、MRU、builtin、display排序，alias每命令择最强trigger。command row动态决定尾随空格，arg suggestion保留command自定义插入值；选择刷新优先按insert_text保持，键盘环绕而滚轮clamp，ghost严格跟随selected row并采用Smart ASCII prefix规则。MRU提交用dispatch-tier lookup canonicalize alias/menu-hidden key，异步提交失败重标dirty。
+
+leading parse只左trim参数；完整性只看静态takes_args/args_required，unknown或被hard/tier/tool gate排除的lookup仍视complete交dispatch。inline scanner要求slash位于开头或前一ASCII whitespace byte，token名到Unicode whitespace；args区间到下一slash token。recognized ranges使用menu lookup及surface gate，leading recognition则用dispatch lookup。command_offered统一visible、session/dashboard关系和mode completion gate，registry仍保留mode-gated command给中央refusal。发现trait文档的/model必填示例已过时，以及inline scanner注释未说明ASCII前导限制，均登记backlog。文件SHA-256为`bd5510e58aae9eb2ee71ce115dacf21f4d2c353a24a164628e6a6d8cc43a530a`，已登记；未运行Cargo、真实composer交互或中央dispatch。
+
+完整读取slash/matcher.rs 187行、mode_support.rs 62行及mode_support_tests.rs 183行。FuzzyMatcher复用单column Smart case/normalization pattern；空query保留输入顺序，非空按score和key排序并限量。indices依赖最近pattern，indices_for会重解析并返回display相对字符位置。ModeSupport把Inline视为full TUI，三种Remedy分别生成切换、替代操作或already-in-mode文案；外置测试锁定12个非Both builtin的完整句子。三文件SHA-256均登记；测试仅静态阅读，未运行Cargo、relaunch或真实按键。
+
+完整读取slash/mru.rs 381行。MRU是大小写敏感canonical command到最后Unix秒数的扁平表，prefix忽略；7天半衰、0.1 floor、256项上限。NotFound建立空表，普通read错误禁用本session持久化，corrupt JSON忽略但保留后续覆盖能力。touch只dirty，snapshot复制全表并先清dirty；process内单worker以固定temp、file fsync、rename串行写，send成功不代表实际磁盘成功，spawn/channel失败才同步fallback。多个共享GROW_HOME进程之间没有锁或merge，已登记backlog。文件SHA-256为`cecd4b2f256e4ba41c0027d746ca4669fcf572d6ca35b85ab655208555e832f8`。
+
+完整读取slash/acp_command.rs 875行。ACP对象总接受可选free-form args，Unstructured input仅贡献hint。skill metadata要求string path与可解析scope成对；有效未知scope被当foreign普通命令而不是malformed，单边合法key才报malformed。显式grow taxonomy优先，缺省按skill/workflow/extension推导。普通命令返回HostCommand；skill不读取路径、不替换变量，只把raw invocation作为唯一Text block InjectSkill交Shell。Goal命令按objective/behavior状态建议set或management子命令，edit可一次预填当前objective。文件头与struct注释仍声称pager读SKILL.md，与实现和测试相反，已登记backlog。文件SHA-256为`cd1c34653cd3b4613ce5e20d98c40cb695f2c16802028c68d981641e13a15ce0`；未运行Cargo、磁盘MRU、host/skill或Goal命令。
+
+完整读取input/mod.rs 13行、macos_modifiers.rs 50行、terminal_support.rs 98行与scroll_log.rs 287行。macOS modifier probe一次CoreGraphics调用投影四个全局bit；modified Enter只接受Enter+Shift/Alt，Apple Terminal丢flag时按terminal capability以OS Shift/Option/Command救援，Super/Control及Shift-Tab不直接匹配。scroll recorder从env一次决定关闭/default/custom，lazy open、JSONL写入、Finalize flush，首个IO错误后永久disable且不反馈scroll。事件schema与monotonic timing、events-since-flush bookkeeping均按源码记录。默认秒级文件名配合File::create存在同秒截断/争用风险，已登记backlog。四文件SHA-256均登记；未运行CoreGraphics、terminal chord、scroll gesture或实际日志IO。
+
+完整读取input/key.rs 555行、keyboard_normalizer.rs 288行与line_editor.rs 304行。KeyShortcut对ASCII大小写/SHIFT统一后精确匹配完整modifiers并拒绝Release，提供compact/pretty平台标签；paste、inline paste、undo、三种Shift-Tab、Windows AltGr与text input predicate分别有平台边界。KeyboardNormalizer无条件把raw U+0002规范化Ctrl+b，只在terminal声明丢失且bare Backspace/Delete时probe OS，Command优先Option。LineEditor只去CR/LF，支持char policy、总byte cap、末尾grapheme删除、共享editor key分类与grapheme viewport。发现compact BackTab+SHIFT会重复显示Shift，已登记backlog。三文件SHA-256均登记；未运行Cargo、真实terminal event或editor交互。
+
+完整读取input/mouse.rs 1450行与mouse/tests.rs 1879行。滚动配置统一投影terminal/multiplexer及四项用户设置；状态机以80ms gap与方向划流，按终端事件密度启发式分类，使用逐事件加速、独立cadence时钟、viewport比例cap、coast衰减预算和fractional carry。只读HUD snapshot与flight recorder不反馈行为。测试锁定时钟无busy-spin、所有kind限幅、finalize不追加需求、复用器profile及日志wire字段，但本轮只作静态交叉证据。两文件SHA-256均登记；未运行Cargo、真实terminal/multiplexer/trackpad输入。
+
+完整读取src/bin下6个playground共1646行。它们分别人工呈现Mermaid生产scrollback、原始mouse事件、Question/Todo pane场景、异步scrollback搜索和持久选择命中；全部是无断言的交互程序，不能计作自动验证。六者只在正常尾路径恢复raw/alternate screen，mouse两项另恢复capture，循环内错误提前返回的RAII缺口对应backlog已有“开发工具”项；Mermaid文件注释称Ctrl-Q但实现退出键为Ctrl-C。六文件SHA-256均登记，未运行二进制或真实终端交互。
+
+完整读取benches下edit_highlight、render、resize、search共1069行。四项Criterion入口覆盖diff syntax策略、全列表与windowed frame、reveal缓存分支、合成长会话resize和搜索scan/steady/cold边界；逐项区分timed closure与fixture/setup。源码均不设性能验收阈值，search steady只opportunistic poll且cold不接收结果，不能把基准存在或编译当作延迟保证。四文件SHA-256均登记；本轮未运行Criterion，未生成target。
+
+完整读取tests顶层11个小入口共623行：GROW_HOME隔离helper测试、4项ignored Mermaid真实子进程gate、8个PTY family编排、unknown SSH clipboard本地case及selection model公共literal测试。PTY入口只证明模块拓扑，未读取或登记其引用子文件；注释中的ignore/Bazel政策不替代子项属性核对。Mermaid模块注释称Bazel无binary时skip，但测试实际对pager_binary使用expect；本轮未运行。11文件SHA-256均登记。
+
+完整读取tests/pty_xtversion.rs 360行。9项真实built-pager PTY测试全部ignored，覆盖probe brand/multiplexer gate、完整/静默/畸形/晚到/分片DCS回复和按键交错；断言以raw query、welcome、doctor文本及三类垃圾片段缺失为主，不验证精确全部字节顺序。文件SHA-256已登记；未运行Cargo或PTY。
+
+完整读取tests/scripted_scenarios.rs 566行。40项ignored async包装器共享Passed/bugs-empty/screenshot-artifact门禁，两个特殊项另查raw OSC8 full spaced path与Kitty action/upload计数；3项普通测试只解析29个具名YAML并要求非空steps，而目录共有45份YAML。包装器注释不证明YAML步骤，YAML需后续逐份审计。文件SHA-256已登记；未运行Cargo、PTY或脚本runner。
+
+完整读取tests/doctor_early_dispatch.rs 726行。14项全部ignored real-binary测试覆盖doctor/du早分发无副作用、fix listing/confirmation/path/conflict/mode边界及non-TTY wrap退出透传。三项tmux timeout/descendant fixture把PATH限制到fake-bin却调用裸sleep；隔离shell探针证实command-not-found 127，故相关测试定义不能证明标题所称回收，已登记backlog。文件SHA-256已登记；未运行Cargo或真实pager。
+
+完整读取tests/pty_e2e中8个wrap子测试共301行。全部Unix-only且ignored，覆盖direct/shell/alias route、显式path失败、OSC52 sink覆盖，以及clean/child-kill/wrap-SIGTERM三类mode恢复。保留弱边界：clean只计数五种reset而非完整byte equality，child kill不锁定137，信号测试不检查PID reap。八文件SHA-256均登记；未运行Cargo或PTY，共享common harness尚不因引用而登记。
+
+完整读取tests/pty_e2e中5个folder trust与2个MCP menu子测试共331行。trust场景覆盖Pending下Ctrl-N chokepoint、accept/decline/feature-off、HOME不可记录及HOME-repo子目录grant不扩大；不验证第二进程reload。两个MCP wrapper只构造project/non-project cwd后委托drive_mcp_menu_load，本地无断言，common.rs尚未审阅故不声称菜单通过。七文件SHA-256均登记；测试全部ignored且未运行。
+
+完整读取`tests/pty_e2e/common.rs` 1267行并登记SHA-256 `fd5d55c5698d4024e81cbdb6be8084dba60e054316f755d465c645314e0d84c0`。共享层提供固定欢迎/响应/plan语料、folder trust与MCP配置夹具、queue及screen谓词、Responses/Chat双协议tool-call SSE、OSC52解码、SGR mouse、Minimal spawn/退出/session发现、typed exit轮询、wrap驱动和失败诊断。由此补足此前两个MCP wrapper的实际菜单断言：进入`/mcps`后要求`MCP Servers`与`cat-mcp`出现并检查无字面panic；wrapper仍ignored，本轮未执行。
+
+边界按实现保留：`drive_to_scrollback_with_turn`丢弃footer等待错误；`locate_screen_text`以目标前Unicode scalar数作为mouse列而非display width；Minimal `session_dir`直接返回sessions下首个目录且不核对cwd/session身份。三项均登记backlog。`quit_minimal`按两次Ctrl-Q后最多等15秒再kill；wrap最多等120秒，Exited后仅update drain 10秒，PendingStatus到deadline会panic。OSC52 decoder跳过坏base64/UTF-8候选；cast写入失败只日志。文件内exit policy单测只静态阅读，未运行Cargo、真实PTY、MCP、clipboard、mouse或wrap。
+
+完整读取`tests/pty_e2e`下`renders_on_action.rs`、`agent_response.rs`、`initial_prompt_positional_auto_submits.rs`、`undo_tip_seen_count_never_persisted.rs`和`scroll_does_not_crash.rs`共214行并登记五个SHA-256。新增四项ignored PTY契约：resize在reset timing后只要求至少一个同步帧；普通Enter和位置参数两条prompt路径要求mock response及记录到chat completion；undo tip触发后只查config文本不含旧seen-count key；200行响应后40次J只查进程存活和当前屏幕无字面panic。
+
+断言边界不扩大：位置参数测试不核对请求body；undo配置读取用`unwrap_or_default`，不能区分文件缺失与读取错误，也不禁止其它设置写入；scroll没有断言offset、目标行或完整stream；render没有精确帧内容/数量。五项都标记`#[ignore]`，本轮未运行Cargo、mock inference或真实PTY。
+
+完整读取`tests/pty_e2e`下macOS文本剪贴板、idle input、undo tip session cap、mid-turn send-now tip及GROW_HOME model hot reload五个用例共285行并登记SHA-256。分别记录Ctrl-V真实host clipboard三秒回显、三秒settle后输入两秒回显、三次tip过期后第四次被gate、慢stream中follow-up出现send-now与Queued、活动config追加模型后1.8秒再打开selector可见新ID。
+
+边界按断言记录：macOS测试串行但覆盖machine-global clipboard，text guard无法恢复旧image，且只以总回显时间间接支持跳过raster probe；idle的true-idle是固定三秒经验代理；tip测试不读内部count；queue测试不触发send-now也不等follow-up执行；hot reload不验证watcher generation、atomic rename、坏配置恢复或新模型实际采样。五项均ignored，本轮未运行Cargo、真实剪贴板、PTY或配置watcher。
+
+完整读取`tests/pty_e2e`下embedded blocked backend、post-activity Ctrl-C、waiting-for-model、config effort menu和Windows文本剪贴板五个用例共316行并登记SHA-256。新增五项ignored测试契约：`--no-leader`对accept但不reply的loopback在30秒内显示welcome；活动后Ctrl-C显示cancel marker且当前screen中prompt不回composer、block行恰一；首token延迟时显示Waiting for response；config唯一ConfigHigh effort进入`/effort`且无Extended reasoning；Windows可用host clipboard上Ctrl-V十秒回显。
+
+边界按实现保留：blocked backend测试不计HTTP调用或逐项timeout，后台listener不join；Ctrl-C计数只用当前screen border line helper；waiting匹配省略ellipsis且不观测WaitingReason；effort不选择或采样；Windows clipboard probe失败直接日志SKIP并成功返回，text guard不能恢复旧image。本轮未执行Cargo、loopback启动、PTY或平台剪贴板。
+
+完整读取`tests/pty_e2e`下bracketed chip、scrollback Esc cancel、bracketed inline、mid-turn slash Esc及text-selection settings五个用例共348行并登记SHA-256。新增五项ignored契约：12行paste显示Pasted并在user blob保留首尾sentinel；Tab后以Space:prompt确认scrollback再Esc出现单个cancel marker；两行paste快速显示且提交含两sentinel；stream中slash dropdown Esc后dropdown和cancel marker均不见；settings在八秒重试内出现三个selection label之一。
+
+边界不按注释扩大：chip不逐行核对十个filler或精确四行threshold；inline不比较完整payload/newline；cancel exact-once仅当前screen；slash Esc不poll turn liveness，无法排除自然完成；settings允许任意三个label命中，不能证明seeded hold被选中或实际copy行为。五项均ignored，本轮未运行Cargo、PTY、model或clipboard。
+
+完整读取`tests/pty_e2e`下welcome logo、running prompt Esc、idle-empty Esc、idle double-Esc及plan revise empty Enter五个文件共383行并登记SHA-256。新增五项ignored契约：50x120/50x180分别只见small/big motif；stream中带draft按Esc后cancel marker、draft substring仍在且无clear hint；空prompt无消息两次Esc不出现scrollback/confirm/rewind且仍可输入；double-Esc清draft后Up可见历史；plan revise空Enter保留approval并显示nudge且footer无Enter approve。
+
+断言边界保留：logo只比motif不证明门槛尺寸；running draft只查screen substring，未定位composer；idle swallow以footer/text缺失代理内部state；history只证明panel显示；plan使用可能歧义的首session目录helper，expectation未显式assert_satisfied，未验证revision、approval持久化或完成。本轮未执行Cargo、PTY、tool call或plan流程。
+
+完整读取`tests/pty_e2e`下continue resume、macOS Otty IME、undo tip process reset、macOS image paste和small-screen tip五个文件共420行并登记SHA-256。新增五项ignored契约：同cwd `--continue`当前screen历史单次且可续turn；Otty bracketed中文在PNG clipboard下三秒无image chip；首process耗尽tip cap后同HOME新process首wipe再显示；Ctrl-V image与typed burst同buffer时两秒先echo且20秒后Image #1；24行tip在慢turn中1.5秒仍在、完成后消失且后续输入不复现。
+
+边界按测试保持：continue不查session ID/ledger/off-screen重复；两项macOS测试clipboard不可用可SKIP或无法恢复旧image，IME不提交prompt；tip reset不读disk或counter；image ordering不直接证明线程、decode、persist；small-screen不证明精确TTL或整个21..28高度带。五项均ignored，本轮未运行Cargo、PTY、clipboard或resume。
+
+完整读取`tests/pty_e2e`下bash chrome cwd strip、queued bash promotion、out-of-band stale row、Windows image paste及spaced path OSC8五个文件共468行并登记SHA-256。新增五项ignored契约：Run (user)行去除exact session cwd前缀；慢turn排队bash最终marker/output/chrome可见且user blobs不含命令sentinel；NVIM环境下虚拟屏直写stale row普通update保留而FocusGained清除；Windows image paste先echo后Image #1；WezTerm raw含OSC8和`Demo%20App.app`。
+
+边界按断言保留：bash只查当前screen Run行；queued marker读取内容不作相等断言且模型检查仅user blobs；stale row是feed_screen模拟不是真实tmux/nvim；Windows clipboard不可用会SKIP且不能恢复旧image；OSC8不做序列配对或点击，若full marker同时存在仍允许额外truncated link。五项均ignored，本轮未运行Cargo、PTY、shell、clipboard或link click。
+
+完整读取`tests/pty_e2e`下image preview、pre-activity Ctrl-C rewind、drag autoscroll、paste-immediate-send及page flip五个文件共489行并登记SHA-256。新增五项ignored契约：path paste形成path-free chip与metadata且输入后metadata消失；server activity前Ctrl-C使prompt从block回composer且单body最多一份；drag持有25次marker sample单调到bottom clamp；paste+Enter同buffer后三sentinel进入user blob且每body最多一次；page flip默认将新prompt置上半屏/旧tail移出，配置false保留tail。
+
+边界按实现记录：preview不提交、不查panic且无显式quit；rewind与paste均允许多个retry body各一份；drag依赖synthetic SGR及scalar列定位；page flip只查50行当前screen且second turn被barrier持有。五项均ignored，本轮未运行Cargo、PTY、mouse、image或model。
+
+完整读取`tests/pty_e2e`下forced wheel、queued-prompt Ctrl-C、drag-wheel selection、stream Ctrl-C recovery及same-turn interjection五个文件共507行并登记SHA-256。新增五项ignored契约：Zed+wheel+lines1下三event精确上移三marker；held A期间queue B再Ctrl-C后B响应且最终Chat user_query中A/B各一；drag中wheel后OSC52含anchor与上方12行、不含anchor下一行；stream cancel当前screen单marker、可再turn且unified log有received/processing；Ctrl-Enter draft入block、TURNTWO及Chat envelope。
+
+边界按断言保持：forced env未逐个移除变量；queued Ctrl-C不查cancel marker且只查最后Chat messages；drag用synthetic SGR、ASCII坐标与joined substring；cancel log只查字符串且screen唯一不覆盖off-screen；interjection helper不读Responses或foreground identity。五项均ignored，本轮未运行Cargo、PTY、mouse、cancel transport或model。
+
+完整读取`tests/pty_e2e`下queued bash FIFO、usage modal、cancel-resend、removed queued prompt及parallel edit五个文件共543行并登记SHA-256。新增五项ignored契约：bash row空Enter不提前执行/取消且release后执行不进user blob；`/usage`用Tab遍历三tab并Esc清当前screen；pre-activity rewind稳定1.5秒后resend当前block一次且每body最多一份；queue删除alpha后Chat只见bravo；同turn两次same-file edit显示单个+2/-2行且无+1/-1。
+
+边界按断言保留：usage只查当前screen不查transcript ledger；resend允许多个body各一份；removed queue只用Chat messages，不读取Responses或RPC ack；parallel edit不读取最终文件/工具结果，无法证明两修改实际成功。五项均ignored，本轮未运行Cargo、PTY、bash、queue或edit。
+
+完整读取`tests/pty_e2e`下double-Esc rewind、nested quote drag、gap-row drag、blank-chrome drag及streaming verb fold五个文件共574行并登记SHA-256。新增五项ignored契约：prompt与scrollback首次Esc无两类文案、第二次开rewind picker；nested quote copy有文本无bar/首空白；gap-row release后joined payload含上下段；blank chrome横拖后joined payload首尾覆盖whole block；三read依次观察singleton、midflight 2及settled 3 labels。
+
+审计新增selection证据债务：四个用例把多个OSC52写入join后再断言范围，无法证明单次copy原子范围；gap与chrome用例还丢弃scrollback footer等待结果，已扩充backlog。verb fold不显式assert tool expectations/文件结果；rewind不执行实际选择。五项均ignored，本轮未运行Cargo、PTY、mouse、clipboard或tools。
+
+完整读取`tests/pty_e2e`下gap-entry drag、Minimal ANSI scrollback、collapsed edit、above-prompt strip drag及prompt suggestion五个文件共602行并登记SHA-256。新增五项ignored契约：blank gap或prompt strip首次进入epsilon后OSC52严格等于该词；Minimal native scrollback中80个高亮行、首尾及宽字符完整唯一；edit先collapsed +2/-1无body再double-click显示marker；suggestion hint在diverge/clear/Tab中消失恢复并接受后可编辑。
+
+两条drag同样丢弃Space:prompt等待，已扩展backlog；严格payload equality会拒绝多payload换行拼接。ANSI检查text extraction而非SGR/style/cell；edit不读取文件或assert tool expectation；suggestion相同mock response服务普通turn与suggest请求，只通过hint代理ghost且不提交接受后的prompt。五项均ignored，本轮未运行Cargo、PTY、native scrollback、mouse、edit或suggestion。
+
+完整读取`tests/pty_e2e`下Tab focus matrix、stuck drag、recap selection、Linux middle-click及wheel frame smoke五个文件共644行并登记SHA-256。新增五项ignored契约：default/vim/simple中Tab显示Space:prompt且simple先double-Esc清draft；lost-up选择style经Esc与后续motion回baseline；recap body copy排除若干header形态；fake X11 middle-click只读primary一次并入model、不读clipboard；30 wheel event使viewport上移且frame 1..30，混向序列存活。
+
+recap仍join多个OSC52 payload，已扩充selection backlog。stuck drag只比较bg/inverse并未footer确认focus；middle-click不走真实X/xsel fallback；wheel不锁精确rows/classification/cadence；Tab footer是focus代理。五项均ignored，本轮未运行Cargo、PTY、mouse、X11、clipboard或frame capture。
+
+完整读取`tests/pty_e2e`下misclassified wheel flood、Read header selection、raw quote copy、welcome screen及dashboard overlay五个文件共666行并登记SHA-256。新增五项ignored契约：高倍率60-event零间隔wheel flood至少移动20 marker且travel/frame不超过30；关闭verb fold后Read header拖动的joined OSC52含路径且无两类`Read `前缀；Vim raw entry复制保留源码`>`且无pretty bar；home无prompt、任意文本进入新session、empty logo随内容消失；dashboard overlay覆盖drafted/empty prompt、Left、Ctrl-backslash与Tab-Esc返回路径。
+
+断言边界不按文件注释扩大：wheel只检查总travel除总frame的平均值，不能证明每个flush的viewport/2 cap；Read与raw quote均join多个OSC52 payload，不证明一次精确copy，已扩充既有selection backlog；welcome只查sentinel、draft与一个logo motif，不能证明session持久身份；dashboard只有一个row，Tab后固定等待而无focus footer，不能证明多会话选择或内部navigation state。五个文件测试均ignored，本轮未运行Cargo、PTY、mouse、clipboard、dashboard或真实scroll pipeline。
+
+完整读取`tests/pty_e2e/scroll.rs`及trackpad under-travel、ghost frames、bottom overscroll follow、streaming wheel四个用例共927行并登记SHA-256。共享驱动按调用顺序写SGR wheel report且仅在非首项前sleep，构造fenced四位marker并从当前screen首个可解析marker取top；settled fixture核对overflow后Tab、静置并reset timing，streaming fixture用chunk delay和blocked expectation保持turn未完成。四项ignored测试分别覆盖条件式200-row travel floor、2..30 frame及每帧chars>=10、overscroll后无新input可见tail、以及gate持有时wheel令top marker下降。
+
+边界按实际分支记录：settled fixture丢弃Space:prompt等待结果，已扩充focus backlog；trackpad在travel<200且frames<=12时打印SKIP并成功，未测arrival gaps就把它解释为compressed burst，新增独立债务；ghost-frame的chars计数不证明全部diff都源于viewport移动；overscroll使用60-event过量burst，不能定位第一个clamped tick；streaming test明确不能强制ACP持续ready或复现饥饿调度。五文件本轮只静态读取，未运行Cargo、PTY、真实trackpad、wheel或mock stream。
+
+完整读取`tests/pty_e2e`下endline park、三任务endline wake、repark及spinner resume四个Unix ignored用例共799行并登记SHA-256。它们以真实flag-gated background command和请求体task-id提取驱动wait：park期间watching/Enter queues且无marker、输入保持FIFO；三任务逐个完成时cue 3→2→1→gone并形成owner marker后每轮chip→reply→marker；短wait、foreground work、长wait二次park仍隐藏marker/spinner/cancel chrome；wait完成后同turn慢stream恢复cancel chrome并观测至少两个spinner glyph。
+
+边界按current-screen断言保持：park fallback同文案服务后续请求，不能区分具体响应因果；三任务顺序依赖70行屏幕而非durable transcript；repark不核对短wait结果/时长或foreground stdout；spinner glyph在全屏集合搜索且只以缺少`❯ RESUMED_STREAM`代理same-turn。前两个用例无显式quit，但局部核对pager-pty-harness确认PtyController Drop会cleanup descendants、kill并有界wait，故不登记泄漏债务；它们仍未验证graceful q路径。四项本轮未运行Cargo、PTY、shell command或mock model。
+
+完整读取`tests/pty_e2e`下Bash完整输出fold、shell-like文件补全、Tab dropdown及queue edit四个Unix ignored用例共598行并登记SHA-256。新增四项契约：12行成功输出抽查五行、double-click折叠/恢复中行及失败输出抽查两行；关闭as-you-type后common-prefix fill、二次Tab列表、带空格目录开引号drill-down并真实cat sentinel；Tab token provider列出两文件排除history、Down+Tab接纳第二项；活动turn中queued Bash row编辑后执行且所有model user blobs排除命令sentinel。
+
+边界按断言缩窄：所谓full output并未逐行检查12行或exit status；shell-like用例未断言notes.md出现/排序和所有noise排除；dropdown的pre-Tab负断言是输入后即时snapshot，无等待窗口；queue edit最终不排除ORIG输出与EDITED同时出现，也不计shell执行次数。后两项分别登记测试债务；本轮未运行Cargo、PTY、真实shell、completion provider或queue drain。
+
+完整读取`tests/pty_e2e`下verb group fold/navigation、header selection、settings toggle及thinking fold四个ignored用例共821行并登记SHA-256。新增四项契约：read3+grep2混合header、edit分隔和read2第二组，double-click展开三member并用Right/Left开合member0后折回；folded/expanded header与member0三次拖选各按新增OSC52历史分段；F2过滤Group tool calls并off展开三项、on恢复header；reasoning streaming可见、settled折入tools-only header、展开后只显示Thought for member header。
+
+边界按具体抽查保留：fold最终只排除a1/a2而非a3，settings refold只排除t2，header copy只排除dragme1；已登记统一member残留债务。每次header drag仍join该gesture的多个新OSC52 payload，扩充原子copy backlog。fold用例不读edit结果，settings不读配置文件，thinking不打开thought body或核对协议选择。本轮未运行Cargo、PTY、tools、settings持久化、reasoning stream或clipboard。
+
+完整读取`tests/pty_e2e`下edit HL refresh、sequential edit merge及queued message once三个ignored用例共732行并登记SHA-256。新增三项契约：2500行Python fixture的目标行styled runs首次快照与后续不等，并输出固定`/tmp/edit_hl_video`演示artifact；三次same-file edit聚为单个+3/-3，展开抽查首尾hunk，agent text后第四次edit独立+1/-1，wheel后两header同屏；park前queued text一行/零matching user blob，release后prompt block一行/一个matching blob。
+
+审计边界分别登记：HL不锁具体syntax color，HTML只查全页任意style/span且固定artifact目录；sequential merge漏查第二hunk与最终文件，与parallel用例合并为独立债务；queued wire只计含substring的blob数量，不计同blob出现次数，screen只覆盖当前行。HL用例结尾无显式quit，但harness Drop有前轮已核对的有界清理；仍不算graceful退出验证。本轮未运行Cargo、PTY、search_replace、mock model或artifact生成。
+
+完整读取`tests/pty_e2e`下auto compact、Linux Otty bracketed IME、iTerm readline和mid-text skill style四个文件共601行并登记SHA-256，新增四项契约：正常高度首非空行>0、18行resize/startup为0且grow恢复；fake Wayland下Otty payload与clipboard text不同时无image、相同时有image，未命名terminal mismatch仍有image；iTerm raw Option/Meta/Alt序列编辑palette与dashboard rename并双Ctrl-Q退出0；Git workspace skill token在composer与echo共享fg且区别body。
+
+边界不按注释扩大：auto compact不识别row 0内容或读持久设置，已登记backlog；Linux用例不用真实Wayland、不记录wl-paste调用且只测dashboard；iTerm只设置TERM_PROGRAM并注入bytes，不是真实iTerm；skill只比较Option foreground的相对关系，不锁teal/theme token或执行skill。本轮未运行Cargo、PTY、clipboard、terminal或model。
+
+完整读取`tests/pty_e2e`下background task reap、extensions modal hints和pretty quote selection三个文件共559行并登记SHA-256。新增三项契约：flag-independent 600秒后台shell写`$$`且活跃，pager接收真实SIGINT后允许Exited任意码/PendingStatus并要求记录PID消失；Plugins modal一组enabled/disabled fixture覆盖install非add、contextual space enable/disable及no-match fallback；两行quote从bar起拖选时bar/space style不变、content变化且joined OSC52含两行无bar/首空白。
+
+关键边界已登记：后台pidfile是shell PID而非sleep PID，不能证明后代reap；extensions只查提示不执行Space或读配置；quote继续join多个OSC52 payload，扩充原子copy backlog，cell索引按char且只使用当前ASCII内容。本轮未运行Cargo、PTY、process、plugin mutation、mouse或clipboard。
+
+完整读取`tests/pty_e2e`下auto-wake cancel、basename demo、width resize及thinking settings四个文件共1406行并登记SHA-256；auto-wake文件含两项测试，故新增五项契约。第一项在synthetic wake poll/hold期间提交CLARIFY后Ctrl-C，要求marker进入某request并经同HOME `--continue`全文重放；第二项取消普通turn后完成background task，chip出现且两秒稳定窗无auto-wake response，下一POST请求携completion reminder且matching body数为1。basename要求collapsed Read行仅basename，Ctrl-F失败可Enter fallback，最终模糊路径命中并写固定/tmp artifact。resize要求120→80列时中段marker漂移≤2行。thinking off隐藏body/header、on恢复任一表示。
+
+边界已分离：auto-wake不检查marker精确一次并扩充唯一性backlog；basename丢弃focus wait且不能区分viewer/fallback，新增债务；resize只验证单个ASCII marker行且Esc焦点未确认；thinking展开helper失败仍可由原header满足，且不读配置或断言panic。本轮未运行Cargo、PTY、background task、resume、resize、settings或artifact生成。
+
+完整读取`tests/pty_e2e`最后四个未登记文件共892行并登记SHA-256，覆盖九项ignored契约。drag-autoscroll从三行anchor拖到viewport底边并持有至anchor完全离屏，release后的joined OSC52必须含首尾且无filler。rename首项检查`/rename`确认、border结构、title style与exit 0，第二项以两个cwd对照`--continue`后的title恢复和plain border。scroll debug分别覆盖env-on+trackpad flood、默认单帧off及`/debug scroll`实时开关。word-select分别覆盖重复双击出现tip、Ctrl+Y确认及配置文本落盘，以及已是word_select和per-tip关闭时不出现tip。
+
+关键边界已写入契约与backlog：selection仍把多个OSC52拼接；rename不读summary/event、不测右对齐，ack只作为持久化代理；HUD断言以title substring和最终marker为主，未观测逐report分类；word-select在accept/已启用路径只证明tip消失，没有选择cell或clipboard证据，配置也只是文本包含。本轮只做静态读取，没有运行Cargo、PTY、mouse、clipboard、rename、resume或配置写入。
+
+完整读取`src/app/acp_handler`的`prompt_origin.rs`、`subagent_activity.rs`与`mcp.rs`共275行并登记SHA-256，新增六项生产契约。viewer anchor把shell wall-clock毫秒差回退到当前单调Instant；subagent activity只更新mutable entity projection，并为busy/no-activity给出Waiting；orphan finalizer只对root下unfinished child合成零指标SubagentFinished并重入canonical handler。MCP分别按session更新init progress、只为root清除initialized进度，以及对open+loaded modal patch server row，并在缺tools的三种config reason下按agent合并FetchMcpsList。
+
+边界已收窄：viewer时间换算对未来、时钟跳变和不可表示delta静默回当前；orphan synthetic finish明确丢失真实error/output/counters/runtime；MCP progress handler本地不校验connected与total，initialized对inactive owner会清状态但不请求redraw，server status在refresh effect已入队但目标row不存在时仍可为active owner返回true。本轮未运行Cargo、通知、MCP连接或subagent生命周期。
+
+完整读取`src/app/acp_handler/interactions.rs`与`routing.rs`共460行并登记SHA-256，新增七项生产契约。ask-user按root/child session路由，替换旧question时发送Cancelled、累计paused duration、恢复/重藏prompt并对被挤掉的local question给notice；成功打开无论目标是否可见都返回true。plan approval拒绝空plan，替换旧approval并清理冲突modal/block/casual/comment状态，只有具体目标可见时返回true。routing明确root优先、child次之、active无session-id兜底，以及parent active与root/child具体可见性的差异和两种mutable view借用。
+
+审计边界与债务已分离：ask-user的true代表全局dashboard/status repaint而非当前view active；plan approval本函数不清question overlay且replacement comments归零；root/child resolver信任先前SessionMatch与再次传入的child_sid。active无session-id兜底没有创建请求关联，陌生或迟到通知存在被路由给新active agent的风险，已单列backlog。本轮未运行Cargo、reverse request、overlay输入或多agent通知。
+
+完整读取`src/app/acp_handler/permissions.rs`共428行并登记SHA-256，新增八项生产契约。权限请求按session归属root交互层，未知owner取消；root always-approve只自动选首个AllowOnce，child不继承；通知受empty-to-nonempty抑制服务控制。FIFO入队只在首次暂存prompt/pane，容错解析Bash/MCP meta并记录child provenance、cursor与last activity。展示层按typed Bash、Execute title、Edit heuristic、tool title/kind回退，protected edit note置于MCP args之前；MCP args限2000 scalar/行和200+summary行。recap仅丢busy live auto，manual apply先清live feedback再追加immutable block。
+
+证据边界已保留：通知可能在owner二次lookup失败前发出；可选meta解析失败静默退化；root未分配id时provenance无法认作root；MCP行宽按scalar而非cell且最终可201行；recap helper无event/turn identity或dedupe。Edit识别依赖AllowAlways英文显示名包含`edit`，已单列backlog。本轮未运行Cargo、permission response、notification、MCP tool或recap事件。
+
+完整读取`src/app/acp_handler/settings.rs`共496行并登记SHA-256，新增十一项生产契约。models update替换future-session process catalog，递归更新普通root/child、冻结workflow child subtree，并递归重试deferred authoritative controls。settings update覆盖Auto gate紧急降级及fire-and-forget通知、soft-default latch、show-resolved/session-picker优先级、group-tool-verbs重折叠、tips与slash tags作为本地重解析信号。另记录leader roster先upsert后remove、announcement过期过滤/hidden prune和permission/tags双层Option解码。
+
+关键边界已记录：模型update最终总返回true而不使用deferred changed；Auto通知只捕获top-level live session且send失败忽略；tips/tags payload内容不直接成为Pager数据；verb grouping只失效root和direct child；roster同id remove后置；announcement相同更新仍true；tags malformed容错而permission非字符串会使整体parse失败。孙级group cache遗漏已单列backlog。本轮未运行Cargo、模型切换、设置推送、leader或公告交互。
+
+完整读取`src/app/acp_handler/background.rs`共623行并登记SHA-256，新增九项生产契约。background stdout按tool-call mapping接管，只处理Bash并优先累计`output_for_prompt`；TaskBackgrounded支持Execute原位demotion、monitor前缀兼容、description多级回退与replay标记。monitor event按具体root/child task追加。scheduled create清全部provisional再upsert，fire可在有next time时自愈未知task，delete幂等但返回active。child cwd与worktree独立派生。git head root优先再direct child并更新共享cwd cache。TaskCompleted更新已知state、恢复description、对unknown仅生成terminal block，session_restart只收尾不新增失败噪声。
+
+边界与债务已分离：mapped stdout即使无task/内容仍消费；byte array过滤非u64并直接`as u8`；monitor unknown task仍按active返回；scheduled child共用parent map且delete缺失也可能true；git handler不看active且只到direct child；completion把无exit无signal视为成功，unknown task不补central store。byte decode与nested git routing分别进入backlog。本轮未运行Cargo、background process、scheduler、git或通知。
+
+完整读取`src/app/acp_handler/mod.rs`共852行并登记SHA-256，新增十二项汇合层契约。递归control projection按post-order向父级同步。顶层ACP为Session/ExtNotification无论应用与否均回Ok，WaitForTerminalExit回unsupported。root session update执行live event highwater、unexpected replay、viewer派生及fresh meta门控；SessionInfo/Plan/bg stdout有专用路径，generic path处理prompt mismatch、viewer adoption、tracker、TTFA、commands/workflows/tools/edit-highlight drains、viewer TurnRunning和behavior admission queue drain。child分支不复用root dedup/reconnect/prompt gate/side-channel drains，只处理tokens、tracker、highlight、behavior与父activity投影。另记录workflow fingerprint/capability/refetch、ExtNotification表、root interjection optimistic id去重和两个blocking ExtMethod。
+
+边界已写明：live highwater依赖跨通道近似FIFO；driver prompt mismatch虽然不应用update，非loading时mutated表达式仍为true；child active parent即可返回true且不做root级dedup；workflowSource键存在但值非字符串仍进入fingerprint；unknown ExtNotification获Ok；legacy无id interjection无法去重。高水位误丢合法乱序事件已单列backlog。本轮未运行Cargo、ACP transport、leader、多client、workflow或interjection。
+
+已完整静态读取`src/app/acp_handler/session_notification.rs`共2095行；因事实提取分两批进行，本阶段尚不把SHA加入reviewed_files。第一批新增13项契约，覆盖typed UI notice/live feedback/coordination merge、replayed subagent descriptor merge、stop hook batching、confirmed context、unexpected replay与reconnect cursor、Grow root/child/forced-owner highwater路由、subagent permission audit、durable TurnCompleted、SubagentSpawned/Progress/Finished、HookExecution及hooks/plugins catalog push。
+
+第一批证据边界包括：WorkflowUpdated绕过root Grow highwater；unknown SubagentProgress仍返回changed；unknown SubagentFinished可渲染generic terminal但不建entity；Hook occurrence一旦claim后找不到tool row仍可能没有run展示；PluginsChanged在skills已Loading时不排新refetch。剩余recap/model/control/compaction/retry/image/Behavior分支完成后才登记文件为reviewed。本阶段未运行Cargo或任何通知生命周期。
+
+`session_notification.rs`第二阶段完成并登记完整文件SHA-256，新增17项契约：recap/unavailable、model auto-switch、ModelChanged双gate与deferred model/Agent drain、MemoryFiles correlation、WorkflowUpdated高水位例外、GoalUpdated、InteractionResolved、child variant dispatcher/control projection、ControlStateUpdate receipt/terminal notice、compaction lifecycle/recent-failure scan、image compression、retry以及Behavior state/resolution/target。结合第一阶段，本文件共提取30项权威事实后才进入reviewed_files。
+
+第二阶段边界已明确：MemoryFiles在modal冲突前就清pending并丢files；WorkflowUpdated不参与Grow highwater；invalid effort转None；Goal字段关系不验证；child unsupported variant仍尝试control projection；async compact走early notice，failure不清held prompt；Retrying不展示；image压缩只看vector emptiness；Behavior valid update即使无变化也true。held prompt、skills fetch generation和effort解析分别进入backlog。本轮未运行Cargo、通知、模型、内存、压缩或Behavior操作。
+
+完整读取`app/acp_handler/tests`下announcements、workflows与subagent permission routing三个文件共235行并登记SHA-256，新增三项测试契约。公告覆盖snapshot替换、hidden id prune及存在一个匹配Persist effect；workflow覆盖单个active revision经公共handler进入session run和Workflow block；child permission覆盖spawn后请求落parent FIFO、allow-once标准dispatch解析response及unknown child取消。
+
+测试证据边界已收窄：公告不执行effect、不覆盖expiry/empty/slash/malformed；workflow不覆盖revision/replay/dedup/terminal；permission不运行leader、真实modal、多child或inactive owner。因此这些测试只作为生产契约的局部验证事实，不替代更广行为保证。本轮未运行Cargo测试。
+
+完整读取`app/acp_handler/tests`下git_head、plugins与goals三个文件共442行并登记SHA-256，新增三项测试契约。git_head覆盖child cwd/worktree四组合及root/direct-child/unknown隔离；plugins覆盖已有collapse seed不重置、first-push race只seed一次、后续expand保留和installed版本notice；goals覆盖长期字段、retired plan_markdown拒绝、replay无history、五种Behavior下五个status无重复history、clear bookkeeping及stale post-clear抑制。
+
+边界已明确：git测试不检查共享cwd cache或nested child；plugin测试不检查skills refetch、closed/error/empty或安装执行；goal负例经canonical DTO核对普通缺省字段合法，plan_markdown是额外拒绝变量，但测试仍不覆盖usage_incomplete、budget runtime、多goal identity或持久化。本轮未运行Cargo测试或git/plugin/goal运行时。
+
+
+完整读取`app/acp_handler/tests/background_tasks.rs`共637行、22项测试并登记SHA-256，新增一项测试契约。测试覆盖generic replay恢复background/scheduled状态、Execute原位降级与late detection清理、root/direct-child start/completion/monitor路由、monitor前缀、session_restart静默收尾、inactive owner变更但false redraw、unknown session拒绝及replay标记。证据边界限定为内存handler调用；未执行Cargo、ACP transport、持久回放、真实后台进程、stdout解析、scheduled fire、unknown-task completion或nested descendant。
+
+
+完整读取`app/acp_handler/tests/command_feedback.rs`共235行、六项测试并登记SHA-256，新增一项测试契约。覆盖新旧command correlation的live feedback隔离与terminal去重、memory browse invocation匹配/失效、manual compaction即时落行，以及四类compaction terminal replay单行保持。证据仅为内存handler与scrollback断言；未执行Cargo、持久化、reconnect transport、memory load/modal render或真实compaction。
+
+
+完整读取`app/acp_handler/tests/interjection.rs`共247行、九项测试并登记SHA-256，新增一项测试契约。覆盖park期间interjection、background completion及subagent finish不插turn marker，parent输出后re-park仍无marker，以及root/viewer广播、unknown拒绝、own-id echo消费和foreign-id渲染。证据仅为内存fixture；未执行Cargo、ACP transport、child interjection、持久replay、真实terminal/model或后台process。
+
+
+完整读取`app/acp_handler/tests/coordination.rs`共430行、八项测试并登记SHA-256，新增一项测试契约。覆盖live sideband跨full/cursor reload、unstructured receipt降级、outgoing audit隐藏与真实coordination tool普通行、target lifecycle原位更新、foreground隔离、manual expansion、replay/late去重、三类失败及runtime health notice。证据仅为内存reducer；未执行Cargo、coordination IPC、reload storage、真实tool、多owner或terminal。
+
+
+完整读取`app/acp_handler/tests/permissions.rs`共371行、十六项测试并登记SHA-256，新增一项测试契约。覆盖MCP argument形状和2000字符/200行上限、manual/auto/late recap、permission首次pane抢占与二次enqueue、选择后恢复、replay全清理及child定向清理保留stash。证据仅为内存helper/dispatch；未执行Cargo、真实MCP/permission UI/recap render、transport replay、auto-approval或完整option矩阵。
+
+
+完整读取`app/acp_handler/tests/mcp.rs`共539行、十八项测试并登记SHA-256，新增一项测试契约。覆盖progress seed/timestamp、N与零server lifecycle、background root路由、unknown/child拒绝、loaded modal owner patch、closed/loading cheap path、malformed status、canonical shell payload及catalog refresh owner effect。证据仅为内存handler；未执行Cargo、真实MCP server/shell transport、modal rendering、errored data或pending-fetch去重。
+
+
+完整读取`app/acp_handler/tests/settings.rs`共392行、十一项测试并登记SHA-256，新增一项测试契约。覆盖group_tool_verbs remote present/omitted重解析与flip清stale expansion、Auto gate全agent清理及逐session Ask通知、settings中announcements隔离，以及soft permission default的user claim、omission、present、null、AlwaysApprove和Auto gate矩阵。grouping两测试显式受host高优先级配置影响；证据仅为内存状态/channel断言，未执行Cargo、真实settings transport、disk persistence、UI或agent ack。
+
+
+完整读取`app/acp_handler/tests/scheduled_tasks.rs`共326行、九项测试并登记SHA-256，新增一项测试契约。覆盖known fire仅更新next_fire_at、unknown fire有next时自愈/无next时不插、latest subagent linkage、created upsert保留created_at与linkage，以及fire/create/delete按非active root归属且false redraw。证据仅为内存handler；未执行Cargo、scheduler persistence、countdown render、replay、child routing、provisional清理、malformed/unknown或真实task执行。
+
+
+完整读取`app/acp_handler/tests/session_routing.rs`共398行、十一项测试并登记SHA-256，新增一项测试契约。覆盖active/inactive root与direct child chunk demux、unknown drop、session-id None race fallback、inactive plan/commands与Settings snapshot、background stdout不重置foreground watchdog、plan prompt identity活动门控及双root隔离。证据仅到direct child且为内存handler；未执行Cargo、ACP transport、nested descendant、viewer adoption、event replay/dedup、malformed或timeout/render。
+
+
+完整读取`app/acp_handler/tests/interactions.rs`共580行、十六项测试并登记SHA-256，新增一项测试契约。覆盖InteractionResolved按session/tool-call清permission/question/plan、inactive root permission Ask与AlwaysApprove、child不继承parent auto-approve、unknown cancel、background root/sibling child question归属与needs_input、unknown ask丢sender，以及plan viewer close/reopen/approve保留新prompt。证据仅为内存handler/view state；未执行Cargo、leader relay、ACP transport、invalid params、nested child、replacement、真实UI或timeout。
+
+
+完整读取`app/acp_handler/tests/models.rs`共684行、十八项测试并登记SHA-256，新增一项测试契约。覆盖catalog保留/移除fallback与多root隔离、follower ModelChanged静默投影、local sampling control defer/drain、Agent控制域隔离、catalog generation等待、unknown session、direct child selection/catalog/highwater和workflow pin。证据仅为内存状态；未执行Cargo、leader/config RPC、真实sampling/provider、selector UI、replay、同ModelId endpoint/wire-route改变、native conversation reset或nested child。
+
+
+完整读取`app/acp_handler/tests/plan_mode.rs`共591行、二十四项测试并登记SHA-256，新增一项测试契约。覆盖approval内容/preview/冲突surface/AlwaysApprove/background root与invalid保留；tool title不得推断Behavior；CurrentMode权威投影、confirmation banner、Behavior-held FIFO、Agent控制域隔离、matching/applied释放、Workflow关闭及Rejected无本地toast。证据仅为内存handler/view；未执行Cargo、plan tool/model turn、ACP transport、preview渲染/滚动、键盘确认、replacement cancellation、持久化或nested child。
+
+
+完整读取`app/acp_handler/tests/mod.rs`共1757行并登记SHA-256，新增三项测试支持契约。其4项直接测试覆盖workflow projection/refresh coalesce、同名metadata变化、canonical SessionInfo title及transient context pressure；其余helper按base/two-root/direct-child拓扑、typed notification构造、subagent临时磁盘replay与snapshot/count边界归档。临时磁盘helper确实写summary/updates/timeline，但未执行session/load transport、腐败/partial/fsync/lock；其余多数helper只构造内存状态，不能独立证明消费者行为。本轮未执行Cargo或测试二进制。
+
+
+Luna/high子代理完整读取`app/acp_handler/tests/reconnect.rs`共1123行、二十六项测试；主代理核对行数、测试计数、SHA-256及全部26个精确函数名后登记。新增三项测试契约，覆盖reload staging/full/cursor/failure/generation/todo，ACP与Grow独立highwater/applied-only cursor/replay gate/context freshness，以及replayed child、terminal adoption和held model。证据为内存handler和fixture，未执行Cargo、真实reconnect transport、session/load持久流程、leader routing、model catalog RPC或terminal rendering。
+
+
+Luna/high子代理完整读取`app/acp_handler/tests/subagents.rs`共1473行、二十九项测试；主代理复核行数、测试计数、SHA-256与全部精确测试函数后登记。新增两项测试契约，覆盖live descendant/owner投影、permission审计、method parity、workflow边界，以及durable replay收敛、owned disk restore、lazy transcript与prompt去重。证据仅为内存handler和临时磁盘fixture；未运行Cargo、ACP transport、真实child process、持久迁移或终端渲染。
+
+Luna/high子代理完整读取`app/acp_handler/tests/session_events.rs`共1474行、四十一项测试；主代理复核行数、测试计数、SHA-256与全部精确测试函数后登记。三十九项测试形成control projection、compaction/image/child、retry error与typed notice四项新增契约；coordination notice和replay compaction immediate两项分别并入既有权威契约，避免重复实体。证据仅为内存reducer；未运行Cargo、ACP transport、provider retry、真实compaction或TUI渲染。
+
+Luna/high子代理完整读取`app/root/dispatch/tests/dashboard.rs`共5205行、一百五十四项测试（含两项tokio test）；主代理复核行数、SHA-256及全部测试函数恰好映射一次后登记。新增十三项测试契约，覆盖location/worktree、roster、slash staging、spawn/attach/exit、overlay、rename/delete、peek、permission与question routing。证据仅为dispatch fixture；未运行Cargo、真实git/worktree、clipboard、ACP、terminal或异步运行时。
+
+Luna/high子代理完整读取`tests/settings_e2e.rs`共6438行、二百二十六项测试；主代理复核行数、SHA-256及全部测试函数恰好映射一次后登记。新增十二项测试契约，覆盖registry、modal/filter/editor、theme/permission/reset、dynamic model/integer、Mermaid、screen/hunk、vim/selection、mouse与fold/grouping设置族。文件名虽为e2e，证据仍是源码内状态与渲染fixture；未运行Cargo、配置落盘、真实终端或外部进程。
+
+Luna/high子代理完整读取`src/scrollback/render.rs`共4980行、七十九项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增六项client-surfaces契约，覆盖viewport/search、fold header、selection geometry、Markdown links、tool-file ownership与inline media/Mermaid placement。证据只到Buffer绘制和几何；未运行Cargo、点击处理、文件生命周期、图形协议或真实终端提交。ScratchBuffer复用TODO与release等长前置条件已另记backlog。
+
+Luna/high子代理完整读取`src/scrollback/state/mod.rs`共3966行、六十五项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增五项client-surfaces契约，覆盖entry/event identity、minimal commit、continuation/materialization、generation/runtime state与viewport/permission/insertion。证据仅为本文件内存状态；未运行Cargo、native scrollback、ACP reconnect、permission/hook或持久化。注释与实现时序、release不变量、snapshot恢复及link-map generation风险已另记backlog。
+
+Luna/high子代理完整读取`src/scrollback/state/layout.rs`共3707行、五十五项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增五项client-surfaces契约，覆盖layout cache/dirty patch、hit test/sticky permission、lazy measurement、resize anchor/navigation与fold/paint window。证据仅为布局算法和fixture；未运行Cargo、上层调度、真实终端、性能或内存回收。hidden-thinking range、release平行数组、oracle截断及负delta不变量已另记backlog。
+
+Luna/high子代理完整读取`src/views/picker.rs`共4148行、三十五项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增五项client-surfaces契约，覆盖搜索/Unicode viewport、description/right label、输入模式、focus/navigation与paste/editor集成。证据仅为内存状态和Buffer几何；未运行Cargo、剪贴板、宿主action或真实终端。窄filter、超长badge和usize到u16收窄边界已另记backlog。
+
+Luna/high子代理重新完整核对`src/views/settings_modal/tests.rs`共7482行、一百六十九项测试（含一项ignored视觉smoke），SHA-256与先前已登记证据一致。该文件早前已分段审完并登记，因此主代理将本轮结果作为独立复核，不重复创建十二个概括性需求，避免与既有细粒度设置契约形成平行权威实体。未运行Cargo或动态设置交互。
+
+Luna/high子代理完整读取`src/views/extensions_modal.rs`共6642行、一百四十二项测试；主代理复核行数、SHA-256、生产符号与全部测试覆盖后登记。新增十项契约，覆盖五页tab/action、表单、MCP、hook、skill/workflow、plugin、marketplace、server section与overlay渲染；部分测试跨需求提供证据，因此保留交叉来源。证据只到本文件状态转换和Buffer fixture；未运行Cargo、ACP/网络、安装、剪贴板或终端后端。MCP setup键`s`的compact footer映射缺口已另记backlog。
+
+Luna/high子代理完整读取`src/views/dashboard/render.rs`共8971行、一百一十二项测试（含两项ignored视觉preview）；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增九项client-surfaces契约，覆盖frame composition、header/location、picker、group/focus、responsive rows、rename、dispatch、footer及attached popup。证据只到Ratatui Buffer与传入状态；未运行Cargo、事件循环、ACP、Git/文件系统或真实终端提交。
+
+Luna/high子代理完整读取`src/views/shortcuts_help.rs`共3657行、六十四项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增三项client-surfaces契约，覆盖registry/context/Vim过滤、search/collapse与Browse/Detail键鼠路由、chrome/expansion/wrapping。证据只到本文件状态与Buffer；未运行Cargo或终端交互。类别说明、全局Vim状态依赖及双重expand API已另记backlog。
+
+Luna/high子代理完整读取`src/app/agent_view/selection.rs`共3374行、四十七项测试；主代理复核行数、SHA-256、三十六个生产函数及全部测试函数恰好映射一次后登记。新增六项client-surfaces契约，覆盖word/URL/line/table selection、drag/copy/autoscroll、hidden boundary、subagent cwd及permission/workflow/coordination详情。证据只到内存几何和复制文本；未运行Cargo、剪贴板、真实鼠标或终端。block drag owner、click计数和80列fallback已另记backlog。
+
+Luna/high子代理完整读取`src/views/question_view.rs`共3546行、五十四项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增三项client-surfaces契约，覆盖single/multi/freeform响应、Plan部分答案、动态布局/滚动、Markdown折叠和CJK宽度。证据只到状态和Buffer；未运行Cargo、ACP reverse response或真实终端。并行Vec、scrollbar宽度、u16上限和忽略send失败已另记backlog。
+
+
+主代理完整读取十个Pager最小生产文件共391行并登记当前SHA-256，新增六项client-surfaces契约：UI/dispatch/session façade、tmux probe adapter、Goal projection、dashboard diagnostics、minimal external editor admission和styled file reference。门面文件只证明声明/重导出与注释中的dispatch边界，不扩大为子模块实现保证；其余契约逐分支记录输入、状态与副作用边界。未运行Cargo、tmux、diagnostics backend、external editor、ACP或终端渲染。
+
+
+主代理完整读取pager `scrollback/wrappers/mod.rs`、root dispatch `jump.rs`、`views/debug_style.rs`、`views/status_bar.rs`与`scrollback/export.rs`共460行并登记SHA-256，新增五项client-surfaces契约。三个内嵌单测分别只证明wrapper composition、debug style reset及empty export；jump/status无本地测试，按逐分支源码事实记录。未运行Cargo、terminal、clipboard、filesystem或slash dispatch。debug/status宽度按char/byte而非display cell的边界已另记backlog。
+
+Luna/high子代理完整读取`src/views/dashboard/state.rs`共11695行、二百四十一项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增十一项configuration/client-surfaces契约，覆盖稳定行身份、持久过滤、焦点/折叠、删除/重命名/worktree、peek question/reply、dispatch/search/paste/location与viewport lease。证据只到状态与fixture；未运行Cargo、文件系统持久化、clipboard或真实UI。persisted key、atomic write、公开焦点、异步索引、目录截断和单槽deferred send已另记backlog。
+
+Luna/high子代理完整读取`src/app/root/mod.rs`共9600行、二百一十八项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增十一项client-surfaces契约，覆盖AppView默认/投影、fan-out/queue、welcome/trust/session/worktree、Esc/minimal、attached overlay、mouse/modal、draw/flush/graphics cleanup、时钟与通知。证据只到root状态及fixture；未运行Cargo、terminal、ACP、clipboard或真实异步事件循环。巨型职责、空鼠标分支、未覆盖ExitSession、时钟来源和minimal hook前置条件已另记backlog。
+
+Luna/high子代理完整读取`src/app/root/event_loop.rs`共4730行、八十项测试（含一项Tokio及Linux/Windows各三项条件测试）；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增七项client-surfaces契约，覆盖startup/trust、调度公平、writer背压、TTY child、leader reconnect、focus/scroll/primary selection、paste恢复与退出摘要。证据为源码和fixture，不代表单一平台同时运行全部条件测试；未运行Cargo或事件循环。run耦合、unbounded input、PAGER解析、reconnect返回值漂移、空post-render队列和错误丢弃已另记backlog。
+
+
+主代理完整读取pager session modal、Btw block、Accented wrapper、scrollback state types与Lifecycle hook block五个生产文件共553行并登记SHA-256，新增五项client-surfaces契约。Accented三项测试逐一登记，其余文件无本地测试；close、rename、block output、公开type/default与layout trait均按源码分支收窄。未运行Cargo、ACP rename/unregister、memory release或终端渲染。session alive计数语义与Turn公开区间下溢已另记backlog。
+
+Luna/high子代理完整读取`src/app/agent_view/render.rs`共4730行、十六项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增七项client-surfaces契约，覆盖shortcut/status、frame layout/selection、prompt/modal层级、fullscreen child、图片/OSC延迟输出与toast/empty state。证据只到Buffer和PostFlush描述；未运行Cargo、graphics protocol或真实终端。draw职责/状态突变、shortcut分叉、HOME前缀、Unicode宽度、恒false helper与清理错误已另记backlog。
+
+Luna/high子代理完整读取`src/views/prompt_widget/tests.rs`共4582行、二百四十一项同步测试；主代理复核行数、SHA-256及全部测试函数恰好映射一次后登记。新增八项test-harness-runtime契约，覆盖edit/submit/stash、layout、paste/image、slash、context/file search、suggestion及渲染。证据为直接状态注入和Buffer fixture；未运行Cargo、异步搜索、真实terminal/clipboard/graphics。巨型测试职责、内部形状耦合、全局状态隔离与重复边界已另记backlog。
+
+Luna/high子代理完整读取`src/app/session/mod.rs`共4110行、五十三项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增四项client-surfaces契约，覆盖会话生命周期/业务状态、queue identity/merge、三控制域local intent及Shell epoch/revision terminal projection。证据只到数据结构和内存测试；未运行Cargo、ACP、background task或持久恢复。巨型公开状态、职责混合、裸字符串、截断分叉、debug-only handoff、queue id及未消费字段已另记backlog。
+
+Luna/high子代理完整读取`src/views/prompt_widget/mod.rs`共3631行；本文件无直接测试，外置`tests.rs`已独立登记，主代理复核行数、SHA-256与生产符号后新增八项client-surfaces契约。覆盖draft/context、edit/enter/hints、suggestion/slash/file search、paste/elements、image lifecycle及geometry/overlay。证据只到生产源码；未运行Cargo、clipboard、filesystem、async search或terminal。巨型职责、公开状态、重复文本映射、render副作用、mouse result、image清理、UTF-8前置条件及注释漂移已另记backlog。
+
+Luna/high子代理完整读取`src/app/agent_view/modal_routing.rs`共3381行、三十一项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增八项client/test-harness契约，覆盖keyboard/paste/mouse modal分发、picker转换和全部active-modal绘制。证据只到内存状态与Buffer；未运行Cargo或真实输入。单文件分发、session两套派生、Changed语义、全局Vim、stale hit-area、DocPicker重复模型与EditConfirm不可达约定已另记backlog。
+
+Luna/high子代理完整读取`src/app/root/effects/mod.rs`共4089行、九十九个Effect分支；本文件无直接测试，外置tests另审。主代理复核行数、SHA-256及99分支sources后登记十三项跨既有capability的生产契约，并为首次出现的既有`local-coordination`能力补建本change的delta文件。证据只到effect执行源码；未运行Cargo、ACP、process、filesystem或network。巨型execute、动态JSON降级、CancelComplete语义、全局cwd、路径前缀、硬编码auth、自动更新命名、deadline、expect与active状态分叉已另记backlog。
+
+Luna/high子代理完整读取`src/scrollback/text_selection.rs`共3106行、一百零二项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增六项client-surfaces契约，覆盖stable endpoint、drag/autoscroll、visible/full reconstruction、Unicode word/URL、table selection与overlay。证据只到算法和Buffer；未运行Cargo、clipboard或真实终端。双模型维护、全局separator、线性扫描、table freshness、URL近似及测试隔离已另记backlog。
+
+Luna/high子代理完整读取`src/views/tasks_pane.rs`共3311行、五十一项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增八项client-surfaces与四项test-harness契约，覆盖四类task归一化/排序/折叠、自动显隐、ListPane输入、overlay与hit regions。证据只到本文件状态与Buffer；未运行Cargo、scheduler、workflow、background process、ACP或clipboard。同名workflow identity、stoppable显示、scheduled liveness、highlight cache与Unicode预览已另记backlog。
+
+Luna/high子代理完整读取`src/views/permission_view.rs`共3066行、四十七项测试（含一项ignored人工harness）；主代理复核行数、SHA-256、三十九个生产函数及全部测试函数恰好映射一次后登记。新增三项client与两项test-harness契约，覆盖尺寸/参数、option/follow-up、Bash换行/quote/heredoc/token映射与selection dim。证据只到状态、字符串算法和Buffer；未运行Cargo、权限响应、shell或人工harness。模块说明、slice不变量、小屏height、简化shell语法、未消费scroll字段与覆盖缺口已另记backlog。
+
+Luna/high复用代理完整读取`src/scrollback/state/selection.rs`共2897行、七十一项测试；主代理复核行数、SHA-256、生产符号及全部测试函数恰好映射一次后登记。新增五项client与六项test-harness契约，覆盖选择/隐藏项、fold/raw mode、group expansion与激活路径。证据只到内存状态；未运行Cargo或真实scrollback输入。helper隐藏过滤、collapse mode、Truncated、group provenance与无选择raw rebuild已另记backlog。
+
+Luna/high复用代理完整读取`src/app/agent_view/modals.rs`共2902行、二十七项测试；主代理复核行数、SHA-256、二十二个生产方法及全部测试函数恰好映射一次后登记。新增三项client与三项test-harness契约，覆盖extensions modal、settings modal、诊断和action转换。证据只到状态/Buffer与本文件测试；未运行Cargo、network、安装或真实input。模块聚合、mouse unwrap、重复config/fold、平行cache、pending identity、双层uninstall及覆盖缺口已另记backlog。
+Luna/high子代理完整读取`src/diagnostics/mod.rs`共3028行、110项测试；主代理复核行数、SHA-256及全部测试函数恰好映射一次后登记。新增三项client/local-diagnostics契约，覆盖startup warning、SSH/small-screen tips与doctor human report/probe suppression；doctor slash live report/fix parsing的第四组证据补入既有同名权威契约，避免重复实体。未运行Cargo、tmux、terminal probe或真实doctor/fix。
+Luna/high子代理完整读取`app/agent_view/mod.rs`共2972行、四十一项测试；主代理复核行数、SHA-256及全部测试函数恰好映射一次后登记。新增三项client-surfaces契约，另将8项与既有reconnect/queue契约重叠的来源并入原权威条目，避免重复实体。覆盖follow-up response、prompt/question/welcome routing、action registry、media/link、multi-click与input reconciliation；未运行Cargo、ACP、PTY或真实输入。
+
+Luna/high复用代理完整读取`app/root/dispatch/tests/task_result.rs`共2965行、68项内联测试；主代理复核SHA-256与69项功能需求来源，覆盖task-result命令/压缩/行为控制、doctor、子代理、bundle/catalog、session picker、设置回滚及通知投影。未运行Cargo、真实transport、shell、terminal、clipboard或持久化后端；dispatch集中边界已登记backlog。
+
+Luna/high复用代理完整读取`scrollback/blocks/tool/edit.rs`共2919行、42项内联测试；主代理复核SHA-256与15项功能需求来源，覆盖差异渲染、高亮升级、布局换行、Edit状态、标题、选择、链接、折叠和patch复制。未运行Cargo或真实终端渲染。
+
+Luna/high复用代理完整读取`app/agent_view/input.rs`共2802行、57项内联测试；主代理复核SHA-256与70项功能需求来源，覆盖输入总路由、overlay优先级、Esc/Left所有权、leader快捷键、行为确认、model/Agent picker、`/btw`滚动与焦点、Vim/Pane、子代理、粘贴和inline edit。未运行Cargo、ACP、PTY或真实输入。
+
+Luna/high复用代理完整读取`app/agent_view/links.rs`共2773行、88项内联测试；主代理复核SHA-256与5项功能需求来源，覆盖链接高亮/点击、CTA与控件遮挡、prompt dropdown/subagent/modal优先级和拖拽状态。未运行Cargo或真实终端交互。
+
+Luna/high复用代理完整读取`app/agent_view/interactions.rs`共2623行、30项内联测试；主代理复核SHA-256与15项功能需求来源，覆盖transport/session清理、permission、cancel/Goal、question三态、鼠标命中、滚动、提交路由、dashboard answer、no-freeform和paste-chip。未运行Cargo或真实输入。
+
+Luna/high复用代理完整读取`app/agent_view/interactions.rs`共2623行、30项内联测试；主代理复核SHA-256与15项功能需求来源，覆盖transport/session清理、permission、cancel/Goal、question三态、鼠标命中、滚动、提交路由、dashboard answer、no-freeform和paste-chip。未运行Cargo或真实输入。
+
+Luna/high复用代理完整读取`app/agent_view/paste.rs`共2695行、76项内联测试；主代理复核SHA-256与15项功能需求来源，覆盖同步文本/路径粘贴、图片与文件URL优先级、异步剪贴板探测、弹窗粘贴路由、提示/undo、Mermaid affordance、Kitty媒体生命周期和失败分类。未运行Cargo或真实剪贴板/终端。
+
+Luna/high复用代理完整读取`app/root/dispatch/dashboard.rs`共2484行、无内联测试；主代理复核SHA-256与5项功能需求来源，覆盖dashboard请求/响应路由、trajectory、task pane、question、worktree和agent view状态投影。未运行Cargo或真实服务/终端。
+
+Luna/high复用代理完整读取`views/dashboard/peek.rs`共2467行、28项内联测试；主代理复核SHA-256与12项功能需求来源，覆盖peek状态刷新、root/subagent投影、配置徽章、面板渲染、问题/权限选项、reply/paste、live tail、状态摘要和数字键路由。未运行Cargo或真实终端。
+
+Luna/high复用代理完整读取`views/list_pane/state/mod.rs`共2740行、115项内联测试；主代理复核SHA-256与13项功能需求来源，覆盖稳定ID选择、布局缓存与淘汰、滚动/跟随、过滤/搜索、键盘导航、能力开关、复制、视觉选择和输入粘贴。未运行Cargo或真实终端。

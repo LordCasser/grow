@@ -1,0 +1,70 @@
+## 1. 逐包遍历
+
+- [x] 1.1 `crates/codegen/acp-transport`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.2 `crates/codegen/agent`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.3 `crates/codegen/announcements`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.4 `crates/codegen/auth`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.5 `crates/codegen/chat-state`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.6 `crates/codegen/cli`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.7 `crates/codegen/client-support`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.8 `crates/codegen/codebase-graph`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.9 `crates/codegen/config`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.10 `crates/codegen/config-types`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.11 `crates/codegen/crash-handler`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.12 `crates/codegen/diagnostics`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.13 `crates/codegen/extension-types`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.14 `crates/codegen/fast-worktree`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.15 `crates/codegen/fsnotify`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.16 `crates/codegen/grow-gix-status`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.17 `crates/codegen/grow-http`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.18 `crates/codegen/hooks`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.19 `crates/codegen/hunk-tracker`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.20 `crates/codegen/markdown`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.21 `crates/codegen/markdown/fuzz`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.22 `crates/codegen/mcp`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.23 `crates/codegen/memory`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.24 `crates/codegen/mermaid`：模块/入口、功能、条件、证据与规范映射。
+- [ ] 1.25 `crates/codegen/pager`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.26 `crates/codegen/pager-minimal`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.27 `crates/codegen/pager-pty-harness`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.28 `crates/codegen/pager-render`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.29 `crates/codegen/paths`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.30 `crates/codegen/plugin-marketplace`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.31 `crates/codegen/prompt-queue`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.32 `crates/codegen/ptyctl`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.33 `crates/codegen/ptyctl-cli`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.34 `crates/codegen/ratatui-inline`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.35 `crates/codegen/ratatui-textarea`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.36 `crates/codegen/sampler`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.37 `crates/codegen/sampling-types`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.38 `crates/codegen/sandbox`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.39 `crates/codegen/shell`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.40 `crates/codegen/shell-base`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.41 `crates/codegen/sqlite-journal`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.42 `crates/codegen/test-support`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.43 `crates/codegen/token-estimation`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.44 `crates/codegen/tools`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.45 `crates/codegen/tracing-macros`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.46 `crates/codegen/tty-utils`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.47 `crates/codegen/update`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.48 `crates/codegen/version`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.49 `crates/codegen/workflow`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.50 `crates/codegen/workspace`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.51 `crates/codegen/workspace-types`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.52 `crates/common/compaction`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.53 `crates/common/test-utils`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.54 `crates/common/tool-protocol`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.55 `crates/common/tool-runtime`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.56 `crates/common/tool-types`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.57 `third_party/dagre_rust`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.58 `third_party/mermaid-to-svg`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.59 `third_party/nix-ohos`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.60 `third_party/nono`：模块/入口、功能、条件、证据与规范映射。
+- [x] 1.61 `third_party/sqlite-vec`：模块/入口、功能、条件、证据与规范映射。
+
+## 2. 集成与验证
+
+- [ ] 2.1 对大型 crate 完成模块/命令/工具注册覆盖清单，消除未映射功能。
+- [ ] 2.2 汇总 capability delta，补充 proposal 与开发者索引。
+- [ ] 2.3 核对全部包和功能覆盖、来源、场景、链接及严格校验。
+- [ ] 2.4 完成实现对应的必要验证并记录限制，核对归档输入。

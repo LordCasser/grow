@@ -1,0 +1,13152 @@
+## ADDED Requirements
+
+### Requirement: Local announcement payload
+公告层 SHALL 提供包含可选 id、message、severity、title、CTA、expires_at、dismissible 和 persistent 的本地公告结构，以及带公告列表的更新 payload。
+
+#### Scenario: 部分 CTA
+- **WHEN** 仅配置 CTA.label 或完全缺失 CTA
+- **THEN** 可解析，不要求 URL、caption 同时存在。
+
+#### Scenario: 获取内建公告
+- **WHEN** 调用 default_announcements
+- **THEN** 返回 grow-default 的 info 公告，dismissible=true、persistent=false。
+
+证据：`crates/codegen/announcements/src/lib.rs` — `AnnouncementCta`；`crates/codegen/announcements/src/lib.rs` — `default_announcements`。
+
+### Requirement: Announcement visibility and expiry
+公告过滤 SHALL 排除 trim 后为空的 message；合法 RFC3339 expires_at 在当前时间达到或超过它时过期，缺失或无法解析的期限不判为过期。
+
+#### Scenario: 到期瞬间
+- **WHEN** now 等于 expires_at
+- **THEN** is_expired_at 为 true，过滤结果不包含该项。
+
+#### Scenario: 非法时间
+- **WHEN** expires_at 无法解析
+- **THEN** 本层不据此隐藏公告；message 过滤与时间过滤各自提供入口。
+
+证据：`crates/codegen/announcements/src/lib.rs` — `filter_expired_at`；`crates/codegen/announcements/src/lib.rs` — `visible_announcements`。
+
+### Requirement: Announcement hidden state
+隐藏状态 SHALL 以 trim 后非空 id 为 key，无 id 时由 title、message 和单元分隔符生成 key；状态保存为有序 hidden_ids 集合，坏文件或非规范 JSON 读为无隐藏项。
+
+#### Scenario: 公告列表更新
+- **WHEN** 已有隐藏 key 不在当前 active 公告中
+- **THEN** prune_hidden_announcement_ids 删除失效 key，并返回集合是否变化。
+
+#### Scenario: 持久化失败
+- **WHEN** 读取不存在或错误文件，或写入失败
+- **THEN** 读取返回空集合；写入当前是 best-effort，调用方不获得成功持久化保证。
+
+证据：`crates/codegen/announcements/src/lib.rs` — `announcement_hide_key`；`crates/codegen/announcements/src/lib.rs` — `write_hidden_announcement_ids`。
+
+### Requirement: Local changelog cache and bullets
+ChangelogManager::fetch SHALL 每次从实时非空 GROW_HOME 或 config grow_home fallback 定位 CHANGELOG.md/json，独立读取两种格式，不访问网络；空白/读取失败返回 None，JSON 整体解析失败返回 None 并记 debug。
+
+#### Scenario: 条目宽容边界
+- **WHEN** JSON 字段缺失或类型错误
+- **THEN** 缺失 category/description/breaking_change 使用默认值，类型错误仍可使整个数组失败。
+
+#### Scenario: 欢迎页 bullets
+- **WHEN** 调用 bullets_from_entries
+- **THEN** 过滤原 description 空字符串，取最多 max 项并去除双星号和反引号；不 trim 空白、不保证去格式后仍非空，保留原顺序。
+
+证据：`crates/codegen/shell-base/src/util/changelog.rs` — `ChangelogManager`；`crates/codegen/shell-base/src/util/changelog.rs` — `bullets_from_entries`。
+
+### Requirement: Persistent tip rotation
+pick_and_advance SHALL 对非空 tips 读取指定 home 的 tip_cursor.json，以 cursor 转 usize 后对列表长度取模选择并克隆条目，然后写 cursor+1；空列表返回 None 且不推进。
+
+#### Scenario: 读写失败
+- **WHEN** cursor 文件缺失/无效或保存失败
+- **THEN** 读取回退 0，保存错误静默忽略，本函数不创建 home、不加锁或原子替换；每次调用而非强制每个 session 推进，列表来源由 caller 提供，不在此请求远程设置。
+
+证据：`crates/codegen/shell-base/src/util/tips.rs` — `pick_and_advance`；`crates/codegen/shell-base/src/util/tips.rs` — `load_cursor`；`crates/codegen/shell-base/src/util/tips.rs` — `save_cursor`。
+
+### Requirement: Shared UI configuration schema
+UiConfig SHALL 提供主题、fork模型、compact/simple、权限与默认选项、timestamps/timeline/page_flip、自动深浅主题、scroll参数、vim、mermaid、hunk_tracker、鼠标、子agent取消、approval记忆、selection、thinking/group/suggestions、cursor/screen、hints/queue/display_refresh设置。
+
+#### Scenario: 实现边界
+- **WHEN** 字段缺失或未知
+- **THEN** serde(default)使用默认值，未知字段不拒绝；max_thoughts_width=120、fork模型空串、compact=false，多数optional字段None且不序列化；字符串枚举与scroll注释范围不由本层统一校验。
+
+证据：`crates/codegen/client-support/src/ui_config.rs` — `UiConfig`。
+
+### Requirement: Shared UI setting resolvers
+UI resolver SHALL 将timeline未配置解析false、page_flip未配置解析true，selection精确hold/word_select解析为持续高亮。
+
+#### Scenario: 实现边界
+- **WHEN** 传入其他selection字符串或None
+- **THEN** 返回false，不trim；这些resolver不代表所有UiConfig字段的产品默认已在此解析。
+
+证据：`crates/codegen/client-support/src/ui_config.rs` — `show_timeline_enabled`。
+
+### Requirement: Follow up behavior wire defaults
+FollowUpBehavior SHALL 使用queue/steer canonical，trim后匹配，默认Queue且默认值序列化省略。
+
+#### Scenario: 实现边界
+- **WHEN** 未知字符串或非字符串反序列化
+- **THEN** 未知字符串回退Queue，非字符串失败；实际FIFO或steer执行属于shell。
+
+证据：`crates/codegen/client-support/src/ui_config.rs` — `deserialize_follow_up_behavior`。
+
+### Requirement: Contextual hint and refresh overrides
+ContextualHints SHALL 保存undo/plan_mode/image_input/send_now/small_screen/word_select/ssh_wrap七项Option<bool>，display_refresh复用config-types设置。
+
+#### Scenario: 实现边界
+- **WHEN** 没有显式配置或配置false
+- **THEN** 全部None整体省略，Some(false)仍为显式选择；默认display_refresh整体省略。
+
+证据：`crates/codegen/client-support/src/ui_config.rs` — `ContextualHints`。
+
+### Requirement: Shared session identity and stderr serialization
+client-support SHALL 提供id/cwd会话身份与sessions_cwd_dir(cwd)下join id的目录投影，并通过全局Mutex串行化with_locked_stderr。
+
+#### Scenario: 实现边界
+- **WHEN** 终端stderr已重定向
+- **THEN** 优先dup_tui_stderr，失败回退系统stderr；锁不覆盖外部直接写入，session_dir不额外验证id路径。
+
+证据：`crates/codegen/client-support/src/session/mod.rs` — `session_dir`。
+
+### Requirement: Image placeholder parsing and path stripping
+图片占位符 SHALL 匹配精确[Image #数字: 路径]，排除路径内右括号/CR/LF，最多检查前16个regex匹配；extract返回编号、trim路径与源字节span。
+
+#### Scenario: 实现边界
+- **WHEN** 数字溢出、空路径或超过16项
+- **THEN** extract跳过无效项但仍消耗匹配名额，编号0允许；strip独立保留原数字锚点，不解析usize，超cap文本原样保留。
+
+证据：`crates/codegen/client-support/src/placeholder_images.rs` — `extract_placeholders`。
+
+### Requirement: Image display number metadata
+附件编号 SHALL 写入grow.dev/imageDisplayNumber元数据，读取以u64转usize，不按附件数组位置推断编号。
+
+#### Scenario: 实现边界
+- **WHEN** 编号为0、非法类型或缺失
+- **THEN** 0可返回；缺失、负数、非整数或无法转usize返回None。
+
+证据：`crates/codegen/client-support/src/placeholder_images.rs` — `display_number_from_meta`。
+
+### Requirement: Placeholder image prefix construction
+默认图片prefix SHALL canonicalize cwd和HOME下Downloads/Desktop/Pictures/Documents/Screenshots，丢弃失败项并排序去重。
+
+#### Scenario: 实现边界
+- **WHEN** cwd本身为HOME或广泛目录
+- **THEN** 本层没有额外缩窄cwd；不会因为HOME参数而直接加入整个HOME，但cwd仍独立加入。
+
+证据：`crates/codegen/client-support/src/placeholder_images.rs` — `default_allowed_prefixes_with_home`。
+
+### Requirement: Placeholder file loading validation order
+图片加载 SHALL 先canonicalize，再检查prefix和敏感子串、允许扩展、普通文件、读前读后字节cap及共享header验证；默认单图50000000字节。
+
+#### Scenario: 实现边界
+- **WHEN** 路径不存在、范围外或读取间变化
+- **THEN** 不存在先CanonicalizeFailed，存在范围外OutsideAllowedPrefixes；canonical入口信任调用方，metadata/read非句柄绑定且read后cap不保证峰值内存有界。
+
+证据：`crates/codegen/client-support/src/placeholder_images.rs` — `load_canonical_placeholder_image`。
+
+### Requirement: Placeholder image type and sensitive path rules
+占位符 SHALL 允许png/jpg/jpeg/gif/webp/bmp/tiff/tif扩展，反斜杠归一后大小写敏感拒绝photoslibrary/musiclibrary/imovielibrary、Trash、Keychains、Containers、ssh/aws/gnupg子树。
+
+#### Scenario: 实现边界
+- **WHEN** 扩展允许但内容或MIME不同
+- **THEN** 调用validate_image_bytes_with(data,false)验证header并sniff MIME，不要求扩展和MIME相等、不重编码原字节。
+
+证据：`crates/codegen/client-support/src/placeholder_images.rs` — `decode_image_mime`。
+
+### Requirement: Orphan image recovery and aggregate budget
+孤立图片恢复 SHALL 按query顺序加载并追加STANDARD base64 ACP ImageContent、未percent编码file URI及display meta；单次恢复默认aggregate200MiB。
+
+#### Scenario: 实现边界
+- **WHEN** 下一张使aggregate超cap或同query重复路径
+- **THEN** 读完该图才检查，超cap即break，等于允许；只计本轮原字节，已有附件不计。去重集合只取入口已有URI，本轮重复orphan会重复加载。
+
+证据：`crates/codegen/client-support/src/placeholder_images.rs` — `recover_orphan_placeholders_with_prefixes_and_caps`。
+
+### Requirement: Relaxed file URI canonicalization
+file URI辅助 SHALL 接受精确file://前缀，先percent decode再canonicalize，失败回退decoded路径。
+
+#### Scenario: 实现边界
+- **WHEN** literal文件名包含percent序列
+- **THEN** decode成功后不再尝试原literal路径；placeholder文本本身不percent decode，URI辅助不是完整authority解析器。
+
+证据：`crates/codegen/client-support/src/placeholder_images.rs` — `canonical_from_file_uri`。
+
+### Requirement: Clipboard image data and MIME helpers
+剪贴板ImageData SHALL 保存encoded bytes和MIME；mime_from_bytes仅检查PNG/JPEG/TIFF/GIF/WEBP/BMP魔术前缀，mime_to_extension精确映射相应扩展。
+
+#### Scenario: 实现边界
+- **WHEN** 未知类型或只有伪造前缀
+- **THEN** 未知回退octet-stream/bin，前缀识别不等于decoder验证。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `mime_from_bytes`。
+
+### Requirement: Clipboard process wait and stdin spooling
+clipboard helper SHALL 以临时文件spool完整stdin，wait每15ms检查child，超deadline杀死并回收直接child后返回WaitTimeout。
+
+#### Scenario: 实现边界
+- **WHEN** 子进程已有退出或仍持stdin
+- **THEN** 先返回已有exit status；调用方负责关闭stdin，deadline不证明后代或stdout reader join有界。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `wait_with_deadline`。
+
+### Requirement: OSC52 emission and remote environment detection
+OSC52 SHALL 将UTF8文本STANDARD base64编码为clipboard c序列，可显式加tmux DCS封装，经共享stderr锁写入并flush。
+
+#### Scenario: 实现边界
+- **WHEN** 输出成功或SSH变量为空
+- **THEN** 成功只证明输出，不确认终端接受；SSH_CONNECTION/SSH_TTY/SSH_CLIENT存在即remote，空值也算。容器探测被存在的DISPLAY/WAYLAND_DISPLAY阻止，否则检查Docker/Podman文件及container变量。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `set_text_osc52`。
+
+### Requirement: MacOS pasteboard metadata and native image read
+macOS SHALL lazily dlopen AppKit并缓存结果，通过Mutex串行化原生pasteboard访问；file-url类型抑制raster，原生优先PNG/TIFF/JPEG。
+
+#### Scenario: 实现边界
+- **WHEN** 设置GROW_CLIPBOARD_NO_NATIVE_READ或原生失败
+- **THEN** 变量存在即禁内容读取并fallback；probe仍可运行。snapshot先count后types不保证外部变化原子性，native bytes不做cap或decoder验证。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `native_image_read`。
+
+### Requirement: MacOS clipboard subprocess routing
+macOS SHALL 用pbpaste -Prefer txt读取文本、pbcopy spooled stdin写文本；附件优先native，否则AppleScript先furl再PNGf/TIFF/JPEG，image-only入口不要求furl优先。
+
+#### Scenario: 实现边界
+- **WHEN** 空text、读取错误或复制超时
+- **THEN** 空字节None，非空lossy UTF8原样；读侧output无deadline，pbcopy写侧2秒。get_file_urls调用get_attachments，可能读取并丢弃图片。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `run_attachments_osascript`。
+
+### Requirement: MacOS clipboard transfer files and image writes
+macOS fallback SHALL 通过temp_dir固定grow-clipboard-probe三种文件传图片，按class读取非空原字节并best-effort删除。
+
+#### Scenario: 实现边界
+- **WHEN** 并发fallback或set_image_file
+- **THEN** 固定名未提供进程间隔离；set_image_file按jpg/jpeg、tif/tiff及其他选择JPEG/TIFF/PNGf，仅转义双引号、无内容校验和deadline。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `attachments_probe_temp_paths`。
+
+### Requirement: Clipboard attachment stdout protocol
+AppleScript输出解析 SHALL 以FURL/IMAGE marker分段，trim furl空或none为None，image需IMAGE:及PNGf/TIFF/JPEG。
+
+#### Scenario: 实现边界
+- **WHEN** 两个字段同时存在
+- **THEN** parser保留两者，由get_attachments选择file优先；contains但不在前缀的FURL marker不被strip_prefix去掉。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `parse_attachments_output`。
+
+### Requirement: Arboard worker deadlines and persistent write lease
+非macOS SHALL 用2秒worker创建读取实例，写入lease初始化一次并永久保留成功实例或失败None；写入持Mutex。
+
+#### Scenario: 实现边界
+- **WHEN** worker超时或初始化后写入阻塞
+- **THEN** 超时放弃worker而非取消，无累计worker上限；lease.set_text自身无deadline。Linux kill switch在Wayland下绕过arboard。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `arboard_lease`。
+
+### Requirement: Wayland data control classification and caching
+Linux data-control SHALL 将依赖Ok任意bool视为协议存在、MissingProtocol为不存在，NoSeats/连接错误不确定；显式probe保留typed结果。
+
+#### Scenario: 实现边界
+- **WHEN** 连续不确定或错误
+- **THEN** bool缓存本次false并重试，累计3次永久false；确定答案永久缓存，锁内串行probe；显式probe不改该缓存，kill switch首次读取缓存。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `apply_probe_outcome`。
+
+### Requirement: Linux clipboard tool discovery
+Linux默认工具 SHALL 按非空Wayland+wl-copy、DISPLAY+xclip/xsel选择，普通选择及write列表首次缓存；availability为1秒内--version退出，任意exit code均可。
+
+#### Scenario: 实现边界
+- **WHEN** PRIMARY工具暂时缺失或混合桌面
+- **THEN** PRIMARY只缓存成功发现；write列表可同时wl-copy和一个X11工具，xclip优先xsel。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `probe_tool_spec`。
+
+### Requirement: Linux clipboard text and image read precedence
+文本/图片读取 SHALL 优先arboard Some；None只有选中Wayland CLI才fallback，Err可fallback工具；CLI非零报错。
+
+#### Scenario: 实现边界
+- **WHEN** 有旧X11内容或file-list失败
+- **THEN** arboard Some可遮住Wayland；get_attachments先file-list错误即传播而不读image，file-list无CLI fallback。非macOS元数据probe返回不可用。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `arboard_get_image`。
+
+### Requirement: Linux X11 primary selection boundary
+PRIMARY SHALL 需要非空DISPLAY，优先xclip后xsel，成功空结果立即None，非法UTF8或失败尝试下一工具。
+
+#### Scenario: 实现边界
+- **WHEN** XWayland所有工具失败
+- **THEN** 返回None；只有无Wayland的纯X11可arboard fallback，避免读到Wayland PRIMARY。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `read_x11_primary_with_tools`。
+
+### Requirement: Linux native clipboard write outcomes
+文本写入 SHALL 先arboard再所有可用CLI，以cli_ok或arboard_ok为any_ok；Wayland CLI在无(data_control且arboard成功)时需回读。
+
+#### Scenario: 实现边界
+- **WHEN** 回读失败或空文本
+- **THEN** 最多3次精确字节比较，间隔100ms，每次1秒；非零read转换为空Vec，空文本可能匹配。X11不回读，数据控制成功时wl-copy也不回读。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `wayland_write_verified`。
+
+### Requirement: Linux image writing and RGBA conversion
+Linux图片文件写入 SHALL 读取全部字节并发送支持PNG的CLI，不转码不回读，任一成功即Ok；非macOS非Linux不支持图片文件写入。
+
+#### Scenario: 实现边界
+- **WHEN** arboard图片或无支持工具
+- **THEN** arboard RGBA转PNG，短buffer报错、长buffer直接传encoder，尺寸转换/乘法未单独检查；无CLI图片后端返回错误。
+
+证据：`crates/codegen/client-support/src/clipboard.rs` — `encode_rgba_to_png`。
+
+### Requirement: Clipboard probe example and ignored integration tests
+clipboard_probe示例 SHALL 执行一次附件读取并打印耗时、MIME/字节数和路径行数，错误返回非零。
+
+#### Scenario: 实现边界
+- **WHEN** 默认运行单元测试
+- **THEN** 真实剪贴板roundtrip、text-only image及macOS两项native smoke保持ignored，不据此推断实际桌面服务验证通过。
+
+证据：`crates/codegen/client-support/examples/clipboard_probe.rs` — `main`。
+
+
+### Requirement: Embedded syntax theme selection
+语法高亮 SHALL 按当前ThemeKind懒初始化并复用三个独立Syntect实例；GrowNight、RosePineMoon、OscuraMidnight和Auto使用grow-night资源，TokyoNight使用tokyo-night，GrowDay使用grow-day。
+
+#### Scenario: Tokyo syntax resource
+- **WHEN** 当前kind为TokyoNight
+- **THEN** 使用独立tokyo-night嵌入资源，不共享GrowNight实例。
+
+#### Scenario: Shared night syntax resource
+- **WHEN** 当前kind为RosePineMoon或OscuraMidnight
+- **THEN** 使用grow-night资源，不为该kind加载独立语法主题。
+
+证据：`crates/codegen/pager-render/src/syntax.rs` — `pub fn get_syntect`。
+
+### Requirement: Syntax foreground and font modifiers
+syntect到ratatui转换 SHALL 传递映射后的前景色以及BOLD、ITALIC、UNDERLINE，不传递背景色。
+
+#### Scenario: Syntax font modifier preservation
+- **WHEN** syntect style同时包含bold与italic及背景色
+- **THEN** 输出包含BOLD与ITALIC，背景保持默认。
+
+证据：`crates/codegen/pager-render/src/syntax.rs` — `pub fn syntect_to_ratatui_fg`。
+
+### Requirement: Terminal native syntax hue mapping
+终端原生锁开启时语法RGB SHALL 直接按chroma及整数HSV映射：chroma小于40返回Reset，否则仅返回基础Red、Yellow、Green、Cyan、Blue或Magenta；不经常规theme quantize。
+
+#### Scenario: Neutral native syntax
+- **WHEN** 原生锁开启且RGB三通道最大最小差小于40
+- **THEN** 返回终端默认前景Reset。
+
+#### Scenario: Chromatic native syntax
+- **WHEN** 原生锁开启且RGB为彩色
+- **THEN** 按色相区间返回六种基础ANSI色之一，不返回黑白或亮色变体。
+
+证据：`crates/codegen/pager-render/src/syntax.rs` — `pub fn polarity_safe_syntax_fg`。
+
+### Requirement: Ordinary syntax color quantization
+终端原生锁关闭时语法RGB SHALL 经theme quantize处理，颜色能力判定由该管线负责。
+
+#### Scenario: Unlocked syntax color
+- **WHEN** 原生锁关闭并转换RGB
+- **THEN** 调用theme quantize而非原生锁色相映射。
+
+证据：`crates/codegen/pager-render/src/syntax.rs` — `pub fn syntect_rgb_to_fg`。
+
+### Requirement: Stateful syntax line fallback
+highlight_line SHALL 为有状态highlighter附加换行，去除每个返回segment尾部CR/LF并跳过空segment；没有highlighter、高亮失败或全部segment为空时返回原始text和调用方fallback样式。
+
+#### Scenario: No syntax highlighter
+- **WHEN** 传入None highlighter
+- **THEN** 返回包含原始文本和fallback样式的单个span。
+
+#### Scenario: Successful syntax segments
+- **WHEN** 高亮成功并返回带尾换行的非空segment
+- **THEN** 删除尾CR/LF后按语法style生成拥有内容的span。
+
+证据：`crates/codegen/pager-render/src/syntax.rs` — `pub fn highlight_line`。
+
+### Requirement: Host environment unicode collection
+host环境收集 SHALL 跳过非Unicode键或值，使用vars_os避免因非Unicode环境项而终止收集。
+
+#### Scenario: Non unicode environment entry
+- **WHEN** 环境中存在不能转为Unicode的键或值
+- **THEN** 该项不进入收集结果，其余Unicode项保留。
+
+证据：`crates/codegen/pager-render/src/host/mod.rs` — `collect_unicode_env`。
+
+### Requirement: Display server first observation
+DisplayServer SHALL 缓存首次平台判断；macOS为Quartz、Windows为Win32、Linux优先非空WAYLAND_DISPLAY再非空DISPLAY，否则Unknown；该判断不验证显示服务可连接性。
+
+#### Scenario: Linux display precedence
+- **WHEN** Linux同时有非空WAYLAND_DISPLAY与DISPLAY
+- **THEN** 首次结果为Wayland。
+
+#### Scenario: Display observation cache
+- **WHEN** 首次观察后环境变量改变
+- **THEN** 后续current仍使用首次缓存结果。
+
+证据：`crates/codegen/pager-render/src/host/mod.rs` — `impl DisplayServer`。
+
+### Requirement: Display refresh probe cache and remote gate
+刷新率探测 SHALL 缓存首次完整结果，远程会话优先于WSL跳过平台探测，并仅接受30至500Hz的最终结果。
+
+#### Scenario: Remote refresh skip
+- **WHEN** 处于SSH远程会话且也被识别为WSL
+- **THEN** 按远程原因跳过，不调用平台刷新率探测。
+
+#### Scenario: Refresh result reuse
+- **WHEN** 第一次探测完成后再次调用
+- **THEN** 复用含首次耗时的结果，不重新测量显示器。
+
+证据：`crates/codegen/pager-render/src/host/display_refresh.rs` — `probe_display_refresh`。
+
+### Requirement: URL opening outcome boundary
+try_open_url SHALL 先执行scheme过滤并区分RejectedScheme、BrowserUnavailable与Opened；Opened只表示opener启动成功，不表示浏览器已展示目标。
+
+#### Scenario: Rejected URL scheme
+- **WHEN** URL不满足scheme过滤
+- **THEN** 不调用系统opener，返回RejectedScheme。
+
+#### Scenario: Spawned opener
+- **WHEN** 允许的URL成功启动系统opener
+- **THEN** 返回Opened，不等待子进程退出或页面加载。
+
+证据：`crates/codegen/pager-render/src/link_opener.rs` — `try_open_url`。
+
+### Requirement: Legacy console glyph override
+legacy控制台判定 SHALL 缓存首次结果，GROW_FORCE_LEGACY_CONSOLE只接受精确1、true、0、false；没有有效覆盖时按编译平台及环境终端品牌判定。
+
+#### Scenario: Explicit legacy override
+- **WHEN** GROW_FORCE_LEGACY_CONSOLE为精确true
+- **THEN** 强制选择legacy字形，包括非Windows平台。
+
+#### Scenario: Invalid legacy override
+- **WHEN** 覆盖值包含额外空白或不同大小写
+- **THEN** 不把该值当作有效布尔覆盖。
+
+证据：`crates/codegen/pager-render/src/glyphs.rs` — `is_legacy_windows_console`。
+
+### Requirement: Toast control character sanitization
+toast清理 SHALL 先执行legacy字形回退，再把每个char::is_control字符替换为空格；不将其视为完整终端转义序列解析器。
+
+#### Scenario: Control characters in toast
+- **WHEN** toast含换行或ESC
+- **THEN** 各控制字符被空格替代，其他载荷字符保留。
+
+证据：`crates/codegen/pager-render/src/glyphs.rs` — `sanitize_toast_message`。
+
+### Requirement: Pager render feature surfaces
+pager-render SHALL 提供test-support辅助接口feature，default-bazel启用test-support；无default feature，optional notify形成隐式notify feature。依赖feature存在不等于运行时自动启用配置热加载。
+
+#### Scenario: Bazel helper feature
+- **WHEN** 启用default-bazel
+- **THEN** 同时启用test-support。
+
+证据：`crates/codegen/pager-render/Cargo.toml` — `default-bazel = ["test-support"]`。
+
+### Requirement: Clipboard delivery classification
+投递结果 SHALL 区分Confirmed、Unverified、Failed；reported_success对前两者返回true，因此该布尔值不等于确认剪贴板内容可取回。
+
+#### Scenario: Clipboard delivery classification
+- **WHEN** 结果为Unverified
+- **THEN** is_confirmed为false而reported_success为true。
+
+证据：`crates/codegen/pager-render/src/clipboard/trust.rs` — `pub enum ClipboardDelivery`。
+
+### Requirement: Clipboard route and OSC disable precedence
+复制路由 SHALL 始终启用native，仅Tmux启用tmux buffer；OSC在未禁用且Linux、Tmux、远程、无显示容器或显式sink任一条件成立时启用；DCS passthrough还要求无embedded editor。
+
+#### Scenario: Clipboard route and OSC disable precedence
+- **WHEN** 显式禁止OSC52且当前位于Tmux
+- **THEN** 关闭OSC及DCS，保留native与tmux buffer。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `fn resolve_clipboard_route_with`。
+
+### Requirement: Clipboard expectation is preflight
+expected_delivery SHALL 根据native可用性、路由和环境给出预期；启用tmux路由即可形成Confirmed预期，不执行写入验证。
+
+#### Scenario: Clipboard expectation is preflight
+- **WHEN** tmux路由启用但尚未写入
+- **THEN** 预期可为Confirmed，该值不能充当tmux写入成功证据。
+
+证据：`crates/codegen/pager-render/src/clipboard/trust.rs` — `pub fn expected_delivery`。
+
+### Requirement: Clipboard native trust boundary
+可信native结果 SHALL 排除远程、容器及未启用native路由；Linux Wayland要求wl-copy成功或arboard成功且具有data-control，其他平台分支按CLI或arboard成功判定。
+
+#### Scenario: Clipboard native trust boundary
+- **WHEN** 远程环境中native系统写入成功
+- **THEN** 不将远端native写入认定为用户本地剪贴板确认。
+
+证据：`crates/codegen/pager-render/src/clipboard/trust.rs` — `fn trusted_native`。
+
+### Requirement: Clipboard actual feedback precedence
+复制反馈 SHALL 先使用可信native，再处理成功OSC的环境策略，之后使用成功tmux buffer；未知OSC的Unverified在tmux成功时由CopiedTmux取代。
+
+#### Scenario: Clipboard actual feedback precedence
+- **WHEN** OSC投递策略为Unverified且tmux成功
+- **THEN** 返回CopiedTmux而非Unverified OSC反馈。
+
+证据：`crates/codegen/pager-render/src/clipboard/trust.rs` — `fn resolve_copy_decision`。
+
+### Requirement: Tmux copy process success
+tmux复制 SHALL 将文本spool为stdin并运行tmux load-buffer -，只有启动及子进程成功退出才报告成功，等待调用设置2秒deadline。
+
+#### Scenario: Tmux copy process success
+- **WHEN** tmux子进程非零退出
+- **THEN** 该写入腿返回失败，不能仅以spawn成功认定复制成功。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `fn write_tmux_buffer`。
+
+### Requirement: Clipboard backup attempted after copy
+copy_text_or_file SHALL 先复制文本，再尝试写备用文件；Confirmed或Unverified均保留Clipboard结果，即使备用文件失败，只有剪贴板Failed且文件失败才形成Failed。
+
+#### Scenario: Clipboard backup attempted after copy
+- **WHEN** 剪贴板Unverified且备用文件写入失败
+- **THEN** 返回没有备用路径的Clipboard结果，其success仍为true。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `fn resolve_delivery`。
+
+### Requirement: Clipboard typed text read errors
+system_clipboard_read_text SHALL 保留读取错误与无文本的区别；system_clipboard_get将错误降为None。
+
+#### Scenario: Clipboard typed text read errors
+- **WHEN** 系统读取发生错误
+- **THEN** typed入口返回Err，Option入口返回None。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn system_clipboard_read_text`。
+
+### Requirement: Clipboard payload origin comparison
+粘贴payload比对 SHALL 将CRLF和CR归一为LF并去除末尾空白；这是文本相等判断，不证明实际事件来源。
+
+#### Scenario: Clipboard payload origin comparison
+- **WHEN** payload与剪贴板文本只在换行编码或尾部空白不同
+- **THEN** 比较结果相同，不能据此确认物理粘贴事件来源。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn bracketed_payload_matches_clipboard_text`。
+
+### Requirement: Clipboard attachment routing
+附件探测 SHALL 对lone HTTP URL跳过，对空文本或不能跳过file URL探测的文本先查file URLs再查图片，其余文本只查图片。
+
+#### Scenario: Clipboard attachment routing
+- **WHEN** 文本被识别为lone HTTP URL
+- **THEN** 返回Skip，不尝试附件探测。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn attachment_probe_route`。
+
+### Requirement: Clipboard snapshot gate and baseline
+附件gate SHALL 读取一次snapshot并返回是否探测及该次changeCount；ImageOnly仅在snapshot受支持、可用且无图时跳过，FileUrlsThenImage不因无图而跳过。
+
+#### Scenario: Clipboard snapshot gate and baseline
+- **WHEN** ImageOnly但snapshot changeCount不可用
+- **THEN** 仍安排探测，返回Some(None)，由调用方负责后续过期校验。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn attachment_probe_gate`。
+
+### Requirement: Clipboard attachment file precedence
+实际附件探测 SHALL 在通过gate后执行路由；FileUrlsThenImage返回file_urls为Some时优先该值并不给出image，即使file_urls字符串为空。
+
+#### Scenario: Clipboard attachment file precedence
+- **WHEN** 底层同时提供file_urls和image
+- **THEN** 返回file_urls，image为None。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn system_clipboard_probe_attachments`。
+
+### Requirement: Clipboard probe prewarm lifecycle
+图片探测预热 SHALL 仅在平台支持时通过Once启动后台线程，不提供join或完成确认。
+
+#### Scenario: Clipboard probe prewarm lifecycle
+- **WHEN** 预热线程已经启动但尚未完成
+- **THEN** 调用返回不代表探测资源初始化完成。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn prewarm_image_probe`。
+
+### Requirement: Clipboard probe test hook scope
+test-support剪贴板hook SHALL 为线程局部，仅覆盖显式包装入口；设置及清除重置调用计数，不自动传播到其他线程。
+
+#### Scenario: Clipboard probe test hook scope
+- **WHEN** 在当前线程设置hook后另起工作线程
+- **THEN** 不能假定工作线程继承该模拟结果。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn set_clipboard_probe_hook`。
+
+### Requirement: Deferred image viewer loading
+延迟viewer SHALL 仅建立loading状态及源路径，不自行启动线程；take_source_path在loading时消费路径一次，apply_loaded填充数据并结束loading。
+
+#### Scenario: Deferred image viewer loading
+- **WHEN** 创建deferred viewer但未运行加载
+- **THEN** 保持loading，图片内容尚未读取。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn open_from_path_deferred`。
+
+### Requirement: Deferred image viewer failure state
+finish_loading SHALL 在加载失败时返回false；消费掉的源路径不自动恢复，loading也不在失败分支自动清除。
+
+#### Scenario: Deferred image viewer failure state
+- **WHEN** 首次延迟加载失败后再次尝试消费源路径
+- **THEN** 无法取得已消费路径，调用方需处理失败状态。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn finish_loading`。
+
+### Requirement: Image preview first completion
+图片preview SHALL 通过共享OnceLock保存Ready、Failed或Unsupported，首次设置胜出，后续完成或mark_failed不覆盖已有结果。
+
+#### Scenario: Image preview first completion
+- **WHEN** 预览已Ready后调用mark_failed
+- **THEN** 仍保留Ready内容。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn mark_failed`。
+
+### Requirement: Image preview preparation inputs
+preview_preparation SHALL 仅在preview pending且存在内存encoded_bytes时构建工作，捕获当前协议与尺寸；不从会话文件回读以创建该工作。
+
+#### Scenario: Image preview preparation inputs
+- **WHEN** 图片只有session路径且无内存字节
+- **THEN** 不产生preview preparation。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn preview_preparation`。
+
+### Requirement: Image preview execution boundary
+预览准备run SHALL 同步执行；Kitty按需要转换图片，ITerm2复用原字节，无协议则记录Unsupported，函数本身不保证后台调度。
+
+#### Scenario: Image preview execution boundary
+- **WHEN** 协议为None并执行preparation
+- **THEN** 得到Unsupported而非Ready图片序列。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn run(self)`。
+
+### Requirement: Prompt image reconciliation cleanup
+reconcile SHALL 按live ElementId保留附件并清理移除项；cleanup仅在没有session_image_path时尝试删除staged_temp_path，删除错误忽略。
+
+#### Scenario: Prompt image reconciliation cleanup
+- **WHEN** 附件同时拥有session路径及staged路径后被移除
+- **THEN** 不会由该cleanup删除staged文件或session文件。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn cleanup_temp_file`。
+
+### Requirement: Prompt image counter reset
+drain_and_cleanup SHALL 清空图片但不重置编号计数；clear同时清空并重置计数。
+
+#### Scenario: Prompt image counter reset
+- **WHEN** 调用clear清除全部附件
+- **THEN** 列表为空且计数归零。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn clear(`。
+
+### Requirement: Dropped path batch all or nothing
+拖放批次解析 SHALL 在任一token不能解析时返回整个空列表，供调用方保留全文处理；它不是通用shell解析器。
+
+#### Scenario: Dropped path batch all or nothing
+- **WHEN** 同一批次包含可读图片和不能解析的caption
+- **THEN** 整个结果为空，不只取出图片。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn try_read_dropped_paths`。
+
+### Requirement: Single image extraction from mixed drops
+try_read_image_from_path SHALL 先过滤NonImage再要求图片数量恰为一，因此允许一个图片与非图片路径混合。
+
+#### Scenario: Single image extraction from mixed drops
+- **WHEN** 已解析批次包含一张图片和一个非图片文件
+- **THEN** 返回该唯一图片。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn try_read_image_from_path`。
+
+### Requirement: Clipboard image construction dimensions
+from_clipboard_data SHALL 保留字节及MIME，尺寸解码失败时允许dimensions为None，不以Result拒绝构造。
+
+#### Scenario: Clipboard image construction dimensions
+- **WHEN** 剪贴板字节无法解码尺寸
+- **THEN** 仍构造附件且dimensions为None。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn from_clipboard_data`。
+
+### Requirement: Image session persistence commit
+persist_to_session SHALL 要求内存字节，创建images目录并用UUID命名，临时文件write_all与sync_all后rename，成功才设置session路径并释放内存字节。
+
+#### Scenario: Image session persistence commit
+- **WHEN** 写入或rename失败
+- **THEN** 不执行成功后的session路径与内存释放状态更新。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn persist_to_session`。
+
+### Requirement: Image send byte and dimension limits
+load_for_send SHALL 优先内存否则完整读取session文件，再拒绝超过50000000字节或已知任边小于8像素的图片；dimensions为None时不在此重新验证尺寸。
+
+#### Scenario: Image send byte and dimension limits
+- **WHEN** 图片识别成功但已知尺寸为2乘2
+- **THEN** 发送加载返回None，识别成功不代表可发送。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn load_for_send`。
+
+### Requirement: Image content block order and skips
+ACP图片内容构建 SHALL 先生成Text block，再放入可加载附件，最后恢复的孤立图片；加载失败附件跳过，编号通过metadata传递。
+
+#### Scenario: Image content block order and skips
+- **WHEN** 输入文本为空但存在可用附件
+- **THEN** 仍先生成Text block，图片随后。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn build_content_blocks_with_prefixes_and_caps`。
+
+### Requirement: Image orphan budget scope
+孤立占位符恢复 SHALL 仅累计恢复图片的预算；超过上限立即停止后续恢复，已有PastedImage不计入该预算。
+
+#### Scenario: Image orphan budget scope
+- **WHEN** 第二个孤立图片使累计值超过cap
+- **THEN** 停止恢复第二个及后续图片，不把该预算解释为全部附件总上限。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn build_content_blocks_with_prefixes_and_caps`。
+
+### Requirement: Image placeholder path stripping
+内容构建 SHALL 剥除占位符路径，即使未提供恢复前缀；未恢复或超预算标签可能仍保留编号锚点。
+
+#### Scenario: Image placeholder path stripping
+- **WHEN** 没有允许恢复前缀而文本含带路径图片占位符
+- **THEN** 输出Text去掉路径，但不保证存在对应Image block。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn build_content_blocks_with_prefixes_and_caps`。
+
+### Requirement: Scrollback image reference extraction order
+extract_image_refs SHALL 先处理Markdown图片再处理裸路径，按原始路径字符串去重，不保证全文出现顺序或canonical文件身份去重。
+
+#### Scenario: Scrollback image reference extraction order
+- **WHEN** 裸路径先于Markdown图片出现在文本中
+- **THEN** 结果仍先包含匹配的Markdown引用。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn extract_image_refs`。
+
+### Requirement: Media only markdown count boundary
+is_media_only_markdown SHALL 要求全串仅包含匹配图片引用，并比较唯一原始路径数与调用方resolved_ref_count；数量一致不验证附件身份。
+
+#### Scenario: Media only markdown count boundary
+- **WHEN** 纯图片文本的唯一原始路径数与resolved_ref_count不同
+- **THEN** 返回false。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn is_media_only_markdown`。
+
+### Requirement: Render writer drain acknowledgement
+WriterSync SHALL 仅在输出线程write_all及flush成功后推进written计数；wait_drained超时不取消已排队输出，也不包含尚未flush的TermWriter缓冲。
+
+#### Scenario: Render writer drain acknowledgement
+- **WHEN** 等待drain超时
+- **THEN** 返回超时结果，队列仍可能继续输出。
+
+证据：`crates/codegen/pager-render/src/render/draw.rs` — `pub fn wait_drained`。
+
+### Requirement: Render writer ownership and buffering
+TermWriter SHALL 对同一个WriterSync限制一个活跃writer；flush将缓冲提交到通道，不等于物理终端写入完成，discard仅丢弃当前未提交缓冲。
+
+#### Scenario: Render writer ownership and buffering
+- **WHEN** 数据已提交后调用discard
+- **THEN** 已排队payload不会被撤销。
+
+证据：`crates/codegen/pager-render/src/render/draw.rs` — `pub fn discard`。
+
+### Requirement: Scrollbar hiding and layout reservation
+隐藏滚动条 SHALL 只控制绘制，不使split_area_for_scrollbar自动回收预留列；分割在宽度不超过2时不提供滚动条区域。
+
+#### Scenario: Scrollbar hiding and layout reservation
+- **WHEN** 设置隐藏后仍调用分割函数且宽度足够
+- **THEN** 布局仍可预留滚动条及间隔列。
+
+证据：`crates/codegen/pager-render/src/render/scrollbar.rs` — `pub fn split_area_for_scrollbar`。
+
+### Requirement: Terminal output bounded virtual grid
+命令输出渲染 SHALL 对每次输入创建新的VTE解析网格，最多50000行和8192列，以字符单元处理而非完整grapheme或终端宽字符模型。
+
+#### Scenario: Terminal output bounded virtual grid
+- **WHEN** 输入超出最大列数
+- **THEN** 超出列容量的字符不继续扩展网格。
+
+证据：`crates/codegen/pager-render/src/render/terminal_output.rs` — `pub fn render_terminal_lines`。
+
+### Requirement: Terminal output control interpretation
+命令输出渲染 SHALL 解释换行、回车、退格、8列tab及实现支持的CSI移动、清行清屏和SGR；该解析器不构成完整终端仿真。
+
+#### Scenario: Terminal output control interpretation
+- **WHEN** 进度文本以回车返回行首再写入
+- **THEN** 后续字符覆盖当前行起始单元。
+
+证据：`crates/codegen/pager-render/src/render/terminal_output.rs` — `pub fn render_terminal_lines`。
+
+### Requirement: Color indexed conversion palette
+indexed_to_rgb SHALL 使用固定xterm色表；nearest_indexed在16至255的颜色立方与灰阶中选择，不探测用户自定义终端调色板。
+
+#### Scenario: Color indexed conversion palette
+- **WHEN** 用户修改终端基础色palette
+- **THEN** 该转换仍使用固定RGB映射。
+
+证据：`crates/codegen/pager-render/src/render/color.rs` — `pub fn indexed_to_rgb`。
+
+### Requirement: Color blending supported representations
+blend_color SHALL 仅对RGB与Indexed颜色混合，任一Indexed输入使结果重新量化；opacity不在此验证或夹到0至1。
+
+#### Scenario: Color blending supported representations
+- **WHEN** 混合基础命名颜色而非RGB或Indexed
+- **THEN** 不能将该接口当作所有Color变体均可混合的保证。
+
+证据：`crates/codegen/pager-render/src/render/color.rs` — `pub fn blend_color`。
+
+### Requirement: Line width fitting span boundaries
+fit_line_to_width SHALL 在每个span内按grapheme截断并补足宽度，保留Line元数据；跨span组成的grapheme不作为一个整体处理。
+
+#### Scenario: Line width fitting span boundaries
+- **WHEN** 宽度不足且单个span含组合字素
+- **THEN** 按该span的grapheme边界截断。
+
+证据：`crates/codegen/pager-render/src/render/line_utils.rs` — `pub fn fit_line_to_width`。
+
+### Requirement: Styled wrapping hard and soft breaks
+多行word wrap SHALL 用None joiner表示每个输入行的硬断行，用Some边界文本表示软断行；只有第一输入采用initial indent，其余输入首行使用subsequent indent。
+
+#### Scenario: Styled wrapping hard and soft breaks
+- **WHEN** 传入两个独立输入行
+- **THEN** 第二行的首个输出保持硬断行标记。
+
+证据：`crates/codegen/pager-render/src/render/wrapping.rs` — `pub fn word_wrap_lines_with_joiners`。
+
+### Requirement: Table wrapping special case
+表格启发式识别到的行 SHALL 单行fit到宽度，不使用普通换行indent选项；ASCII竖线开头被视为表格，ASCII加号不因此自动识别。
+
+#### Scenario: Table wrapping special case
+- **WHEN** ASCII竖线开头的长表行传入wrapper
+- **THEN** 执行单行裁剪或补空格，不按普通文本生成续行。
+
+证据：`crates/codegen/pager-render/src/render/wrapping.rs` — `pub fn word_wrap_line_with_joiners`。
+
+### Requirement: Matching wrap helper scope
+wrap_byte_ranges_matching SHALL 在width为0时返回完整文本范围；不复现所有表格、用户indent和自定义wrap选项，因此调用方不能据此假定与任意视觉换行完全一致。
+
+#### Scenario: Matching wrap helper scope
+- **WHEN** width为0且文本非空
+- **THEN** 返回全范围而非空范围。
+
+证据：`crates/codegen/pager-render/src/render/wrapping.rs` — `pub fn wrap_byte_ranges_matching`。
+
+### Requirement: Remote editor self resolving links
+官方VSCode远程上下文中的SelfResolvingPath文件链接 SHALL 同时不给出OSC URL及应用open target，由终端自行识别；Opaque文件链接不采用此委托。
+
+#### Scenario: Remote editor self resolving links
+- **WHEN** 官方VSCode remote展示可自解析文件路径
+- **THEN** 解析结果不为该显示创建OSC或应用打开目标。
+
+证据：`crates/codegen/pager-render/src/render/osc8.rs` — `pub fn resolve_link_target_for_context`。
+
+### Requirement: File link target conversion boundary
+文件目标转换 SHALL 不要求canonicalize或存在性；当无法生成file URL时仍可保留应用File目标。
+
+#### Scenario: File link target conversion boundary
+- **WHEN** 文件Path无法转换为file URL
+- **THEN** 不因此丢弃可用的应用打开目标。
+
+证据：`crates/codegen/pager-render/src/render/osc8.rs` — `pub fn resolve_link_target_for_context`。
+
+### Requirement: Local link existing file and media fallback
+local_link_to_file_target SHALL 对解析目标要求is_file；相对目标不存在时才按media路径组件后缀寻找唯一候选，重复候选也形成歧义。
+
+#### Scenario: Local link existing file and media fallback
+- **WHEN** 相对目标已在cwd存在且media也有后缀候选
+- **THEN** 优先使用cwd目标。
+
+证据：`crates/codegen/pager-render/src/render/osc8.rs` — `pub fn local_link_to_file_target`。
+
+### Requirement: Explicit anchored file link existence
+显式本地链接 SHALL 允许anchored路径或file URL目标不存在，相对路径仍采用保守查找；该机制不是文件访问授权边界。
+
+#### Scenario: Explicit anchored file link existence
+- **WHEN** 显式Markdown链接指向尚不存在的绝对路径
+- **THEN** 仍可生成文件目标。
+
+证据：`crates/codegen/pager-render/src/render/osc8.rs` — `pub fn explicit_local_link_to_file_target`。
+
+### Requirement: Link scanning priority and existence scope
+文本链接扫描 SHALL 依URL、引号绝对或home路径、非引号路径、相对media路径顺序处理；绝对路径扫描不要求is_file，URL范围优先避免重复路径匹配。
+
+#### Scenario: Link scanning priority and existence scope
+- **WHEN** 文本含不存在的可匹配绝对路径
+- **THEN** 仍可能生成文件链接，不能套用local_link的存在性保证。
+
+证据：`crates/codegen/pager-render/src/render/osc8.rs` — `pub fn scan_text_for_links`。
+
+### Requirement: Wrapped link overlay atomic projection
+跨软行链接 SHALL 先验证所有投影段，任一段重叠或u16列溢出时整体不插入；joiner中的字节不归属可点击行段。
+
+#### Scenario: Wrapped link overlay atomic projection
+- **WHEN** 链接跨多行且其中一段与已有overlay重叠
+- **THEN** 整个候选链接不加入overlay。
+
+证据：`crates/codegen/pager-render/src/render/osc8.rs` — `pub fn scan_lines_for_url_overlays`。
+
+### Requirement: Appearance watcher static snapshot
+ConfigWatcher SHALL 在启动时尝试读取pager.toml并转换配置，失败使用默认值；当前实现只保留静态watch sender，不提供文件热加载。
+
+#### Scenario: Appearance watcher static snapshot
+- **WHEN** 启动后修改pager.toml
+- **THEN** 该watcher不因此发布更新，不能依据dev模式注释声称热加载。
+
+证据：`crates/codegen/pager-render/src/appearance/watcher.rs` — `fn start_static`。
+
+### Requirement: Appearance cache thread local setters
+外观cache SHALL 在线程局部保存读取结果，setter仅更新缓存，不直接持久化到配置文件。
+
+#### Scenario: Appearance cache thread local setters
+- **WHEN** 调用set_timestamps改变显示偏好
+- **THEN** 当前线程缓存改变，不由该setter写盘。
+
+证据：`crates/codegen/pager-render/src/appearance/cache.rs` — `pub fn set_timestamps`。
+
+### Requirement: Appearance scroll line zero distinction
+滚动行数读取 SHALL 将环境配置中的0解释为None；set_scroll_lines将0收紧为1，读取与setter不共享零值语义。
+
+#### Scenario: Appearance scroll line zero distinction
+- **WHEN** 调用set_scroll_lines(0)
+- **THEN** 缓存保存至少1行，而不是None。
+
+证据：`crates/codegen/pager-render/src/appearance/cache.rs` — `pub fn set_scroll_lines`。
+
+### Requirement: Permission sticky cursor lifetime
+上次权限选择 SHALL 存于线程局部状态而非绑定会话，resolve_initial_cursor按偏好选择首个匹配的非global选项，再考虑global与索引0回退。
+
+#### Scenario: Permission sticky cursor lifetime
+- **WHEN** 同线程切换会话但未重置选择偏好
+- **THEN** 不能假定sticky选择自动清空。
+
+证据：`crates/codegen/pager-render/src/appearance/permission_cursor.rs` — `pub fn resolve_initial_cursor`。
+
+### Requirement: Theme availability color capability
+ThemeKind::available SHALL 在truecolor提供五个具体主题，在其他颜色能力仅提供Night与Day；Auto不在具体主题列表中。
+
+#### Scenario: Theme availability color capability
+- **WHEN** 终端不支持truecolor
+- **THEN** 可选列表仅包含Night和Day。
+
+证据：`crates/codegen/pager-render/src/theme/mod.rs` — `pub fn available`。
+
+### Requirement: Theme name parsing whitespace boundary
+ThemeKind::from_name SHALL 对名称大小写归一并识别实现的别名，但不自动trim输入。
+
+#### Scenario: Theme name parsing whitespace boundary
+- **WHEN** 主题名称前后带空白
+- **THEN** 不能作为无空白有效名称自动接受。
+
+证据：`crates/codegen/pager-render/src/theme/mod.rs` — `pub fn from_name`。
+
+### Requirement: Theme application native lock
+Theme::apply_kind SHALL 在terminal native锁定时不应用外部主题；未锁定时把不支持truecolor的受限主题收紧为Night，更新内存及cursor，不直接持久化。
+
+#### Scenario: Theme application native lock
+- **WHEN** 原生锁定时请求其他主题
+- **THEN** 维持原生主题路径。
+
+证据：`crates/codegen/pager-render/src/theme/mod.rs` — `pub fn apply_kind`。
+
+### Requirement: Theme current palette auto fallback
+Theme::current SHALL 在普通主题路径将Auto按Night palette处理；它本身不等于运行系统极性检测来解析Auto。
+
+#### Scenario: Theme current palette auto fallback
+- **WHEN** 当前kind仍为Auto且调用current
+- **THEN** 使用Night palette，而非在此触发OS自动检测。
+
+证据：`crates/codegen/pager-render/src/theme/mod.rs` — `pub fn current()`。
+
+### Requirement: Theme cursor sequence delivery
+apply_cursor_color SHALL 在颜色可转RGB时向stderr写OSC12并flush，忽略写入错误；reset_cursor_color写OSC112，不在这些函数内检查TTY品牌或复用器。
+
+#### Scenario: Theme cursor sequence delivery
+- **WHEN** stderr写入cursor序列失败
+- **THEN** 函数不返回投递失败结果，不能据调用完成认定终端已更新。
+
+证据：`crates/codegen/pager-render/src/theme/mod.rs` — `pub fn apply_cursor_color`。
+
+### Requirement: System appearance OSC fallback scope
+detect_with_osc11_fallback SHALL 先查询系统外观，仅在无结果时尝试OSC11，系统结果优先。
+
+#### Scenario: System appearance OSC fallback scope
+- **WHEN** 系统探测已得到Dark或Light
+- **THEN** 不需要OSC11结果覆盖系统结果。
+
+证据：`crates/codegen/pager-render/src/theme/system_appearance.rs` — `pub fn detect_with_osc11_fallback`。
+
+### Requirement: Terminal context cached observation
+terminal_context SHALL 缓存首次终端上下文；环境品牌与effective品牌是不同字段，不能把能力回退品牌当作实际环境识别证据。
+
+#### Scenario: Terminal context cached observation
+- **WHEN** 首次取得上下文后环境改变
+- **THEN** 后续访问仍使用缓存上下文。
+
+证据：`crates/codegen/pager-render/src/terminal/mod.rs` — `pub fn terminal_context`。
+
+### Requirement: Alternate screen selection priority
+alternate screen策略 SHALL 优先遵守CLI no-alt-screen，再按Always/Never/Auto；Auto在Zellij或tmux-backed control mode关闭，其余开启。
+
+#### Scenario: Alternate screen selection priority
+- **WHEN** CLI禁用alt screen且配置Always
+- **THEN** 返回false。
+
+证据：`crates/codegen/pager-render/src/terminal/mod.rs` — `pub fn determine_alt_screen_policy`。
+
+### Requirement: Hyperlink standard scheme filter
+Standard scheme过滤 SHALL 只接受精确小写http、https、mailto；EditorExtended额外接受file、vscode、cursor、idea、zed，品牌能力表不自动启用Extended。
+
+#### Scenario: Hyperlink standard scheme filter
+- **WHEN** 直接向Standard传入file或大写HTTP
+- **THEN** 返回不允许。
+
+证据：`crates/codegen/pager-render/src/terminal/hyperlinks.rs` — `pub fn allows`。
+
+### Requirement: Hyperlink capability declaration boundary
+hyperlink_capabilities SHALL 按品牌返回能力表，不实时探测终端；AppleTerminal为HostileParser，Warp为Unsupported但支持native plain URL打开。
+
+#### Scenario: Hyperlink capability declaration boundary
+- **WHEN** 查询Warp能力
+- **THEN** OSC8为Unsupported，不因此否认裸URL原生打开。
+
+证据：`crates/codegen/pager-render/src/terminal/hyperlinks.rs` — `pub fn hyperlink_capabilities`。
+
+### Requirement: Overlay ownership delayed commit
+overlay序列构造 SHALL 不自动提交owner；PostFlush::write_to仅在write_all成功后提交owner，不调用flush，也不回滚部分输出。
+
+#### Scenario: Overlay ownership delayed commit
+- **WHEN** write_all返回错误
+- **THEN** 不提交该owner，但已写出的字节不由此回滚。
+
+证据：`crates/codegen/pager-render/src/terminal/overlay.rs` — `pub fn write_to`。
+
+### Requirement: Overlay explicit commit boundary
+Escapes::commit SHALL 更新线程局部owner并返回序列字符串；此操作不执行I/O，不证明终端已绘制。
+
+#### Scenario: Overlay explicit commit boundary
+- **WHEN** 仅调用commit而未发送返回字符串
+- **THEN** owner已变化但没有由此产生终端输出。
+
+证据：`crates/codegen/pager-render/src/terminal/overlay.rs` — `pub fn commit(self)`。
+
+### Requirement: Scrollback image disable scope
+inline overlay强制关闭开关 SHALL 用于scrollback overlay判定，不等同全局禁用所有图形协议。
+
+#### Scenario: Scrollback image disable scope
+- **WHEN** 设置scrollback force off
+- **THEN** scrollback overlay关闭，不能据此声称所有图片渲染入口均禁用。
+
+证据：`crates/codegen/pager-render/src/terminal/image.rs` — `pub fn set_inline_overlay_force_off`。
+
+### Requirement: Kitty image format sniff boundary
+kitty_format_from_bytes SHALL 按PNG签名字节判定直接格式，不以此完成整张图片解码验证。
+
+#### Scenario: Kitty image format sniff boundary
+- **WHEN** 字节具有PNG头但后续数据损坏
+- **THEN** 格式识别成功不证明可显示完整图片。
+
+证据：`crates/codegen/pager-render/src/terminal/image.rs` — `pub fn kitty_format_from_bytes`。
+
+### Requirement: Kitty image transmission chunking
+Kitty图像传输 SHALL 对base64数据按4096字节分块生成序列，空输入不生成数据块；生成字符串不执行终端写入。
+
+#### Scenario: Kitty image transmission chunking
+- **WHEN** 传入空图片数据
+- **THEN** 得到空传输串。
+
+证据：`crates/codegen/pager-render/src/terminal/image.rs` — `pub fn transmit_kitty_image`。
+
+### Requirement: Image fit minimum cells
+fit_image_to_cells SHALL 根据像素尺寸及cell比例拟合，结果至少一列一行，即使给定最大可用维度为0。
+
+#### Scenario: Image fit minimum cells
+- **WHEN** 最大可用列或行为0
+- **THEN** 不能把返回值当作严格零空间裁剪结果。
+
+证据：`crates/codegen/pager-render/src/terminal/image.rs` — `pub fn fit_image_to_cells`。
+
+### Requirement: Modal chrome initial state
+ModalWindowState SHALL 初始化为空命中区域、无focus和hover、active_tab为0；with_tabs仅设置数量及等长None rects，不注册事件或保证索引有效性。
+
+#### Scenario: Modal chrome initial state
+- **WHEN** 使用with_tabs(3)
+- **THEN** tab_count为3且三个tab rect均为None，active_tab为0。
+
+证据：`crates/codegen/pager-render/src/modal_window_state.rs` — `pub fn with_tabs`。
+
+### Requirement: Tool path filesystem target spelling
+工具路径目标 SHALL 展开独立首组件~并对相对路径拼接cwd，保留点段及符号链接语义，不canonicalize或检查存在性。
+
+#### Scenario: Tool path filesystem target spelling
+- **WHEN** 相对路径含..且提供cwd
+- **THEN** 目标保留拼接后的..，不以展示归一结果替代OS路径。
+
+证据：`crates/codegen/pager-render/src/render/tool_paths.rs` — `pub fn resolve_tool_path_target`。
+
+### Requirement: Tool path expanded display
+工具路径Expanded展示 SHALL 使用词法归一目标，在cwd下且相对结果非空时显示相对路径，否则显示归一目标；展示结果不构成安全边界。
+
+#### Scenario: Tool path expanded display
+- **WHEN** 目标词法归一后恰等于cwd
+- **THEN** 不显示空相对字符串，回退完整展示路径。
+
+证据：`crates/codegen/pager-render/src/render/tool_paths.rs` — `fn path_for_expanded_header`。
+
+### Requirement: Tool path component shortening
+shorten_path SHALL 在预算0时返回空串，否则先尝试保留完整路径、缩短斜线组件、保留尾部路径，再执行字符串截断。
+
+#### Scenario: Tool path component shortening
+- **WHEN** 路径已在显示宽度预算内
+- **THEN** 原样返回路径。
+
+证据：`crates/codegen/pager-render/src/render/tool_paths.rs` — `pub fn shorten_path`。
+
+### Requirement: Safe buffer helper coordinate scope
+SafeBuf SHALL 跳过y在buffer上下界外或x达到右界的写入；当前实现不检查x低于左界，也不提供全部坐标输入无panic保证。
+
+#### Scenario: Safe buffer helper coordinate scope
+- **WHEN** y处于buffer之外
+- **THEN** 跳过底层set_line/set_span/set_string调用。
+
+证据：`crates/codegen/pager-render/src/render/safe_buf.rs` — `pub trait SafeBuf`。
+
+### Requirement: Mermaid preference canonical values
+RenderMermaid SHALL 默认为Auto，精确接受auto/on/off并输出对应canonical字符串，其他输入返回None；类型解析不执行图形渲染。
+
+#### Scenario: Mermaid preference canonical values
+- **WHEN** 输入Auto或yes
+- **THEN** 返回None，由调用方处理回退。
+
+证据：`crates/codegen/pager-render/src/appearance/render_mermaid.rs` — `pub fn from_canonical`。
+
+### Requirement: Scroll mode canonical values
+ScrollMode SHALL 默认为Auto，精确接受auto/wheel/trackpad；本类型只保存分类偏好，不实现输入时序检测。
+
+#### Scenario: Scroll mode canonical values
+- **WHEN** 输入WHEEL或track pad
+- **THEN** 返回None。
+
+证据：`crates/codegen/pager-render/src/appearance/scroll_mode.rs` — `pub fn from_canonical`。
+
+### Requirement: Text selection preference predicates
+TextSelection SHALL 默认为Flash，精确接受flash/hold/word_select；Hold和WordSelect的holds为true，仅WordSelect的selects_word为true。
+
+#### Scenario: Text selection preference predicates
+- **WHEN** 模式为Hold
+- **THEN** holds为true而selects_word为false，不由此类型直接执行鼠标动作。
+
+证据：`crates/codegen/pager-render/src/appearance/text_selection.rs` — `pub const fn holds`。
+
+### Requirement: Global tab width atomic setting
+tab_width SHALL 使用默认4的全局AtomicU8，以Relaxed读取和设置；setter接受0且不持久化或主动触发重绘。
+
+#### Scenario: Global tab width atomic setting
+- **WHEN** 调用set_tab_width(0)
+- **THEN** 随后读取为0，不自动夹到最小1。
+
+证据：`crates/codegen/pager-render/src/appearance/mod.rs` — `pub fn set_tab_width`。
+
+### Requirement: Terminal version source precedence
+终端版本 SHALL 优先使用DA2结果，其次环境版本，否则返回空字符串及None来源；XTVERSION文本不进入该选择函数。
+
+#### Scenario: Terminal version source precedence
+- **WHEN** DA2与环境版本同时存在
+- **THEN** 返回DA2及Da2来源。
+
+证据：`crates/codegen/pager-render/src/terminal/term_version.rs` — `fn best_term_version`。
+
+### Requirement: Terminal environment version corroboration
+环境版本 SHALL 仅在env_brand与变量品牌相符时使用，TERM_PROGRAM=vscode可对应VSCode、Cursor、Windsurf；版本值trim后保留原格式，不强制semver。
+
+#### Scenario: Terminal environment version corroboration
+- **WHEN** tmux的TERM_PROGRAM_VERSION与残留其他终端品牌同时存在
+- **THEN** 不将tmux版本归属给其他终端。
+
+证据：`crates/codegen/pager-render/src/terminal/term_version.rs` — `fn detect_env_term_version`。
+
+### Requirement: DA2 startup probe gate
+DA2启动探测 SHALL 仅针对Alacritty、未被CSI拦截的复用器环境且stdin为TTY；非Unix不执行定时读取，拒绝或无结果也可缓存None。
+
+#### Scenario: DA2 startup probe gate
+- **WHEN** 终端品牌不是Alacritty
+- **THEN** 跳过查询并记录无版本结果。
+
+证据：`crates/codegen/pager-render/src/terminal/da2.rs` — `pub fn probe_at_startup`。
+
+### Requirement: XTVERSION startup allowlist
+XTVERSION启动探测 SHALL 对Unknown、Kitty、WezTerm、Ghostty、Iterm2、Rio且无CSI拦截复用器、stdin为TTY时尝试发送；回复由外部事件过滤器记录，不在此同步等待。
+
+#### Scenario: XTVERSION startup allowlist
+- **WHEN** Alacritty终端调用XTVERSION启动入口
+- **THEN** 品牌门禁拒绝查询。
+
+证据：`crates/codegen/pager-render/src/terminal/xtversion.rs` — `fn gate_allows_probe`。
+
+### Requirement: XTVERSION first recorded outcome
+XTVERSION SHALL 通过OnceLock保留首次记录结果，reply_pending要求已发查询且尚无结果；record_no_reply依赖调用方触发，不是独立超时任务。
+
+#### Scenario: XTVERSION first recorded outcome
+- **WHEN** 查询发出后会话完全空闲且无人记录结果
+- **THEN** 可能持续pending，不由本模块定时写入NoReply。
+
+证据：`crates/codegen/pager-render/src/terminal/xtversion.rs` — `pub fn reply_pending`。
+
+### Requirement: Keyboard capability host scope
+键盘能力表 SHALL 仅对macOS提供品牌分类，Linux、Windows及Other返回全Unknown默认值；该表不执行按键探测。
+
+#### Scenario: Keyboard capability host scope
+- **WHEN** 在Linux查询Kitty能力
+- **THEN** 返回Unknown分类，不能据此推导Kitty不支持协议。
+
+证据：`crates/codegen/pager-render/src/terminal/keyboard.rs` — `pub fn keyboard_capabilities_for_host`。
+
+### Requirement: Keyboard modifier rescue classification
+修饰键rescue谓词 SHALL 仅对Dropped返回true，Native、Unrecoverable和Unknown均为false；组合delivery任一键Dropped即可受益。
+
+#### Scenario: Keyboard modifier rescue classification
+- **WHEN** macOS AppleTerminal的Cmd为Unrecoverable、Opt为Dropped
+- **THEN** 组合rescue为true，但不是Cmd可恢复的保证。
+
+证据：`crates/codegen/pager-render/src/terminal/keyboard.rs` — `pub fn benefits_from_rescue`。
+
+### Requirement: Kitty keyboard negotiated version boundary
+Kitty协商flags SHALL 在skip_reason存在时为空，否则启用DISAMBIGUATE_ESCAPE_CODES；只有已知DA2 packed不大于2401时不启用REPORT_EVENT_TYPES，未知版本保留它。
+
+#### Scenario: Kitty keyboard negotiated version boundary
+- **WHEN** skip_reason为空且packed为2401
+- **THEN** 返回非空disambiguation flags但没有event types。
+
+证据：`crates/codegen/pager-render/src/terminal/kitty_keyboard.rs` — `pub fn negotiated_kitty_flags`。
+
+### Requirement: Kitty keyboard recorded state predicates
+Kitty状态 SHALL 按记录的flags分别判断已push、含REPORT_EVENT_TYPES及非空但withheld；这些谓词不实际观察释放事件到达。
+
+#### Scenario: Kitty keyboard recorded state predicates
+- **WHEN** 仅记录DISAMBIGUATE_ESCAPE_CODES
+- **THEN** flags_pushed为true、releases_reported为false、event_types_withheld为true。
+
+证据：`crates/codegen/pager-render/src/terminal/kitty_keyboard.rs` — `pub fn kitty_event_types_withheld`。
+
+### Requirement: Kitty keyboard teardown consume once
+take_kitty_flags_pushed SHALL 通过原子swap清空记录并返回此前是否非空，防止多个teardown根据同一记录重复pop。
+
+#### Scenario: Kitty keyboard teardown consume once
+- **WHEN** 连续两次take且中间未set
+- **THEN** 第一次消费非空记录返回true，第二次返回false。
+
+证据：`crates/codegen/pager-render/src/terminal/kitty_keyboard.rs` — `pub fn take_kitty_flags_pushed`。
+
+### Requirement: Gboom phase and tick lifecycle
+GboomState SHALL 从Title开始，tick将dt夹到0.1秒；Playing处理游戏后优先判死，胜利还需敌人死亡动画完成；其他阶段每tick推进一次火焰。
+
+#### Scenario: Gboom phase and tick lifecycle
+- **WHEN** 长时间暂停后tick
+- **THEN** phase_time只累计夹限后的dt，火焰仅推进一次。
+
+证据：`crates/codegen/pager-render/src/gboom/mod.rs` — `pub fn tick`。
+
+### Requirement: Gboom keyboard phase handling
+GBOOM键处理 SHALL 对Esc/q/Q始终返回Close；Title其他键只开始游戏，结束阶段其他键需phase_time严格大于0.8才关闭；上游负责key kind分发。
+
+#### Scenario: Gboom keyboard phase handling
+- **WHEN** Title阶段按Space
+- **THEN** 只进入Playing，不同时射击。
+
+证据：`crates/codegen/pager-render/src/gboom/mod.rs` — `pub fn handle_key`。
+
+### Requirement: Gboom PNG cache and caller size limit
+frame_png SHALL 按sim_gen及尺寸缓存PNG，尺寸小于8返回None；480乘320上限由frame_size_for_cells提供，frame_png本身不强制该上限。
+
+#### Scenario: Gboom PNG cache and caller size limit
+- **WHEN** 相同generation及尺寸再次请求帧
+- **THEN** 返回缓存PNG；调用方仍需约束任意输入尺寸。
+
+证据：`crates/codegen/pager-render/src/gboom/mod.rs` — `pub fn frame_png`。
+
+### Requirement: Gboom queued fire coalescing
+Game SHALL 用布尔值合并排队射击，每step最多消费一次，冷却中请求被丢弃而非延后。
+
+#### Scenario: Gboom queued fire coalescing
+- **WHEN** 同一step前多次queue_fire
+- **THEN** 最多触发一次射击。
+
+证据：`crates/codegen/pager-render/src/gboom/game.rs` — `pub fn queue_fire`。
+
+### Requirement: Gboom held movement modes
+Game按键 SHALL 在timer模式以0.16秒桥接重复事件，在release-aware模式保持至release；切换模式不自动清空已有hold，release_all不立即清零速度。
+
+#### Scenario: Gboom held movement modes
+- **WHEN** 移动中调用release_all
+- **THEN** 停止保持输入，但速度仍通过后续step平滑衰减。
+
+证据：`crates/codegen/pager-render/src/gboom/game.rs` — `pub fn release_all`。
+
+### Requirement: Gboom procedural assets
+GBOOM资源 SHALL 由源码纹理算法与字符图生成，不读取外部图片；Texture按64乘64循环采样，Renderer实例持有生成资源。
+
+#### Scenario: Gboom procedural assets
+- **WHEN** 构造Renderer
+- **THEN** 生成所需纹理和精灵，不要求下载图片。
+
+证据：`crates/codegen/pager-render/src/gboom/engine.rs` — `pub fn new()`。
+
+### Requirement: Gboom random float actual range
+XorShift64::next_f32 SHALL 按当前next_u32再右移8除以2的24次方生成值，实际落在0至0.5的半开区间；不能以旧注释声称覆盖0至1。
+
+#### Scenario: Gboom random float actual range
+- **WHEN** 调用next_f32生成游戏随机值
+- **THEN** 值严格小于0.5；该事实待独立债务修复，不在文档迁移改算法。
+
+证据：`crates/codegen/pager-render/src/gboom/assets.rs` — `pub fn next_f32`。
+
+### Requirement: Gboom rendering layer order
+游戏渲染 SHALL 依墙、地板天花板、敌人、世界暗角、枪与准星、全帧受伤及低血效果绘制；精灵使用远到近顺序及逐列墙深度。
+
+#### Scenario: Gboom rendering layer order
+- **WHEN** 枪已绘制后存在受伤红闪
+- **THEN** 红闪也影响枪，不受世界暗角的枪仍受后续效果。
+
+证据：`crates/codegen/pager-render/src/gboom/engine.rs` — `pub fn render_game`。
+
+### Requirement: Renderable basic height contracts
+Renderable标准实现 SHALL 对unit及None报告0高度，对str、String、Span、Line固定报告1且不随width变化；Option Some及包装项委托内部实现。
+
+#### Scenario: Renderable basic height contracts
+- **WHEN** 空String在width为0时查询desired_height
+- **THEN** 仍返回1，不代表实际可见一行文字。
+
+证据：`crates/codegen/pager-render/src/render/renderable.rs` — `pub trait Renderable`。
+
+### Requirement: Renderable owned and borrowed delegation
+RenderableItem SHALL 同时支持Owned Box和Borrowed引用，render与desired_height均委托内部对象，不自行缓存布局。
+
+#### Scenario: Renderable owned and borrowed delegation
+- **WHEN** 使用Borrowed包装自定义Renderable
+- **THEN** 高度与渲染调用传给原对象。
+
+证据：`crates/codegen/pager-render/src/render/renderable.rs` — `pub enum RenderableItem`。
+
+### Requirement: Search highlight reverse modifier
+搜索高亮 SHALL 对regex非重叠匹配的显示列插入REVERSED modifier，不切换已有REVERSED状态；以纯文本字节范围映射显示列。
+
+#### Scenario: Search highlight reverse modifier
+- **WHEN** 同一单元格重复应用匹配高亮
+- **THEN** REVERSED保持开启，不因第二次应用取消。
+
+证据：`crates/codegen/pager-render/src/render/highlight.rs` — `fn invert_cell`。
+
+### Requirement: Search highlight viewport branch scope
+搜索高亮 SHALL 在wrapped分支跳过skip行并在viewport_bottom停止；single_row分支不应用这两个纵向限制，调用方需提供有效buffer坐标。
+
+#### Scenario: Search highlight viewport branch scope
+- **WHEN** single_row为true
+- **THEN** 仅按该分支横向范围处理，不自动执行wrapped的纵向裁剪。
+
+证据：`crates/codegen/pager-render/src/render/highlight.rs` — `pub fn paint_match_highlights`。
+
+### Requirement: Embedded editor environment precedence
+嵌入编辑器识别 SHALL 按非空NVIM或NVIM_LISTEN_ADDRESS、VIM_TERMINAL、INSIDE_EMACS的顺序返回Neovim、Vim、Emacs，否则None；此环境启发式不验证实际进程或区分编辑器与tmux的嵌套方向。
+
+#### Scenario: Multiple editor markers
+- **WHEN** 三个编辑器标记同时非空
+- **THEN** 优先返回Neovim。
+
+#### Scenario: Empty editor markers
+- **WHEN** 全部标记为空或不存在
+- **THEN** 返回None，TMUX单独存在不构成编辑器识别。
+
+证据：`crates/codegen/pager-render/src/terminal/embedded_editor.rs` — `pub fn embedded_editor_from_env`。
+
+### Requirement: Terminal query render fd gate
+write_query SHALL 在共享render stderr锁内检查实际输出fd为TTY，write_all及flush均成功才返回true。
+
+#### Scenario: Terminal query render fd gate
+- **WHEN** 实际render fd不是TTY
+- **THEN** 不发送查询并返回false。
+
+证据：`crates/codegen/pager-render/src/terminal/probe.rs` — `fn write_query`。
+
+### Requirement: Terminal reply bounded buffer semantics
+Unix read_tty_reply SHALL 读取stdin至终止条件、256字节上限或deadline；已消费部分字节时可返回Some，消费窗口内键入内容不会重新注入输入流。
+
+#### Scenario: Terminal reply bounded buffer semantics
+- **WHEN** 读取部分回复后发生错误
+- **THEN** 返回已消费字节而非证明完整协议回复。
+
+证据：`crates/codegen/pager-render/src/terminal/probe.rs` — `fn read_tty_reply`。
+
+### Requirement: Tmux probe process and drain deadlines
+tmux查询 SHALL 使用2秒leader等待及独立300毫秒退出后清理窗口，清理进程组先TERM等待100毫秒再KILL；pipe read_to_end没有字节上限，child.wait也未单独设deadline。
+
+#### Scenario: Tmux probe process and drain deadlines
+- **WHEN** leader在主deadline前成功退出但后代持有pipe
+- **THEN** 使用退出后清理窗口，不把主deadline剩余量当全部drain预算。
+
+证据：`crates/codegen/pager-render/src/terminal/tmux_probe.rs` — `fn run_tmux_bounded`。
+
+### Requirement: Tmux typed query result projection
+TmuxQueryResult SHALL 区分Available、Unsupported、Unavailable、Error；into_option仅保留Available值。
+
+#### Scenario: Tmux typed query result projection
+- **WHEN** 查询结果为Error
+- **THEN** into_option返回None，具体错误需在投影前处理。
+
+证据：`crates/codegen/pager-render/src/terminal/tmux_probe.rs` — `pub enum TmuxQueryResult`。
+
+### Requirement: Grow home display containment
+is_under_user_grow_home SHALL 使用词法路径前缀判断，不解析符号链接或父目录段，不能作为文件授权检查。
+
+#### Scenario: Grow home display containment
+- **WHEN** 路径词法上位于grow home但包含逃逸父段
+- **THEN** 不得仅凭此谓词授权访问。
+
+证据：`crates/codegen/pager-render/src/util.rs` — `pub fn is_under_user_grow_home`。
+
+### Requirement: Relative time calendar approximation
+format_time_ago SHALL 以固定30天月、365天年展示相对时间，不使用日历月份；360至364天可显示12mo。
+
+#### Scenario: Relative time calendar approximation
+- **WHEN** 年龄为360天
+- **THEN** 按固定月单位显示12mo。
+
+证据：`crates/codegen/pager-render/src/util.rs` — `pub fn format_time_ago`。
+
+### Requirement: Monotonic wall clock projection
+system_time_from_instant_at SHALL 使用传入单调时钟与wall clock对投影，未来instant夹到wall_now，减法失败也回退wall_now。
+
+#### Scenario: Monotonic wall clock projection
+- **WHEN** instant晚于捕获的单调now
+- **THEN** 返回wall_now。
+
+证据：`crates/codegen/pager-render/src/util.rs` — `pub fn system_time_from_instant_at`。
+
+### Requirement: Limited HTML entity replacement
+decode_html_entities SHALL 按固定顺序替换amp、lt、gt、quot及实现支持的单引号实体，不是完整HTML解码器；连续替换可能继续解码amp暴露出的实体。
+
+#### Scenario: Limited HTML entity replacement
+- **WHEN** 输入包含&amp;lt;
+- **THEN** 连续替换可得到小于号。
+
+证据：`crates/codegen/pager-render/src/util.rs` — `pub fn decode_html_entities`。
+
+### Requirement: Schedule interval parser scope
+parse_schedule_interval_secs SHALL 要求trim_start后精确every前缀及u64数量，支持秒分时天单位并允许0；乘法与UTF8切片未全面防护，Option返回值不保证任意输入安全失败。
+
+#### Scenario: Schedule interval parser scope
+- **WHEN** 输入every 0s
+- **THEN** 返回Some(0)，不拒绝零间隔。
+
+证据：`crates/codegen/pager-render/src/util.rs` — `pub fn parse_schedule_interval_secs`。
+
+### Requirement: Color detection first observation and native cap
+颜色detect SHALL 缓存首次raw探测，NO_COLOR存在优先返回None；无supports-color证据时默认TrueColor，原生锁动态将结果上限收紧到Basic。
+
+#### Scenario: Color detection first observation and native cap
+- **WHEN** 首次探测时NO_COLOR存在且原生锁开启
+- **THEN** 结果仍为None，不由锁提升为Basic。
+
+证据：`crates/codegen/pager-render/src/theme/color_support.rs` — `pub fn detect`。
+
+### Requirement: Standalone color evidence input
+standalone颜色诊断 SHALL 使用stderr或独立控制终端证据，不依赖stdout是否TTY；NO_COLOR可明确提供None颜色证据。
+
+#### Scenario: Standalone color evidence input
+- **WHEN** JSON stdout被管道接收但stderr仍为TTY
+- **THEN** 不单凭stdout管道判定完全无终端颜色证据。
+
+证据：`crates/codegen/pager-render/src/theme/color_support.rs` — `pub fn standalone`。
+
+### Requirement: Initial theme configuration resolution
+resolve_initial_theme SHALL 读取有效配置，Auto开启auto mode并探测外观，具体主题直接返回，无配置默认Night；当前函数不读取注释所称环境主题覆盖。
+
+#### Scenario: Initial theme configuration resolution
+- **WHEN** 没有有效theme配置
+- **THEN** 返回GrowNight。
+
+证据：`crates/codegen/pager-render/src/theme/cache.rs` — `pub fn resolve_initial_theme`。
+
+### Requirement: Runtime auto theme resolution
+resolve_auto SHALL 仅用系统API解析外观并按配置映射，失败回退Night，不调用OSC11，也不自行设置current kind或auto mode。
+
+#### Scenario: Runtime auto theme resolution
+- **WHEN** 运行时系统外观未知
+- **THEN** 返回GrowNight，调用方负责应用返回主题。
+
+证据：`crates/codegen/pager-render/src/theme/cache.rs` — `pub fn resolve_auto`。
+
+### Requirement: Color level explicit initialization precedence
+颜色set SHALL 直接初始化同一OnceLock，首次成功后其他set返回Err；若set早于detect，则detect不执行环境探测闭包，NO_COLOR不会重新覆盖已初始化raw值，原生锁仍限制有效级别。
+
+#### Scenario: Color level explicit initialization precedence
+- **WHEN** 首次set为TrueColor后环境存在NO_COLOR
+- **THEN** 未锁定时get仍读取已设置TrueColor，不重新检测环境。
+
+证据：`crates/codegen/pager-render/src/theme/color_support.rs` — `pub fn set(level`。
+
+### Requirement: Color quantization representation matrix
+quantize_color SHALL 在TrueColor原样返回，在Ansi256仅转换RGB，在Basic将RGB经indexed再映射ANSI16并转换Indexed，在None将所有颜色变Reset；已有命名颜色在Basic保留。
+
+#### Scenario: Color quantization representation matrix
+- **WHEN** Basic级别下输入命名Red
+- **THEN** 保留Red；None级别下则返回Reset。
+
+证据：`crates/codegen/pager-render/src/theme/color_support.rs` — `pub fn quantize_color`。
+
+### Requirement: Image overlay readiness and displayed path
+图片弹窗计划 SHALL 仅在协议支持图片且preview已prepared时展示像素；显示路径只取source_path，不用session路径代替。
+
+#### Scenario: Image overlay readiness and displayed path
+- **WHEN** 有encoded_bytes但preview未prepared
+- **THEN** 选择元数据布局，不仅因内存图片存在就显示像素。
+
+证据：`crates/codegen/pager-render/src/render/image_overlay/geometry.rs` — `fn plan_image_preview`。
+
+### Requirement: Image overlay minimum geometry
+图片弹窗 SHALL 要求至少28列，像素模式至少8行、元数据模式至少6行；像素居中并预留路径footer，元数据框宽约75%且靠底。
+
+#### Scenario: Image overlay minimum geometry
+- **WHEN** 区域高度6且preview未ready
+- **THEN** 可构造元数据布局，但不满足像素模式最小高度。
+
+证据：`crates/codegen/pager-render/src/render/image_overlay/geometry.rs` — `fn overlay_geometry`。
+
+### Requirement: Image overlay escapes result boundary
+render_image_overlay SHALL 返回可选post-flush像素序列；返回None也可能已绘制元数据弹窗，不代表没有任何buffer变化。
+
+#### Scenario: Image overlay escapes result boundary
+- **WHEN** 成功渲染元数据模式
+- **THEN** 返回None像素序列，buffer内仍有边框与元数据。
+
+证据：`crates/codegen/pager-render/src/render/image_overlay.rs` — `pub fn render_image_overlay`。
+
+### Requirement: Image overlay metadata formatting
+图片元数据 SHALL 按MIME简称、可用尺寸、字节数、可选basename顺序以中点连接；PNG/JPEG/TIFF/GIF/WebP/BMP精确MIME映射，其余原样显示，KB及MB按1024进制且保留一位小数。
+
+#### Scenario: Image overlay metadata formatting
+- **WHEN** 图片1024字节且尺寸不可用
+- **THEN** 显示1.0 KB而不补造尺寸。
+
+证据：`crates/codegen/pager-render/src/render/image_overlay/content.rs` — `fn build_meta_line`。
+
+### Requirement: Image overlay path character truncation
+路径裁剪 SHALL 先按Unicode char数量预算，预算0为空、最多3时取开头，其他超长路径以三个点连接头尾；paint_path_line再按显示列裁剪整个Path标签。
+
+#### Scenario: Image overlay path character truncation
+- **WHEN** 路径包含宽字符且字符数量符合预算
+- **THEN** 仍可能在最终显示列裁剪中被截断，不保证尾部始终保留。
+
+证据：`crates/codegen/pager-render/src/render/image_overlay/content.rs` — `fn truncate_path_for_overlay`。
+
+### Requirement: Text preview overlay truncation and configuration
+文本preview SHALL 默认取首尾各3行、宽度比0.75、最小区域20乘5且无hint；内容超过2N行时插入省略行，实际高度可能进一步裁掉尾部。width_ratio及bottom_gap未作通用范围校验，调用方须提供有效布局。
+
+#### Scenario: Empty text preview
+- **WHEN** content.lines结果为空
+- **THEN** 返回None且不绘制弹窗。
+
+#### Scenario: Long text preview
+- **WHEN** 总行数超过两倍preview_lines
+- **THEN** 选择首N行、省略行及尾N行，但不保证受限高度下全部选中行可见。
+
+证据：`crates/codegen/pager-render/src/render/preview_overlay.rs` — `pub fn render_preview_overlay`。
+
+### Requirement: Markdown theme style conversion
+Markdown style SHALL 每次从Theme::current新建，Reset颜色转为未设置颜色，保留对应RGB/Indexed/ANSI颜色；modifier转换支持bold、italic、underline、dim、hidden、strikethrough，不转换reverse或blink。标题内层按六级颜色及modifier，外层标记dim并hidden。
+
+#### Scenario: Default color bridge
+- **WHEN** 主题字段为Reset
+- **THEN** anstyle颜色为None，而非指定黑白RGB。
+
+#### Scenario: Heading marker style
+- **WHEN** 构建标题外层样式
+- **THEN** 应用标题颜色及dim/hidden，内层使用独立级别modifier。
+
+证据：`crates/codegen/pager-render/src/theme/md_style.rs` — `pub fn style()`；`crates/codegen/pager-render/src/theme/md_style.rs` — `fn modifier_to_anstyle`。
+
+### Requirement: Built in theme palette and heading modifiers
+内置Theme构造器 SHALL 提供独立固定palette及语义样式字段，不在构造器内探测终端。Night/Day的H1至H5加粗、H6无附加modifier；Tokyo全部标题加粗；Rose的H2另加下划线且H4另加斜体，Oscura的H4另加斜体；terminal_default使用Reset背景，H1加粗下划线。
+
+#### Scenario: Day heading six
+- **WHEN** 构造GrowDay palette
+- **THEN** H6 modifier为空，不能用语法主题资源中的H6 bold替代该值。
+
+#### Scenario: Native canvas palette
+- **WHEN** 构造terminal_default
+- **THEN** bg_base为Reset，跟随终端默认背景。
+
+证据：`crates/codegen/pager-render/src/theme/grownight.rs` — `pub const fn grownight`；`crates/codegen/pager-render/src/theme/growday.rs` — `pub const fn growday`；`crates/codegen/pager-render/src/theme/rosepine.rs` — `pub const fn rosepine_moon`；`crates/codegen/pager-render/src/theme/oscura.rs` — `pub const fn oscura_midnight`；`crates/codegen/pager-render/src/theme/terminal_default.rs` — `pub const fn terminal_default`；`crates/codegen/pager-render/src/theme/tokyonight.rs` — `pub const fn tokyonight`。
+
+### Requirement: OSC11 reply parsing scope
+OSC11读取 SHALL 要求完整BEL或ST尾及有效UTF8，RGB解析寻找rgb:后前三个分隔通道，不验证完整OSC11信封；通道trim后以u16十六进制解析，长度大于2取高字节，否则直接取值。
+
+#### Scenario: OSC11 reply parsing scope
+- **WHEN** 通道为fff
+- **THEN** 取高字节得到15，不扩展成255。
+
+证据：`crates/codegen/pager-render/src/theme/osc11.rs` — `fn parse_osc11_rgb`。
+
+### Requirement: OSC11 luminance polarity
+OSC11极性分类 SHALL 对sRGB作gamma逆变换后按0.2126/0.7152/0.0722计算亮度，低于0.5为Dark，否则Light。
+
+#### Scenario: OSC11 luminance polarity
+- **WHEN** RGB为全黑
+- **THEN** 返回Dark。
+
+证据：`crates/codegen/pager-render/src/theme/osc11.rs` — `fn classify_luminance`。
+
+### Requirement: OSC11 terminal mode restoration scope
+OSC11探测 SHALL 先检查stdin TTY并发送查询，再在Unix读取时保存termios并清除ICANON/ECHO/ISIG/IEXTEN，退出时尝试恢复原快照；恢复错误不返回给调用方，非Unix读取返回None。
+
+#### Scenario: OSC11 terminal mode restoration scope
+- **WHEN** Unix读取完成或提前返回
+- **THEN** guard尝试恢复进入该读取前的termios，不调用crossterm全局disable_raw_mode。
+
+证据：`crates/codegen/pager-render/src/theme/osc11.rs` — `fn read_osc_response_with_fd`。
+
+### Requirement: Appearance animation conversion bounds
+RawAnimationConfig转换 SHALL 将fps夹到1至60、wave_rows至少1，并保留show_fps；不将该局部限幅推导为所有配置字段均受范围校验。
+
+#### Scenario: Appearance animation conversion bounds
+- **WHEN** raw fps为0且wave_rows为0
+- **THEN** 转换得到fps1、wave_rows1。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `impl From<RawAnimationConfig>`。
+
+### Requirement: Manual fold preference persistence
+persist_respect_manual_folds SHALL 在user grow home缺失时拒绝写入；持有进程内锁读取并更新scrollback.scroll.respect_manual_folds，临时写入后rename替换，不提供跨进程锁或fsync保证。
+
+#### Scenario: Manual fold preference persistence
+- **WHEN** 原pager.toml内容无法解析
+- **THEN** 返回InvalidData，不把坏文件直接重写为默认配置。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `pub fn persist_respect_manual_folds`。
+
+### Requirement: Manual fold config table shape
+manual folds配置更新 SHALL 要求scrollback与scrollback.scroll为普通可修改table，不兼容的节点形状返回错误，保留其他可解析文档内容。
+
+#### Scenario: Manual fold config table shape
+- **WHEN** scrollback字段是非table值
+- **THEN** 返回错误，不强制转换并覆盖该节点。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `fn upsert_respect_manual_folds`。
+
+### Requirement: Gboom overlay chrome and health thresholds
+GBOOM弹窗 SHALL 在区域小于30列或8行时不绘制，否则居中使用约90%区域并调暗背景；只绘制边框标题HUD，像素帧由调用方发送。HP大于60用绿、大于30用黄、其余用红，控制提示仅在剩余宽度足够时显示。
+
+#### Scenario: Minimum game overlay
+- **WHEN** 区域为29列8行
+- **THEN** 返回None，不绘制弹窗。
+
+#### Scenario: Critical health boundary
+- **WHEN** HP恰为30
+- **THEN** HUD使用红色而非黄色。
+
+证据：`crates/codegen/pager-render/src/render/gboom_overlay.rs` — `pub fn render_gboom_overlay`。
+
+### Requirement: Appearance optional color parsing
+OptionalColor SHALL 接受三元素u8 RGB数组或字符串；字符串trim并小写，none/null为无颜色，其他按十六进制或固定命名表解析；命名色不随当前Theme变化。
+
+#### Scenario: Appearance optional color parsing
+- **WHEN** 当前使用Day主题且配置BLUE
+- **THEN** 解析固定命名表RGB，不从Day palette查询BLUE。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `pub enum OptionalColor`。
+
+### Requirement: Appearance optional color serialization loss
+OptionalColor序列化 SHALL 将None写为none、RGB写数组、Indexed转固定RGB数组，其他Color变体写unknown；不保证所有可解析命名色或Color身份完整往返。
+
+#### Scenario: Appearance optional color serialization loss
+- **WHEN** BLACK解析为Color::Black后序列化并重读
+- **THEN** 序列化为unknown，后续按命名色解析会失败。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `impl Serialize for OptionalColor`。
+
+### Requirement: Appearance optional color quantization access
+OptionalColor::to_option SHALL 对Some颜色执行全局quantize，而to_option_raw保留原始Color；None保持None，不等同Some Reset。
+
+#### Scenario: Appearance optional color quantization access
+- **WHEN** 颜色能力为None且OptionalColor包含RGB
+- **THEN** to_option返回Some Reset，to_option_raw仍返回原RGB。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `pub fn to_option(&self)`。
+
+### Requirement: Scroll speed environment parsing order
+scroll speed首次读取 SHALL 先直接解析未trim的GROW_SCROLL_SPEED为u8，有效后夹到1至100，无效回有效配置；超出u8范围不等同夹到100。
+
+#### Scenario: Scroll speed environment parsing order
+- **WHEN** 环境值为300或带空白数字
+- **THEN** 环境解析失败，回配置而非直接取100。
+
+证据：`crates/codegen/pager-render/src/appearance/cache.rs` — `pub fn load_scroll_speed`。
+
+### Requirement: Scroll mode environment fallback
+scroll mode首次读取 SHALL 先trim环境值并严格解析，无效回配置；配置字符串不trim，仍无效才Auto。
+
+#### Scenario: Scroll mode environment fallback
+- **WHEN** 环境值无效但配置为wheel
+- **THEN** 采用Wheel，不直接回Auto。
+
+证据：`crates/codegen/pager-render/src/appearance/cache.rs` — `pub fn load_scroll_mode`。
+
+### Requirement: Appearance cache prime split behavior
+prime SHALL 用传入UiConfig覆盖compact、timestamps、timeline、page flip、combine、simple及selection，其余设置调用各自lazy load；已设置的lazy项保留，非一次统一复制或读盘。
+
+#### Scenario: Appearance cache prime split behavior
+- **WHEN** 调用prime前scroll speed已设置
+- **THEN** lazy load保留该speed，但显式UiConfig覆盖组重新赋值。
+
+证据：`crates/codegen/pager-render/src/appearance/cache.rs` — `pub fn prime(ui`。
+
+### Requirement: Permission cursor environment default sentinel
+默认权限光标首次加载 SHALL 将环境字符串解析后过滤AlwaysAllowAllSessions值，再回有效配置；因此显式always_allow_all_sessions环境值和未知字符串均不能据此压过磁盘偏好。
+
+#### Scenario: Permission cursor environment default sentinel
+- **WHEN** 环境指定always_allow_all_sessions而配置为reject
+- **THEN** 使用配置Reject。
+
+证据：`crates/codegen/pager-render/src/appearance/permission_cursor.rs` — `pub fn load_default_selected_permission`。
+
+### Requirement: Permission cursor unmatched sticky fallback
+resolve_initial_cursor SHALL 在非默认sticky存在时直接使用sticky；无匹配普通选项时回global选项再索引0，不再尝试配置偏好，空选项列表也返回0。
+
+#### Scenario: Permission cursor unmatched sticky fallback
+- **WHEN** sticky在选项中不存在但配置偏好存在
+- **THEN** 不重新匹配配置，按global或0回退。
+
+证据：`crates/codegen/pager-render/src/appearance/permission_cursor.rs` — `pub fn resolve_initial_cursor`。
+
+### Requirement: System appearance watcher lifecycle
+SystemAppearanceWatcher SHALL 仅在start_if_auto参数为true时创建，先同步detect作为初始值，再在异步循环sleep后同步detect，仅Option外观变化时send；不在循环重新读取auto开关，Drop abort任务但不能立即中断正在执行的同步detect。
+
+#### Scenario: Disabled auto watcher
+- **WHEN** start_if_auto传入false
+- **THEN** 返回None，不启动轮询任务。
+
+#### Scenario: Unchanged appearance
+- **WHEN** 新探测结果与当前Option值一致
+- **THEN** 不发送watch更新。
+
+#### Scenario: Auto preference changes after startup
+- **WHEN** watcher已启动但其他位置关闭auto
+- **THEN** 该对象不自行检查新偏好停止，调用方需管理其生命周期。
+
+证据：`crates/codegen/pager-render/src/theme/system_appearance.rs` — `pub fn start_if_auto`。
+
+### Requirement: Appearance scroll conversion limits
+ScrollConfig转换 SHALL 仅将min_page_fraction上限限制为100，margin与follow/fold布尔字段按raw传递。
+
+#### Scenario: Appearance scroll conversion limits
+- **WHEN** raw min_page_fraction超过100
+- **THEN** 结果为100，不改变margin。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `impl From<RawScrollConfig>`。
+
+### Requirement: Appearance execute preview conversion
+ExecuteConfig转换 SHALL 将first_lines和last_lines至少设为1，缺少running_accent时使用当前Theme accent_running，其余开关及header style转换保留。
+
+#### Scenario: Appearance execute preview conversion
+- **WHEN** running_accent为None且first_lines为0
+- **THEN** 使用主题accent并将first_lines设为1。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `impl From<RawExecuteConfig>`。
+
+### Requirement: Appearance edit optional defaults
+EditBlockConfig转换 SHALL 对未指定line_summary取true、expanded_by_default取false、hunk_separator取省略号；显式值优先，不把缺省与false混同。
+
+#### Scenario: Appearance edit optional defaults
+- **WHEN** raw未提供三个可选字段
+- **THEN** 转换得到true、false及…分隔符。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `impl From<RawEditBlockConfig>`。
+
+### Requirement: Appearance thinking conversion and fixed flags
+ThinkingConfig转换 SHALL 将bg_blend上限100再除100、truncated_lines至少1，缺少accent使用主题gray_dim；body_dim_italic和collapsed_expand_hint固定false。
+
+#### Scenario: Appearance thinking conversion and fixed flags
+- **WHEN** raw bg_blend超过100且truncated_lines为0
+- **THEN** 得到blend1.0及1行，同时两个固定标志为false。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `impl From<RawThinkingConfig>`。
+
+### Requirement: Gboom crosshair target selection
+准星目标 SHALL 在alive敌人中筛选前向投影大于0、垂距不超过HIT_WIDTH且LOS通畅者，取前向距离最小目标，同距保留枚举顺序；无额外射程上限。
+
+#### Scenario: Gboom crosshair target selection
+- **WHEN** 两个合格目标前向距离相同
+- **THEN** 保留先枚举者。
+
+证据：`crates/codegen/pager-render/src/gboom/game.rs` — `pub fn target_in_crosshair`。
+
+### Requirement: Gboom damage and death transition
+射击 SHALL 在无冷却时设置冷却与枪口闪光，无命中也设置；命中扣基础伤害加随机项，HP耗尽进入Dying并立即增加kills，否则进入Pain。
+
+#### Scenario: Gboom damage and death transition
+- **WHEN** 最后敌人刚进入Dying
+- **THEN** kills已增加，但外层Won阶段仍需等待死亡动画。
+
+证据：`crates/codegen/pager-render/src/gboom/game.rs` — `fn try_fire`。
+
+### Requirement: Gboom game victory predicate
+Game::won SHALL 仅比较kills与敌人总数，dead仅比较玩家HP不大于0；Game step本身不依这两个谓词自动停止。
+
+#### Scenario: Gboom game victory predicate
+- **WHEN** kills等于敌人总数但尸体动画未结束
+- **THEN** Game::won为true，不等同外层已切Won阶段。
+
+证据：`crates/codegen/pager-render/src/gboom/game.rs` — `pub fn won`。
+
+### Requirement: Gboom enemy state transitions
+敌人 SHALL 从Idle在视距内且LOS成立时进入Chasing，近战范围内冷却结束进入Attacking；蓄力结束回Chasing并设置冷却，仅按扩大后的距离判断伤害，不复查LOS。Pain到期回Chasing，Dying到期Dead，Dead不再行动；本step总伤害最后统一扣玩家HP且下限0。
+
+#### Scenario: Attack expires outside hit distance
+- **WHEN** Attacking计时到期但玩家已离开命中距离
+- **THEN** 不造成伤害，仍回Chasing并设置冷却。
+
+#### Scenario: Dying enemy expires
+- **WHEN** 死亡动画计时耗尽
+- **THEN** 转Dead，后续step跳过该敌人。
+
+证据：`crates/codegen/pager-render/src/gboom/game.rs` — `fn step_imps`。
+
+### Requirement: Frame draw sequencing and idle discard
+draw_frame SHALL 先排同步更新开始、autoresize并渲染，设置链接后flush并交换buffer；无变化、无post-flush且无cursor动作时丢弃当前writer缓冲，否则发送post-flush、cursor、同步结束并flush。函数忽略这些I/O错误，flush_with_links错误按无变化处理，不返回整帧投递确认。
+
+#### Scenario: Completely idle frame
+- **WHEN** 内容未变且无post-flush及cursor动作
+- **THEN** discard未提交缓冲并返回，不提交仅含同步控制序列的空帧。
+
+#### Scenario: Frame flush error
+- **WHEN** flush_with_links返回错误
+- **THEN** 按false继续并swap buffers，不通过返回值向调用方报告该错误。
+
+证据：`crates/codegen/pager-render/src/render/draw.rs` — `pub fn draw_frame`。
+
+### Requirement: Appearance layout padding and compact projection
+布局转换 SHALL 仅把左右 outer horizontal padding 提升到至少 1，保留 outer_vpad 和 block padding；compact 投影返回外部垂直 padding 0、左右水平 padding 1，非 compact 返回配置值。默认外部垂直 padding 为 1，其余四项为 2。
+
+#### Scenario: Zero padding conversion
+- **WHEN** raw layout 的五项 padding 均为 0
+- **THEN** 左右外部水平 padding 变为 1，其余仍为 0。
+
+#### Scenario: Compact projection
+- **WHEN** 对任意布局请求 compact 有效 padding
+- **THEN** 外部垂直为 0，左右水平为 1，不修改原配置。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `impl LayoutConfig`；`crates/codegen/pager-render/src/appearance/config.rs` — `impl From<RawLayoutConfig>`。
+
+### Requirement: Appearance terminal defaults and runtime initialization
+RawAppearanceConfig 转换 SHALL 将未设置的 minimal_live_rows 和 minimal_max_commit_rows 分别解析为 10 和 2000，显式值原样保留；复制 minimal_collapse_thinking 与 alt_screen。转换初始化 prompt.compact=false、show_timestamps=true、show_timeline=UiConfig::SHOW_TIMELINE_DEFAULT 和默认 turn_status；这些初始化不代表后续持久化加载结果。
+
+#### Scenario: Absent versus explicit zero rows
+- **WHEN** 行数选项分别为 None 或 Some(0)
+- **THEN** 缺省分别为 10/2000，显式零保持为零，本转换不施加下限。
+
+#### Scenario: Fresh appearance runtime state
+- **WHEN** 将 raw appearance 转为运行时配置
+- **THEN** compact 初始 false，timestamps 初始 true，timeline 取共享默认值。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `impl From<RawAppearanceConfig>`；`crates/codegen/pager-render/src/appearance/config.rs` — `impl Default for RawTerminalConfig`。
+
+### Requirement: Appearance scrollback display optional conversion
+scrollback display 转换 SHALL 对缺省项使用 dim_accent=0.5、group_selection_split=true、highlight_overlays_border=false、expandable_indicator=true、expandable_indicator_running=true、indicator_char=›、selection_buttons=false、sticky_headers=true、tab_width=4、group_max_visible=10；collapsed_accent_char 缺省取当前 glyph helper。显式值直接保留，不在该转换中裁剪数值或限制字符串长度。
+
+#### Scenario: Missing optional display values
+- **WHEN** 所有 optional display 字段未设置
+- **THEN** 按各字段独立默认值填充，collapsed accent 通过 glyph helper 取得。
+
+#### Scenario: Explicit display values
+- **WHEN** 提供 tab_width=0、group_max_visible=0 或空 indicator 字符串
+- **THEN** 转换保留这些值，不以默认值替换。
+
+证据：`crates/codegen/pager-render/src/appearance/config.rs` — `impl From<RawAppearanceConfig>`。
+
+### Requirement: Clipboard write legs execute without success short circuit
+clipboard_write_with_route SHALL 按 native、tmux buffer、OSC52 顺序同步执行所有已启用路径，分别记录结果；前一路径成功或失败均不跳过后续已启用路径，最终反馈由收集到的结果另行判定。
+
+#### Scenario: Native write succeeds
+- **WHEN** native 写入成功且 tmux 与 OSC52 路由均启用
+- **THEN** 仍尝试 tmux buffer 和 OSC52，不能将 native 成功解释为仅写入一个目标。
+
+#### Scenario: Disabled route leg
+- **WHEN** 某条路由未启用
+- **THEN** 跳过该路径，保留其初始失败/未成功标志。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `fn clipboard_write_with_route`。
+
+### Requirement: Clipboard backup path and write boundary
+复制备份路径 SHALL 优先采用 trim 后非空的 GROW_COPY_FILE 并展开 tilde，否则使用 user_grow_home/last-copy.txt；无法解析路径时返回 NotFound。当前 Unix 写入采用 create/truncate、设置 0600 后 write_all；备用入口递归创建缺失父目录时使用 0700，通用显式路径入口使用 create_dir_all。当前实现不提供原子替换、符号链接拒绝或失败时保留旧内容的保证。
+
+#### Scenario: Empty override
+- **WHEN** GROW_COPY_FILE 仅含空白
+- **THEN** 回退到 grow home，无法取得 home 时备份报 NotFound。
+
+#### Scenario: Existing Unix copy file
+- **WHEN** 向已有文件写入新内容
+- **THEN** 先打开并截断，再设为 0600 并写入；写入失败不能保证旧内容仍在。
+
+#### Scenario: Generic explicit path
+- **WHEN** 直接调用 write_text_to_copy_file
+- **THEN** 展开 tilde 并创建父目录，但不使用备用入口的 0700 DirBuilder。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn default_copy_fallback_path`；`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn write_text_to_copy_file`；`crates/codegen/pager-render/src/clipboard/mod.rs` — `fn write_owner_only`；`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn write_copy_fallback`。
+
+### Requirement: Bracketed paste attachment probe size and line gates
+paste_payload_needs_clipboard_attachment_probe SHALL 对空 payload 返回 true；trim 后无换行且以小写 http:// 或 https:// 开头的文本返回 false，其余 trim 后 UTF-8 长度至少 4096 字节返回 false；剩余文本仅在至多四行或含 :// 时返回 true。URL 分支只检查前缀和换行，不验证完整 URL。
+
+#### Scenario: Multibyte payload reaches byte limit
+- **WHEN** trim 后文本字符数少于 4096 但 UTF-8 字节数达到 4096
+- **THEN** 跳过附件探测。
+
+#### Scenario: Long caption with URI marker
+- **WHEN** trim 后少于 4096 字节、超过四行且含 ://
+- **THEN** 允许附件探测；同样行数但无该标记则跳过。
+
+#### Scenario: Whitespace-only bracketed paste
+- **WHEN** payload 非空但 trim 后为空
+- **THEN** 按至少一行处理并允许附件探测。
+
+证据：`crates/codegen/pager-render/src/clipboard/mod.rs` — `fn lone_http_url_trimmed`；`crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn paste_payload_needs_clipboard_attachment_probe`。
+
+### Requirement: Dropped path token decoding boundary
+拖放 token SHALL trim 并去除一对匹配 ASCII 引号；file:// 通过 URL 解析与 to_file_path 解码，失败即拒绝。其他路径仅反转义反斜杠后一个字符，末尾单个反斜杠保留；Windows drive 或 UNC 形式不反转义。此函数不展开 tilde 或环境变量。
+
+#### Scenario: Windows separators
+- **WHEN** token 使用 drive-letter 或 UNC 路径
+- **THEN** 保留反斜杠分隔符，不当作 shell escape 删除。
+
+#### Scenario: Home anchor is not expansion
+- **WHEN** token 为 ~/image.png
+- **THEN** 产生含字面 ~ 的 PathBuf，后续存在检查不隐式展开 home。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `fn token_to_path`；`crates/codegen/pager-render/src/prompt_images.rs` — `fn shell_unescape`；`crates/codegen/pager-render/src/prompt_images.rs` — `fn strip_matching_quotes`。
+
+### Requirement: Dropped image and nonimage path distinction
+拖放路径 SHALL 先要求 file:// 或绝对/tilde/Windows anchor，拒绝空路径、/ 和包含 NUL/CR/LF 的解码路径。扩展名受支持且存在可读非空文件、字节 MIME 可识别、尺寸可解码时作为 Image 并保留输入路径；其他候选中 bare path 必须存在，file URL 可指向缺失目标，NonImage 尽量 canonicalize，失败保留原路径。
+
+#### Scenario: Missing file URL
+- **WHEN** 有效 file URL 指向不存在且非根的目标
+- **THEN** 返回 NonImage 路径；等价 bare path 不存在时拒绝。
+
+#### Scenario: Image symbolic link
+- **WHEN** 输入路径是可读取并通过图片检查的符号链接
+- **THEN** Image.source_path 保留输入路径，不走 NonImage 的 canonicalize 分支。
+
+#### Scenario: Encoded newline
+- **WHEN** file URL 解码后路径含 CR 或 LF
+- **THEN** 拒绝路径，不进入图片或 NonImage 分类。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `fn try_read_dropped_path`；`crates/codegen/pager-render/src/prompt_images.rs` — `fn read_image_at_path`。
+
+### Requirement: Session media directory identity prerequisite
+session_images_dir 与 session_mermaid_dir SHALL 在没有 SessionId 时返回 None；有 SessionId 时把该 ID 和 cwd 的 lossy 字符串交给 session_dir，再分别追加 images 或 mermaid；两个 helper 仅派生路径，不创建目录。
+
+#### Scenario: No session identity
+- **WHEN** SessionId 为 None
+- **THEN** 两种媒体目录均为 None，不回退到临时缓存路径。
+
+#### Scenario: Known session identity
+- **WHEN** 传入 SessionId 和 cwd
+- **THEN** 分别返回同一会话目录下 images 与 mermaid 路径，不通过此调用写磁盘。
+
+证据：`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn session_images_dir`；`crates/codegen/pager-render/src/prompt_images.rs` — `pub fn session_mermaid_dir`。
+
+### Requirement: Theme helper styles preserve native foreground
+Theme 辅助样式 SHALL 让 fg 和 primary 直接设置给定颜色或 text_primary，不额外量化；muted/dim 在对应 gray/gray_dim 为 Reset 时仅添加 DIM 而不设置前景，否则仅设置该颜色。link_style 设置 link_fg 并添加 UNDERLINED；bold 仅添加 BOLD。
+
+#### Scenario: Native muted color
+- **WHEN** gray 或 gray_dim 为 Reset
+- **THEN** 相应 helper 产生 DIM modifier，前景保持未设置。
+
+#### Scenario: Explicit gray color
+- **WHEN** gray 为 RGB 或命名颜色
+- **THEN** muted 使用显式前景，不额外添加 DIM。
+
+证据：`crates/codegen/pager-render/src/theme/tokyonight.rs` — `pub const fn muted`；`crates/codegen/pager-render/src/theme/tokyonight.rs` — `pub const fn dim`；`crates/codegen/pager-render/src/theme/tokyonight.rs` — `pub fn link_style`；`crates/codegen/pager-render/src/theme/tokyonight.rs` — `pub const fn primary`；`crates/codegen/pager-render/src/theme/tokyonight.rs` — `pub const fn bold`。
+
+### Requirement: Theme diff and polarity helper predicates
+diff_uses_line_fg SHALL 仅在 diff_delete_bg 与 diff_insert_bg 同时为 Reset 时返回 true；ghost_text_style 设置 gray_dim 和 ITALIC，不通过 dim helper 添加 DIM。is_dark 对 RGB 或转换后的 Indexed 颜色按 classify_luminance 分类，对命名颜色和 Reset 直接返回 true。
+
+#### Scenario: Only one diff background resets
+- **WHEN** 删除背景为 Reset 而插入背景不是 Reset
+- **THEN** diff_uses_line_fg 返回 false。
+
+#### Scenario: Named background polarity
+- **WHEN** bg_base 是 White 等命名色或 Reset
+- **THEN** is_dark 返回 true；此 helper 不解析命名颜色亮度。
+
+#### Scenario: Native ghost style
+- **WHEN** gray_dim 为 Reset
+- **THEN** ghost text 显式设置 Reset 前景并加 ITALIC，不添加 DIM。
+
+证据：`crates/codegen/pager-render/src/theme/mod.rs` — `pub fn diff_uses_line_fg`；`crates/codegen/pager-render/src/theme/mod.rs` — `pub fn ghost_text_style`；`crates/codegen/pager-render/src/theme/mod.rs` — `pub fn is_dark`。
+
+### Requirement: Gboom map collision and wall visibility
+Map SHALL 将越界 cell 视为墙，非零 cell 视为 solid；blocked 检查中心加减 radius 形成的轴对齐方框所覆盖的全部格子，并非精确圆形相交。los 使用格子 DDA 仅检查墙，不检查敌人；距离小于 1e-4 直接可见，起点格不先检查，到达目标距离即返回可见。
+
+#### Scenario: Outside map
+- **WHEN** 查询负坐标或超出宽高的 cell
+- **THEN** 返回墙材质 1，solid 为 true。
+
+#### Scenario: Coincident visibility points
+- **WHEN** 两个点距离小于 1e-4
+- **THEN** 直接返回 true，不先检查点所在格是否为墙。
+
+证据：`crates/codegen/pager-render/src/gboom/game.rs` — `pub fn cell`；`crates/codegen/pager-render/src/gboom/game.rs` — `fn blocked`；`crates/codegen/pager-render/src/gboom/game.rs` — `pub fn los`。
+
+### Requirement: Gboom player integration and simulation ordering
+Game.step SHALL 先增加 time，再更新玩家，消费一次 queued fire，最后更新敌人。玩家移动先衰减 hold timers，再归一化 forward/strafe 目标向量，使对角目标速度不超过直行；移动和旋转分别以 0.08/0.07 秒时间常数指数平滑，先积分角度再按 X、Y 分轴检查终点碰撞。bob 按速度累计，即使位置被墙阻止也继续；本 step 不校验或限幅传入 dt。
+
+#### Scenario: Diagonal held movement
+- **WHEN** 同时持续按前进与横移
+- **THEN** 目标向量先归一化，再以 3.3 tiles/s 设置平移目标速度。
+
+#### Scenario: Wall stops translation
+- **WHEN** 分轴终点碰撞检查阻止位置更新但速度仍非零
+- **THEN** bob 仍随速度和 dt 增加；碰撞不把对应速度直接归零。
+
+#### Scenario: Queued shot after movement
+- **WHEN** 本步开始时 fire_queued 为 true
+- **THEN** 先完成玩家积分，再清除队列标记并尝试开火，最后推进敌人。
+
+证据：`crates/codegen/pager-render/src/gboom/game.rs` — `pub fn step`；`crates/codegen/pager-render/src/gboom/game.rs` — `fn step_player`。
+
+
+### Requirement: Shell extension method result envelope
+ExtMethodResult SHALL 始终序列化result字段，None为null；error=None省略。success设置Some结果无error，failure设置null结果和Display字符串error，partial同时保留结果及字符串error，from_result按Ok/Err选择。公开error类型为任意JSON Value，不在结构层限定字符串或ExtMethodError，也不强制result/error互斥。ExtMethodError::with_data将Serialize数据转Value，失败静默转None并省略data；code/message保持调用方文本。to_ext_response先转Value再RawValue并创建ACP ExtResponse，序列化失败返回anyhow错误，不把业务failure变成ACP协议错误。Empty序列化为空对象；这些类型不负责turn停止原因分类。
+
+#### Scenario: Partial result
+- **WHEN** 调用partial(value,error)
+- **THEN** 响应同时含result和字符串error。
+
+#### Scenario: Business failure response
+- **WHEN** failure结果成功转为ExtResponse
+- **THEN** JSON中result为null且error为字符串，仍是ExtResponse。
+
+源码证据：
+- `crates/codegen/shell/src/session/result.rs` — `impl<T: Serialize> ExtMethodResult<T>`。
+- `crates/codegen/shell/src/session/result.rs` — `impl ExtMethodError`。
+- `crates/codegen/shell/src/session/result.rs` — `mod tests`。
+
+
+### Requirement: Shell transient context pressure notification
+emit_context_pressure_update SHALL 构造SessionInfoUpdate，其内层meta为grow/contextPressure=true，通知顶层meta包含原样projected_tokens作为totalTokens、Utc当前毫秒agentTimestampMs及transient=true。经emit_transient_notification记录日志后按gateway_enabled的Relaxed值决定fire-and-forget发送，不入持久化队列、不追加模型上下文，也不在该路径补event ID；不更新summary标题或活动时间。该helper不验证token估算来源，不提供客户端接收确认。
+
+#### Scenario: Muted pressure update
+- **WHEN** gateway_enabled=false时调用压力更新
+- **THEN** 可记录日志但不转发，不持久化。
+
+#### Scenario: Transient payload
+- **WHEN** 传入projected_tokens构造压力通知
+- **THEN** totalTokens保留传入u64，使用独立内层contextPressure标记。
+
+源码证据：
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) fn emit_context_pressure_update`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) fn emit_transient_notification`。
+
+
+### Requirement: Shell Grow notification metadata and hooked forwarding
+build_grow_notification SHALL 生成eventId/agentTimestampMs后extend extra_meta，同名调用方键覆盖内置字段。普通send_with_extra_meta先关闭rewind窗口，再构造通知、尝试普通持久化入队并forward，入队失败忽略。forward对notification_hook_for_update匹配的更新先await Notification hook，hook生命周期错误记录并阻止live转发，已入队持久化不回滚；unhooked仅尝试JSON编码及fire-and-forget，无gateway_enabled检查，编码失败静默跳过。临时Grow入口移除eventId并标transient=true，不入持久化队列，但仍走hooked forward；passive transient走unhooked且不关闭rewind窗口，hook transient先关闭窗口再调用passive，避免递归hook。上述方法返回不代表客户端收到。 durable passive发送复制已盖meta的durable通知，仅替换live update，先append_grow_notification_exact成功再hooked forward，保留同event ID；audit与persist-only durable不forward。exact循环重发同一通知clone，retry_exact允许时固定等待100ms，无重试次数上限，首个及每10个失败告警，计数饱和；永久错误直接返回。追加等待及重试等待均biased优先响应durable_ui_cancel并返回NotCommitted(Interrupted)，此包装不保证之前入队的写入未完成。passive没有关闭rewind窗口，forward若因hook失败而抑制发送也不改变其最终Ok返回。
+
+#### Scenario: Metadata collision
+- **WHEN** extra_meta包含eventId
+- **THEN** 调用方值覆盖新生成eventId。
+
+#### Scenario: Hook failure after enqueue
+- **WHEN** 普通通知已入队但Notification hook返回错误
+- **THEN** live通知被阻止，不撤销持久化入队。
+
+#### Scenario: Transient passive snapshot
+- **WHEN** 调用send_transient_passive_notification
+- **THEN** 删除eventId、标记transient并unhooked转发，不持久化或关闭rewind窗口。
+
+源码证据：
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) fn build_grow_notification`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) async fn forward_grow_notification`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `fn forward_grow_notification_unhooked`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) fn send_transient_passive_notification`。
+
+- `crates/codegen/shell/src/session/actor/updates.rs` — `async fn append_grow_notification_exact`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) async fn send_grow_passive_notification`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) async fn persist_grow_audit_notification`。
+
+### Requirement: Shell outbound event enqueue metadata and edit path capture
+
+send_update_full SHALL 先关闭rewind窗口；仅ToolCall且kind=Edit时记录非空location路径，绝对路径须能strip_prefix cwd，其他绝对路径跳过，相对路径直接按lossy字符串记录，不在此canonicalize或排除父目录组件。随后分别读取projected tokens与notification timing，生成eventId及默认当前UTC毫秒或显式时间覆盖；外层meta包含totalTokens/eventId/agentTimestampMs，并按可用性加入promptId、streamStartMs、turnStartMs、updateType、updateParams、chunkId及仅true时的isReplay。通知发往event_tx，发送错误忽略；返回不确认持久化或gateway送达。send_buffered_grow_update关闭rewind窗口后以meta=None进入同一事件队列。模式更新enqueue入口使用build_notification_meta在入队前生成ID和时间，内层meta包含当前grow/behavior、grow/planPhase及可为null的grow/behaviorChange；其current_mode_id来自参数，行为标签和phase分别锁读，不构成一次原子快照，且该入口不关闭rewind窗口。
+
+#### Scenario: Edit location outside cwd
+- **WHEN** Edit ToolCall含cwd外绝对路径及非空相对路径
+- **THEN** 前者跳过，后者直接记录，不做文件系统规范化。
+
+#### Scenario: Enqueue failure
+- **WHEN** event_tx接收端已关闭
+- **THEN** 发送错误被忽略，方法返回不表示已持久化。
+
+#### Scenario: Mode event metadata
+- **WHEN** 调用普通模式更新enqueue入口
+- **THEN** 外层已有ID和时间，内层behaviorChange为null，进入事件队列。
+
+#### Scenario: Buffered Grow metadata
+- **WHEN** 调用send_buffered_grow_update
+- **THEN** 关闭rewind窗口并以无meta通知入队。
+
+源码证据：
+- `crates/codegen/shell/src/session/actor/updates.rs` — `async fn send_update_full`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) async fn send_buffered_grow_update`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `fn enqueue_current_mode_update_inner`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `async fn behavior_current_mode_update_rides_event_pipeline_in_id_order`。
+
+### Requirement: Shell inbound Grow persistence and subagent hook ordering
+
+handle_grow_session_notification SHALL 将非Object meta丢弃并调用ensure_event_id_meta，再无条件尝试普通Grow持久化入队，忽略队列发送失败。SubagentProgress仅跳过debug日志，在持久化入队之后返回Ok；不在此累计其上下文压力为usage。SubagentSpawned在入队之后await SubagentStart observe hook，携带subagent cause、type及Some description；hook错误传播且不撤销先前入队。hook成功后，仅goal_id为Some且等于当前Goal身份并且goal_runtime_available时，以当前goal_tokens_used触发GoalUpdated。该处理函数本身不转发原通知到gateway，不核验通知session_id等于actor身份。persist_update_only使用actor session_id及新meta入普通持久化队列，发送失败只告警，不等待ack或发送UI。 ensure_event_id_meta经shell util重导出shell-base实现，任意非null eventId均原样保留且立即返回，不校验字符串或补时间；缺失或null ID才生成，agentTimestampMs仅在键不存在时补入，已有null时间也保留。
+
+#### Scenario: Progress enqueue
+- **WHEN** 收到SubagentProgress
+- **THEN** 仍尝试普通持久化入队，随后返回Ok。
+
+#### Scenario: Spawn hook failure
+- **WHEN** SubagentSpawned已入队且hook失败
+- **THEN** 传播错误，不撤销队列中的通知。
+
+#### Scenario: Unowned spawn
+- **WHEN** SubagentSpawned无goal_id或与当前Goal不匹配
+- **THEN** 不触发该分支的GoalUpdated。
+
+源码证据：
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) async fn handle_grow_session_notification`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) fn persist_update_only`。
+- `crates/codegen/shell/src/session/actor/updates.rs` — `async fn actor_persisted_grow_lines_carry_event_id`。
+
+- `crates/codegen/shell/src/util/mod.rs` — `pub use shell_base::util::*`。
+- `crates/codegen/shell-base/src/util/event_id.rs` — `pub fn ensure_event_id_meta`。
+
+### Requirement: Shell response completion usage projection
+
+response_completed_update SHALL 纯构造ResponseCompleted，不发送或持久化。usage存在时，input_tokens按prompt_tokens依次saturating_sub cached_prompt_tokens及cache_creation_prompt_tokens后转u64，output/cache_read/cache_creation/reasoning分别复制对应计数并转u64；usage缺失则保持None，不补零对象。message_id、raw_stop_reason及stop_sequence直接复制，signature仅从存在的native_continuation调用signature取得。该转换不验证计数相加关系，也不执行费用累计或Goal归属。
+
+#### Scenario: Cache counts exceed prompt
+- **WHEN** cached及cache creation合计超过prompt tokens
+- **THEN** uncached input饱和为0，其余计数仍独立保留。
+
+#### Scenario: Missing usage
+- **WHEN** response.usage为None
+- **THEN** ResponseCompleted.usage为None。
+
+源码证据：
+- `crates/codegen/shell/src/session/actor/updates.rs` — `pub(super) fn response_completed_update`。
+
+### Requirement: Shell prompt usage wire and headless projection
+
+PromptUsage SHALL 从ledger复制totals与每model计量，以main_loop_model_calls作为numTurns，保留ledger incomplete。project_from_ledger在无ledger且incomplete时返回默认计数的不完整报告，两者均无则None；for_error_path有ledger时始终投影为incomplete。整体incomplete或totals cost partial时清除totals及全部model cost ticks，totals partial还将model partial设true。ACP inputTokens保持完整prompt计数，costMissingCalls只反序列化不序列化。headless input按完整input依次饱和扣减cache read及cache creation，保留其他独立桶和既有total，不验证桶合计。headless在incomplete且is_token_empty时只设置usage_is_incomplete并返回；token empty仅检查model_calls、input、output、cache read、cache creation及model_usage空，忽略reasoning、duration、numTurns与cost。正常路径写usage、num_turns，可信总cost同时写float USD及精确ticks，换算为ticks除1e10；整体partial或incomplete禁止写cost，每model还受自身partial限制。modelUsage使用精简camelCase字段，无reasoning或duration。函数在传入JSON上按条件赋值，不清除预先存在的cost、modelUsage或incomplete字段，因此省略写入不等于删除旧字段。 attach_result_usage_fail_closed先将输入clone反序列化为PromptUsage，成功则投影，失败告警并仅设置usage_is_incomplete=true，保留result其他字段。
+
+#### Scenario: No ledger but incomplete
+- **WHEN** project_from_ledger收到None及true
+- **THEN** 返回带incomplete的默认报告。
+
+#### Scenario: Untrusted cost
+- **WHEN** 整体usage incomplete或totals partial
+- **THEN** scrub清除全部cost ticks，headless不写新cost值。
+
+#### Scenario: Reuse populated result
+- **WHEN** result预先含cost且当前usage incomplete
+- **THEN** 投影不主动删除已有cost字段。
+
+源码证据：
+- `crates/codegen/shell/src/extensions/notification.rs` — `pub fn project_from_ledger`。
+- `crates/codegen/shell/src/extensions/notification.rs` — `pub fn scrub_untrustworthy_costs`。
+- `crates/codegen/shell/src/extensions/notification.rs` — `pub fn project_result_usage`。
+- `crates/codegen/shell/src/extensions/notification.rs` — `impl From<&chat_state::UsageLedger> for PromptUsage`。
+
+- `crates/codegen/shell/src/extensions/notification.rs` — `pub fn attach_result_usage_fail_closed`。
+- `crates/codegen/shell/src/extensions/notification.rs` — `fn project_result_hides_costs_when_partial_or_incomplete`。
+- `crates/codegen/shell/src/extensions/notification.rs` — `fn project_result_incomplete_empty_omits_zero_usage`。
+- `crates/codegen/shell/src/extensions/notification.rs` — `fn attach_result_usage_fail_closed_on_parse_error`。
+
+### Requirement: Messages terminal usage fallback and model projection
+
+messages_result_usage SHALL 在新空scratch对象上调用shell usage投影，从usage四个token桶读取u64，缺失或错误类型回退0。无end_usage或投影incomplete仅告警，ResultUsage本身不携带incomplete标志；num_turns缺失回退completed_responses，total_cost_usd缺失回退0.0，不保留shell精确ticks。duration_api_ms直接从原始end_usage.apiDurationMs按u64读取，缺失为0，不受整个PromptUsage反序列化成功与否约束。model rows非Object返回空对象，否则每个model映射四个token桶及costUSD，缺失或类型错误分别为0和0.0；只有model键精确匹配当前session model时附context_window，其他model为None。该Messages适配会将shell已隐藏的未知或不可信费用转换为数值0，不能将其解释为已证实免费。 finish和error均把ResultUsage直接写入ResultLine，total_cost_usd、usage及modelUsage必定序列化，没有incomplete或cost partial字段。总cost及model costUSD使用serialize_finite_cost，有限值原样写入（含负数），非有限值替换0.0；contextWindow仅Some才序列化。
+
+#### Scenario: Missing aggregate usage
+- **WHEN** end_usage为None
+- **THEN** 告警，tokens和cost回退零，num_turns回退completed_responses。
+
+#### Scenario: Hidden cost
+- **WHEN** shell投影因incomplete省略cost
+- **THEN** Messages适配将总费用及缺失model费用回退0.0。
+
+#### Scenario: Current model context
+- **WHEN** model行键等于session model
+- **THEN** 仅该行取得session context_window。
+
+源码证据：
+- `crates/codegen/pager/src/headless/reducer/messages/usage.rs` — `pub(super) fn messages_result_usage`。
+- `crates/codegen/pager/src/headless/reducer/messages/usage.rs` — `pub(super) fn messages_model_usage`。
+
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn error`。
+- `crates/codegen/pager/src/headless/reducer/messages/wire.rs` — `pub(super) struct ResultLine`。
+- `crates/codegen/pager/src/headless/reducer/messages/wire.rs` — `pub(super) fn serialize_finite_cost`。
+
+### Requirement: Messages stream wire discriminants and nullable fields
+
+MessagesLine SHALL 用type区分system、assistant、user、stream_event、result；system再用subtype区分init及compact_boundary。ContentBlock和PartialBlock支持text/thinking/tool_use；PartialDelta明确输出text_delta、thinking_delta、signature_delta、input_json_delta，后者携带partial_json字符串。StreamEventBody支持message_start、content_block_start/delta/stop、message_delta及message_stop，block事件保留usize index。Partial tool input使用EmptyObject序列化为{}。Assistant/PartialMessage的stop_reason及stop_sequence、各frame的parent_tool_use_id无省略规则，None输出null；ResultLine result/structured_output/errors仅Some输出，stop_reason None仍为null。MessageUsage从ResponseUsage只复制四个token桶，reasoning不另加到output。权限模式只有always-approve映射bypassPermissions，其余包括None均default；new_uuid生成UUID v4。DTO只定义字段和tag，不校验事件顺序、角色字符串或block配对。
+
+#### Scenario: Unknown permission mode
+- **WHEN** 输入不是always-approve
+- **THEN** 输出default。
+
+#### Scenario: Unset stop metadata
+- **WHEN** AssistantMessage stop_reason与stop_sequence均None
+- **THEN** 两个字段均输出null。
+
+#### Scenario: Partial tool start
+- **WHEN** PartialBlock ToolUse序列化
+- **THEN** input为{}，tag为tool_use。
+
+源码证据：
+- `crates/codegen/pager/src/headless/reducer/messages/wire.rs` — `pub(super) enum MessagesLine`。
+- `crates/codegen/pager/src/headless/reducer/messages/wire.rs` — `pub(super) enum PartialDelta`。
+- `crates/codegen/pager/src/headless/reducer/messages/wire.rs` — `pub(super) fn messages_permission_mode`。
+- `crates/codegen/pager/src/headless/reducer/messages/wire.rs` — `pub(super) struct EmptyObject`。
+
+### Requirement: Messages partial stream envelope lifecycle
+
+partial_open_message SHALL 在无打开message时输出message_start，优先ResponseIdentity ID，否则独立partial_msg_seq生成msg_N，model走frame_model，usage为identity输入桶且output为0；空content及null stop字段，随后标记MessageOpen。partial_delta无open block才按caller index/kind开块，已有块则总用其index输出delta，不在此核验传入kind一致。partial_tool_use输出start、单条完整input JSON字符串delta、stop，不将该工具块登记为持续open block。关闭thinking块时优先open_signature其次pending signature，先发signature_delta再stop，签名仅clone；signature-only在开启partials且无open_kind和open block时以blocks.len为index输出空thinking三事件。partial_close_message在partials关闭时无动作，否则先关闭block及处理signature-only；若无message但response.started则仍开空message，随后发送共享resolved stop/usage/sequence的message_delta、message_stop并回到Idle。每条外层事件携带新UUID v4、session_id及null parent_tool_use_id；合成partial ID计数与最终frame计数独立，不从本函数推断两者永久一致。
+
+#### Scenario: Delta targets open block
+- **WHEN** 已有open block且调用方传不同index
+- **THEN** delta使用已打开block的index。
+
+#### Scenario: Contentless started response
+- **WHEN** 关闭message时response.started且无已开message
+- **THEN** 创建空message_start并输出message_delta/message_stop。
+
+#### Scenario: Tool input delta
+- **WHEN** partial工具调用含完整input对象
+- **THEN** 输出一个input_json_delta包含完整JSON字符串，随后stop。
+
+源码证据：
+- `crates/codegen/pager/src/headless/reducer/messages/partial.rs` — `fn partial_open_message`。
+- `crates/codegen/pager/src/headless/reducer/messages/partial.rs` — `pub(super) fn partial_delta`。
+- `crates/codegen/pager/src/headless/reducer/messages/partial.rs` — `pub(super) fn partial_close_message`。
+- `crates/codegen/pager/src/headless/reducer/messages/partial.rs` — `pub(super) fn partial_tool_use`。
+
+- `crates/codegen/pager/src/headless/reducer/messages/tests/partial.rs` — `fn messages_partial_thinking_then_text_defers_signature_to_frame`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/partial.rs` — `fn messages_partial_empty_response_still_frames_message`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/partial.rs` — `fn messages_partial_response_started_ids_do_not_leak_across_responses`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/partial.rs` — `fn messages_partial_message_delta_carries_stop_sequence`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/partial.rs` — `fn messages_partial_consecutive_signature_blocks_keep_own_signature`。
+
+### Requirement: Messages client tool result grouping and terminal reconciliation
+
+Messages reducer SHALL 在ToolCall前先flush已缓存结果，finalize当前文本块并添加tool_use；raw_input非对象变{}。每次调用分配递增order并按ID插入pending map，重复ID覆盖旧order但不删除已生成tool_use块。ToolCallUpdate仅Completed或Failed处理，先关闭并flush assistant（默认tool_use）再缓存结果；Failed才is_error=true。结果ID匹配时取出原order，未知或重复结果重新分配order而非拒绝。结果content优先raw_output字符串原样，其为null时仅非空content数组转JSON字符串，其余为空串；其他raw_output转JSON字符串。flush结果按order排序，合并为一个user消息并清缓存。finish/error终端前导先ensure init、close assistant，再为仍pending ID补tool call did not complete错误结果，最后flush分组；该补齐不保证重复ID等异常输入的一一配对。
+
+#### Scenario: Out of order completion
+- **WHEN** 工具结果按不同于调用的顺序到达
+- **THEN** 缓存按原调用order排序后分组输出。
+
+#### Scenario: Unmatched tool at terminal
+- **WHEN** finish/error时pending map仍有工具ID
+- **THEN** 补is_error=true的未完成结果并输出。
+
+#### Scenario: Repeated terminal result
+- **WHEN** 同ID的pending已移除后再次收到terminal
+- **THEN** 分配新order缓存，不在此去重。
+
+源码证据：
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn emit_client_tool_call`。
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn buffer_tool_result`。
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn reconcile_unmatched_client_tools`。
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn flush_tool_results`。
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn tool_result_content`。
+
+- `crates/codegen/pager/src/headless/reducer/messages/tests/tool_calls.rs` — `fn messages_tool_use_grouped_then_user_results`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/tool_calls.rs` — `fn messages_sequential_tool_rounds_interleave_without_response_started`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/tool_calls.rs` — `fn messages_unmatched_client_tool_use_reconciled_at_finish`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/tool_calls.rs` — `fn messages_parallel_tool_results_ordered_by_tool_use_not_completion`。
+
+### Requirement: Messages deferred initialization and command metadata retention
+
+MessagesReducer begin SHALL 保存session上下文并返回空输出，仅debug_assert防止重复begin，不重置其他reducer状态。ensure_init首次调用先置init_emitted再生成唯一init，后续不重复。AvailableCommands、ResponseStarted、ReasoningCompleted、ResponseCompleted不在reduce统一入口强制init，其余事件在分发前ensure_init，包括随后忽略的空文本或Plan；响应边界和终端前导也可触发init。AvailableCommands仅非空tools替换工具列表，非空commands才同时替换commands和skills，空commands保留两者，未验证skills必为commands子集。init读取当时session/model/cwd/MCP和缓存列表，apiKeySource固定user，model缺失或空为unknown；后续列表变化不会重发init。 ACP AvailableCommands映射从update内层meta.tools数组筛选字符串为tools，非数组或缺失为空；commands按原序复制全部名称，skills仅按各command meta同时存在scope/path键筛选，接受null或非字符串值，不验证路径、scope枚举或命令来源，不去重，保留输入顺序。
+
+#### Scenario: Metadata before first text
+- **WHEN** 先AvailableCommands再首个AgentMessage
+- **THEN** 元数据事件无输出，文本入口先输出携带缓存列表的init。
+
+#### Scenario: Empty command refresh
+- **WHEN** 已有commands/skills后收到空commands
+- **THEN** 保留原commands和skills。
+
+#### Scenario: Post init metadata
+- **WHEN** init已生成后列表更新
+- **THEN** 更新内部列表但不再次输出init。
+
+源码证据：
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn begin`。
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn ensure_init`。
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn reduce`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/init.rs` — `fn messages_init_is_deferred_and_carries_tools`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/init.rs` — `fn messages_skills_stay_subset_when_later_command_update_is_empty`。
+
+- `crates/codegen/pager/src/headless/reducer/mod.rs` — `fn tools_from_meta`。
+- `crates/codegen/pager/src/headless/reducer/mod.rs` — `pub(crate) fn skill_names`。
+- `crates/codegen/pager/src/headless/reducer/mod.rs` — `pub(crate) fn map_session_update`。
+
+### Requirement: Headless reducer tool metadata normalization and format routing
+
+tool_call_event SHALL 优先采用meta grow/tool.kind非空字符串，否则ACP kind显式wire token；tool name优先grow/tool.name非空字符串、其次非空title、其次非空kind、最后tool，不trim或验证自定义kind枚举。ToolCall保留ID/title/status，缺失raw_input为null；ToolCallUpdate保留可选status，缺失raw_output为null，缺失content/locations为[]。json_array_or_empty仅序列化错误时告警并返回[]，成功时返回任意JSON值，不检查数组类型。已知kind/status显式映射snake_case，未来未覆盖变体尝试serde字符串，否则None。to_line序列化失败生成type:error和错误描述；attach_structured_output成功写structuredOutput，失败写null和structuredOutputError，无输入时不修改，不清旧错误键。reducer_for仅streaming-json选择AcpReducer、streaming-messages-json选择新MessagesReducer，plain/json返回None由外部直接渲染。
+
+#### Scenario: Canonical tool metadata
+- **WHEN** grow/tool.name和kind均非空字符串
+- **THEN** 优先于显示title及ACP kind使用，不trim。
+
+#### Scenario: Missing update arrays
+- **WHEN** ToolCallUpdate无content或locations
+- **THEN** 对应字段映射为[]。
+
+#### Scenario: Direct output format
+- **WHEN** 选择plain或json
+- **THEN** 不创建流式reducer。
+
+源码证据：
+- `crates/codegen/pager/src/headless/reducer/mod.rs` — `pub(crate) fn tool_call_event`。
+- `crates/codegen/pager/src/headless/reducer/mod.rs` — `fn tool_name_from`。
+- `crates/codegen/pager/src/headless/reducer/mod.rs` — `fn json_array_or_empty`。
+- `crates/codegen/pager/src/headless/reducer/mod.rs` — `pub(crate) fn reducer_for`。
+
+### Requirement: ACP streaming reducer event preservation and terminal lines
+
+AcpReducer SHALL 无状态逐事件生成type标记JSON，AgentMessage/Thought包括空字符串均输出text/thought；ToolCall及Update保留投影后的raw/content/locations，kind/status None序列化null，不作工具配对或terminal-only过滤。AvailableCommands输出tools/commands而丢弃skills；Plan保留entries。ResponseStarted和ReasoningCompleted不输出，ResponseCompleted输出usage行，messageId/stopReason/usage/signature仅Some输出，stop_sequence丢弃。Lifecycle分别输出compact started/completed/failed/cancelled和image compressed，completed保留async_compact但丢弃pre_tokens。max_turns立即产生max_turns_reached；finish每次创建end行含stopReason/sessionId/requestId并按可用性附usage及structuredOutput，忽略result_text/duration；error每次新建error行附可用usage，不使用duration或stop reason override。无终止去重或自动init行为。
+
+#### Scenario: Empty text event
+- **WHEN** AgentMessage为空字符串
+- **THEN** 仍输出text行。
+
+#### Scenario: Missing usage metadata
+- **WHEN** ResponseCompleted所有可选字段None
+- **THEN** 输出仅type为usage的行。
+
+#### Scenario: Nonterminal tool update
+- **WHEN** 收到InProgress ToolCallUpdate
+- **THEN** 仍输出tool_call_update，不等待终态。
+
+源码证据：
+- `crates/codegen/pager/src/headless/reducer/acp.rs` — `impl Reducer for AcpReducer`。
+- `crates/codegen/pager/src/headless/reducer/acp.rs` — `struct AcpUsageLine`。
+- `crates/codegen/pager/src/headless/reducer/acp.rs` — `fn acp_lifecycle_line`。
+
+- `crates/codegen/pager/src/headless/reducer/messages/tests/acp_reducer.rs` — `fn acp_reducer_maps_agent_message_to_text`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/acp_reducer.rs` — `fn acp_reducer_maps_tool_call_to_native_shape`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/acp_reducer.rs` — `fn acp_reducer_maps_tool_call_update_to_native_shape`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/acp_reducer.rs` — `fn acp_response_completed_emits_usage_line`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/acp_reducer.rs` — `fn acp_finish_emits_end_line_with_usage_and_structured_output`。
+
+### Requirement: Messages assistant frame content and response identity projection
+
+Messages reducer SHALL 合并连续同kind文本，kind切换先finalize；空Text不成块，Thinking有文本或signature才成块，signature-only保留空thinking块。flush终端signature仅填最后thinking块的空signature，已有每块签名不覆盖。frame ID优先pending completion ID、再started identity ID、最后独立msg_seq合成msg_N；model优先响应非空model、再session非空model、最后unknown。usage优先pending usage，否则identity输入桶和零output。default_stop_reason=None强制null而不采用pending reason，Some时pending优先默认；stop_sequence直接取pending。flush有内容时更新last_text为所有Text块无分隔拼接，并增加assistant_frames及completed_responses；无内容不输出frame，仅started响应增加completed_responses，然后清响应状态。take_pending清除每响应identity与terminal metadata，防止下一frame沿用；调用方仍负责事件边界。 ResponseStarted在旧response/块/文本/签名/缓存结果未flush时先flush旧内容，再开启新identity；ResponseCompleted先flush_boundary，仅当前Started且双方ID均Some并不等时丢弃迟到completion，否则写入pending。CompactCompleted先flush_boundary再输出system compact_boundary，trigger按async_compact为async或auto并保留pre_tokens，其他Lifecycle与Plan不产生对应内容行。
+
+#### Scenario: Signature only response
+- **WHEN** 仅存在ReasoningCompleted signature
+- **THEN** flush保留空thinking及该signature。
+
+#### Scenario: No default stop reason
+- **WHEN** pending存在reason但flush默认None
+- **THEN** frame stop_reason输出null。
+
+#### Scenario: Next response without ID
+- **WHEN** 上一response已flush，下一frame无started/completed ID
+- **THEN** 生成msg_N，不沿用前一响应ID。
+
+源码证据：
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn finalize_open`。
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn flush_assistant`。
+- `crates/codegen/pager/src/headless/reducer/messages/mod.rs` — `fn resolved_stop_reason`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/content.rs` — `fn messages_response_completed_consumed_per_response`。
+
+- `crates/codegen/pager/src/headless/reducer/messages/tests/content.rs` — `fn messages_consecutive_text_responses_split_into_frames`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/content.rs` — `fn messages_duplicate_response_started_does_not_merge_content`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/content.rs` — `fn messages_content_before_late_response_started_flushes_first`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/content.rs` — `fn messages_late_response_completed_for_flushed_response_is_dropped`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/content.rs` — `fn messages_compact_completed_maps_to_system_boundary`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/content.rs` — `fn messages_async_compact_has_distinct_applied_boundary`。
+
+- `crates/codegen/pager/src/headless/reducer/messages/tests/result_usage.rs` — `fn messages_num_turns_counts_contentless_response`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/result_usage.rs` — `fn messages_retry_exhausted_null_stop_reason_overrides_retained_end_turn`。
+- `crates/codegen/pager/src/headless/reducer/messages/tests/result_usage.rs` — `fn messages_late_orphaned_completion_does_not_inflate_num_turns`。
+
+### Requirement: Headless stdout failure latch and terminal error precedence
+
+HeadlessEmitter write_out SHALL 在output_closed时直接Ok且不写入，否则锁stdout执行write_all并按参数flush。写入或flush错误都关闭后续输出，BrokenPipe返回Ok且不记录hard error；其他错误保存首个kind/message副本并返回原错。take_output_error取出并清空hard error但不重新开启输出。emit_line先构造紧凑JSON加换行再调用write_out且忽略Result，plain文本逐块flush，NDJSON不显式flush。输出关闭只阻止后续stdout写入，不在这些方法内取消采样、停止reducer或清除缓存。在主执行路径完成outcome计算后，已记录hard stdout错误优先作为headless stdout write failed返回Err，否则返回原outcome；BrokenPipe本身不强制整体成功。
+
+#### Scenario: Broken pipe
+- **WHEN** stdout返回BrokenPipe
+- **THEN** 后续输出关闭，不设置hard error。
+
+#### Scenario: Hard stdout failure
+- **WHEN** stdout返回PermissionDenied
+- **THEN** 记录首个错误，最终错误检查可覆盖正常outcome。
+
+#### Scenario: Read error latch
+- **WHEN** 调用take_output_error两次
+- **THEN** 首次取得已记错误，第二次None，output仍关闭。
+
+源码证据：
+- `crates/codegen/pager/src/headless.rs` — `fn write_out`。
+- `crates/codegen/pager/src/headless.rs` — `fn record_write_result`。
+- `crates/codegen/pager/src/headless.rs` — `fn take_output_error`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn broken_pipe_write_is_a_clean_latched_stop`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn first_hard_write_error_wins_the_latch`。
+
+### Requirement: Headless inbound notification and permission dispatch
+
+handle_headless_acp_message SHALL 对SessionNotification仅非空Text形式AgentMessage/Thought转emitter，首个二者之一设置共享TTF标记；ToolCall/Update/Plan/AvailableCommands经公共映射分发，其他update忽略但仍发送Ok unit确认。此SessionNotification分支不检查session_id等于root，不按eventId去重。权限请求仅always-approve且request.session_id等于root时按AllowOnce优先、AllowAlways其次选择请求中首个匹配option ID；无匹配或其他模式/会话均返回Cancelled，不持久化权限选择。ExtNotification先解析，再发送Ok unit，随后分发生命周期/流式/后台追踪，确认不表示显示成功或后台事件生效。WaitForTerminalExit返回headless不支持错误，其他消息分支无处理；所有这些response发送失败均忽略。
+
+#### Scenario: Foreign permission session
+- **WHEN** always-approve但权限请求不是root session
+- **THEN** 返回Cancelled。
+
+#### Scenario: Both allow options
+- **WHEN** root权限请求同时含AllowAlways与AllowOnce
+- **THEN** 选择AllowOnce，不以options原始跨kind顺序决定。
+
+#### Scenario: Empty text notification
+- **WHEN** AgentMessageChunk文本为空
+- **THEN** 不输出文本，但确认通知Ok。
+
+源码证据：
+- `crates/codegen/pager/src/headless.rs` — `fn handle_headless_acp_message`。
+- `crates/codegen/pager/src/headless.rs` — `fn auto_respond_to_permissions`。
+
+### Requirement: Headless Grow extension carrier decoding
+
+handle_ext_notification SHALL 仅识别grow/task_backgrounded、grow/task_completed、grow/monitor_event及grow/session_notification或grow/session/update两别名，其余返回None。专用task方法要求update.sessionUpdate匹配对应snake_case tag，backgrounded直接取task_id，completed从task_snapshot取task_id；ID接受任意JSON字符串或数字并转字符串，不trim或限定整数，其他类型解析失败。monitor_description为Some即标monitor，包括空字符串。任务解析失败或错tag记录error并忽略，不补入后台集合。session载体按typed update解析compact、image、subagent和response事件，response可选字段默认None、started缺失token桶默认0；已知字段类型错误导致整条忽略并warn，未知tag通常忽略，task生命周期放错session载体额外error。所有envelope仅读update，不要求或校验session_id/root身份，额外字段被忽略。grow/monitor_event不解析payload即返回MonitorEvent。
+
+#### Scenario: Numeric task ID
+- **WHEN** task_id为JSON数字
+- **THEN** 转换其JSON数字表示为字符串用于追踪。
+
+#### Scenario: Wrong task carrier
+- **WHEN** session通知载体带task_completed tag
+- **THEN** 记录error并忽略，不更新后台状态。
+
+#### Scenario: Missing session identity
+- **WHEN** 有效update envelope无session_id
+- **THEN** 仍解析事件，不执行根会话身份过滤。
+
+源码证据：
+- `crates/codegen/pager/src/headless/ext_protocol.rs` — `pub(crate) fn handle_ext_notification`。
+- `crates/codegen/pager/src/headless/ext_protocol.rs` — `fn de_task_id`。
+- `crates/codegen/pager/src/headless/ext_protocol.rs` — `fn decode_session_notification`。
+- `crates/codegen/pager/src/headless/ext_protocol.rs` — `fn decode_task_completed`。
+
+- `crates/codegen/pager/src/headless/ext_protocol_tests.rs` — `fn headless_task_backgrounded_numeric_task_id_is_coerced`。
+- `crates/codegen/pager/src/headless/ext_protocol_tests.rs` — `fn headless_response_completed_parses_per_response_fields`。
+- `crates/codegen/pager/src/headless/ext_protocol_tests.rs` — `fn headless_undecodable_known_background_task_errors_not_silent`。
+- `crates/codegen/pager/src/headless/ext_protocol_tests.rs` — `fn headless_malformed_known_response_boundary_warns_not_silent`。
+- `crates/codegen/pager/src/headless/ext_protocol_tests.rs` — `fn headless_session_notification_task_tag_errors_not_silent`。
+
+### Requirement: Headless background tracking wait and best effort reap
+
+Headless后台追踪 SHALL 独立于wait_for_background维护Task/Subagent区分的pending与completed集合，完成即移除pending并加tombstone，迟到spawn/backgrounded不重新激活，monitor标记不改变追踪规则。等待预算从prompt future完成开始；等待开启时先排空已缓冲消息再判空，关闭等待仍调用750ms grace。drain try_recv到非Ok，无条数或时间上限；grace排空后才检查deadline，因此持续消息或同步handler可超出名义预算。退出循环后再次drain，对剩余pending按HashSet次序串行发送Task kill或Subagent cancel，每项10秒timeout，错误/超时仅告警继续。ACP成功响应不检查payload且不等待实际进程退出，不保证所有后台工作被回收；总回收等待可随pending数增长。
+
+#### Scenario: Late backgrounded
+- **WHEN** task完成后迟到backgrounded
+- **THEN** tombstone阻止重新加入pending。
+
+#### Scenario: Waiting disabled
+- **WHEN** prompt future完成且wait_for_background=false
+- **THEN** 仍执行750ms grace并在退出时处理pending回收。
+
+#### Scenario: Reap failure
+- **WHEN** 一个后台请求超时或返回ACP错误
+- **THEN** 告警并继续其他任务，不从此函数返回错误。
+
+源码证据：
+- `crates/codegen/pager/src/headless.rs` — `fn track_background_lifecycle`。
+- `crates/codegen/pager/src/headless.rs` — `async fn reap_pending_background_tasks`。
+- `crates/codegen/pager/src/headless.rs` — `async fn drain_acp_with_grace`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn completion_before_backgrounded_never_rearms_pending`。
+
+- `crates/codegen/pager/src/headless_tests.rs` — `fn reap_request_for_task_kills_with_session_scope`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn numeric_task_id_is_decoded_tracked_and_reaped`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn reap_request_for_subagent_cancels_with_typed_id`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn drain_records_task_backgrounded_delivered_at_exit`。
+
+### Requirement: Headless CLI prompt and schema admission
+
+HeadlessPrompt::from_args SHALL 按single、prompt_json、prompt_file顺序选择首个Some，本函数不拒绝多参数同时提供；全部None返回交互模式None。文本trim后拒绝空串；文件完整read_to_string，仅扩展名精确为json时按ACP JSON解析，其余按文本。JSON接受非空ACP ContentBlock数组或type为acp且有content的对象包装，拒绝空数组、其他顶层类型、未知格式及解码错误；不对各block文本作统一trim。into_content_blocks把Text包装为单一TextContent，Blocks原样返回。parse_json_schema只要求合法JSON对象，不执行JSON Schema语义校验。
+
+#### Scenario: Multiple sources
+- **WHEN** 直接调用from_args同时提供single与prompt_json
+- **THEN** 选择single，即使后者无效也不解析。
+
+#### Scenario: File suffix
+- **WHEN** 输入文件扩展名为JSON而非json
+- **THEN** 将UTF-8文件内容按文本trim，不按ACP数组解码。
+
+#### Scenario: Schema object
+- **WHEN** schema参数为合法JSON对象
+- **THEN** 通过此层对象门控，不能据此宣称schema关键字有效。
+
+#### Scenario: Empty blocks
+- **WHEN** prompt JSON为[]
+- **THEN** 返回content blocks array is empty错误。
+
+源码证据：
+- `crates/codegen/pager/src/headless/cli.rs` — `impl HeadlessPrompt`。
+- `crates/codegen/pager/src/headless/cli.rs` — `fn parse_prompt_json`。
+- `crates/codegen/pager/src/headless/cli.rs` — `fn parse_json_schema`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn parse_json_schema_rejects_non_objects_and_invalid_json`。
+
+### Requirement: Headless CLI permission parse failure policy
+
+CLI权限规则解析 SHALL 先遍历deny再遍历allow，分别以Deny和Allow动作调用workspace解析器，并收集所有无效项及其原始参数、flag和错误。strict存在任何错误即将全部错误以分号连接返回Err，不返回部分有效规则；lenient逐项向stderr警告并跳过错误，返回其余有效规则。两者空输入均返回空规则。headless启动在spawn_shell之前通过strict构造cli_agent_overrides，解析错误通过问号返回，阻止本次shell启动。该构造顺序不定义权限评估优先级。tools/disallowed_tools逗号列表trim、去空，保留顺序和重复项；全部为空返回None，max_turns直接传入配置。
+
+#### Scenario: Mixed invalid rules
+- **WHEN** deny和allow各存在一个非法规则，同时存在合法规则
+- **THEN** strict错误包含两项非法规则，不返回合法子集。
+
+#### Scenario: Lenient partial rules
+- **WHEN** lenient收到非法deny与合法deny和allow
+- **THEN** 跳过非法项并返回合法deny后接allow。
+
+#### Scenario: Empty comma list
+- **WHEN** tools参数只有空白与逗号
+- **THEN** 转换为None，而非Some空列表。
+
+源码证据：
+- `crates/codegen/pager/src/headless/cli.rs` — `fn parse_permission_rules_inner`。
+- `crates/codegen/pager/src/headless/cli.rs` — `fn parse_permission_rules_strict`。
+- `crates/codegen/pager/src/headless/cli.rs` — `fn parse_permission_rules_lenient`。
+- `crates/codegen/pager/src/headless/cli.rs` — `fn parse_comma_list`。
+- `crates/codegen/pager/src/headless.rs` — `agent_config.cli_agent_overrides`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn strict_reports_all_invalid_rules`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn lenient_skips_invalid_keeps_valid`。
+
+### Requirement: CLI agent argument and inline definition normalization
+
+resolve_agent_arg SHALL 将存在且is_file的参数识别为文件，canonicalize失败保留原路径；其余参数包括目录和不存在路径作为原始名称。apply_agent_flag只写选中的profile path或agent.name字段，不清另一字段。parse_cli_agents要求JSON可解码为名称到值的HashMap，不保证结果顺序；对象仅在缺promptBody时把prompt改名，缺name/description时填map key，然后交给AgentDefinition::from_json，任一项失败即返回带key的错误。解析成功后强制将def.name改为map key，不再次验证该key；因此from_json对内部name的非空检查不等于最终key检查。promptBody仅非空trim字符串进入定义，非字符串被忽略。headless在spawn前解析agents；TUI对agents/tools/disallowed-tools/max-turns告警忽略，但agent文件加载成功后转为JSON override，加载失败仅告警，名称直接成为字符串override。
+
+#### Scenario: Missing agent path
+- **WHEN** agent参数看似路径但文件不存在
+- **THEN** 按名称处理，不在resolve_agent_arg返回文件不存在错误。
+
+#### Scenario: Inline name replacement
+- **WHEN** map key与合法内部name不同
+- **THEN** 解析后最终name采用map key。
+
+#### Scenario: Prompt body precedence
+- **WHEN** 对象同时存在promptBody和prompt
+- **THEN** 不执行prompt到promptBody改名，body由from_json按字符串规则处理。
+
+源码证据：
+- `crates/codegen/pager/src/headless/cli.rs` — `fn resolve_agent_arg`。
+- `crates/codegen/pager/src/headless/cli.rs` — `fn parse_cli_agents`。
+- `crates/codegen/pager/src/headless/cli.rs` — `fn apply_agent_flag`。
+- `crates/codegen/agent/src/config.rs` — `pub fn from_json`。
+- `crates/codegen/pager/src/headless.rs` — `agent_config.cli_agents`。
+- `crates/codegen/pager/src/app/root/event_loop.rs` — `let headless_only`。
+
+### Requirement: Headless emitter structured metadata and format projection
+
+HeadlessEmitter SHALL 仅在请求结构化输出时读取prompt响应meta：字符串structuredOutputError优先于structuredOutput，后者接受任意JSON值；meta缺失或两键不匹配不清除已存结果。终止时尚无结果则生成model did not produce structured output错误，不从text_buffer解析或在此层验证Schema。usage setter在meta缺失时保持原值，在meta存在但缺usage时清空。Plain逐块输出文本并flush、忽略thought、结束追加换行，生命周期及错误写stderr；Json缓存text/thought，正常结束输出含text/stopReason/sessionId/requestId的pretty对象，thought仅非空时附加，附usage与结构化投影；错误输出type:error/message及可用usage，不附正常结果字段或结构化结果。StreamingMessagesJson缓存文本并转发事件，StreamingJson只转发文本事件，两种stream均直接转发thought并通过reducer.finish/error输出终止行。生命周期在Json忽略；max-turns在Plain写stderr，在Json无即时输出，在stream调用reducer。
+
+#### Scenario: Missing structured metadata
+- **WHEN** 开启结构化输出且文本自身是合法JSON，但无meta结果
+- **THEN** 仍输出缺失结构化结果错误，不解析文本作为回退。
+
+#### Scenario: Metadata error precedence
+- **WHEN** meta同时含字符串structuredOutputError及structuredOutput
+- **THEN** 保存错误分支。
+
+#### Scenario: Usage missing key
+- **WHEN** 已存usage后传入不含usage的Some meta
+- **THEN** 清空usage；传None则保留。
+
+#### Scenario: Streaming native text
+- **WHEN** StreamingJson收到文本块
+- **THEN** 转发给reducer且不增长text_buffer。
+
+源码证据：
+- `crates/codegen/pager/src/headless.rs` — `impl HeadlessEmitter`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn structured_output_without_meta_errors_never_parses_text`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn structured_output_from_meta_wins_over_text_buffer`。
+- `crates/codegen/pager/src/headless_tests.rs` — `fn streaming_json_structured_output_emits_from_meta`。
+
+### Requirement: Headless session open and fork failure boundaries
+
+Headless open_session SHALL 有ID时发送Load并设置noReplay=true，仅restore_code=Some(true)附grow/restore_code=true；任意Load错误统一返回Session does not exist，不回退New。无ID发送New，显式新ID经UUID与cwd下持久化存在性预检后通过New meta.sessionId发送，两种New均采用响应session_id。fork_then_open优先父cwd作为newCwd，否则launch cwd；可选新ID先预检，再发送grow/session/fork，顶层非null error优先报错，newSessionId接受顶层或result内字符串。缺ID报错；成功fork后Load失败返回包含child ID的错误，无本地回滚。fork payload sourceCwd优先本地跨cwd解析结果，否则所选cwd，sessionKind固定fork；parent worktree判定依次检查summary worktree标记/非空source_workspace_dir，再向上查.git，文件为true、目录为false。判定为worktree时附sourceWorkspaceDir。预检不保留ID、不保证并发创建互斥；响应ID解析不验证UUID或非空。
+
+#### Scenario: Load transport error
+- **WHEN** Load返回错误而非成功响应
+- **THEN** 统一报Session does not exist，不自动新建。
+
+#### Scenario: Fork child load fails
+- **WHEN** fork返回child字符串但后续Load失败
+- **THEN** 报告fork succeeded as child but load failed，未执行回滚。
+
+#### Scenario: Fork response error
+- **WHEN** 响应同时含newSessionId及顶层非null error
+- **THEN** 按error失败。
+
+源码证据：
+- `crates/codegen/pager/src/headless.rs` — `async fn open_session`。
+- `crates/codegen/pager/src/headless.rs` — `async fn open_session_with_id`。
+- `crates/codegen/pager/src/headless.rs` — `async fn fork_then_open`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `pub fn fork_session_params`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `pub fn parent_session_is_worktree`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `pub fn fork_response_new_session_id`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `pub fn ensure_session_id_available`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `fn effective_fork_new_cwd_prefers_parent`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `fn fork_session_params_sets_new_session_id_and_workspace_dir`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `fn fork_session_params_omits_workspace_dir_when_not_worktree`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `fn fork_response_parses_nested_and_top_level_id`。
+
+
+### Requirement: Shared CLI session startup intent classification
+
+session_startup_intent_from_flags SHALL 无I/O地将标志归一成NewAuto、NewWithId、Resume或ForkFrom。错误检查依次为fork与worktree并用、fork缺resume/continue、指定session_id与resume/continue并用但缺fork。显式resume ID优先于most-recent/continue；无显式ID时两种最近会话标志等价。fork允许附新session_id；仅session_id产生NewWithId；无选择标志产生NewAuto。分类层原样保留字符串，不做UUID或存在性检查。PagerArgs将worktree Some（包括空label）视为开启。DeferredStartupActions统一保存待启动会话、preferred ID、worktree参数、新建标志、prompt和dashboard标志；is_empty比较Default，take以mem::take取出全部状态并重置默认值，这不是跨线程原子操作。
+
+#### Scenario: Fork validation precedence
+- **WHEN** fork=true且has_worktree=true，同时无resume
+- **THEN** 先返回ForkWithWorktree。
+
+#### Scenario: Explicit resume wins
+- **WHEN** 直接分类同时提供resume_session_id及continue_last_session
+- **THEN** Resume使用显式ID，most_recent_for_cwd=false。
+
+#### Scenario: Non UUID intent
+- **WHEN** 仅传session_id=my-id
+- **THEN** 分类得到NewWithId，UUID验证留给后续预检。
+
+#### Scenario: Deferred take
+- **WHEN** 待启动动作包含session与prompt后调用take
+- **THEN** 返回完整快照，原对象恢复Default。
+
+源码证据：
+- `crates/codegen/pager/src/app/session_startup.rs` — `pub fn session_startup_intent_from_flags`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `impl DeferredStartupActions`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `fn intent_session_id_alone_is_new_with_id`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `fn intent_from_flags_matches_pager_args`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `fn deferred_startup_owner_take_is_atomic`。
+
+### Requirement: Session startup materialization and local miss provenance
+
+materialize_startup_for_cwd SHALL NewWithId在普通cwd执行UUID和存在性预检，worktree上下文仅检查UUID；NewAuto直接返回。最近会话Resume/Fork取cwd限定list_summaries首项，无项报错；最近Fork先检查可选child ID。显式目标依次查当前cwd本地ID、跨cwd本地ID，然后仅对非UUID且TitleResolution::Allowed查当前cwd标题。PinnedPreSandbox禁止重新按标题选择。命中跨cwd保留original_cwd；显式Fork在父目标解析后按有效父cwd预检child ID。所有本地查找未命中时，has_worktree返回延迟Resume资料，deferred_local_miss仅非UUID为true；普通上下文直接报错，非UUID附title_miss_hint。本函数不执行远端恢复；worktree分支仅移交后续处理。无来源ID且most_recent=false的Resume/Fork视为内部非法意图。
+
+#### Scenario: Pinned title miss
+- **WHEN** PinnedPreSandbox下本地ID查找失败
+- **THEN** 不重新进行标题选择，继续worktree延迟或错误分支。
+
+#### Scenario: Worktree new ID
+- **WHEN** has_worktree=true且NewWithId含合法UUID
+- **THEN** 此阶段跳过process cwd存在性检查，仍返回NewWithId。
+
+#### Scenario: Local miss provenance
+- **WHEN** 非UUID目标本地及允许的标题查找均未命中且has_worktree=true
+- **THEN** 返回原目标并标记deferred_local_miss=true，不在此函数恢复远端。
+
+源码证据：
+- `crates/codegen/pager/src/app/session_startup.rs` — `pub async fn materialize_startup_for_cwd`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `async fn resolve_existing_session`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `async fn most_recent_session_id`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `async fn resolve_session_by_title`。
+- `crates/codegen/pager/src/app/session_title_resolve_tests.rs` — `async fn pinned_no_match_does_not_retry_title_after_sandbox`。
+- `crates/codegen/pager/src/app/session_title_resolve_tests.rs` — `async fn pinned_non_uuid_id_is_not_reinterpreted_as_title`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `async fn title_fallback_resumes_single_match_case_insensitively`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `async fn id_hit_beats_title_fallback`。
+- `crates/codegen/pager/src/app/session_startup.rs` — `async fn worktree_defer_flags_local_miss_and_local_hit_does_not`。
+
+
+### Requirement: Resume title matching and ambiguity reporting
+
+select_by_title SHALL 对可解析UUID或trim后空参数返回None；其他参数与summary display_title按trim后to_lowercase精确比较，不做子串搜索或完整Unicode caseless匹配。无匹配返回None，唯一匹配直接选择；多个匹配中恰有一个manual_title同样匹配则选择该项，否则报歧义并列出所有匹配ID与Debug转义标题，不任意选首项。title_miss_hint用Debug转义参数并建议grow sessions search；worktree_resume_failure_message仅在调用方传入local_miss_target时附该提示，不根据ID形状猜测未命中。detail原样拼接，要求调用方已清理用户可见内容。
+
+#### Scenario: Unicode lowercase boundary
+- **WHEN** 标题为straße而输入STRASSE
+- **THEN** 不匹配；Café与CAFÉ可按lowercase匹配。
+
+#### Scenario: Unique manual title
+- **WHEN** 多个同标题中仅一个manual标题匹配
+- **THEN** 选择该manual项。
+
+#### Scenario: Ambiguous manual titles
+- **WHEN** 两个manual标题均匹配
+- **THEN** 报歧义并列出候选。
+
+#### Scenario: Resolved legacy ID error
+- **WHEN** worktree错误调用local_miss_target=None
+- **THEN** 只保留恢复错误，不附标题未命中提示。
+
+源码证据：
+- `crates/codegen/pager/src/app/session_title_resolve.rs` — `pub(crate) fn select_by_title`。
+- `crates/codegen/pager/src/app/session_title_resolve.rs` — `pub(crate) fn worktree_resume_failure_message`。
+- `crates/codegen/pager/src/app/session_title_resolve_tests.rs` — `fn non_ascii_case_matching_contract`。
+- `crates/codegen/pager/src/app/session_title_resolve_tests.rs` — `fn sole_manual_rename_wins_among_duplicates`。
+- `crates/codegen/pager/src/app/session_title_resolve_tests.rs` — `fn duplicate_auto_titles_error_lists_ids_with_escaped_titles`。
+- `crates/codegen/pager/src/app/session_title_resolve_tests.rs` — `fn worktree_failure_message_hint_follows_threaded_provenance`。
+
+### Requirement: Resume target pinning and selected profile retention
+
+presandbox_resume_target SHALL UUID参数或无cwd直接返回Unresolved；其他参数先当前cwd本地ID、再跨cwd本地ID，最后同步列当前cwd summary按标题选择，列表失败或歧义传播错误。标题命中同时携带所选summary的sandbox_profile。PagerArgs pin在无显式恢复目标时不操作；解析成功后无论是否命中都标记resume_target_pinned=true，命中ID替换resume_session，标题命中额外保存Some(profile)，包括Some(None)。saved_resume_profile_for_cwd优先返回这一已存profile，即使为None也不重查；否则按恢复ID或最近会话向持久化层查询。此处只保存选择结果，不创建OS sandbox，也不保留磁盘会话身份。
+
+#### Scenario: Title has no saved profile
+- **WHEN** 标题命中summary且sandbox_profile=None
+- **THEN** 保存已解析的None，后续profile读取不回退全局查找。
+
+#### Scenario: Ambiguous title pin
+- **WHEN** 同步标题查找发生歧义
+- **THEN** pin返回错误，不在该调用继续设置pinned标志。
+
+#### Scenario: Definitive no match
+- **WHEN** 目标解析成功返回Unresolved
+- **THEN** 保留原参数并标记pinned，后续materialize按该标志禁止标题重选。
+
+源码证据：
+- `crates/codegen/pager/src/app/session_title_resolve.rs` — `pub(crate) fn presandbox_resume_target`。
+- `crates/codegen/pager/src/app/cli.rs` — `pub fn pin_local_resume_target_for_cwd`。
+- `crates/codegen/pager/src/app/cli.rs` — `pub fn saved_resume_profile_for_cwd`。
+- `crates/codegen/pager/src/app/session_title_resolve_tests.rs` — `async fn duplicate_legacy_id_title_pin_keeps_the_cwd_scoped_profile`。
+- `crates/codegen/pager/src/app/session_title_resolve_tests.rs` — `fn pin_ambiguous_title_errors_before_sandbox`。
+
+### Requirement: Headless model and reasoning effort application
+
+apply_headless_model_and_effort SHALL 无model和effort时不发请求；显式model按catalog ID忽略ASCII大小写匹配，未匹配保留原字符串交服务端，不匹配display name；仅effort要求current存在。catalog为空时effort只接受canonical token（小写化但不trim），有效token不在此层生成effort更新；有显式model仍发送model设置。catalog非空时先检查目标模型有可解析非空reasoningEfforts菜单，缺失/无效/空菜单返回Unsupported并被headless警告忽略；菜单存在时先匹配option ID，再匹配菜单包含的canonical值，未匹配报UnknownToken并列菜单ID。有model发送model配置，解析出的effort附meta；仅effort发送reasoning-effort配置及meta。设置请求失败输出终止错误并在prompt发送前返回；不回滚已打开会话。
+
+#### Scenario: Unsupported effort
+- **WHEN** catalog存在但目标无有效菜单且输入任意effort token
+- **THEN** 先判Unsupported并忽略effort；若指定model仍发送model设置。
+
+#### Scenario: Catalog unavailable effort only
+- **WHEN** catalog空、current存在且只有合法canonical effort
+- **THEN** 本函数不发送设置请求。
+
+#### Scenario: Unknown menu token
+- **WHEN** 有效菜单不含输入option ID或canonical值
+- **THEN** 返回错误而不发送prompt。
+
+源码证据：
+- `crates/codegen/pager/src/headless.rs` — `async fn apply_headless_model_and_effort`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `pub(crate) fn resolve_effort_for_model`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `pub(crate) fn resolve_effort_token_for`。
+- `crates/codegen/sampling-types/src/types.rs` — `pub fn parse_reasoning_efforts_meta`。
+- `crates/codegen/sampling-types/src/types.rs` — `pub fn parse_canonical_effort_token`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `fn resolve_effort_token_maps_remap_id_to_canonical_value`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `fn resolve_effort_token_accepts_none_only_when_menu_offers_it`。
+
+
+### Requirement: Client model catalog refresh and selection state
+
+ModelState SHALL 以IndexMap保存模型目录。update_catalog替换目录，保留仍存在的current，否则直接采用fallback_current而不验证其存在；只有current发生变化才从新模型meta重新读取reasoningEffort，同ID刷新保留会话effort。set_current接受给定ID，effort_override优先，否则读取目录meta，不在此方法校验菜单。next_model按目录顺序循环，无current选首项，陈旧current或空目录返回None。From SessionModelState逐项插入目录，重复ID覆盖，current仅在目录含该ID时保留，context override初始化None；current_model_name优先目录name否则原ID。
+
+#### Scenario: Same model refresh
+- **WHEN** 用户effort为xhigh，刷新仍包含同一current且默认为high
+- **THEN** 保留xhigh。
+
+#### Scenario: Current removed
+- **WHEN** 刷新移除current并提供另一目录模型作为fallback
+- **THEN** 切换到fallback并读取其默认effort。
+
+#### Scenario: Stale selection cycle
+- **WHEN** current不在非空目录中
+- **THEN** next_model返回None，不自动选首项。
+
+源码证据：
+- `crates/codegen/pager/src/acp/model_state.rs` — `pub fn update_catalog`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `pub fn set_current`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `pub fn next_model`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `fn update_catalog_preserves_user_effort_when_model_unchanged`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `fn update_catalog_rederives_effort_when_current_model_changes`。
+
+### Requirement: Client model image capability and context window projection
+
+ModelState SHALL 图像能力优先采用acceptsImages布尔值，否则在inputModalities数组中按ASCII大小写匹配image；数组存在但无匹配返回false，缺有效元数据或数组返回true。该getter在当前pager直接用于clipboard_image_tip_eligible，与提示行可绘制及无已附图片共同决定提示资格，不构成统一图片提交校验。get_context_window优先已设置override，否则只读取当前模型meta.totalContextTokens的u64值；setter允许任意u64，包括0，目录刷新与set_current不清override。SubagentProgress调用方仅在child_view存在且context_window_tokens>0时写override，0不会清除旧值。
+
+#### Scenario: Image metadata conflict
+- **WHEN** acceptsImages=false且inputModalities包含image
+- **THEN** 显式布尔值优先，getter返回false。
+
+#### Scenario: Missing image capability
+- **WHEN** 没有当前模型或有效meta
+- **THEN** getter默认true，提示仍须满足其他UI条件。
+
+#### Scenario: Zero progress window
+- **WHEN** child已有override且新SubagentProgress窗口为0
+- **THEN** 该调用不覆盖也不清除旧值。
+
+源码证据：
+- `crates/codegen/pager/src/acp/model_state.rs` — `pub fn current_model_accepts_images`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `pub fn get_context_window`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `pub fn override_context_window`。
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `pub(crate) fn clipboard_image_tip_eligible`。
+- `crates/codegen/pager/src/app/acp_handler/session_notification.rs` — `context_window_tokens > 0`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `fn accepts_images_honors_explicit_meta`。
+- `crates/codegen/pager/src/acp/model_state.rs` — `fn accepts_images_defaults_true_when_meta_absent`。
+
+### Requirement: Agent transient toast and sticky status lifecycle
+
+AgentView SHALL 用单个瞬态toast保存tone、清理后的文本与绝对deadline，新toast替换旧瞬态但保留sticky；默认持续3秒，显式duration原样用于deadline。active_toast只要瞬态存在即优先返回，不自行检查到期，否则返回Info tone的sticky。maintain_toast在now>=deadline清除瞬态并返回true，其他情况false，常驻状态因此重新可见。prompt键处理入口清除瞬态但不清sticky，不保证所有UI键路径都经过此入口。set_sticky_toast_recursive更新自身及当时存在的全部嵌套child view；不代表未来child自动继承。toast文本使用既有sanitize_toast_message，tone独立于文本。
+
+#### Scenario: Transient replaces sticky display
+- **WHEN** 已有sticky后显示瞬态toast
+- **THEN** 显示瞬态，sticky仍保留；到期maintain后恢复sticky。
+
+#### Scenario: Expired getter before maintenance
+- **WHEN** 瞬态deadline已过但尚未maintain
+- **THEN** active_toast仍返回瞬态。
+
+#### Scenario: Prompt key dismissal
+- **WHEN** 按键到达prompt handler
+- **THEN** 清瞬态，保留sticky。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `pub fn show_toast_with_tone_for`。
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `pub(super) fn active_toast`。
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `pub fn maintain_toast`。
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `pub fn set_sticky_toast_recursive`。
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `fn mouse_off_banner_uses_explicit_command_in_every_pane`。
+- `crates/codegen/pager/src/app/agent_view/prompt.rs` — `self.toast = None`。
+- `crates/codegen/pager/src/app/root/mod.rs` — `agent.maintain_toast(now)`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/settings.rs` — `fn mouse_reporting_toggle_off_sticky_persists_after_transient_toast`。
+
+
+### Requirement: External URL browser unavailable UI fallback
+
+AgentView open_url_or_show SHALL 使用Standard scheme过滤；Opened或RejectedScheme不追加回退UI，BrowserUnavailable向scrollback写含完整URL的多行notice、best-effort调用SystemClipboard::try_set并显示固定Browser unavailable提示，不根据复制结果改变该提示。dispatch无活动agent时同样尝试打开，失败后按clipboard reported_success生成以URL开头的单行app toast，仅报告成功时附URL copied。有活动agent时委托agent路径。Opened仅表示平台opener成功spawn或测试记录文件写入成功，不代表浏览器实际展示页面，因此后续opener退出失败不触发此回退。
+
+#### Scenario: Agent browser unavailable
+- **WHEN** 活动agent打开允许scheme但opener不可用
+- **THEN** 历史区保留完整URL并尝试复制，显示固定提示。
+
+#### Scenario: Welcome copy failure
+- **WHEN** 无活动agent且浏览器不可用，复制未报告成功
+- **THEN** toast包含URL但不声明URL copied。
+
+#### Scenario: Rejected scheme
+- **WHEN** scheme过滤拒绝
+- **THEN** 静默返回，不写回退notice或执行此分支复制。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `pub(crate) fn open_url_or_show`。
+- `crates/codegen/pager/src/app/root/dispatch/ctx.rs` — `pub(super) fn open_url_or_show`。
+- `crates/codegen/pager-render/src/link_opener.rs` — `pub fn browser_unavailable_message`。
+- `crates/codegen/pager-render/src/link_opener.rs` — `pub fn browser_unavailable_line`。
+- `crates/codegen/pager-render/src/link_opener.rs` — `pub fn open_url`。
+
+### Requirement: Ephemeral tip slot counting and expiry policy
+
+EphemeralTipState SHALL 维护单槽，默认tip持续3秒且非ambient、无seen限制。同key show先于cap检查，替换全部tip属性、刷新完整lifetime、清暂停余量，返回false且不增seen；异key超过外部seen map cap时保持旧槽不变，否则替换槽、计数饱和加1并返回true。sync_clock_policy暂停时保存deadline剩余时长（饱和至0）并清deadline，恢复时以now加余量重建；maintain先同步再消费now>=deadline，暂停的0余量槽可留到恢复后清除。clear仅匹配key，clear_all任意清，clear_on_submit保留ambient；is_active只表示槽存在。AgentView show先要求提示行可绘制，遮挡或尺寸stale时不调用底层show；tip_row_renderable要求无遮挡且高度大于SHORT_TERMINAL_ROWS。AgentView计时策略对session banner暂停所有tip，对ambient另要求visible与可绘制，其他contextual tip可在遮挡时继续计时。
+
+#### Scenario: Refresh at cap
+- **WHEN** 当前槽同key且seen计数已达cap
+- **THEN** 仍刷新TTL，返回false且计数不变。
+
+#### Scenario: Rejected replacement
+- **WHEN** 新key已达seen cap而旧槽存在
+- **THEN** 保留旧槽及其计时。
+
+#### Scenario: Pause expired deadline
+- **WHEN** 暂停时deadline已到期
+- **THEN** 保存0余量而不在暂停maintain消费，恢复后可立即过期。
+
+#### Scenario: Ambient submission
+- **WHEN** ambient槽调用clear_on_submit
+- **THEN** 保留槽，显式clear_all仍可清除。
+
+源码证据：
+- `crates/codegen/pager/src/tips/ephemeral.rs` — `fn show_at`。
+- `crates/codegen/pager/src/tips/ephemeral.rs` — `pub(crate) fn sync_clock_policy`。
+- `crates/codegen/pager/src/tips/ephemeral.rs` — `pub(crate) fn maintain`。
+- `crates/codegen/pager/src/tips/ephemeral.rs` — `fn same_key_refresh_skips_gate_and_recount`。
+- `crates/codegen/pager/src/tips/ephemeral.rs` — `fn clear_on_submit_retires_edit_contextual_but_keeps_ambient`。
+- `crates/codegen/pager/src/tips/ephemeral.rs` — `fn ttl_expires_and_clears_slot`。
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `fn ephemeral_tip_clock_running`。
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `pub fn show_ephemeral_tip`。
+
+### Requirement: Word selection tip acceptance and optimistic setting update
+
+Word-select提示 SHALL 使用20秒ambient生命周期和AppView共享seen key的3次上限，展示settings路径及Ctrl+Y。dispatch_show受word_select配置、未启用WordSelect和active主agent限制；槽仍为该key时记录当前prompt快照，包括同key刷新。键入口仅在非Release Ctrl+y、该tip key、可绘制且prompt等于快照时产生AcceptWordSelectTip；维护发现prompt变化时清提示及快照。直接accept dispatch仅检查active主agent和key，先清提示/快照并记录Accepted，再调用设置setter。setter相同值无effect，否则先更新cache、刷新modal与toast，返回PersistSetting携旧canonical值；保存错误由异步结果回滚cache并刷新modal、显示失败，不恢复已消耗提示或Accepted事件。Accepted不代表磁盘保存成功。
+
+#### Scenario: Prompt changed
+- **WHEN** 当前prompt与展示快照不同
+- **THEN** 快捷键不产生接受动作，维护时清除提示。
+
+#### Scenario: Accept then save failure
+- **WHEN** 提示接受后持久化返回失败
+- **THEN** 恢复旧设置缓存并显示失败，提示不会重新出现。
+
+#### Scenario: Already configured
+- **WHEN** 展示dispatch发现选择模式已是WordSelect
+- **THEN** 不展示也不增加seen计数。
+
+源码证据：
+- `crates/codegen/pager/src/tips/word_select.rs` — `pub fn word_select_tip`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `pub(super) fn dispatch_accept_word_select_tip`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `pub(super) fn dispatch_show_word_select_tip`。
+- `crates/codegen/pager/src/app/agent_view/input.rs` — `self.word_select_tip_prompt_snapshot.as_deref() == Some(self.prompt.text())`。
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `pub(crate) fn maintain_ephemeral_tip`。
+- `crates/codegen/pager/src/app/root/dispatch/settings/setters.rs` — `fn set_keep_text_selection`。
+- `crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `fn apply_setting_rollback`。
+- `crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `TaskResult::SettingPersistFailed`。
+- `crates/codegen/pager/src/tips/word_select.rs` — `fn word_select_tip_has_long_ambient_window`。
+
+### Requirement: Clipboard image tip polling and successful show commit
+
+ClipboardFocusTipState SHALL 将poll限制为间隔至少1秒，达到间隔即先更新last_poll_at；cheap读取None或等于last_seen时不分类。新count才调用classify，非图像结果立即提交cheap count，图像结果等待成功展示后note_fired提交outcome count。should_fire要求has_image、距上次展示至少30秒以及outcome count未知或不同last_fired；note_fired总更新时间，仅count存在时更新两个去重count。未展示不提交冷却或图像去重，因此允许下一次poll重新分类。AppView在调用poll前要求image_input开启、平台probe支持、非冷却、窗口focused及active agent图像提示资格；show返回true才note_fired及记录Shown。提示无seen cap，使用默认3秒非ambient生命周期。两次探针不是原子读取，返回count可不同；本状态机不保证真实图片字节可读取。 生产probe支持标志仅由macOS编译目标决定，不等于AppKit加载成功；其他平台返回(None,false)/None。macOS进程内Mutex保护count及types读取，AppKit加载失败缓存且snapshot返回(None,false)；types不可用返回已有count及false。只将精确public.png/public.tiff/public.jpeg视为raster，任一public.file-url或NSFilenamesPboardType抑制图片。探测不读取图片字节或启动子进程，锁不阻止外部剪贴板修改。事件循环在输入drain及pending effects之后调用poll，成功展示参与draw请求；FocusGained在image配置和平台支持时触发一次后台预热，返回不等待预热完成。
+
+#### Scenario: Throttled read
+- **WHEN** 距上次poll不足1秒
+- **THEN** 不调用cheap或classify。
+
+#### Scenario: Refused image show
+- **WHEN** classify发现图像但UI未成功展示
+- **THEN** 不note_fired，下一次间隔可重分类同count。
+
+#### Scenario: Unknown cheap count
+- **WHEN** cheap返回None
+- **THEN** 不分类，仍更新poll节流时间。
+
+#### Scenario: Cooldown in UI
+- **WHEN** 上次成功展示不足30秒
+- **THEN** AppView资格检查拒绝，尚未调用底层poll。
+
+源码证据：
+- `crates/codegen/pager/src/tips/clipboard_focus.rs` — `pub fn poll`。
+- `crates/codegen/pager/src/tips/clipboard_focus.rs` — `pub fn should_fire`。
+- `crates/codegen/pager/src/tips/clipboard_focus.rs` — `pub fn note_fired`。
+- `crates/codegen/pager/src/tips/clipboard_focus.rs` — `fn refused_show_keeps_retrying_then_dedups_once_landed`。
+- `crates/codegen/pager/src/tips/clipboard_focus.rs` — `fn throttle_limits_reads_to_one_per_interval`。
+- `crates/codegen/pager/src/app/root/mod.rs` — `fn clipboard_tip_in_poll_window`。
+- `crates/codegen/pager/src/app/root/mod.rs` — `fn apply_clipboard_probe`。
+
+#### Scenario: Native image metadata only
+- **WHEN** macOS剪贴板同时声明public.png和public.file-url
+- **THEN** 分类为非图片，不读取图片数据，也不把平台支持标志当作AppKit可用确认。
+
+补充源码证据：
+- `crates/codegen/pager-render/src/clipboard/mod.rs` — `pub fn clipboard_image_snapshot`。
+- `crates/codegen/client-support/src/clipboard.rs` — `fn image_pasteable_from_types`。
+- `crates/codegen/client-support/src/clipboard.rs` — `pub(super) fn clipboard_image_snapshot`。
+- `crates/codegen/client-support/src/clipboard.rs` — `pub fn clipboard_image_probe_supported`。
+- `crates/codegen/pager/src/app/root/event_loop.rs` — `let tip_shown = app.poll_clipboard_focus_tip();`。
+
+### Requirement: Planning keyword tip edit edge detection
+
+Plan nudge SHALL 检测plan、planning、design、architect、step by step、break this down、lay out、approach、strategy，按ASCII大小写不敏感字节匹配且两侧不得为ASCII字母数字或非ASCII字节；下划线视为边界，多词内部空格精确匹配。PromptWidget每次handle_key清一次性信号，plan gate开启且结果Edited、非completion accepted时，只对编辑前不含关键词而编辑后包含的边沿触发；排除paste/inline paste键、首字符/或!及slash dropdown，不trim前导空白。恢复/粘贴/补全已有关键词后的下一键重新读取before状态，不因此触发。AgentView优先undo提示，plan信号被取出后还要求非plan、idle、Normal输入模式；dispatch另检查配置与active agent。提示默认3秒非ambient、AppView共享seen cap3，文案ctrl+x b，不自动切换行为。
+
+#### Scenario: Typed keyword edge
+- **WHEN** 键入pla后再输入n且其他条件允许
+- **THEN** 产生一次性plan信号，后续保留关键词的编辑不再触发。
+
+#### Scenario: Restored keyword
+- **WHEN** set_text恢复design文本后输入空格
+- **THEN** before与after均匹配，不触发。
+
+#### Scenario: Underscore boundary
+- **WHEN** 输入_plan_
+- **THEN** 关键词匹配器允许下划线边界，是否展示仍受输入及UI条件约束。
+
+源码证据：
+- `crates/codegen/pager/src/tips/plan_nudge.rs` — `fn contains_whole_word_ci`。
+- `crates/codegen/pager/src/views/prompt_widget/mod.rs` — `fn plan_nudge_fire_for_edit`。
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `pub(super) fn take_prompt_tip_signal`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `pub(super) fn dispatch_show_plan_nudge`。
+- `crates/codegen/pager/src/views/prompt_widget/tests.rs` — `fn typing_into_planning_keyword_fires_plan_nudge_once`。
+- `crates/codegen/pager/src/views/prompt_widget/tests.rs` — `fn restored_keyword_draft_does_not_fire_plan_nudge`。
+- `crates/codegen/pager/src/views/prompt_widget/tests.rs` — `fn completion_accept_of_keyword_path_does_not_fire_plan_nudge`。
+
+### Requirement: Undo tip substantial draft wipe detection
+
+ClearDetector SHALL 在before不同于last_len时将peak设为before，再以peak>=20且after<=5判定触发；触发后peak=after，否则peak=max(peak,after)，并记录last_len=after。helper不额外检查after<before。PromptWidget以Unicode标量chars计数，仅undo gate开启、handle_key返回Edited且非completion accepted时调用；还要求textarea.can_undo且未发生had_images为真但当前images及image_undo_stash都空的载荷丢失。程序set_text本身不走该检测，后续用户清空恢复的大草稿仍可触发。信号每键重置且take一次性消费，AgentView优先undo于plan提示；dispatch检查undo配置和active主agent，再受通用可绘制/seen gate限制。undo提示默认3秒非ambient、AppView共享seen cap3，文案ctrl+z；提示不执行撤销，也不保证恢复所有图片或外部状态。
+
+#### Scenario: Gradual wipe
+- **WHEN** 草稿峰值30后逐删至6再到5
+- **THEN** 在6到5触发，后续到0不再触发直到建立新峰值。
+
+#### Scenario: Restored draft wipe
+- **WHEN** 程序恢复80字符后用户清至0
+- **THEN** 重同步采用80峰值，本次仍触发检测。
+
+#### Scenario: Lost image payload
+- **WHEN** 清空后images和stash均空且编辑前有图片
+- **THEN** 抑制undo提示，即使长度满足阈值。
+
+源码证据：
+- `crates/codegen/pager/src/tips/clear_detector.rs` — `pub fn observe_user_edit`。
+- `crates/codegen/pager/src/views/prompt_widget/mod.rs` — `pub fn handle_key`。
+- `crates/codegen/pager/src/app/agent_view/notices.rs` — `pub(super) fn take_prompt_tip_signal`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `pub(super) fn dispatch_show_undo_tip`。
+- `crates/codegen/pager/src/tips/clear_detector.rs` — `fn gradual_delete_fires_at_residue_threshold`。
+- `crates/codegen/pager/src/tips/clear_detector.rs` — `fn wiping_a_programmatically_restored_draft_fires`。
+- `crates/codegen/pager/src/views/prompt_widget/tests.rs` — `fn ctrl_c_clear_with_images_suppresses_undo_tip`。
+- `crates/codegen/pager/src/views/prompt_widget/tests.rs` — `fn accepting_file_completion_does_not_fire_undo_tip`。
+
+### Requirement: Agent banner tip rendering precedence
+
+AgentView SHALL 在mode_switch_banner为Some时独占横幅绘制分支并清公告点击区域；即使横幅高度为0、宽度不超过4或deadline已过，也不在该分支回退绘制公告或tip。无mode banner时，session_banner_active且横幅高度大于0才禁止普通及ephemeral tip绘制。其余情况下普通tip先绘制，符合可绘制条件的active ephemeral随后覆盖整个横幅矩形并仅在首行按宽度截断绘制；清除字符、前景、背景和modifier，避免残留旧文字或加粗。ephemeral只将预留高度提高到至少1，不缩减已有多行预留。普通tip使用加粗Tip前缀并保留空白换行；tip_height的宽度估算先转u16再向上整除，不保证任意长文本或按词换行的精确高度。
+
+#### Scenario: Mode banner suppresses fallback
+- **WHEN** mode_switch_banner存在但可用宽度只有4
+- **THEN** 清公告点击区域，跳过该横幅文字绘制，也不回退展示tip。
+
+#### Scenario: Announcement slot precedence
+- **WHEN** 无mode banner且session_banner_active、横幅高度大于0
+- **THEN** 普通和ephemeral tip均不绘制。
+
+#### Scenario: Ephemeral replaces wrapped tip
+- **WHEN** 无mode或公告占位且同帧普通tip和ephemeral均可绘制
+- **THEN** ephemeral清整个预留矩形，首行显示自身内容，其余行清空且不继承普通Tip前缀的加粗。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/render.rs` — `if let Some((ref msg, deadline)) = self.mode_switch_banner`。
+- `crates/codegen/pager/src/app/agent_view/render.rs` — `let tip_row_visible =`。
+- `crates/codegen/pager/src/tips/render.rs` — `pub fn tip_height`。
+- `crates/codegen/pager/src/tips/render.rs` — `pub fn render_ephemeral_tip`。
+- `crates/codegen/pager/src/tips/render.rs` — `fn clears_full_rect_and_truncates_to_width`。
+
+### Requirement: Small screen and SSH startup tip evaluation
+
+AppView普通draw SHALL 在minimal模式提前返回之后依次评估small-screen与SSH提示；各自evaluated状态跨后续draw保留。非active Agent、agent缺失、尺寸stale或(0,0)时延后。小屏幕仅接受21至28行且用户compact关闭；首次稳定尺寸不在区间或compact开启即消耗机会，符合区间但tip不可绘制则延后。SSH环境建议以进程OnceLock缓存，仅SSH且无OSC52 sink、非官方VS Code remote成立；稳定agent上环境不成立即消耗机会，tip不可绘制或槽已占用则延后。两者调用show前即标记evaluated，随后配置关闭或show失败不重试；小屏幕没有SSH的槽占用延后检查。各自内存seen cap为1，小屏幕默认3秒ambient并提示/compact-mode，SSH为10秒ambient并提示/doctor；只有show返回true才记录Shown事件。
+
+#### Scenario: Deferred unstable size
+- **WHEN** active agent尺寸尚未测量或标记stale
+- **THEN** 两种提示均保留评估机会。
+
+#### Scenario: Disabled configuration consumes evaluation
+- **WHEN** 小屏幕尺寸21至28、compact关闭且可绘制，但small_screen配置关闭
+- **THEN** 先标记evaluated，show因配置退出，后续开启配置不会重试本次机会。
+
+#### Scenario: Sequential startup tips
+- **WHEN** 同帧小屏幕成功占槽且SSH环境符合
+- **THEN** SSH保留机会等待后续槽空闲，不替换小屏幕提示。
+
+#### Scenario: Minimal mode
+- **WHEN** draw走minimal模式分支
+- **THEN** 本次不执行这两个普通draw提示触发器。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/mod.rs` — `pub(crate) fn maybe_trigger_small_screen_tip`。
+- `crates/codegen/pager/src/app/root/mod.rs` — `pub(crate) fn maybe_trigger_ssh_wrap_tip_inner`。
+- `crates/codegen/pager/src/app/root/mod.rs` — `pub fn draw`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `fn show_small_screen_tip`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `fn show_ssh_wrap_tip`。
+- `crates/codegen/pager/src/diagnostics/mod.rs` — `pub fn ssh_wrap_hint`。
+- `crates/codegen/pager/src/views/agent.rs` — `pub const AUTO_COMPACT_MAX_ROWS`。
+- `crates/codegen/pager/src/tips/small_screen.rs` — `pub fn small_screen_tip`。
+- `crates/codegen/pager/src/tips/ssh_wrap.rs` — `pub fn ssh_wrap_tip`。
+
+### Requirement: Queued follow up send now tip and acceptance
+
+发送普通prompt路径 SHALL 以入队前is_turn_running决定是否考虑send-now提示。立即提交服务器路径在optimistic queue echo后、返回SendPrompt effect前，要求非parked wait才展示；本地入队路径在入队和可选清输入后，仅held_queue_count为0时展示。show另要求send_now配置开启、active Agent存在并通过通用tip gate；提示默认3秒非ambient、共享内存seen cap3，文案Queued · Enter to send now，只有show返回true记录Shown。提示不证明服务器接受或完成发送。prompt路径try_send_now要求turn running、同步queue后top可发送，选择首个entry交给force_interject_queue_row；仅返回Action且当前提示key为send_now时记录Accepted并清提示，不等待服务器确认。普通提交空输入回退仅在PromptMode::Normal且trim后文本空时尝试该路径，非空反斜杠续行不因此发送排队项。
+
+#### Scenario: Server queue echo before acknowledgement
+- **WHEN** turn运行中、非parked且服务器立即提交路径生成queue echo
+- **THEN** 允许展示提示后返回SendPrompt effect，展示不代表服务端确认。
+
+#### Scenario: Local held queue presentation
+- **WHEN** 本地入队后held_queue_count大于0
+- **THEN** 抑制send-now浮动提示，保留已有held队列展示。
+
+#### Scenario: Acceptance is local action
+- **WHEN** prompt发送队首返回Action且当前tip为send_now
+- **THEN** 记录Accepted并清tip；不以远端发送完成为条件。
+
+源码证据：
+- `crates/codegen/pager/src/tips/send_now.rs` — `pub fn send_now_tip`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `fn maybe_show_send_now_tip`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `let queued_while_running =`。
+- `crates/codegen/pager/src/app/agent_view/queue.rs` — `fn try_send_now_queued_from_prompt`。
+- `crates/codegen/pager/src/app/agent_view/queue.rs` — `fn held_queue_count`。
+- `crates/codegen/pager/src/app/agent_view/prompt.rs` — `self.prompt.text().trim().is_empty()`。
+
+### Requirement: Queue row steering admission and optimistic confirmation
+
+AgentView队列steering SHALL 要求turn运行且行可解析为prompt-like，否则仅toast并返回Changed；本地prompt-like要求Prompt kind且wire_blocks不存在或恰为单一Text且内容等于display text，服务器行按wire kind判定。已确认服务器行返回QueueInterjectShared并携带row version，不在此删除行；optimistic echo只将一个send_now_awaiting_confirm槽设为该ID并返回Changed，后续请求覆盖旧槽。本地行先从pending_prompts移除、修正选择和必要时隐藏pane，再返回携带text/images的SteerPrompt；此函数没有发送失败恢复步骤。确认解析使用原始广播entries而非保留echo的合并视图，移除已被广播或running确认的optimistic ID；待发送ID已running则清意图而不发送，出现在entries则清意图并返回广播version，均未出现则继续保留。消费者仅在广播有running_prompt_id时生成QueueInterject effect；缺少该ID时意图已被解析清除，不生成effect。退休echo清除同ID等待意图，clear_queue_echo_state清除全部。
+
+#### Scenario: Unconfirmed echo
+- **WHEN** 用户立即发送optimistic服务器行
+- **THEN** 记录单槽等待ID，不立即发QueueInterjectShared。
+
+#### Scenario: Natural drain wins
+- **WHEN** 待确认ID成为广播running_prompt_id
+- **THEN** 清等待意图，不重复steer。
+
+#### Scenario: Confirmation without foreground
+- **WHEN** 待确认ID出现在entries但广播无running_prompt_id
+- **THEN** 解析清等待意图，消费者不生成QueueInterject effect。
+
+#### Scenario: Local expanded payload
+- **WHEN** 本地Prompt的wire_blocks并非单一等于display的Text
+- **THEN** 保留队列项并拒绝立即发送。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/queue.rs` — `fn force_interject_queue_row`。
+- `crates/codegen/pager/src/app/agent_view/queue.rs` — `fn remove_local_queue_row`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `pub fn wire_matches_display`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `fn resolve_send_now_awaiting_confirm`。
+- `crates/codegen/pager/src/app/acp_handler/queue.rs` — `let Some(expected_turn_id) = running_prompt_id.clone() else`。
+- `crates/codegen/pager/src/app/agent_view/queue.rs` — `fn local_queue_row_becomes_same_turn_steering`。
+
+补充测试源码：`crates/codegen/pager/src/app/agent_view/queue.rs` — `fn server_bash_row_cannot_be_steered_or_advertised_as_sendable`。
+
+### Requirement: Steering dispatch and failed payload review queue
+
+SteerPrompt SHALL 委托dispatch_interject；active agent存在时先清提交型tip，再要求session ID与current prompt ID，缺失仅toast并无effect。通过后按trim key去重记录原始文本历史并限制200条，生成UUID记入self interjection并立即插入本地文本echo及sent toast；不修改composer，随后生成SendInterject。effect有图片时在blocking任务中生成发送blocks，失败或grow/steer请求发送错误均返回携带原始text/blocks/images的InterjectFailed。失败处理仅在agent仍存在时分配新本地queue ID，将Prompt放队首、requires_review=true；保留原始blocks/images，并为显式图片查找或补入显示placeholder后构造chip范围，不从placeholder推造附件。失败不恢复旧queue ID、不覆盖composer，也不在此撤销optimistic scrollback echo。QueueInterjectShared另要求active agent具有session与current prompt ID，生成含expectedVersion/expectedTurnId的grow/queue/interject通知；传输错误只warn，返回CancelComplete，不走InterjectFailed恢复。 acp_send先发送到unbounded通道再等待oneshot响应，通道发送关闭或响应端关闭均为错误，helper本身不设timeout；SendInterject的Ok响应正文被忽略并生成InterjectQueued，其task处理为空，不证明steering已经执行。build_interject_params在blocks为Some时原样使用（包括空数组），None时用text构造单个Text，携带sessionId、expectedTurnId和interjectionId。
+
+#### Scenario: Failed image preparation
+- **WHEN** SendInterject的图片blocking转换失败
+- **THEN** 返回原始载荷供InterjectFailed入队复核，不发grow/steer。
+
+#### Scenario: Failed steering request
+- **WHEN** grow/steer发送失败且agent仍存在
+- **THEN** 将文本和显式图片置于新ID队首Prompt，requires_review为true，当前composer保留。
+
+#### Scenario: Server queue notification failure
+- **WHEN** grow/queue/interject通知传输失败
+- **THEN** 记录warn并返回CancelComplete，不创建本地失败草稿。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/interject.rs` — `fn dispatch_interject`。
+- `crates/codegen/pager/src/app/root/dispatch/interject.rs` — `fn dispatch_steer_prompt`。
+- `crates/codegen/pager/src/app/root/effects/mod.rs` — `Effect::SendInterject {`。
+- `crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `TaskResult::InterjectFailed {`。
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `fn dispatch_queue_interject_shared`。
+- `crates/codegen/pager/src/app/root/effects/mod.rs` — `Effect::QueueInterject {`。
+
+补充源码证据：
+- `crates/codegen/acp-transport/src/channel.rs` — `pub async fn acp_send`。
+- `crates/codegen/pager/src/app/root/effects/mod.rs` — `fn build_interject_params`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/turn_pipeline.rs` — `fn failed_image_interjection_keeps_attachments_and_requires_review`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/turn_pipeline.rs` — `fn steer_targets_the_existing_turn_and_emits_no_new_prompt`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/turn_pipeline.rs` — `fn steer_without_foreground_is_rejected_locally`。
+
+### Requirement: Background work watcher count projection
+
+AgentView watchers SHALL 仅统计status为Running的bg_tasks并按is_monitor分为commands和monitors；loops直接取scheduled_tasks长度。subagents只统计finished为false且workflow_run_id为None的条目，有任意workflow ID即排除，不要求找到对应workflow；workflows按snapshot status精确等于active计数，不按子agent数量计数。Watchers.total累加五类，awaitable_work仅累加commands、monitors、subagents。提示标签按command、monitor、loop、subagent、workflow顺序列出非零计数，以中点分隔、非1追加s并加still running后缀；全部零返回None。这是本地快照投影，不验证进程存活、任务可达或后续一定唤醒。
+
+#### Scenario: Workflow children
+- **WHEN** 两个未finished子agent均带同一个workflow ID且存在一个active workflow
+- **THEN** subagents为0、workflows为1。
+
+#### Scenario: Orphan workflow association
+- **WHEN** 未finished子agent带workflow ID但本地没有对应workflow快照
+- **THEN** 该子agent仍不计入subagents。
+
+#### Scenario: Awaitable subset
+- **WHEN** 仅有loop和active workflow
+- **THEN** total非零，awaitable_work为0。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/queue.rs` — `pub(crate) fn watchers`。
+- `crates/codegen/pager/src/app/subagent.rs` — `pub fn is_running`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `impl WorkflowRunSnapshot`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `pub fn awaitable_work`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn still_running_label`。
+- `crates/codegen/pager/src/app/agent_view/queue.rs` — `fn workflow_children_coalesce_into_one_workflow_watcher`。
+
+补充测试源码：
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn idle_with_one_workflow_counts_run_once`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn still_running_label_lists_only_nonzero_kinds`。
+
+### Requirement: Turn status visibility and startup seed expiry
+
+turn_status.should_show SHALL 在parked为true时直接为true，否则只要state非Idle、drain_blocked、可见启动seed或watchers.total大于0任一成立即为true。启动seed要求McpInitProgress.total为0且started_at.elapsed严格小于30秒，connected不参与此判定；total大于0的MCP进度本身不使此状态行可见。McpInitProgress.is_visible对total大于0不做30秒过期判断，但不能将该方法直接等同状态行可见性。状态判断使用实际Instant elapsed，启动文字计时另用frame.now对started_at的饱和时差。该函数决定调用方是否预留状态行，不保证横幅、遮挡或终端实际绘制结果。
+
+#### Scenario: Fresh zero-server seed
+- **WHEN** Idle且无其他可见条件，total为0且seed年龄不足30秒
+- **THEN** 状态行可见。
+
+#### Scenario: Expired seed
+- **WHEN** 同样条件下seed年龄达到30秒
+- **THEN** seed不再使状态行可见，不在此删除进度对象。
+
+#### Scenario: Real MCP progress only
+- **WHEN** Idle、无watchers或drain block，total大于0
+- **THEN** McpInitProgress.is_visible为true但should_show为false。
+
+#### Scenario: Non-idle command state
+- **WHEN** 状态不是Idle，即使不属于TurnRunning或TurnCancelling
+- **THEN** should_show仍为true。
+
+源码证据：
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn starting_session_visible`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `pub fn should_show`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn render_starting_session`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `impl McpInitProgress`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `pub fn is_idle`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn should_show_when_starting_session`。
+
+补充测试源码：
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn idle_zero_server_seed_renders_starting_session`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn idle_active_mcp_progress_renders_nothing_in_turn_status`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn expired_seed_renders_nothing`。
+
+### Requirement: Idle and parked status rendering precedence
+
+AgentView布局 SHALL 在live control_status为Some或turn_status.should_show成立时预留1行。render_turn_status在高度0或宽度小于10时返回空命中区域且不绘制；之后依次优先处理Idle且未drain_blocked的有效启动seed、Idle且drain_blocked的等待编辑提示、Idle且control_status为Some的spinner状态，再处理Idle或parked提示。parked有watchers时以still running标签开头，否则用waiting；held_queue大于0且队首可发送时附加queued及Enter to send now，否则有队列只附加queued，无队列则提示Enter queues与Ctrl+Enter steers。非parked Idle只显示watchers标签，无watchers不绘制。此分支返回不绘制运行态取消按钮/计时；只有buttons为Some且watchers.total大于0才返回watching_cue命中区域，宽度取图标与标签显示宽度和可用宽度的较小值。文案不执行队列或控制动作。 AgentView.renders_parked由is_parked_wait且非is_waiting_on_subagent决定：底层parkable helper接受TaskOutput waits=true、Sleep及Subagent，但AgentView再次排除Subagent，因此不能把helper单测当作前台子agent等待实际采用parked外观的证明。
+
+#### Scenario: Control reserves row
+- **WHEN** should_show为false但live control_status存在
+- **THEN** AgentView仍预留一行，Idle时可绘制control提示。
+
+#### Scenario: Startup takes precedence
+- **WHEN** Idle且有效启动seed、control_status及watchers同时存在且未阻塞drain
+- **THEN** 仅绘制Starting session分支，返回空命中区域。
+
+#### Scenario: Parked with no watchers
+- **WHEN** parked且无watchers、无更高优先级Idle分支
+- **THEN** 绘制waiting及队列提示，不返回watching_cue点击区域。
+
+#### Scenario: Narrow row
+- **WHEN** 状态行宽度为9
+- **THEN** 不绘制并返回默认命中区域。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/render.rs` — `let turn_status_height = if control_status.is_some()`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `pub fn render_turn_status`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn parked_with_held_queue_renders_queued_hint`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn parked_without_watchers_renders_waiting_cue`。
+
+补充测试源码：
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn watching_cue_is_clickable_on_mouse_hosts_only`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn narrow_area_clips_cue_tail_keeping_counts`。
+
+补充源码证据：
+- `crates/codegen/pager/src/app/agent_view/queue.rs` — `pub(crate) fn renders_parked`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn parkable_wait_matches_blocking_wait_presentation`。
+
+### Requirement: Running turn status timers and controls
+
+运行态状态行 SHALL 仅在buttons存在且状态为TurnRunning或CommandRunning时提供stop按钮，bg按钮还要求has_running_execute；hover仅改变stop颜色，bg由箭头变为send to bg文字。pending user input使用菱形代替spinner，但phase timer只在TurnRunning的ToolRunning标题精确以Ask: 或Ask空格开头时隐藏。turn_elapsed存在才展示总计时，且仅此时total_tokens大于0才附加token数。剩余label预算按spinner、phase timer、control suffix、1格gap及右侧内容饱和扣除；非tool且parkable wait的queued suffix只有完整label加suffix能放下才保留，否则先舍弃suffix再截断label。左侧先绘制，右侧后绘制并显式重设前景、背景及清modifier；flat_background使右侧背景为Reset。此分支未将右侧总宽压缩到可用行宽，不能宣称任意窄行全部按钮和计时均不越界。
+
+#### Scenario: Question phase timer
+- **WHEN** TurnRunning ToolRunning标题以Ask: 开头且有activity_started_at
+- **THEN** 隐藏phase timer，但turn timer仍按turn_elapsed展示。
+
+#### Scenario: Queue hint cannot fit
+- **WHEN** 非tool等待态的label与queued suffix之和超过label预算
+- **THEN** 舍弃整个queued suffix，再按预算截断label。
+
+#### Scenario: Submitting state
+- **WHEN** TurnSubmitting且buttons存在
+- **THEN** 不展示stop或bg按钮。
+
+源码证据：
+- `crates/codegen/pager/src/views/turn_status.rs` — `pub fn render_turn_status`。
+- `crates/codegen/pager/src/views/turn_status.rs` — `fn compute_activity`。
+
+### Requirement: Queued edit entry focus lock and draft restoration
+
+进入队列编辑 SHALL 对仍属optimistic echo的server ID直接返回；从对应本地或服务器镜像解析不到行也不进入。服务器行只载入text/kind，本地行另克隆images/chip_elements。仅原composer文本非空时stash，随后restore队列载荷、保存original文本及行身份，Bash kind切Bash输入模式，其余Normal；已绑定session的服务器行发QueueHoldEdit effect，不等待hold确认才展示编辑器。切离Prompt时dirty仅比较当前文本与original；dirty拒绝切换、清目标Queue/Todo/Tasks/Catalog的focused标志并toast，不建立EditConfirm。clean则退出并切目标pane。exit helper仅在EditingQueued执行，按release_hold与session/server ID产生可选release effect，take stash或默认空draft恢复，并重置两种输入模式、仅清EditConfirm modal，按queue可见性返回Queue或Scrollback；重复exit无动作。原draft仅按文本非空决定stash，不承诺所有空文本附带状态均保存。
+
+#### Scenario: Unconfirmed server edit
+- **WHEN** 请求编辑尚未确认的optimistic server echo
+- **THEN** 不修改编辑状态或发送hold。
+
+#### Scenario: Dirty pane switch
+- **WHEN** 编辑文本不同于original并尝试切至Tasks
+- **THEN** 阻止切换、清Tasks focused并toast，不创建确认modal。
+
+#### Scenario: Repeated exit
+- **WHEN** 已退出编辑后再次调用exit helper
+- **THEN** 返回None且不再次恢复空stash覆盖composer。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/queue_edit.rs` — `pub(super) fn enter_queue_edit`。
+- `crates/codegen/pager/src/app/agent_view/queue_edit.rs` — `fn editing_lock_on_pane_switch`。
+- `crates/codegen/pager/src/app/agent_view/queue_edit.rs` — `fn exit_editing_mode_inner`。
+- `crates/codegen/pager/src/app/agent_view/queue_edit.rs` — `fn finish_editing_exit`。
+
+补充测试源码（PTY用例标记ignore，本轮未执行）：
+- `crates/codegen/pager/src/app/root/dispatch/tests/settings.rs` — `fn simple_mode_rollback_preserves_queue_release_effect`。
+- `crates/codegen/pager/tests/pty_e2e/edit_interject_lone_queued_row_keeps_tui_alive.rs` — `async fn edit_interject_lone_queued_row_keeps_tui_alive`。
+
+### Requirement: Queued edit save payload and hold ordering
+
+队列编辑保存 SHALL 对服务器行取当前原始text，退出编辑并恢复旧draft但不发release hold，返回QueueEditShared；该路径不修改shared镜像，也不携带composer images或expectedVersion。router仅在active session存在时生成QueueEdit effect，grow/queue/edit通知包含sessionId/id/newText；错误仅warn后CancelComplete，不恢复编辑draft。本地保存从stash提取text/images/chips，重新计算skill token ranges；存在目标行时替换这些字段、requires_review=false、wire_blocks=None、display_as_skill=false，清理不再保留的旧图片。找不到目标行时不创建新行，清理本次images后退出；最后仅按drain参数决定返回DrainQueue或Changed。普通Enter保存前拒绝trim为空的文本，保存helper本身不重复空文本检查。
+
+#### Scenario: Shared save keeps hold
+- **WHEN** 保存服务器队列行
+- **THEN** 先恢复旧draft而不发QueueReleaseEdit，再返回只含文本的QueueEditShared。
+
+#### Scenario: Local retry approved by edit
+- **WHEN** 本地requires_review行被成功保存
+- **THEN** 清requires_review与旧wire_blocks，保留编辑后的显式图片/chips。
+
+#### Scenario: Local row vanished
+- **WHEN** 保存时本地队列已不存在目标ID
+- **THEN** 不创建替代行，清理本次图片并退出，drain仍按参数决定。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/queue_edit.rs` — `fn save_edited_queued_row`。
+- `crates/codegen/pager/src/app/agent_view/queue_edit.rs` — `fn exit_editing_mode_keeping_hold`。
+- `crates/codegen/pager/src/app/root/dispatch/router.rs` — `Action::QueueEditShared { id, new_text }`。
+- `crates/codegen/pager/src/app/root/effects/mod.rs` — `Effect::QueueEdit { session_id, id, new_text }`。
+
+### Requirement: Queue pane merged row identity and visibility edges
+
+QueuePane.sync_from_merged SHALL 清空并重建entries，按传入server数组顺序加入除running_id精确匹配以外的服务器行，再按local VecDeque顺序加入全部本地行，重新赋连续1起始显示序号；此函数不按wire position另排序，也不去重。服务器选择ID由DefaultHasher哈希prompt ID再置最高位，本地选择ID原样保留；无碰撞检测，不承诺跨版本哈希稳定或任意u64本地ID无碰撞。row_ref按首个匹配选择ID返回origin/server_id/version。wire kind仅精确bash与command映射特殊kind，其余含未知值映射Prompt。隐藏pane在非空且prev_len为0或长度增加时自动显示；长度变0且visible时清visible/focused，记录prev_len；is_visible还要求entries非空。关闭后的等长内容替换不触发自动显示。
+
+#### Scenario: Only foreground hidden
+- **WHEN** server含running行与其他行，本地也有条目
+- **THEN** 只过滤匹配running ID的server行，其余server在local之前，序号重新连续生成。
+
+#### Scenario: Hidden same length update
+- **WHEN** pane隐藏且prev_len非零，新队列长度相同但文本或ID变化
+- **THEN** 不因内容变化自动显示。
+
+#### Scenario: Unknown kind
+- **WHEN** wire kind为未识别字符串
+- **THEN** 按Prompt显示kind返回，后续使用方仍有自己的准入条件。
+
+源码证据：
+- `crates/codegen/pager/src/views/queue_pane.rs` — `pub fn sync_from_merged`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `fn synth_server_id`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `pub fn kind_from_wire`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `pub fn row_ref`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `fn running_message_is_the_only_server_row_hidden`。
+
+### Requirement: Queue row summary and full text projection
+
+QueuedPromptEntry SHALL 保留完整原始text供ListItem.search_text和copy_text使用，展示摘要取lines中首个trim后非空行，line_count仍为原始text.lines().count。多行后缀以line_count减1饱和计算，单数(+1 line)或复数(+N lines)，不按首个非空行的位置重新扣除前置空行。重建样式先为后缀扣宽再截断摘要；Prompt使用用户颜色，Command先整体截断再按首个ASCII空格分命令和参数，Bash另为!空格前缀扣2格。后缀和Bash前缀仍无条件追加，极窄宽度时不能保证构造Line不超过预算。位置前缀独立显示#position空格，复制与搜索不带该前缀、摘要省略或行数后缀。
+
+#### Scenario: Leading blank lines
+- **WHEN** 原文含前置空行和后续非空文本
+- **THEN** 摘要跳过空行，但多行后缀仍依据原始lines总数。
+
+#### Scenario: Copy multiline row
+- **WHEN** 多行行摘要被截断
+- **THEN** copy_text返回完整原文，保留原空白和换行。
+
+#### Scenario: Narrow multiline bash
+- **WHEN** 预算不足以容纳!前缀和多行后缀
+- **THEN** 仅正文被饱和扣宽截断，前缀后缀仍追加，最终绘制裁剪由下游负责。
+
+源码证据：
+- `crates/codegen/pager/src/views/queue_pane.rs` — `pub fn new(prompt: &QueuedPrompt`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `pub fn from_server`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `fn build_styled`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `impl ListItem for QueuedPromptEntry`。
+
+### Requirement: Queue pane action keys and selection repair
+
+QueuePane SHALL 初始化NoWrap、copy开启并使用SystemClipboard，关闭search/filter/goto-line/follow/wrap-toggle/visual-select及失焦选择显示；search_text接口存在不代表队列UI提供搜索。handle_key先要求selected_id，优先匹配可重映射InterjectPrompt，再按key.code将x/Delete/Backspace转删除，e/Enter转编辑，大写J/K转上下交换；该函数不额外过滤KeyEventKind或这些键的修饰键，J/K条件contains(NONE)不要求无修饰键。操作返回QueueEvent交调用方执行。select_after_delete按当前merged entries位置选择删除后相同位置（末尾则前一项）的ID；无存活项时不主动清selection。隐藏后on_state_change关闭输入栏；desired_height隐藏或空为0，否则先将entries.len转u16再clamp到1至3，不能泛化为任意长队列的min(len,3)。
+
+#### Scenario: Remapped steering first
+- **WHEN** selected_id存在且某键匹配InterjectPrompt同时其code为Enter
+- **THEN** 返回ForceInterject而非EditSelected。
+
+#### Scenario: Last row deletion
+- **WHEN** 当前合并列表仅一个条目
+- **THEN** select_after_delete直接返回，selection清理由后续同步或列表处理承担。
+
+#### Scenario: Search interface versus UI
+- **WHEN** 行实现提供search_text
+- **THEN** QueuePane默认配置仍关闭搜索。
+
+源码证据：
+- `crates/codegen/pager/src/views/queue_pane.rs` — `pub fn handle_key`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `pub fn select_after_delete`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `pub fn desired_height`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `search_enabled: false`。
+
+### Requirement: Queue pane hover actions and preview rendering
+
+QueuePane绘制 SHALL 优先将操作按钮绑定到存在的hovered row，否则在focused时绑定selected row；目标行不在当前viewport时不绘制按钮，不回退到另一行。按钮从右向左先cancel再edit，turn running时再考虑Send now，每个标签必须完整放入inner区域；Send now展示不检查prompt-like，实际发送准入由调用方负责。按钮hit返回渲染绑定ID优先于当前selection，reset清rect/entry ID但保留hover ID；render在entries为空时提前返回，早于按钮reset，不能仅凭该方法声称空队列必清旧hit。hover背景不覆盖focused selection，滚轮后重新按last_inner、scroll offset与layout解析hover行。多行预览只在focused、有overlay区域且selected完整text.lines数量大于1时绘制，预览目标始终是selected而非hovered。主题kind变化重建ListPaneStyle；列表溢出时额外借右侧1列给scrollbar。 AgentView鼠标左键路径先经缓存pane_areas.hit_test命中Queue才查行按钮，顺序delete、send-now、edit；PaneAreas只接受面积大于0且包含坐标的queue rect。delete重查row_ref并分服务器版本删除与本地删除，本地删除前drain_blocked为true则返回DrainQueue；send-now再次要求turn running并走force_interject准入，只有Action立即返回，Changed继续普通鼠标选择。编辑已有编辑态时先尝试切Queue，dirty锁拒绝时不另进编辑。此处使用上次render缓存，不等于对任意绘制间状态变化的实时布局证明。
+
+#### Scenario: Hover differs from selection
+- **WHEN** focused且hovered ID是另一可见行
+- **THEN** 按钮绑定hovered行，预览仍按selected行判断。
+
+#### Scenario: Offscreen hovered row
+- **WHEN** hovered ID仍存在但已滚出viewport
+- **THEN** 不绘制该行按钮，不回退到focused selection。
+
+#### Scenario: Nonprompt send button
+- **WHEN** turn running且Bash行的按钮宽度足够
+- **THEN** 仍可能显示Send now，点击后的调用方可以拒绝steering。
+
+源码证据：
+- `crates/codegen/pager/src/views/queue_pane.rs` — `pub fn render(`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `fn row_id_at`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `fn hit(&self`。
+- `crates/codegen/pager/src/views/queue_pane.rs` — `pub fn handle_scroll`。
+
+补充调用方证据：
+- `crates/codegen/pager/src/app/agent_view/mouse.rs` — `self.queue.delete_click(mouse.column, mouse.row)`。
+- `crates/codegen/pager/src/views/agent.rs` — `pub fn hit_test`。
+- `crates/codegen/pager/src/app/agent_view/render.rs` — `if queue_height > 0 {`。
+
+### Requirement: Immediate server routing and local drain admission
+
+immediate_server_send_eligible SHALL 要求TurnSubmitting/TurnRunning或shared_queue非空，同时session ID存在、本地pending空、非EditingQueued、无任何control slot in_flight、无deferred_session_mode、非loading_replay；普通prompt调用方另要求composer images为空。maybe_drain_queue按顺序拒绝非Idle、current_prompt_id仍存在、behavior in_flight target、任意control in_flight、deferred behavior latch、replay、服务器非running队列项、无session、队首requires_review或正在编辑队首。behavior target分支先写入deferred_session_mode再拒绝，不消费队列。通过后按combine配置调用combined dequeue并传editing_id或普通dequeue，无条目仍blocked；此准入不证明后续发送成功。即时服务器准入以本地队列空为条件，避免本客户端后提交项跳到旧本地项前面，不宣称全局多客户端提交时间排序。
+
+#### Scenario: Locally idle but shared queue busy
+- **WHEN** Idle且shared_queue非空，本地pending空，其他即时准入条件成立
+- **THEN** 仍允许服务器即时路由。
+
+#### Scenario: Older local item
+- **WHEN** pending_prompts非空即使turn运行
+- **THEN** 拒绝即时服务器路由。
+
+#### Scenario: Behavior latch
+- **WHEN** Idle且无current prompt，但behavior slot有in_flight目标
+- **THEN** 将目标写入deferred_session_mode并阻止本地drain。
+
+#### Scenario: Review required head
+- **WHEN** 其他drain门槛通过但队首requires_review
+- **THEN** 不消费队首或后续条目。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `fn immediate_server_send_eligible`。
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `fn maybe_drain_queue(`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `fn controls_pending`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `fn behavior_control_target`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `immediate_server_send_eligible(agent) && agent.prompt.images.is_empty()`。
+
+补充测试源码：`crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `fn send_while_idle_with_nonempty_shared_queue_routes_to_server`。
+
+### Requirement: Local combined dequeue payload projection
+
+AgentSession.dequeue_combined_prompt SHALL 对空队列返回None，否则用共享combine规则计算连续前缀并至少取首项；adapter将Prompt且非requires_review作为plain，wire不等display作为expanded，images非空作为has_images，synthetic固定false，editing_id转字符串仅排除followers。首项不合并时仍pop并原样返回，所以首项review/编辑保护由maybe_drain_queue承担。可合并首项允许图片，followers遇图片、非plain、expanded、空字符串或编辑ID即停止，不trim纯空白。多项合并保留首项身份和图片，文本以双换行连接，后续chip范围按已连接文本UTF8字节长度加分隔符平移，清wire_blocks/display_as_skill及skill_token_ranges，将各原始text记录为combined_texts；不重新编号图片或验证chip范围。
+
+#### Scenario: Edited follower
+- **WHEN** 前三项plain且第二项ID正在编辑
+- **THEN** 仅pop第一项，编辑项及其后条目保留。
+
+#### Scenario: Unmergeable front direct call
+- **WHEN** 直接调用helper且首项为Bash或requires_review
+- **THEN** 仍取出首项原样返回；调用方必须先执行准入保护。
+
+#### Scenario: Chip offset
+- **WHEN** 首项first与次项second!合并，次项chip范围2至6
+- **THEN** 合并text为first双换行second!，该chip范围平移至9至13。
+
+源码证据：
+- `crates/codegen/pager/src/app/session/mod.rs` — `pub fn dequeue_combined_prompt`。
+- `crates/codegen/prompt-queue/src/combine.rs` — `pub fn combine_prefix_len`。
+- `crates/codegen/prompt-queue/src/combine.rs` — `pub fn join_texts`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `fn dequeue_combined_prompt_reoffsets_chip_ranges_for_second_entry`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `fn dequeue_combined_prompt_stops_before_row_under_edit`。
+
+补充测试源码：
+- `crates/codegen/pager/src/app/session/mod.rs` — `fn dequeue_combined_prompt_stops_at_image_bearing_follower_keeps_own_image`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `fn dequeue_combined_prompt_clears_skill_token_ranges_on_multi`。
+
+### Requirement: Local prompt drain echo and wire payload selection
+
+本地Prompt出队 SHALL 分配新prompt UUID并标记self-originated，设置current_prompt_id、TurnSubmitting和turn_started_at；提交不在此等同服务端前台运行确认。combined_texts至少两段走逐段bubble helper，否则按display_as_skill优先、skill token ranges次之、普通text生成回显；对得到的UserPrompt block写同一message_id。仅wire_blocks为None时保存text/images/chips及回显ID的in_flight恢复快照，该条件不以display_as_skill判定。发送优先使用Some wire_blocks，且只在第一个block为Text时写displayText、可选displayAsSkill和combined元数据；首项非Text或空数组时跳过这些标记，不拒绝该分支。无wire而有images时剥离文本图片占位路径、携带显式images并省略skill token ranges；无图但multi时发送带combined元数据的Text blocks；其余发送原text及skill token ranges。界面回显和快照先于effect执行，不证明实际发送成功。 combined bubble helper扫描全部scrollback中的UserPrompt，按message_id精确匹配收集；匹配条数等于segments长度且非空才按原顺序复用全部ID，不比较文本、连续性或样式。数量不匹配则为所有segments追加新UserPrompt并写message_id，不移除部分旧匹配项；不按相同文本复用不同message_id。helper要求segments非空，否则最终expect失败，现有multi调用以至少两段保护。
+
+#### Scenario: Empty structured payload
+- **WHEN** queued.wire_blocks为Some空数组
+- **THEN** 走SendPromptBlocks并跳过首Text元数据，不自动改用普通text。
+
+#### Scenario: Images with token ranges
+- **WHEN** 无wire且有显式images与skill token ranges
+- **THEN** 发送改写后的Text和images，不携带原技能字节范围。
+
+#### Scenario: Plain restore snapshot
+- **WHEN** wire_blocks为None
+- **THEN** 记录in_flight text/images/chips及回显ID用于后续恢复，无需等待发送完成。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `pub(crate) fn maybe_drain_queue(`。
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `if queued.wire_blocks.is_none()`。
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `wire_blocks[0] is not TextContent`。
+
+补充源码证据：`crates/codegen/pager/src/app/root/dispatch/queue.rs` — `fn paint_or_reuse_combined_user_bubbles`。
+
+### Requirement: Server turn adoption echo and rewind projection
+
+apply_turn_start_shim SHALL 采用传入prompt ID建立turn boundary和current ID，并按该ID是否self-originated重新设置attached_as_viewer；清旧follow-ups后flush匹配该ID的待处理follow-ups，不创建SendPrompt effect。combined_texts至少两段时走多气泡helper，即使kind为bash/internal仍进入multi绘制，但这两kind不建立rewind快照。其余kind仅text为Some时显示普通UserPrompt，单气泡从scrollback末尾寻找相同message_id复用，不比较传入text；rewind时采用已显示文本以避免旧镜像覆盖编辑。新adoption快照仅text和回显ID，images/chips为空；multi恢复优先传入text，否则双换行连接segments。最后重设turn_started_at，若tracker已有任意activity则清in_flight快照；消费pending commands并递增generation，以及workflow definitions/diagnostics和tools快照。helper不证明每次调用都由合法新回合通知触发，调用方负责准入。 handle_queue_changed解析失败返回false；成功时running text/kind优先载荷字段再旧shared镜像，combined仅采用至少两段，origin scheduler_fired映射cron、user/plan_resume保持kind、其他已知存在字符串映射internal、缺origin保持kind。仅Root session匹配参与agent镜像与接管；apply_queue_changed后将合并镜像赋agent并取消镜像中已消失的server编辑。前台接管要求running_prompt_id、Root agent与running_turn_kind存在（此处不检查其具体值）；相同current ID仅TurnSubmitting调用shim，否则不调用；不同或无current ID直接调用shim。running ID缺失不在此清当前回合。
+
+#### Scenario: Reused edited bubble
+- **WHEN** 单气泡已有同message ID但显示文本不同于adoption text
+- **THEN** 复用已有气泡，rewind快照取显示文本。
+
+#### Scenario: Tracker already active
+- **WHEN** adoption绘制后tracker.activity为Some
+- **THEN** 清in_flight恢复快照，即使刚构造过。
+
+#### Scenario: Combined internal input
+- **WHEN** kind为internal且combined_texts至少两段
+- **THEN** multi气泡仍绘制，但该分支不建立rewind快照。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `pub(crate) fn apply_turn_start_shim`。
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `fn paint_or_reuse_combined_user_bubbles`。
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `if agent.session.tracker.activity().is_some()`。
+
+补充调用方证据：`crates/codegen/pager/src/app/acp_handler/queue.rs` — `pub(super) fn handle_queue_changed`。
+
+### Requirement: Composer attachment transfer to newest queued row
+
+drain_prompt_state_to_last_queued SHALL 先stash composer并提取显式images/chip_elements，再查pending_prompts最后一项；无最后项则直接返回。存在最后项时先替换chip_elements，images为空时返回而不清该行原images；images非空但该行wire_blocks为Some时toast Images removed (skill prompt)并不赋新images，chip_elements已被替换；否则替换entry.images。helper不重写队列text，不负责调用者随后清composer，也不证明chip与最终图片集合始终一致。
+
+#### Scenario: Structured row image rejection
+- **WHEN** 最新队列行有wire_blocks且composer快照含图片
+- **THEN** 先写chip_elements，再toast并跳过图片赋值。
+
+#### Scenario: No new images
+- **WHEN** composer快照images为空且最新行已有images
+- **THEN** 更新chip_elements，保留该行原images。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `fn drain_prompt_state_to_last_queued`。
+
+### Requirement: Shared queue snapshot optimistic echo reconciliation
+
+AppView.apply_queue_changed SHALL 按session替换shared队列，以广播entries原顺序为起点；先从optimistic集合移除ID已在entries或等于running_prompt_id的行，再按剩余optimistic顺序追加未在entries中的行，并仅把追加行position设为追加时entries.len。广播原条目不排序、不去重、不比较version或快照年龄；空广播在存在未确认echo时仍产生非空镜像。清空optimistic集合后移除其session key，最终entries空才移除shared key。push_optimistic_prompt_echo分别按ID对两个map去重，重复ID不更新已有text/kind；新行version0、owner/last_editor/combined为空，optimistic position0，shared追加position为原长度。退休指定echo helper同时清两个map指定session下所有同ID条目及空key，但不自动清agent内部等待标记。
+
+#### Scenario: Empty broadcast with echo
+- **WHEN** 广播entries空且一个optimistic ID既非running也未确认
+- **THEN** 将该echo追加到shared镜像，不清空镜像。
+
+#### Scenario: Repeated optimistic ID
+- **WHEN** 再次push同session同ID但text变化
+- **THEN** 两个map中已存在的该ID条目均保持原内容。
+
+#### Scenario: Confirmed older version
+- **WHEN** 广播含与echo同ID的条目，无论version大小
+- **THEN** 移除echo并采用广播条目，不在此比较版本。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/mod.rs` — `pub fn apply_queue_changed`。
+- `crates/codegen/pager/src/app/root/mod.rs` — `pub fn push_optimistic_prompt_echo`。
+- `crates/codegen/pager/src/app/root/dispatch/queue.rs` — `fn retire_optimistic_echo`。
+
+### Requirement: Usage modal opening and usage result identity
+
+用量、上下文和会话信息入口 SHALL 先要求当前视图为存在的Agent且有session；minimal模式只产生对应单项请求并使用nonce 0，其他模式替换为指定tab的Usage弹窗并依次产生FetchSessionUsage、ShowContextInfo、ShowSessionInfo三个effect，共享agent、session和nonce。SessionInfo请求同时携带新metadata read revision及show_resolved_model。弹窗初始三项Loading、scroll和selected_row为0、hover为空且row_hits清空。nonce来自进程级AtomicU64 relaxed fetch_add加1；代码未显式处理u64耗尽，不据此承诺无限期非零。apply_session_usage_result SHALL 先核对目标Agent存在及当前session匹配；nonce 0无论当前屏幕模式或弹窗状态均追加notice，非零仅在当前Usage弹窗nonce相等时写入usage的Loaded或Failed，其他情况丢弃且不追加scrollback。
+
+#### Scenario: Missing session
+- **WHEN** 调用ShowUsage但Agent尚无session
+- **THEN** 追加会话尚未开始的notice且不产生effect；Context和SessionInfo入口在同条件下静默返回。
+
+#### Scenario: Open another tab
+- **WHEN** 非minimal模式打开Context或SessionInfo
+- **THEN** 激活请求tab，同时请求全部三个tab的数据；打开本身不写入scrollback。
+
+#### Scenario: Late usage response
+- **WHEN** 返回usage的session不匹配，或非零nonce不匹配当前Usage弹窗
+- **THEN** 不更新弹窗，不追加notice，不产生effect。
+
+#### Scenario: Scrollback intent persists
+- **WHEN** session匹配且返回nonce为0
+- **THEN** 成功格式化usage，失败包含原error文本，均追加notice；不要求此刻仍为minimal模式。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/status.rs` — `dispatch_show_usage / dispatch_show_context_info / dispatch_show_session_info / open_usage_modal / apply_session_usage_result`。
+- `crates/codegen/pager/src/views/usage_modal.rs` — `next_fetch_nonce / UsageModalState::open`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `show_usage_opens_usage_modal_and_fetches_all_tabs / show_usage_minimal_keeps_scrollback_fetch`。
+
+### Requirement: Context and session info result projection boundaries
+
+SessionInfo成功处理 SHALL 要求Agent存在、当前session等于结果携带session且metadata revision严格相等，然后应用agent_name、同步已打开agents_modal的active_agent并应用完整context；这些实时状态写入先于nonce路由。apply_agent_name即使名称未变化也饱和递增revision，因此同revision的后续响应通常不再通过。Context成功处理只要求Agent存在，不比较info.session_id或metadata revision，先应用context再路由；model缺失时使用unknown。两者nonce 0分别追加notice或结构化context block，非零仅匹配当前Usage弹窗时更新对应Loaded数据。SessionInfo和Context失败处理只要求Agent存在，nonce 0追加含原错误文本的notice，非零匹配弹窗才写Failed；失败路径无session/revision检查。上述处理均不产生effect，不能把弹窗nonce保护表述成所有实时状态的过期保护。
+
+#### Scenario: Closed modal with valid session info
+- **WHEN** SessionInfo成功结果session与revision有效，但弹窗已关闭
+- **THEN** 仍应用agent_name和context，但不追加scrollback、不填弹窗。
+
+#### Scenario: Stale context modal epoch
+- **WHEN** Context成功结果nonce非零且不匹配当前弹窗
+- **THEN** 仍先应用实时context，但不更新弹窗内容。
+
+#### Scenario: Rejected metadata revision
+- **WHEN** SessionInfo成功结果revision不等于当前metadata revision
+- **THEN** 在agent_name、context及任何显示更新前返回。
+
+#### Scenario: Failure scrollback intent
+- **WHEN** SessionInfo或Context失败结果nonce为0且Agent仍存在
+- **THEN** 直接追加错误notice，不检查当前session身份或屏幕模式。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/status.rs` — `handle_session_info_complete / handle_session_info_failed / handle_context_info_complete / handle_context_info_failed`。
+- `crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `SessionInfoComplete / ContextInfoComplete dispatch arms`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `begin_agent_metadata_read / agent_metadata_read_is_current / apply_agent_name`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `stale_epoch_results_are_dropped_after_close_reopen / modal_fill_writes_nothing_to_scrollback / minimal_mode_commits_scrollback_blocks / failed_fetches_fill_modal_error_state`。
+
+### Requirement: Usage modal content navigation and copy selection
+
+Usage弹窗输入 SHALL 先交给共享modal chrome，未处理时才进入内容handler。内容Tab/BackTab按Usage、Context、SessionInfo循环；switch_tab同步window索引，清scroll、selected_row、hover和row_hits，保留已加载数据和fetch_nonce。SessionInfo中Up/k饱和递减选择，Down/j仅在Loaded时递增并限制到末行；其他tab改动scroll。PageUp/Down在任意tab以10饱和调整scroll，滚轮以1调整；此层不按内容高度限制向下滚动。SessionInfo Enter返回当前行CopyRow，即使尚未Loaded；鼠标左击按首个命中缓存row_hits选择并返回CopyRow，空白点击返回Changed，移动更新hover。copy_value只检查SessionInfo数据Loaded和索引范围，不检查active_tab。根dispatch遍历全部agents，选第一个可返回该索引值的Usage弹窗，经共享clipboard copy_text_or_file复制并显示toast，不按active_view或来源Agent定位；找不到则无操作，返回effect为空。
+
+#### Scenario: Switch tab preserves fetch
+- **WHEN** 已有Loaded数据且切换tab
+- **THEN** 清选择、滚动和命中缓存，保留数据与nonce，不产生新fetch。
+
+#### Scenario: Enter before loading
+- **WHEN** SessionInfo尚Loading且按Enter
+- **THEN** 内容层仍返回CopyRow，但copy_value无值时不复制。
+
+#### Scenario: Multiple agents with usage modals
+- **WHEN** 根dispatch收到仅携带index的CopyUsageModalValue
+- **THEN** 使用agents迭代中第一个含可复制该行的Usage弹窗；不能据此保证复制来源为当前Agent。
+
+#### Scenario: Mouse outcome mapping
+- **WHEN** Usage鼠标内容handler返回Unchanged
+- **THEN** modal_routing仍将此次鼠标输入返回Changed；键盘Unchanged则保留Unchanged。
+
+源码证据：
+- `crates/codegen/pager/src/views/usage_modal.rs` — `UsageModalState::switch_tab / copy_value / handle_key / handle_mouse`。
+- `crates/codegen/pager/src/app/agent_view/modal_routing.rs` — `ActiveModal::Usage key and mouse routing`。
+- `crates/codegen/pager/src/app/root/dispatch/status.rs` — `dispatch_copy_usage_modal_value`。
+- `crates/codegen/pager/src/views/usage_modal.rs` — `tab_switch_resets_scroll_selection_and_window_index / key_selection_moves_on_session_info_and_clamps / mouse_click_copies_row_and_move_tracks_hover`。
+
+### Requirement: Usage modal session and context field projection
+
+SessionInfo行 SHALL 按顺序输出非空白title（保留原文）、Shell version、固定provider BYOK的Auth method、session ID、cwd、Model；model缺失取unknown并委托model_display_name处理显示名与resolved开关。Model hash要求should_show_model_fingerprint通过且值Some；backend为Some即输出（包括空字符串）；sandbox profile为Some才输出。末尾Turn使用turn_index，Context使用used/total及已提供usage_pct。Context tab先输出model、usage、system prompt、messages、free，再按输入顺序输出全部usage_categories及可选detail，最后auto-compact阈值与turn/tool-call/compaction计数；比例通过f64计算保留一位，total为0显示横线，不限制比例到100%。
+
+#### Scenario: Blank title
+- **WHEN** title仅空白而backend为Some空字符串
+- **THEN** 省略Title，保留API backend空值行。
+
+#### Scenario: Zero context window
+- **WHEN** total为0且类别tokens非零
+- **THEN** 类别比例显示横线；总Usage仍使用传入usage_pct。
+
+源码证据：
+- `crates/codegen/pager/src/views/usage_modal.rs` — `session_info_rows / context_rows / percent_of_window`。
+
+### Requirement: Usage modal rendering and row hit projection
+
+Usage弹窗 SHALL 使用共享medium sizing并传入compact，标题取active tab，footer提示不可点击。chrome不能生成内容区域时立即返回，不在本函数清row_hits。成功布局后按active tab生成Loading、含原错误的Failed或Loaded文本；Usage复用session_usage_block_text，Context用context_rows，SessionInfo将label左对齐宽17后接value。scroll按逻辑字符串行数减可见高度后转换u16所得上限截断，之后清row_hits。SessionInfo逐逻辑行单行裁剪，每个可见行（包括Loading或Failed提示）登记全内容宽度hit，选中行加箭头，hover改变文本span背景；选择移动不会自动调整scroll。其他tab从scroll逻辑行切片后用trim=false自动换行，滚动上限不按换行后的视觉高度计算。
+
+#### Scenario: Wrapped content
+- **WHEN** Context某逻辑行自动换成多行
+- **THEN** scroll仍以原始逻辑行数计算和切片，不能据此保证所有折行尾部可滚动到达。
+
+#### Scenario: Session info loading
+- **WHEN** SessionInfo仍Loading且布局成功
+- **THEN** 为Loading提示登记一行hit；点击可发CopyRow但尚无Loaded值可复制。
+
+#### Scenario: Selected row outside viewport
+- **WHEN** 键盘选择移动到可见范围以外
+- **THEN** 渲染不自动滚动以跟随选择。
+
+源码证据：
+- `crates/codegen/pager/src/views/usage_modal.rs` — `render_usage_modal`。
+
+### Requirement: Status auxiliary surface dispatch admission
+
+状态辅助入口 SHALL 按各自条件工作：ShowQueue与ShowTasks要求active Agent存在，将对应status_blocks formatter结果追加notice，无session或screen mode门槛。commit_minimal_update_notice同样只检查active Agent，不自行检查minimal模式。OpenTutorial在minimal直接返回，否则在app层切换TutorialState有无，允许非Agent视图。ShowReleaseNotes只在存在的active Agent替换active_modal为standalone DocViewer，scroll为0、cache和previous_palette为空；无screen mode判断。OpenGboom要求存在active Agent及图形协议非None，未检测到协议时只toast；通过时清image_viewer并创建新GboomState，不要求session ID、不切换active_modal且不在此按focused subagent路由。上述dispatch均返回空effect。
+
+#### Scenario: Tutorial in minimal
+- **WHEN** minimal模式调用OpenTutorial
+- **THEN** 直接返回，不创建或切换tutorial。
+
+#### Scenario: Release notes on welcome
+- **WHEN** active_view不是Agent
+- **THEN** 不打开DocViewer，不产生effect。
+
+#### Scenario: Repeated game opening
+- **WHEN** 图形协议可用且当前Agent已有Gboom
+- **THEN** 替换为新游戏状态，同时清image_viewer。
+
+#### Scenario: Read only queue snapshot
+- **WHEN** active Agent存在但没有session ID
+- **THEN** 仍调用queue formatter并追加notice。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/status.rs` — `dispatch_show_queue / dispatch_show_tasks / commit_minimal_update_notice / dispatch_open_tutorial / dispatch_show_release_notes / dispatch_open_gboom`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/status.rs` — `minimal_update_notice_commits_a_system_block / open_tutorial_toggles_overlay_without_effects`。
+
+### Requirement: Queue and task scrollback snapshot formatting
+
+queue_block_text SHALL 先按shared_queue原顺序输出非current_prompt_id行，再输出全部pending_prompts；连续编号从1开始，不显示kind、owner、version或附件，不去重。每行取首个trim后非空行，额外行数使用原text.lines数量减1（饱和），不按所选非空行位置计算，也不按终端宽度截断。空队列输出Queue is empty。tasks_block_text SHALL 固定分组为workflows、非workflow子Agent、后台任务/monitor、scheduled；包含已结束项而非只列运行项。各组独立排序：workflow按active优先、received_at降序、run_id升序；子Agent按running优先、started_at降序、child_session_id升序；后台按Running优先、start_time降序、task_id升序；scheduled按tag、human_schedule、task_id升序。workflow显示名称、trim后非空phase、非零active_agent_count和live_elapsed；子Agent与后台pending_kill优先显示stopping。后台description仅trim首尾且非空即使用，不压缩内部换行；否则取command首非空行。scheduled使用prompt首非空行。最终header计数为逻辑rows数量，不是视觉行数。
+
+#### Scenario: Leading blank queue lines
+- **WHEN** prompt前含空行且共有三条Rust lines
+- **THEN** 摘要取首个非空行，仍显示额外2行。
+
+#### Scenario: Workflow owned child
+- **WHEN** 子Agent的workflow_run_id为Some但没有对应workflow记录
+- **THEN** 仍从独立子Agent分组排除，不在此检测孤儿关系。
+
+#### Scenario: Multiline description
+- **WHEN** 后台任务description包含内部换行且trim后非空
+- **THEN** 原内部换行保留，因此一项任务可能输出多行。
+
+源码证据：
+- `crates/codegen/pager/src/app/status_blocks.rs` — `queue_block_text / tasks_block_text / first_nonempty_line / format_queue_row / join_header_rows`。
+
+### Requirement: Session usage ledger display and cost absence
+
+session_usage_block_text SHALL 仅当totals.model_calls为0且model_usage空时走空账本分支，usage_is_incomplete决定显示未记录但可能漏计或尚无调用；该分支不检查其他token或cost字段。非空分支依次显示input/cached、output/reasoning、total、model calls/API duration和cost，直接使用totals而不从model_usage重算。仅model_usage项数大于1时列By model，每项显示input、output和cost，顺序沿用容器迭代；单项不单列。非空且incomplete时追加漏计提示。format_cost SHALL 优先将Some ticks按1e10每美元转换并显示四位小数，即使cost_is_partial同时为true；None才按partial区分部分调用未报告与未报告，不将缺失费用显示为零。formatter本身不清除partial金额、不校验负ticks、不实现账本reset；since start or last resume只是该输出标题，生命周期由上游负责。
+
+#### Scenario: Conflicting partial cost
+- **WHEN** cost_usd_ticks为Some且cost_is_partial为true
+- **THEN** 显示四位美元金额；不在formatter降为not available。
+
+#### Scenario: Missing cost
+- **WHEN** cost_usd_ticks为None且partial为false
+- **THEN** 显示not available (not reported)，不显示免费。
+
+#### Scenario: Zero calls with residual totals
+- **WHEN** model_calls为0且model_usage空，但其他totals非零
+- **THEN** 仍采用空账本提示，不展示那些totals。
+
+#### Scenario: Single model entry
+- **WHEN** model_usage恰好一项且totals有调用
+- **THEN** 只展示totals，不展示By model或该条模型名。
+
+源码证据：
+- `crates/codegen/pager/src/app/status_blocks.rs` — `session_usage_block_text / format_cost / session_usage_block_flags_partial_and_incomplete`。
+- `crates/codegen/shell/src/extensions/notification.rs` — `ticks_to_usd / USD_TICKS_PER_USD`。
+
+### Requirement: Dispatch root and child view lookup boundaries
+
+get_active_agent、get_active_agent_mut及with_active_agent SHALL 在active root存在时优先检查root permission_queue：非空则返回root；否则active_subagent有对应child时返回child，缺child则回退root。非Agent或root不存在返回None或不调用closure。active_agent_session_id始终返回active root的session，不跟随child或权限队列。with_scrollback沿用前述可见视图解析；navigate_clearing_selection先清该视图persistent_text_selection、table_selection_geometry、selection_created_at、highlighted_link_idx，再调用scrollback closure。find_agent_id_by_session_id及find_agent_by_session_id只匹配root session，按IndexMap顺序取首个。find_agent_view_by_session_id每个root先比较自身session，再按session字符串作为key查该root的直接subagent_views；不递归、不复核child.session.session_id，不保证所有root优先于任意child。
+
+#### Scenario: Permission queue overrides child
+- **WHEN** root有待处理permission且active_subagent存在
+- **THEN** 通用active helper定位root；active_agent_session_id也始终取root session。
+
+#### Scenario: Missing child view
+- **WHEN** active_subagent标记存在但map无对应child
+- **THEN** 通用active helper回退root。
+
+#### Scenario: Duplicate lookup identity
+- **WHEN** 较早root的child key匹配，较晚root自身session也匹配
+- **THEN** find_agent_view_by_session_id返回较早root的child；仅root helper仍只匹配root。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/ctx.rs` — `get_active_agent / get_active_agent_mut / with_active_agent / active_agent_session_id / navigate_clearing_selection / find_agent_view_by_session_id`。
+
+### Requirement: Agent switch permission mirror and transient context
+
+switch_to_agent SHALL 先执行debug_assert：Picker或session_startup_allowed必须成立，该断言不是release运行时门槛；然后未知target或已active target直接返回。实际切换设置active_view并从目标session重置全局permission_mode镜像：always-approve优先，auto要求auto_mode_gate开启，否则旧镜像为auto/always-approve时改ask，其他原值保持。之后同步permission slash gate并调用一次性screen hint。hint helper先take，再检查非minimal和target存在，因此不显示时也消费hint；非minimal并非只fullscreen。show_welcome设置Welcome并重置welcome_announcement。sync_sleep_inhibitor只扫描顶层agents的state.is_idle，任意非Idle则inhibit，否则release，不遍历子Agent或单独计数后台任务。reseed_tip_for_new_session仅要求active_view为Agent且tips非空，不检查该Agent实际存在，随后调用pick_and_advance并更新app.tip。
+
+#### Scenario: Already active
+- **WHEN** target已是active Agent且debug断言通过
+- **THEN** 直接返回，不刷新permission镜像或消费hint。
+
+#### Scenario: Auto gate disabled
+- **WHEN** 切入目标is_auto但auto gate关闭，原全局镜像为auto
+- **THEN** 全局镜像改ask，不在此清目标session auto状态。
+
+#### Scenario: Hint in minimal
+- **WHEN** hint存在且helper在minimal调用
+- **THEN** hint被取走但不显示。
+
+#### Scenario: All root agents idle
+- **WHEN** 全部顶层Agent Idle但其子视图有运行状态
+- **THEN** 此helper仍release睡眠抑制；不在此扫描子视图。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/ctx.rs` — `switch_to_agent / surface_screen_mode_switch_hint / show_welcome / sync_sleep_inhibitor / reseed_tip_for_new_session`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/router.rs` — `switch_to_agent_reanchors_stale_global_auto`。
+
+### Requirement: Plugin CTA candidate and install completion gates
+
+plugin_cta_candidates SHALL 只收featured sources中install_status严格为not_installed的plugin，保持source/plugin输入顺序且不去重，featured_source_url取最后一个featured source（即使无candidate）。plugin_cta_phase_for先检查enabled和featured_source_present，再委托keyword matcher选择单一candidate，最后检查该name是否dismissed；若选中项已dismissed直接Hidden，不继续匹配其他项。impression仅在next为Matched且prev并非同name Matched时返回name，relative_path变化而name不变不重复记录。安装完成处理要求Agent存在、phase为Installing且当前relative_path最后一个斜杠分段等于返回plugin_name，不检查session或请求generation；通过后记录安装诊断。Success且requires_reload、session存在时转AwaitingReload；不需reload且expects_mcp时转AwaitingMcps、attempt归0并fetch；其余成功直接Installed。Installed安排DismissCtaInstalled，session存在再刷新catalog。非Success outcome经sanitize_user_error，transport Err原样保留，均转带原relative_path的Error。 connect_matched_plugin仅接受Matched或Error，先记录点击诊断（含is_retry）再检查session；无session不改变phase。expects_mcp按候选首个同name条目判断：components含非空mcp_servers，或components缺失且remote_url存在；找不到候选为false。通过后设Installing、attempt0并清两个hit集合，InstallPluginFromCta携带本Agent/session、featured_source_url或空字符串及relative_path；不按候选所属源重新定位source。 键盘CTA分支要求非Release、ctrl+/匹配及Matched/Error，调用connect后即返回Changed，即使无session导致无effect；前面的OpenExtensions registry分支优先。鼠标CTA分支先判dismiss hit再判connect hit，均要求Matched/Error；dismiss持久化失败只warn，仍加入内存dismissed、记录诊断、设Hidden并清两个hit；不因持久化失败保留当前横幅。
+
+#### Scenario: Dismissed first match
+- **WHEN** matcher选中的candidate已dismissed但另一个candidate也可能匹配
+- **THEN** 直接Hidden，不执行第二次matcher。
+
+#### Scenario: Same path leaf completion
+- **WHEN** 当前Installing路径末段与结果plugin_name相同
+- **THEN** 该局部门槛通过；不能据此证明结果属于同一次安装请求。
+
+#### Scenario: Successful install without session
+- **WHEN** 安装成功但当前Agent session已None
+- **THEN** 直接Installed并安排dismiss，不reload或fetch catalog。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/cta.rs` — `plugin_cta_candidates / plugin_cta_phase_for / cta_impression_plugin_name / handle_cta_plugin_install_done / cta_settle_installed`。
+
+- `crates/codegen/pager/src/app/agent_view/cta.rs` — `connect_matched_plugin`。
+
+- `crates/codegen/pager/src/app/agent_view/cta.rs` — `connect_matched_enters_installing_and_emits_effect / connect_retries_from_error / connect_without_session_is_noop / connect_captures_expects_mcp_and_resets_attempt / connect_expects_mcp_true_for_url_sourced_plugin`。
+
+- `crates/codegen/pager/src/app/agent_view/input.rs` — `ctrl slash CTA input branch`。
+- `crates/codegen/pager/src/app/agent_view/mouse.rs` — `plugin_cta hit_dismiss and hit_connect branches`。
+- `crates/codegen/pager/src/app/agent_view/cta.rs` — `ctrl_slash_installs_matched_plugin / ctrl_slash_ignored_when_cta_hidden`。
+
+### Requirement: Plugin CTA post install polling and catalog refresh
+
+CTA reload和MCP结果 SHALL 要求Agent存在、当前对应Awaiting阶段且name匹配，不检查session/generation。reload仅Success进入后续：当前session存在且expects_mcp时attempt归0并fetch，否则Installed；失败按候选同name首项relative_path或plugins/name回退构造Error。MCP成功列表在不expects_mcp、目标plugin至少一server且全Ready、attempt>=15、或目标plugin无server但全列表非空且attempt>=1时Installed；其他情况有session则attempt加1并安排重试，无session直接Installed。MCP错误直接Error。重试effect等待1000ms再fetch，因此attempt上限不是15秒硬超时；Installed dismiss effect等待4000ms才返回timeout结果。catalog成功先sanitize并替换候选/featured source状态，enabled时刷新dismissed缓存，仅Hidden/Matched时重算phase，变Hidden清两个hit集合；catalog失败只warn。debounce结果要求generation匹配，并保留Installing/AwaitingReload/AwaitingMcps/Installed/Error阶段；其他阶段重算但本handler不清hit集合。 CtaInstalledDismissTimeout消费者仅在Agent存在、phase仍Installed且name相等时改Hidden，不检查generation/session，不清hit或刷新catalog。 notify_plugin_cta_text_changed仅在featured_source_present且candidates非空时wrapping_add generation并返回DebouncePluginCta；此发送侧不检查enabled、session是否存在或当前phase，消费侧再检查generation与phase。
+
+#### Scenario: All MCP servers absent
+- **WHEN** 全列表空、expects_mcp为true、session存在且attempt<15
+- **THEN** 继续retry，不应用absent短路。
+
+#### Scenario: Other plugin servers only
+- **WHEN** 目标plugin不存在但其他server存在且attempt为1
+- **THEN** 结束探测进入Installed。
+
+#### Scenario: MCP not ready at budget
+- **WHEN** 目标server非Ready且attempt>=15
+- **THEN** 仍Installed；该确认不等于MCP全部可用，也不在此启动认证。
+
+#### Scenario: Catalog arrives during installation
+- **WHEN** 当前Installing且catalog成功
+- **THEN** 更新候选缓存，但保留Installing阶段。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/cta.rs` — `handle_cta_plugin_reload_done / handle_plugin_cta_mcps_loaded / handle_plugin_cta_catalog_loaded / handle_plugin_cta_debounce_expired`。
+- `crates/codegen/pager/src/app/root/effects/mod.rs` — `RetryPluginCtaMcps / DismissCtaInstalled`。
+- `crates/codegen/pager/src/app/root/effects/helpers.rs` — `CTA_MCP_RETRY_DELAY_MS / CTA_INSTALLED_DISMISS_MS`。
+
+- `crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `CtaInstalledDismissTimeout`。
+
+- `crates/codegen/pager/src/app/agent_view/cta.rs` — `notify_plugin_cta_text_changed / notify_skips_debounce_when_no_candidates / notify_skips_debounce_when_source_absent / notify_emits_debounce_when_candidates_present`。
+
+### Requirement: Plugin CTA banner width and hit regions
+
+draw_plugin_cta SHALL 在Hidden时清connect/dismiss命中并返回；Matched显示安装提问及Install/x，Error显示通用安装失败文本及Retry/x而不展示Error.message，Installing显示spinner与Installing，AwaitingReload/AwaitingMcps显示spinner与Setting up，Installed显示checkmark，后三类无按钮。高度0或宽度不大于短按钮总宽时清命中并返回。键提示ctrl+/仅在有按钮且宽度严格大于短按钮宽+提示宽+12时加入connect按钮。正常绘制只清并写area首行；文本预算为宽度减右侧按钮宽再减1，无按钮时使用整宽。右侧connect命中包含键提示，dismiss另隔1列且宽3；无按钮阶段清命中。插件名使用accent_model，connect hover使用link_fg/bg_hover，dismiss hover使用text_secondary/bg_hover。渲染只投影当前phase，不在此发安装请求或改变phase。
+
+#### Scenario: Minimum button width
+- **WHEN** Matched区域宽度等于短按钮总宽
+- **THEN** 整行不绘制且清两个命中，不强行挤入按钮。
+
+#### Scenario: Exact hint threshold
+- **WHEN** 区域宽度恰等于短按钮宽加提示宽加12
+- **THEN** 不显示ctrl+/提示，仍使用短按钮。
+
+#### Scenario: Error payload
+- **WHEN** Error.message包含具体服务器错误
+- **THEN** 横幅仅显示通用Could not install语义，提供Retry和x，不显示message。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/cta.rs` — `draw_plugin_cta / draw_awaiting_phases_show_setting_up_with_spinner_and_no_buttons / draw_installed_shows_checkmark_and_no_buttons / draw_matched_shows_install_copy_and_colored_name / draw_matched_hovered_connect_highlights`。
+
+- `crates/codegen/pager/src/app/agent_view/cta.rs` — `draw_error_shows_retry_and_dismiss_rects / draw_matched_shows_keyboard_hint / draw_matched_drops_hint_when_narrow_but_keeps_buttons / draw_matched_hint_yields_to_message_at_intermediate_width`。
+
+### Requirement: Follow up response acceptance and pending turn buffer
+
+apply_follow_ups SHALL 优先处理当前显示的同response_id：suggestions相同直接false且不更新shown prompt身份；变化则清hit/hover，空建议撤回并从seen删除该response，非空替换显示及shown prompt。此分支先于当前prompt不匹配检查。其他已seen response仅在prompt为当前回合且建议非空时重新显示，否则拒绝；同一回合的已seen旧response因此也可重新显示。未seen且指向其他active prompt的非空建议按prompt缓存，空建议忽略且不撤回该pending。无active prompt或身份匹配时，新response清旧显示；空建议不登记seen，返回之前是否有显示；非空登记seen与递增generation再显示，不按服务端时间或response排序。pending最多16个prompt key，新key按FIFO追加并淘汰最旧；相同key替换内容但不移动FIFO位置。flush先移除pending及顺序项再调用apply，不自行设置current_prompt_id。clear仅清显示/hit/hover，保留seen和pending。reload reset清全部状态和generation，可保留指定prompt：优先对应已显示数据，否则pending，清空后重新buffer该唯一项。 SessionLoaded对应load处理段仅在foreground prompt通过should_adopt_running_prompt时将该ID传给preserving reset，否则全reset；adopt_running_prompt依次start_turn_boundary、设置current_prompt_id/turn_started_at、enable_follow_with_preserve再flush，使flush在身份设置之后执行。
+
+#### Scenario: Shown identity before turn guard
+- **WHEN** 当前显示response同ID但传入prompt属于其他回合且建议变化
+- **THEN** 仍走显示更新分支，不先按其他active回合缓存。
+
+#### Scenario: Pending empty retraction
+- **WHEN** 非当前回合已有pending，随后未seen空建议到达
+- **THEN** 不清已有pending。
+
+#### Scenario: Seen response within active turn
+- **WHEN** 非当前显示的已seen response携带当前prompt和非空建议
+- **THEN** 重新显示，即使该response早于同回合另一个response。
+
+#### Scenario: Reload preservation
+- **WHEN** 指定keep prompt同时有匹配显示和pending
+- **THEN** 保留显示副本，重置其他状态后仅将其放入pending。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/cta.rs` — `apply_follow_ups / buffer_pending_follow_ups / flush_pending_follow_ups / clear_follow_ups / reset_follow_ups_for_reload_preserving`。
+- `crates/codegen/pager/src/app/agent_view/mod.rs` — `MAX_PENDING_FOLLOW_UPS`。
+
+- `crates/codegen/pager/src/app/acp_handler/tests/follow_ups.rs` — `follow_ups_viewer_turn_transition_renders_newer_chips`。
+- `crates/codegen/pager/src/app/agent_view/mod.rs` — `apply_follow_ups_buffered_before_adoption_flushes_on_adoption / apply_follow_ups_buffered_superseded_turn_does_not_revive / pending_follow_ups_buffer_evicts_oldest_on_overflow`。
+
+- `crates/codegen/pager/src/app/agent_view/session.rs` — `adopt_running_prompt`。
+- `crates/codegen/pager/src/app/root/dispatch/session/load.rs` — `foreground adoption and reset_follow_ups_for_reload_preserving`。
+- `crates/codegen/pager/src/app/agent_view/mod.rs` — `reload_preserves_running_turn_follow_ups_and_renders_on_adoption / reload_preserves_running_turn_displayed_chips_and_rerenders_on_adoption / reset_for_reload_clears_pending_buffer / follow_up_chip_click_maps_to_suggestion_text`。
+
+### Requirement: Follow up notification identity and ingestion limits
+
+handle_follow_ups SHALL 反序列化必需sessionId、response_id、promptId与suggestions；单项label缺失默认空，其他字段忽略。解析失败或_meta中grow/replayed严格为布尔true时返回false；response_id空或UTF8字节数超过128时拒绝，不截断、不trim，也不在此检查promptId非空或长度。建议先取输入前6项，再逐项过滤unsafe display字符、取前256个剩余Unicode char、trim首尾，最后丢弃空label；不会从第7项补足，也不去重。整个JSON和Vec先解析后限额，此限制是保留数据上限而非解析内存上限。按session找到匹配后拒绝Child，只更新root Agent；非active root仍应用建议状态，返回值仅在apply改变显示且该Agent active时true。 find_session_match先扫描全部root精确session匹配，优先于首个child-key匹配；均无匹配时允许active root.session_id为None的启动期回退，即使入站sessionId尚未绑定。active判断只比较root AgentId，不排除该root正在显示child。suggestions中任意类型错误会使整个通知解析失败，不是只丢该项。
+
+#### Scenario: Empty leading suggestion slots
+- **WHEN** 前6项清洗后为空而第7项有效
+- **THEN** 传入apply的建议为空，不补取第7项。
+
+#### Scenario: Replay marker type
+- **WHEN** grow/replayed是字符串true而非布尔true
+- **THEN** 不由replay条件拒绝，继续其他检查。
+
+#### Scenario: Background root notification
+- **WHEN** session匹配后台root且apply更新建议
+- **THEN** 后台状态更新，但handler返回false。
+
+#### Scenario: Oversized multibyte identity
+- **WHEN** response_id字符数少于128但UTF8字节超过128
+- **THEN** 拒绝整个通知，不截断身份。
+
+源码证据：
+- `crates/codegen/pager/src/app/acp_handler/follow_ups.rs` — `FollowUpsParams / FollowUpSuggestionParam / sanitize_suggestion / handle_follow_ups`。
+
+- `crates/codegen/pager/src/app/acp_handler/routing.rs` — `find_session_match / is_matched_agent_active`。
+- `crates/codegen/pager/src/app/acp_handler/tests/follow_ups.rs` — `follow_ups_route_by_session_without_redrawing_foreground / follow_ups_prompt_id_makes_dedup_deterministic / follow_ups_caps_count_and_label_length / follow_ups_oversized_response_id_is_rejected / follow_ups_per_element_malformed_is_ignored / follow_ups_empty_for_current_response_clears_chips`。
+
+### Requirement: Follow up chip prefix rendering and original text mapping
+
+render_follow_ups SHALL 在宽或高0时返回空rects；否则仅清并绘制area首行。每条label委托truncate_str以48显示列预算处理，包裹为方括号加两侧空格，用Unicode宽度计算chip；从左到右完整放置，遇第一条放不下立即停止，不跳过后继续，因此rects保持suggestions前缀索引对应。chip间隔1列且命中rect不含间隔；hover索引用原suggestion索引，hover使用text_primary/bg_hover，普通使用link_fg。渲染不改原suggestions；follow_up_chip_at取首个包含坐标的rect索引，鼠标提交路径按该索引读取完整已入站清洗的suggestion而非48列显示文本，再返回SubmitFollowUp。该renderer自身不施加6项入站数量限制。 SubmitFollowUp路由以consume_input=false、literal=true、is_follow_up=true进入dispatch_send_prompt_inner：先清app.pending_action，reconnect_pending则toast并返回，保留chips；跳过project picker、slash执行及exit alias分支。此路径也跳过仅consume_input启用的paste probe等待。进入普通发送分支后仅在session已绑定时清follow-ups，然后按通用immediate/local路由；immediate仍要求composer.images为空，因此点击建议不保证总走immediate。未绑定session时此清理点保留chips。 immediate路径生成UUID、登记self-origin并push server queue echo，follow-up因consume_input=false不清composer也不插入本地history；local路径enqueue_prompt_with_skill_tokens后同样跳过composer附件转移、清文本及history插入，再调用maybe_drain_queue。未绑定session仍可本地入队而不产生SendPrompt，chips保留不表示未接受入队；本函数不对再次点击同建议去重。skill_token_ranges仍由当前composer的slash_controller对提交text计算，literal不等于禁用样式元数据。
+
+#### Scenario: Large first chip
+- **WHEN** 首条chip放不下但后续短chip可放下
+- **THEN** 返回空命中，不尝试后续项。
+
+#### Scenario: Truncated display selection
+- **WHEN** 长建议显示截断且用户命中该chip
+- **THEN** 索引仍对应完整suggestion，不以省略号文本作为提交值。
+
+#### Scenario: Chip gap
+- **WHEN** 鼠标坐标处于两个chip间的空白列
+- **THEN** follow_up_chip_at不命中该间隔。
+
+源码证据：
+- `crates/codegen/pager/src/views/agent.rs` — `render_follow_ups / render_follow_ups_drops_chips_that_do_not_fit / render_follow_ups_clamps_long_label / render_follow_ups_applies_hover_style`。
+- `crates/codegen/pager/src/app/agent_view/cta.rs` — `follow_up_chip_at`。
+- `crates/codegen/pager/src/app/agent_view/mouse.rs` — `SubmitFollowUp chip branch`。
+- `crates/codegen/pager-render/src/render/line_utils.rs` — `truncate_str`。
+
+- `crates/codegen/pager/src/app/root/dispatch/router.rs` — `SubmitFollowUp`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_send_prompt_inner`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/router.rs` — `follow_up_chip_does_not_execute_slash_command / follow_up_chip_does_not_execute_exit_alias / chip_submit_while_running_clears_follow_up_chips / chip_submit_while_reconnect_pending_keeps_chips_and_does_not_send`。
+
+- `crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `chip_submit_without_session_keeps_chips_and_does_not_send / send_prompt_without_session_queues_but_no_effect`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `follow_up_chip_bypasses_project_picker`。
+
+### Requirement: Agent suggestion mode gates and shown diagnostics
+
+refresh_prompt_suggestion_gate SHALL 每次从resolve_enabled刷新controller.enabled，另将prompt_suggestion_active设为input mode Normal、prompt mode Normal且session.state非busy的合取；active字段本身不合并enabled。log_prompt_suggestion_shown_if_visible仅在prompt_suggestion_ghost返回Some且mark_shown_logged首次通过时记录Shown，统计对象为当前prompt文本加ghost完整串，经suggestion_size得到chars/words，事件不含文本。此helper不检测绘制像素或遮挡，不能把逻辑ghost可用等同实际屏幕可见。notify_suggestion_text_changed在非Bash模式清shell suggestions ghost并返回None；Bash模式将当前文本与slash active/inline ghost存在标记传给controller.text_changed，仅Debounce结果产生带AgentId和generation的DebounceSuggestions，Matched或None不产生effect。
+
+#### Scenario: Normal gate while disabled
+- **WHEN** Normal输入与Normal prompt且state非busy，但resolve_enabled返回false
+- **THEN** active字段仍可为true，enabled单独为false；最终ghost可用性由controller决定。
+
+#### Scenario: Shown latch already set
+- **WHEN** ghost存在但mark_shown_logged返回false
+- **THEN** 不再次记录Shown。
+
+#### Scenario: Shell suggestions outside Bash
+- **WHEN** 非Bash模式调用notify_suggestion_text_changed
+- **THEN** 清shell ghost且不发DebounceSuggestions。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/cta.rs` — `refresh_prompt_suggestion_gate / log_prompt_suggestion_shown_if_visible / notify_suggestion_text_changed`。
+
+### Requirement: Prompt suggestion controller generation and prefix semantics
+
+PromptSuggestionController SHALL 使用wrapping generation区分请求：begin_fetch只递增generation，不清现有文本；on_loaded拒绝不等generation而不改状态，相等且Some文本trim非空并不含换行LF时保留原文、清dismissed并重置shown latch，否则只清full_text。此层不限制长度，不过滤其他控制字符或trim存储文本。ghost_for要求enabled、未dismissed、非空full_text且输入为严格前缀，返回剩余串；输入完全等于建议只隐藏，不消费，清空输入可再现。accept有ghost时返回剩余串并clear文本及递增generation；dismiss仅设标记，不使在途generation失效，后续同generation有效on_loaded可解除dismiss。mark_shown_logged只翻转latch，不自行检查有无建议。resolve_enabled将环境override用OnceLock读取一次，缺override则读取设置缓存；resolve_model只返回每次读取的非空白环境model原字符串，否则None，忽略models参数，不按注释选择catalog默认模型。
+
+#### Scenario: Typed full suggestion
+- **WHEN** 输入等于full_text，随后清空输入且未dismiss
+- **THEN** 先无ghost，后完整ghost恢复，文本并未被消费。
+
+#### Scenario: Dismiss during fetch
+- **WHEN** dismiss后同generation合法响应到达
+- **THEN** on_loaded清dismissed并安装新文本。
+
+#### Scenario: Fetch with existing suggestion
+- **WHEN** 已有full_text时调用begin_fetch
+- **THEN** 旧文本保留并可继续显示，只有generation改变。
+
+#### Scenario: Catalog model available without override
+- **WHEN** models包含默认模型但环境override缺失
+- **THEN** resolve_model仍返回None。
+
+源码证据：
+- `crates/codegen/pager/src/views/prompt_suggestion.rs` — `PromptSuggestionController / resolve_enabled / resolve_model / suggestion_size`。
+
+- `crates/codegen/pager/src/views/prompt_suggestion.rs` — `ghost_hides_on_divergent_text_and_returns_on_clear / accept_returns_remainder_and_clears / stale_generation_is_discarded / clear_invalidates_in_flight_fetch / shown_latch_marks_once_and_rearms_on_new_load / rejected_load_does_not_rearm_shown_latch`。
+
+### Requirement: Prompt suggestion completion fetch and response routing
+
+prompt完成处理在通过此前完成准入且maybe_drain_queue后 SHALL 仅当resolve_enabled、result为Ok、非cancelling、非bash、Agent存在、composer文本严格为空、local和shared队列均空、state Idle及session已绑定时begin_fetch并追加FetchPromptSuggestion；本条件不要求active Agent，也不额外检查composer images为空。reconnect_pending在drain及建议生成前返回。effect向grow/suggestPrompt发送generation、model和sessionId；响应解析JSON后若存在result字段则选其值（包括null），否则选顶层，再只接受suggestion字符串；解析/类型错误与RPC Err均投影为None。TaskResult携带AgentId和发起端generation，不携带sessionId、不使用服务端回传generation。消费者按root AgentId定位并调用on_loaded，随后无论其返回true/false均刷新gate与检查Shown，不另行检查active view、session或Idle；过期控制由controller generation承担。 handle_prompt_response前置先要求Agent存在；Ok仅从response.meta.promptId读取身份（缺失时不回退调用参数），Err使用发起prompt_id。Some身份与current不同即提前返回：若等于finalized且current为空则只merge_finalized_pr_meta，否则有session时退休该ID的optimistic/shared echo并通知queue echo retired。None身份不触发该局部比较，仍交给finalizer判定。后续只有finalize_prompt_terminal返回ViewerFinalized才继续；Err且TurnSubmitting且response/current身份相等时先take in_flight_prompt，finalizer通过后若有该draft则restore并提前返回，不通知、drain或fetch建议。_http_status未使用；最终建议条件的result.is_ok不等于任意Ok stop_reason都会触发，因为Cancelled被was_cancelling排除。
+
+#### Scenario: Whitespace draft
+- **WHEN** composer文本仅含空格
+- **THEN** 不是严格空字符串，不触发此建议fetch。
+
+#### Scenario: Nested null result
+- **WHEN** RPC JSON同时有result:null与顶层suggestion字符串
+- **THEN** 选择null result后解析为None，不回退顶层suggestion。
+
+#### Scenario: Stale result reception
+- **WHEN** 目标Agent存在但controller拒绝旧generation
+- **THEN** 仍执行gate刷新及Shown检查，不能把整个消费者描述为完全无操作。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `completion FetchPromptSuggestion admission`。
+- `crates/codegen/pager/src/app/root/effects/mod.rs` — `FetchPromptSuggestion`。
+- `crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `PromptSuggestionLoaded`。
+
+### Requirement: Unconfirmed input draft restoration admission
+
+restore_failed_input_draft SHALL 仅当composer文本严格空、images空且prompt_mode为Normal时将失败text/images/chip_elements转换StashedPrompt并restore到composer，提示审阅后重发；该条件不检查prompt_input_mode、chip_elements是否空或是否有其他pending。from_submission将cursor设为text字节长度、image_counter由images_high_water计算并清image_undo_stash。否则将完整text/images/chip_elements以新local queue ID插入队首，kind为Prompt，再标requires_review并提示编辑重试，不覆盖现有composer。helper不发送RPC或主动drain；前述prompt response调用方恢复后立即返回。enqueue_in_flight_prompt_front本身只插队，不自动标review，review由此恢复调用方设置。
+
+#### Scenario: Existing draft
+- **WHEN** composer已有文本或图片，或prompt_mode不是Normal
+- **THEN** 失败输入插队首并requires_review，现有composer保留。
+
+#### Scenario: Empty normal composer
+- **WHEN** composer文本/images为空且prompt_mode Normal
+- **THEN** 恢复提交载荷，cursor取文本末尾，提示手动审阅。
+
+#### Scenario: Requeue identity
+- **WHEN** 恢复路径选择队首缓存
+- **THEN** 分配新的next_queue_id，不复用原RPC prompt ID。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `restore_failed_input_draft`。
+- `crates/codegen/pager/src/app/session/mod.rs` — `enqueue_in_flight_prompt_front`。
+- `crates/codegen/pager/src/views/prompt_widget/mod.rs` — `StashedPrompt::from_submission`。
+
+### Requirement: Compaction request completion foreground ownership
+
+handle_compact_complete SHALL 先要求Agent存在。track_foreground=false时不检查command state，Scheduled/AlreadyRunning设置compaction Info反馈，Completed不做显示更新，Err交给错误helper，均返回无effect且不finish/drain。track_foreground=true时仅CommandRunning Compact或CommandCancelling Compact继续，先finish_command；Scheduled/AlreadyRunning设置Progress反馈，Completed不重复发布完成显示，Err调用错误helper；随后mark_turn_finished并清activity_started_at/last_activity，reconnect_pending时返回，否则maybe_drain_queue并处理page flip。此handler无session ID或请求generation门槛。错误helper在control_terminal_was_published为true时完全返回；否则InvalidRequest/InvalidParams/MethodNotFound清compaction反馈并追加含sanitize_user_error结果的Command Error notice，其他错误只设置Warning提示结果未知、重连核查再重试，不宣称压缩失败已确认。
+
+#### Scenario: Background scheduled result
+- **WHEN** track_foreground为false且当前正在普通turn
+- **THEN** 只设置Info反馈，不结束当前command或drain。
+
+#### Scenario: Foreground stale command kind
+- **WHEN** track_foreground为true但当前不是Compact command状态
+- **THEN** 忽略整个结果。
+
+#### Scenario: Published terminal error
+- **WHEN** error.data声明control terminal已发布
+- **THEN** 错误helper不追加notice或更改feedback；前台外层仍进行其收尾。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `handle_compact_complete / show_compact_request_error`。
+- `crates/codegen/shell/src/session/commands.rs` — `control_terminal_was_published`。
+
+- `crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `CompactComplete`。
+- `crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `compact_rpc_acknowledgement_does_not_append_another_completion / compact_cancel_rpc_does_not_echo_the_backend_terminal`。
+
+### Requirement: Shell suggestion response strict wire projection
+
+SuggestResponseParsed.from_json SHALL 若result字段存在则仅解析该值，否则解析顶层。响应、ghost和completion结构均deny_unknown_fields；响应completions及generation必需，ghost可缺失或null。ghost suffix为空时先丢弃该ghost，不再校验source；非空ghost及全部completion source仅接受history/path/file/ai。每项replaceRange要求两个usize且start<=end；任一项类型错误、未知source或逆序range导致整个解析返回None，不保留部分候选。此解析层不检查range是否落在请求text字节边界或长度内、不限制文本大小和候选数量、不清洗display/replacement/description，保留priority与truncated原值和输入顺序，后续应用层负责进一步判断。
+
+#### Scenario: Empty ghost unknown source
+- **WHEN** ghost结构合法、suffix为空但source字符串未知
+- **THEN** 丢弃ghost，若其余响应合法则解析成功。
+
+#### Scenario: One invalid completion
+- **WHEN** 多个completion中一个source未知或range逆序
+- **THEN** 整个响应None，不仅过滤该项。
+
+#### Scenario: Range beyond draft
+- **WHEN** range正序且usize有效，但大于实际请求text长度
+- **THEN** 解析层仍接受，不能据此直接应用splice。
+
+源码证据：
+- `crates/codegen/pager/src/views/suggestion_controller/mod.rs` — `SuggestResponseParsed::from_json / SuggestResponseWire / CompletionItemWire / SuggestionSource::parse_source`。
+
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `parse_response_with_ghost_and_completions / parse_response_without_ghost`。
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `parse_response_empty_suffix_treated_as_no_ghost / parse_response_missing_generation_returns_none / parse_response_unwrapped_format / parse_completion_requires_one_atomic_edit / parse_completion_rejects_old_or_malformed_shapes`
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `source_parse_known_values / source_parse_unknown_returns_none`
+
+
+### Requirement: Shell suggestion dropdown and ghost reset scopes
+
+CompletionDropdownState SHALL 键盘move_selection按rem_euclid循环、scroll_selection夹在首末项，空items时不改状态。accept不要求open，非空时selected夹到末项、移出该item后close；close清open/selected/hover/items，但保留request_text/request_cursor及generation。SuggestionController.new从环境读取enabled与ai_enabled，均默认false；AI model仅过滤空字符串而非trim空白。set_ghost普通递增generation并设置text/full_text/source/ghost generation，不主动关dropdown。clear_ghost清text/full_text/source并close dropdown，但不递增controller generation、不清last_request_text或tab_pending；invalidate_draft额外清后二者并递增generation。has_ghost与ghost_text只判断ghost文本是否空，不检查enabled。accept_ghost在非空时先close dropdown，Full移出全部text并清full/source和递增generation；OneWord按one_word_end取前缀并移除，只有余串空时清full/source，成功时递增generation；此方法不直接清tab_pending。
+
+#### Scenario: Closed dropdown acceptance
+- **WHEN** open=false但items非空
+- **THEN** accept仍可取选中item，并清剩余items。
+
+#### Scenario: Clear versus invalidate
+- **WHEN** 调用clear_ghost后仍有旧generation请求在途
+- **THEN** 此操作自身不使generation失效；invalidate_draft才额外递增并撤销pending Tab。
+
+#### Scenario: Disabled with stored ghost
+- **WHEN** enabled=false但ghost.text非空
+- **THEN** has_ghost仍返回true，显示准入需调用方判断。
+
+源码证据：
+- `crates/codegen/pager/src/views/suggestion_controller/mod.rs` — `CompletionDropdownState / SuggestionController::new / clear_ghost / invalidate_draft / accept_ghost`。
+
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `accept_full_returns_entire_ghost_and_clears / accept_one_word_takes_first_word_leaves_rest / accept_one_word_whitespace_only / accept_one_word_unicode / accept_one_word_progressive`。
+
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `accept_ghost_closes_dropdown`。
+
+### Requirement: Shell completion splice validation and Tab decisions
+
+peek_completion_splice SHALL 要求dropdown generation等于controller且items非空，selected夹至末项后校验range，返回Edit或Stale而不消费。range要求正序且end不超过request_text长度，current_text以整个request_text为前缀；只有range原本到request末尾且current增长时才扩展end，并要求replacement以扩展后token为前缀；最终检查current字节边界。未增长时不要求replacement前缀匹配，也不检查cursor。accept_completion在generation不符时仅close并None；否则消费已解析候选、close并递增generation，即使解析结果为Stale也返回Stale且已消费。tab_decision另检查cursor等于request_cursor加非负字节增长；不符返回Nothing。全部项为file/path且无truncated时，单项直接InstaAccept（此处尚未验证range），多项同range才尝试公共前缀，公共前缀尾部奇数个反斜杠去一个，再经range校验且严格扩展typed才Fill；其他返回Open。
+
+#### Scenario: Stale range acceptance
+- **WHEN** generation相等但range不能对当前文本应用
+- **THEN** accept_completion返回Stale并清候选、递增generation；调用方不得据此写文本。
+
+#### Scenario: Single invalid token candidate
+- **WHEN** 仅一项file/path且未truncated，cursor门槛通过但range无效
+- **THEN** tab_decision仍InstaAccept，后续peek/accept负责拒绝。
+
+#### Scenario: Cursor-only movement
+- **WHEN** 文本未变但光标不等于request_cursor
+- **THEN** tab_decision返回Nothing；peek自身不接收cursor。
+
+源码证据：
+- `crates/codegen/pager/src/views/suggestion_controller/mod.rs` — `peek_completion_splice / accept_completion / tab_decision / common_prefix_fill / validated_replace_range`。
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `validated_range_exact_text_passes_through / validated_range_stretches_over_token_extension_tail / validated_range_non_extension_tail_rejects / validated_range_mid_text_token_keeps_end / validated_range_drifted_text_falls_back / validated_range_out_of_bounds_falls_back / validated_range_mid_char_boundary_rejects`
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `common_prefix_fill_extends_typed_token / common_prefix_fill_stretches_over_typed_tail / common_prefix_fill_none_when_lcp_equals_typed_token / common_prefix_fill_none_for_fuzzy_non_extension_lcp / common_prefix_fill_none_on_case_mismatch / common_prefix_fill_none_on_mixed_ranges_or_single_item / common_prefix_fill_none_on_stale_generation / common_prefix_fill_multibyte_boundary_trim / tab_decision_nothing_on_empty_or_stale_items / tab_decision_nothing_on_cursor_drift / tab_decision_insta_accept_single_token_candidate / tab_decision_fill_for_shared_prefix / tab_decision_open_for_whole_line_and_mixed_sets / tab_decision_open_when_no_extending_lcp / tab_decision_truncated_rows_open_only / tab_decision_lcp_ending_mid_escape_opens / tab_decision_lcp_with_complete_escape_fills / peek_completion_splice_is_non_consuming / accept_completion_resolves_token_splice / accept_completion_whole_line_edit / accept_completion_stale_range_resolves_stale / accept_completion_stale_generation_refuses_and_closes / accept_completion_invalidates_in_flight_response`
+
+
+### Requirement: Shell suggestion text matching and response state updates
+
+SuggestionController.text_changed SHALL 在disabled、slash active/inline ghost存在或文本严格空时invalidate_draft并不发debounce。否则只有文本相对last_request_text恰好追加一个Unicode char且匹配ghost首字符才递减ghost并更新last_request_text，返回Matched且不递增generation；不匹配则清dropdown、递增generation并Debounce，不在此更新last_request_text。on_debounce_expired只比较generation。begin_tab_completion独立于enabled，递增generation并按run_tab_on_load设置或清pending；take_pending_tab在标记等于传入generation时先清标记，再返回是否仍等于当前generation。on_suggestions_loaded仅generation相等才更新，ghost Some且enabled时设置ghost字段，否则clear_ghost；之后替换items、dropdown generation、selected0及请求text/cursor锚点，不更新progressive last_request_text。有效ghost分支不会主动清dropdown.open/hover，另一分支通过clear_ghost清；不把不自动打开误写为始终关闭。one_word_end按Unicode空白取前导空白加首个非空白段，全空白则全部接受。common_str_prefix按相同字节前缀退到a的char边界，不做大小写归一化。
+
+#### Scenario: Progressive single character
+- **WHEN** 文本只追加一个匹配ghost首字符的多字节char
+- **THEN** 按其UTF8长度从ghost移除，保留generation。
+
+#### Scenario: Ghost response while dropdown open
+- **WHEN** 同generation响应带有效ghost且enabled
+- **THEN** 替换候选并selected0，但open及hover可保持原值。
+
+#### Scenario: Whitespace ghost acceptance
+- **WHEN** OneWord接受的ghost全为空白
+- **THEN** one_word_end为整串字节长度，不把它当空接受。
+
+源码证据：
+- `crates/codegen/pager/src/views/suggestion_controller/mod.rs` — `text_changed / try_progressive_match / on_suggestions_loaded / begin_tab_completion / take_pending_tab / common_str_prefix / one_word_end`。
+
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `progressive_match_sequential_chars / progressive_match_multi_char_append_clears / progressive_match_unicode_char / progressive_match_empty_suffix_clears`。
+
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `text_changed_slash_active_invalidates_pending_state / text_changed_inline_ghost_suppresses / text_changed_empty_text_clears_ghost / text_changed_progressive_match_returns_matched / text_changed_no_match_returns_debounce / debounce_expired_stale_generation_returns_false`。
+
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `suggestions_loaded_sets_ghost / suggestions_loaded_stale_generation_ignored / suggestions_loaded_populates_dropdown / suggestions_loaded_stale_does_not_populate_dropdown`。
+- `crates/codegen/pager/src/views/suggestion_controller/tests.rs` — `loaded_response_pins_request_text_on_dropdown / accept_ghost_invalidates_in_flight_response / emptied_text_discards_in_flight_response / non_matching_edit_tears_down_ghostless_dropdown / tab_completion_arms_and_lands_while_disabled / tab_completion_pending_stale_after_edit / tab_fetch_pending_tracks_armed_current_fetch_only / tab_completion_silent_refetch_has_no_pending_tab / disabled_controller_ignores_response_ghost / full_pipeline_text_change_debounce_load / rapid_typing_discards_stale_debounce / slash_during_pending_debounce_suppresses`
+
+
+### Requirement: Shell completion dropdown layout and visible row projection
+
+Completion dropdown SHALL 在closed或无items时请求高度0，否则先将item数量转为u16再min(6)，加一行separator预算；render_dropdown自身不绘separator，area高度0、宽度小于4或closed时直接返回。scroll_offset按固定6行及夹至末项的selected计算居中偏移，不随实际area高度变化；render使用实际area高度遍历从该偏移开始的items，不保证矮区域始终显示selected。items多于area高度时为scrollbar预留两列。label列取全部items中display宽度不超过40的最大值，再受可用内容宽度3/5与40上限限制，超长label不参与最大值计算。行使用display和description而非replacement；选中加粗，embedded row样式优先，否则选中、hover、普通背景依次选择。description预算按两列gap计算但实际非空description仅插入一空格；最终通过SafeBuf写入。越出buffer底部的行跳过；本函数不清空未绘制行，也不维护鼠标命中区域、验证generation或重排priority。
+
+#### Scenario: Reduced viewport
+- **WHEN** 候选超过6项且实际area少于6行
+- **THEN** 偏移仍按6行计算，实际绘制行数受area约束，不声称选中项必然可见。
+
+#### Scenario: All labels over cap
+- **WHEN** 所有display显示宽度均超过40
+- **THEN** label列宽计算为0，仍按description预算构造行。
+
+#### Scenario: Resize past bottom
+- **WHEN** area部分行超出buffer底部
+- **THEN** 跳过这些行；已有源码测试验证该布局调用不panic。
+
+源码证据：
+- `crates/codegen/pager/src/views/completion_dropdown.rs` — `dropdown_height / scroll_offset / compute_label_column_w / render_dropdown / build_item_line / tests`。
+
+### Requirement: Shell completion view acceptance and deterministic refetch
+
+AgentView shell completion executor SHALL 在接受前探测selected splice是否切断atomic element；会切断时消费按键但保留候选、不写草稿、不refetch。否则调用prompt接受；返回None时以调用前had_items决定是否消费按键，避免过期候选的Enter落入发送。成功应用splice后设置Bash模式并刷新建议；Stale或应用拒绝仍消费按键。InstaAccept遇atomic element冲突改为打开候选；Fill仅在实际应用成功时刷新，否则打开候选；Open只打开，Nothing不请求。request_shell_tab_completion在run_tab_on_load且已有当前pending时去重；其他情况begin_tab_completion并发FetchShellSuggestions，携带当前text/cursor、cwd的lossy字符串、agent_id、可选session_id、wire limit，include_ai=false、ai_model=None、token_only=true。该方法自身不要求绑定session或enabled，也不检查Bash模式。接受或fill后的刷新在enabled时走notify_suggestion_text_changed且仅收录其Some effect，disabled时直接silent Tab请求，不把两条路径都描述为立即RPC。
+
+#### Scenario: Pending Tab dedupe
+- **WHEN** run_tab_on_load=true且controller仍有当前pending
+- **THEN** 不增加第二个FetchShellSuggestions effect。
+
+#### Scenario: Atomic element conflict
+- **WHEN** InstaAccept候选splice切断atomic element
+- **THEN** 打开候选以供选择，不消费该候选并重新请求。
+
+#### Scenario: Disabled suggestion pipeline
+- **WHEN** 应用补全成功且suggestions.enabled=false
+- **THEN** 设置Bash并直接请求token_only、无AI、run_tab_on_load=false的刷新。
+
+源码证据：
+- `crates/codegen/pager/src/app/agent_view/shell_completion.rs` — `accept_completion_dropdown_item / shell_completion_tab / execute_tab_action / request_shell_tab_completion / kick_shell_suggest_refetch`。
+- `crates/codegen/pager/src/app/agent_view/shell_completion.rs` — `dropdown_tab_accept_replaces_token_in_place / dropdown_enter_accept_replaces_token_in_place / dropdown_accept_works_without_env_flag / dropdown_accept_stale_range_is_a_draft_preserving_noop / dropdown_accept_stale_generation_is_a_noop / dropdown_accept_whole_line_edit / tab_opens_dropdown_without_ghost / tab_without_items_fires_deterministic_fetch / repeat_tab_fires_single_fetch_while_pending / tab_with_stale_items_refetches / tab_on_empty_bash_draft_falls_through_to_focus_scrollback / tab_in_normal_mode_does_not_fetch / tab_single_token_candidate_accepts_without_dropdown_flash / tab_single_candidate_accepts_and_kicks_fetch_always_on / tab_single_history_item_opens_dropdown / tab_mixed_file_and_history_items_opens_dropdown / tab_whole_line_history_items_open_dropdown_not_fill / tab_fills_common_prefix_then_opens_dropdown_on_refresh / tab_fill_kicks_deterministic_fetch_always_on / tab_fill_clipping_paste_chip_opens_dropdown_without_refetch / tab_insta_accept_clipping_paste_chip_opens_dropdown_without_refetch / dropdown_accept_clipping_paste_chip_keeps_candidates / dropdown_accept_respects_selection_over_mixed_clip_ranges / dir_accept_kicks_refetch_for_drill_down / pipeline_fires_only_in_bash_mode / esc_closes_tab_fetched_dropdown / typing_invalidates_tab_state_always_on / prompt_click_invalidates_cached_items_before_tab`。
+
+
+### Requirement: Prompt completion writes and atomic element overlap refusal
+
+PromptWidget completion_dropdown_accept SHALL 对自身当前textarea文本解析候选，结果Some时清ghost（包括Some Stale），不在此写文本。apply_completion_splice对Stale直接false；Edit和apply_completion_fill均先以element.start<range.end且element.end>range.start拒绝任意元素重叠，不仅拒绝部分切断，完整覆盖元素也拒绝，元素内部的空range亦满足该判定；与元素端点相接的外部range不因该元素拒绝。通过检查后调用textarea.replace_range、将cursor设为range.start加替换UTF8字节长度并update_file_search_context，返回true；本层不重复controller的请求锚点/generation校验。completion_accept_would_clip_element只对peek得到的Edit检查重叠，None/Stale返回false，不消费候选。set_completion_hovered将超出items长度的index变None并返回值是否变化；select_completion_hovered在Some时直接赋selected并true，不再校验generation/open或index。
+
+#### Scenario: Whole atomic element replacement
+- **WHEN** 补全range完整覆盖一个atomic element
+- **THEN** 与部分重叠一样拒绝，不允许通过整体覆盖绕过保护。
+
+#### Scenario: Adjacent text replacement
+- **WHEN** range从paste chip结束处开始且只覆盖后续普通文本
+- **THEN** 不因该chip拒绝，写入后光标位于替换文本末尾。
+
+#### Scenario: Stale completion resolution
+- **WHEN** controller对当前草稿返回Some Stale
+- **THEN** widget清ghost，但apply返回false且不写草稿。
+
+源码证据：
+- `crates/codegen/pager/src/views/prompt_widget/mod.rs` — `completion_dropdown_accept / apply_completion_splice / apply_completion_fill / completion_accept_would_clip_element / completion_range_clips_element / set_completion_hovered / select_completion_hovered`。
+- `crates/codegen/pager/src/views/prompt_widget/tests.rs` — `apply_completion_splice_replaces_token_in_place / apply_completion_splice_preserves_text_after_token / apply_completion_splice_whole_line_replaces_and_ends_cursor / apply_completion_splice_stale_is_a_noop / dropdown_accept_resolves_against_current_draft / dropdown_accept_stale_range_resolves_stale / apply_completion_fill_writes_and_positions_cursor / completion_splice_and_fill_reject_range_clipping_paste_chip`。
+
+### Requirement: Shell suggestion async dispatch and failure projection
+
+Shell suggestion debounce effect SHALL 等待50ms后携带arming agent_id/generation分发；handler查顶层agents中的该Agent、要求Bash及generation匹配，再读取届时text/cursor/cwd、AI配置和可选session发送token_only=false请求，不要求当前active Agent。FetchShellSuggestions向grow/suggest发送text/cursor/cwd/includeAi/aiModel/sessionId/limit/generation/tokenOnly，成功解析后TaskResult携带原request_text/cursor与解析response；采用响应generation，不在effect中与请求generation另比较。传输失败、无效JSON或parser失败均退为CancelComplete，其consumer仅trace并返回空effects，不清pending Tab。ShellSuggestionsLoaded只查顶层Agent并要求Bash，无session身份检查；调用controller按generation接收后，无论是否过期均把progressive last_request_text设为当前prompt文本，再take_pending_tab(response generation)，成功才执行一次shell_completion_tab。
+
+#### Scenario: Failed armed Tab request
+- **WHEN** 已arm的Tab请求传输失败且没有后续草稿失效操作
+- **THEN** CancelComplete不清pending，重复run_tab_on_load请求仍可被pending去重。
+
+#### Scenario: Stale parsed response
+- **WHEN** Bash Agent收到过期generation的合法响应
+- **THEN** controller不替换候选，但分发层仍重设last_request_text为当前草稿。
+
+#### Scenario: Agent switched during debounce
+- **WHEN** arming Agent仍存在且Bash/generation有效但不是active Agent
+- **THEN** 为arming Agent的当前草稿发请求，不转给active Agent。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/effects/mod.rs` — `Effect::DebounceSuggestions / Effect::FetchShellSuggestions`。
+- `crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `handle_suggestion_debounce_expired`。
+- `crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `TaskResult::ShellSuggestionsLoaded / TaskResult::CancelComplete`。
+- `crates/codegen/pager/src/app/agent_view/shell_completion.rs` — `request_shell_tab_completion`。
+
+### Requirement: CLI completion script generation and zsh root rewrite
+
+completions command SHALL 接受clap_complete Shell value_enum并以PagerArgs命令树生成公开名称grow的补全脚本。非Zsh直接生成至stdout；Zsh先生成到内存buffer，UTF8成功时过滤以精确前缀'::prompt -- 开头的所有行，再对root words、grow-command curcontext及case的三个固定line[2]模式各只替换第一次为line[1]，按lines迭代重建并为每行添加换行。UTF8失败时尝试原始字节write_all并忽略其错误。此函数生成静态CLI命令补全，不请求grow/suggest或运行时文件候选。CLI main在resume target处理前直接调用并返回，但该分支前仍可执行debug相关环境变量设置，不能将函数注释扩大成整个启动路径零副作用。
+
+#### Scenario: Public command name
+- **WHEN** 以内部binary名称解析后生成补全
+- **THEN** 脚本命令树和生成名称均固定grow。
+
+#### Scenario: Zsh root prompt positional
+- **WHEN** 生成器输出包含已知root prompt slot和三个line[2]模式
+- **THEN** 删除prompt行并逐个替换首个匹配；不执行通用shell语法重写。
+
+#### Scenario: Other shell output
+- **WHEN** 目标不是Zsh
+- **THEN** 直接调用clap_complete生成到stdout，不应用Zsh补丁。
+
+源码证据：
+- `crates/codegen/pager/src/completions_cmd.rs` — `run / fix_zsh_root_prompt_positional / zsh_completions_drop_prompt_slot_and_dispatch_on_line_1`。
+- `crates/codegen/pager/src/app/cli.rs` — `Command::Completions`。
+- `crates/codegen/pager/src/app/mod.rs` — `cli_completions_parses`。
+- `crates/codegen/cli/src/main.rs` — `Command::Completions early return`。
+
+### Requirement: Root terminal outcome queue drain and deferred notification
+
+AppView apply_terminal_outcome SHALL 对Ignored返回false；ViewerFinalized时若顶层Agent存在，先以pending_prompts.is_empty快照queue_empty，再maybe_drain_queue并追加effects、记录page flip，随后调用terminal notifications并返回true，即使Agent不存在也返回true；is_active参数不参与判断。apply_terminal_notifications在notification=None或Agent不存在时无操作。queue_empty时以display_name优先generated_session_title、当前model和AppView.cwd构造idle title，固定focused=true、busy=false、无pending permissions/activity/elapsed，并替换pending_notification_escapes。TurnComplete只有queue_empty才设置通知，其他kind不受queue_empty抑制；以session_name或Grow为title、携带body和可选session_id，将单个deferred_notification替换为当前Instant加100ms。这里不证明实际通知送达，也不保存并发通知队列。queue_empty仅依据drain前本地pending_prompts，不等同所有服务端任务已经空闲。
+
+#### Scenario: Queued follow-on turn
+- **WHEN** ViewerFinalized时pending_prompts非空且notification为TurnComplete
+- **THEN** 执行drain，但不生成idle escapes或设置此次TurnComplete延迟通知。
+
+#### Scenario: No notification payload
+- **WHEN** ViewerFinalized但notification为None
+- **THEN** 仍可drain并返回true，notification helper不刷新idle title。
+
+#### Scenario: Background terminal result
+- **WHEN** 传入is_active=false且ViewerFinalized
+- **THEN** 不因该参数抑制drain或通知处理。
+
+源码证据：
+- `crates/codegen/pager/src/app/root/turn_completion.rs` — `apply_terminal_notifications / apply_terminal_outcome`。
+
+### Requirement: Terminal marker stop hook stash identity folding
+
+AgentView push_turn_terminal_marker SHALL 先take并清空pending_stop_hooks。stash有prompt_id时仅与相同ending_prompt_id合并；ending缺失或不同则逐组立即推standalone lifecycle hooks，传给marker的groups为空。stash没有prompt_id时保留旧启发式，不拒绝合并。event Some时调用push_end_marker_block并携带ending_prompt_id和可合并groups；event None时将这些groups逐组推standalone，不创建terminal marker。即使没有marker，stop hook结果也不会仅因event None被丢弃。
+
+#### Scenario: Mismatched stamped hooks
+- **WHEN** stash prompt_id与ending_prompt_id不同且event存在
+- **THEN** 旧hook组单独显示，当前marker不折入旧组。
+
+#### Scenario: No terminal marker
+- **WHEN** event=None且stash可匹配
+- **THEN** hook组转为standalone lifecycle blocks。
+
+#### Scenario: Unstamped stash
+- **WHEN** stash无prompt_id但event存在
+- **THEN** 允许其groups折入marker，不因缺身份拒绝。
+
+源码证据：`crates/codegen/pager/src/app/agent_view/turn_completion.rs` — `push_turn_terminal_marker`。
+- `crates/codegen/pager/src/app/agent_view/turn_completion/tests.rs` — `marker_push_consumes_matching_stop_hook_stash / marker_push_flushes_stale_stash_standalone / marker_without_ending_pid_flushes_stamped_stash_standalone / no_marker_flushes_stash_as_standalone_block / viewer_finalize_consumes_stop_hook_stash`。
+- `crates/codegen/pager/src/app/agent_view/turn_completion/tests.rs` — `real_end_marker_stays_plain_with_running_work / workless_marker_renders_legacy_text / turn_end_after_park_pushes_single_marker`。
+
+
+### Requirement: Agent terminal identity gate and shared teardown
+
+finalize_prompt_terminal SHALL 要求非空Option的prompt_id与current_prompt_id精确相等（不额外拒绝空字符串）；accepts_submitting=false时还要求state.is_terminal_turn，true时本方法不另设状态检查。通过后将model_failure_reported并入skip_error_marker，先捕获elapsed、ending id并计算marker/notification，再finish_turn、push marker、seal subagent permission group、mark_turn_finished、清activity、drain root permissions。存在plan approval时send_stale_cancel、保存next_comment_id、restore stashed_prompt并清line_viewer；无plan approval不在此清line_viewer。清cancel view/buttons；bash_turn时复位bash标记并滚底；清prompt suggestion并登记finalized_prompt，返回ViewerFinalized。durable入口将cancelled/error/rate_limit判为pr_ok=false，error默认unknown error，rate_limit跳错误标记，其余包括缺失/未知stop_reason为pr_ok=true；固定accepts_submitting=false。
+
+#### Scenario: Missing terminal identity
+- **WHEN** 终态未携带prompt_id
+- **THEN** 返回Ignored，不按当前运行状态猜测身份。
+
+#### Scenario: Durable unknown reason
+- **WHEN** 身份和terminal state门槛满足但stop_reason未知
+- **THEN** 按pr_ok=true构造meta进入共享收尾。
+
+源码证据：`crates/codegen/pager/src/app/agent_view/turn_completion.rs` — `finalize_turn_from_durable_terminal / finalize_prompt_terminal`。
+- `crates/codegen/pager/src/app/agent_view/turn_completion/tests.rs` — `durable_terminal_immediately_finalizes_driver / provider_failure_is_reported_once_on_either_terminal_rail / stale_durable_terminal_cannot_finish_new_driver_turn / pidless_prompt_response_cannot_finish_running_turn / viewer_finalize_idles_and_pushes_completed_marker / viewer_finalize_duplicate_terminal_is_noop`。
+- `crates/codegen/pager/src/app/agent_view/turn_completion/tests.rs` — `viewer_finalize_runs_full_teardown_once`。
+- `crates/codegen/pager/src/app/acp_handler/tests/turn_completion.rs` — `durable_terminal_finalizes_the_exact_viewer_turn_once / durable_terminal_does_not_finish_a_different_foreground_turn`。
+
+
+### Requirement: Terminal marker notification precedence and late response metadata
+
+terminal_marker_event SHALL 优先failed_error：skip时无marker，否则TurnFailed保留可选elapsed；随后cancel优先于bash，产生TurnCancelled；bash或非ok且skip时无marker，其他TurnCompleted使用elapsed默认零。terminal_notification先判pr_ok且非cancel非bash发TurnComplete，其次failed_error且非skip发AgentError，否则None；不要求该函数的任意meta组合都与marker同类。merge_finalized_pr_meta自身不校验prompt身份，调用方负责；Ok从meta解析usage（非法丢弃）、structuredOutputError字符串优先于任意structuredOutput JSON，Err仅提供error。初始化slot后只填各个缺失字段，不覆盖已有usage/structured_output/error，不进行finish/marker/drain。
+
+#### Scenario: Cancelled bash turn
+- **WHEN** meta同时was_cancelling和bash_turn且无failed_error
+- **THEN** marker仍TurnCancelled，notification无TurnComplete。
+
+#### Scenario: Repeated late response
+- **WHEN** slot已存在usage而新响应提供不同usage及缺失的error
+- **THEN** 保留旧usage，只填缺失error。
+
+源码证据：`crates/codegen/pager/src/app/agent_view/turn_completion.rs` — `terminal_marker_event / terminal_notification / merge_finalized_pr_meta`。
+- `crates/codegen/pager/src/app/agent_view/turn_completion/tests.rs` — `viewer_finalize_stop_reason_to_marker_mapping / late_prompt_response_merges_usage_and_structured_output_only`。
+
+
+### Requirement: Trajectory CLI implicit session selection
+
+Trajectory run SHALL 使用显式session_id原值；缺省时获取current_dir的lossy字符串并list_summaries(Some cwd)，排除session_kind以subagent开头的项，再按last_active_at.unwrap_or(updated_at)取最大项。None或其他kind不因类型被排除；没有候选时报错。bind为SocketAddr默认127.0.0.1:0，直接交给trajectory::serve；callback向stderr打印canonical_id与URL，除no_open外尝试open_url，失败打印手动打开提示，serve结果原样传播。此层不自行实现HTTP服务或绑定地址安全校验。
+
+#### Scenario: Implicit primary selection
+- **WHEN** 未指定session且列表包含subagent_fork和普通会话
+- **THEN** 排除subagent前缀项，在剩余项按活动时间选取。
+
+#### Scenario: No browser
+- **WHEN** no_open=true且服务调用callback
+- **THEN** 打印URL但不调用open_url。
+
+源码证据：`crates/codegen/pager/src/trajectory_cmd.rs` — `TrajectoryArgs / run / is_primary_session_kind / implicit_trajectory_never_selects_a_subagent_session`。
+
+### Requirement: Export CLI replay projection and output precedence
+
+Export run SHALL 以必需session_id加载replay updates，None报session not found；将全部updates按is_replay=true交AcpUpdateTracker投影到新的ScrollbackState，收集blocks渲染Markdown，严格空字符串时报无conversation content。output存在时优先于clipboard：以lossy路径做tilde展开、create_dir_all父目录、std::fs::write并打印完成；并非独占创建或原子写入。无output且clipboard=true时调用copy_text但忽略返回值，仍打印复制完成，chars数量实际为UTF8字节len、lines为lines().count。其余向stdout写Markdown再写一个换行，写失败传播。此层不额外筛选敏感文本或限制导出字节，具体内容由replay tracker及Markdown renderer决定。
+
+#### Scenario: Both output and clipboard
+- **WHEN** 用户同时提供output及clipboard
+- **THEN** 只执行文件输出分支。
+
+#### Scenario: Clipboard failure
+- **WHEN** copy_text返回失败
+- **THEN** 此函数仍报告复制并返回Ok，不据此证明剪贴板成功。
+
+源码证据：`crates/codegen/pager/src/export_cmd.rs` — `ExportArgs / run`。
+
+### Requirement: Sessions CLI list search and deletion dispatch
+
+Sessions CLI SHALL 提供List/Search/Delete子命令，List/Search limit为usize默认20，无本层正数限制；current_dir失败退为点目录，传入AgentConfig未使用。List调用fetch_sessions(cwd.to_str(),None,limit)，按worktree_label分组，有标签按BTreeMap排序、无标签最后，组内保持返回顺序；空结果打印No sessions found。标题取前50个Unicode char，日期取前min(10,len)个字节，不追加省略号、不按显示列截断。Search以grow_home根目录执行query、lossy cwd、limit、offset0、include_content=true请求；按返回顺序打印session id、两位小数score、本地时区updated时间、严格空title的untitled回退及可选snippet；Total为本页results.len，不是全库匹配总量。Delete直接调用delete_session_history(id,None)，按any_removed打印Deleted或No session found，无本层确认/本目录过滤，失败传播。List和Search走不同底层接口，不能由List帮助文字认定完全等价。
+
+#### Scenario: Grouped listing
+- **WHEN** 结果含多个worktree_label和None
+- **THEN** 标签组排序后展示，无标签最后，组内不在本层另排序。
+
+#### Scenario: Search page count
+- **WHEN** 搜索结果受limit限制
+- **THEN** Total仅显示此次返回的条目数。
+
+#### Scenario: Delete missing session
+- **WHEN** 删除返回any_removed=false
+- **THEN** 打印未找到并正常返回。
+
+源码证据：`crates/codegen/pager/src/sessions_cmd.rs` — `SessionsCommand / run / print_sessions_grouped`。
+
+### Requirement: Memory CLI clear scopes confirmation and partial failure
+
+Memory CLI SHALL 仅提供Clear子命令，workspace/global/all归同一clap scope组，yes短选项为y。run在current_dir失败时退点目录并MemoryStorage::new(cwd,None)；all选择workspace后global，global仅全局，其他默认workspace（workspace布尔字段本身不参与分支）。run_clear先按目标path.exists筛选展示，全部不存在则打印Nothing to clear并返回；否则展示现存目标，未skip_confirm时flush stdout并read_line，只有trim后ASCII大小写不敏感的y/yes继续，其他输入包括EOF取消并Ok。确认后遍历全部targets而非仅existing，逐项调用clear，即使一项失败仍继续。至少一项Ok(true)且有错误时打印partial及错误但返回Ok；无成功且有错误才返回clear failed；全部Ok(false)则直接Ok。具体文件删除范围由MemoryStorage负责，本层不实现回滚或事务。
+
+#### Scenario: Default scope
+- **WHEN** 用户未指定scope
+- **THEN** 选择workspace目标。
+
+#### Scenario: Partial failure
+- **WHEN** workspace清理成功而global失败
+- **THEN** 打印部分成功和错误，继续返回Ok。
+
+#### Scenario: Negative confirmation
+- **WHEN** 输入不是trim后y/yes
+- **THEN** 打印Cancelled并返回，不调用clear。
+
+源码证据：`crates/codegen/pager/src/memory_cmd.rs` — `MemoryCommand / run / run_clear / workspace_target / global_target`。
+
+### Requirement: Trace CLI snapshot archive and local output
+
+Trace CLI SHALL 以session_id调用load_session_trace，None时报not found；后续使用snapshot的canonical session_id。build_session_tar按snapshot.files顺序将每项relative_path接在session_id下，以GNU tar header、mode0644、当前UNIX秒mtime加入默认压缩Gzip，再追加export_metadata.json，包含session_id、VERSION_WITH_COMMIT、OS、ARCH、当前UTC RFC3339时间。归档在内存完整finish后才检查压缩字节数，超过128MiB报错，恰等于上限允许；不能将此限制描述为流式内存上限或未压缩数据上限。save_local_bundle使用显式path原值（不展开tilde），默认grow_home/traces/canonical-id.tar.gz，创建父目录并std::fs::write，允许覆盖，无本层独占/原子写或输出权限设置。json模式在保存成功后stdout输出session_id/status=saved/path，非json向stderr打印进度和整数KB大小、stdout打印path。本层不重新筛选snapshot文件或脱敏，输入安全和收集范围由storage负责。
+
+#### Scenario: Archive limit timing
+- **WHEN** 压缩后archive大于128MiB
+- **THEN** 完整构建后返回错误，不保存；不是构建过程中提前中止。
+
+#### Scenario: Canonical default filename
+- **WHEN** 传入session别名且storage返回canonical id
+- **THEN** 默认文件名和JSON session_id使用canonical id。
+
+#### Scenario: Explicit output
+- **WHEN** output给定
+- **THEN** 按原Path创建父目录并写入，不做tilde展开。
+
+源码证据：`crates/codegen/pager/src/trace_cmd.rs` — `TraceArgs / build_session_tar / append_bytes / set_mtime / traces_dir / save_local_bundle / run_save`。
+
+### Requirement: Startup warning banner selection and diagnostic action construction
+
+Startup banner_warning SHALL 返回输入顺序中第一条Warning，否则最后一条记录，空列表None；不改写或删除原列表，不按时间字段或消息内容排序。StartupWarning保存severity/message/可选action，不在此截断到注释建议的60列或清洗文本。ActionableStartupWarning::new收集诊断ID并assert非空，保留ID顺序及重复项，固定action为Run /doctor for details and fixes.；into_warning只返回display warning，不将IDs放入StartupWarning。本模块提供展示数据与选择策略，不执行诊断或修复。
+
+#### Scenario: Later warning
+- **WHEN** 列表先Info后Warning
+- **THEN** 展示首条Warning。
+
+#### Scenario: Only information
+- **WHEN** 列表包含多条Info无Warning
+- **THEN** 展示最后一条Info。
+
+#### Scenario: Empty diagnostic identifiers
+- **WHEN** 构造ActionableStartupWarning时ID迭代器为空
+- **THEN** assert失败，不产生无诊断ID的doctor-linked wrapper。
+
+源码证据：`crates/codegen/pager/src/startup.rs` — `ActionableStartupWarning::new / into_warning / StartupWarning / banner_warning / tests`。
+
+### Requirement: Embedded tutorial topic catalog and guide references
+
+TUTORIAL_TOPICS SHALL 为编译期静态有序目录，topic字段title/blurb/content/go_deeper均为静态字符串或可选静态字符串，content通过include_str从docs/tutorial编入。当前九项依次覆盖既有项目上下文、首个prompt、附件粘贴、导航、slash命令、worktree、plan权限、自定义及后续学习。前八项go_deeper引用how-to标题，最后一项None；该模块不加载运行时文件、网络内容或执行overlay导航。源码测试要求非空title/blurb/content、content以#开头、标题精确唯一、内容不超过50行，并通过docs::find_doc检查go_deeper存在；find_doc为ASCII大小写不敏感比较，不是模糊搜索。测试限制不是运行时截断或自动修复。
+
+#### Scenario: Embedded content
+- **WHEN** 程序编译教程目录
+- **THEN** 从指定Markdown文件嵌入内容，不在此运行时重新读取。
+
+#### Scenario: Guide reference validation
+- **WHEN** 教程有go_deeper标题
+- **THEN** 测试通过find_doc解析对应how-to，允许ASCII大小写差异。
+
+#### Scenario: Last topic
+- **WHEN** 访问Where to Go Next目录项
+- **THEN** go_deeper为None，本目录不给出深入指南目标。
+
+源码证据：`crates/codegen/pager/src/tutorial_docs.rs` — `TutorialTopic / topic! / TUTORIAL_TOPICS / tests`。
+
+源码证据：`crates/codegen/pager/src/docs.rs` — `find_doc`。
+
+### Requirement: Bundled how-to lookup and managed disk extraction
+
+Bundled docs SHALL 编译期嵌入25项USER_GUIDE及2项REFERENCE_DOCS，all_docs先user-guide后reference保持数组顺序，find_doc按ASCII忽略大小写的完整title取首项，不trim或模糊匹配；get_howto_doc返回内容，all_titles借用静态字符串，list_howto_titles分配String列表。extract_user_guide_docs仅将USER_GUIDE写至指定grow_home/docs/user-guide，create_dir_all失败warn并返回；逐项std::fs::write覆盖，单项失败debug后继续。随后read_dir成功时删除未在当前USER_GUIDE中的managed名称：UTF8名字、前两ASCII数字、第三字节连字符、末尾.md且len>3；不要求其确为普通文件，remove_file错误仅debug。非UTF8名、其他命名以及REFERENCE_DOCS不由此清理或写入。写入失败不阻止后续stale清理，本函数无事务/成功结果返回。
+
+#### Scenario: Reference guide lookup
+- **WHEN** 查找Hooks & Plugins Guide
+- **THEN** 可从REFERENCE_DOCS返回，但extract不输出该文件。
+
+#### Scenario: Managed stale document
+- **WHEN** 目录存在99-removed.md且不在当前表
+- **THEN** 尝试remove_file；notes.md不匹配managed规则因而保留。
+
+#### Scenario: Individual write failure
+- **WHEN** 某一当前指南写入失败
+- **THEN** 记录debug并继续其他文件及后续清理。
+
+源码证据：`crates/codegen/pager/src/docs.rs` — `USER_GUIDE / REFERENCE_DOCS / all_docs / find_doc / get_howto_doc / all_titles / list_howto_titles / extract_user_guide_docs / tests`。
+
+### Requirement: Async view shared wake notification
+
+async_view SHALL 通过进程静态OnceLock惰性创建单个Arc<tokio::sync::Notify>，notifier返回共享静态引用，wake仅notify_one，不传递snapshot内容、错误或完成结果。本模块没有Loading/Failed/Ready状态，也不为每次wake建立消息队列；消费者需另行读取已发布的数据。源码测试在创建notified future后wake，并要求一秒timeout内结束，不证明多个waiter广播或整个UI刷新。
+
+#### Scenario: Wake edge
+- **WHEN** 调用wake
+- **THEN** 向共享Notify调用notify_one，数据仍由外部snapshot/channel持有。
+
+源码证据：`crates/codegen/pager/src/async_view.rs` — `notifier / wake / tests`。
+
+### Requirement: Models CLI listing and worker shutdown ownership
+
+list_available_models SHALL 克隆AgentConfig并新建CancellationToken，spawn_shell成功后立即以thread_handle建立AgentShutdownGuard，再调用shell::cli_models::list_models，传入grow-pager及version::VERSION。打印current_model_id和返回顺序中的所有available model id，匹配current id用星号及default标记，其余用连字符，不在此排序、过滤或输出模型描述。list_models失败传播且guard同样析构，触发cancel和有界join尝试；不保证worker一定已退出或持久化完成。HEADLESS_CLIENT_TYPE常量为generic，但本命令不用它。
+
+#### Scenario: List failure
+- **WHEN** spawn成功后list_models返回Err
+- **THEN** 传播错误并析构shutdown guard。
+
+#### Scenario: Default model marker
+- **WHEN** 返回候选id等于current_model_id
+- **THEN** 打印星号与default标记。
+
+源码证据：`crates/codegen/pager/src/models.rs` — `list_available_models`。
+
+源码证据：`crates/codegen/pager/src/client_identity.rs` — `PAGER_CLIENT_TYPE / PAGER_CLIENT_VERSION / HEADLESS_CLIENT_TYPE`。
+
+源码证据：`crates/codegen/pager/src/acp/spawn.rs` — `AgentShutdownGuard::drop`。
+
+### Requirement: Editable TOML loading and hint persistence boundaries
+
+read_config_document_for_edit SHALL read_to_string，任何读取错误均退为空字符串，再解析DocumentMut；成功读取的非空非法TOML才warn并None，空内容可编辑。set_hint使用grow_home/config.toml，set_hint_at先create_dir_all父目录，再读文档；None时返回Ok且不写，Some时通过doc[hints][key]赋值并std::fs::write整个文档。读失败不等于拒写，非法UTF8读取亦走空文档；本层不检查hints原值类型、不做并发锁、原子替换或回滚。有效表结构下保留其他键表的编辑由toml_edit文档承担；不能从八项正常结构测试推导任意类型输入都无panic。
+
+#### Scenario: Invalid readable TOML
+- **WHEN** 成功读取非空但解析失败
+- **THEN** 返回None，set_hint_at正常返回且不覆盖内容。
+
+#### Scenario: Unreadable input
+- **WHEN** read_to_string失败
+- **THEN** 按空内容返回可编辑文档，后续写入仍可能被尝试。
+
+#### Scenario: Missing configuration
+- **WHEN** 父目录和文件不存在且可创建
+- **THEN** 创建父目录并写含hints键的文档。
+
+源码证据：`crates/codegen/pager/src/config_toml_edit.rs` — `read_config_document_for_edit / set_hint / set_hint_at / tests`。
+
+### Requirement: Shared frame timestamp and time derived motion primitives
+
+Motion FrameStamp SHALL 保存Instant、SystemTime和相对origin的饱和elapsed；capture分别采样单调与wall clock，at使用UNIX_EPOCH加饱和elapsed构造确定性wall_now，Default elapsed为零。sample按period纳秒除elapsed并夹至u64最大，非零period只有debug_assert且除数max1。phase_index空len返回0，否则sample转usize后取模；字符串帧空返回空串，title字符帧空返回空格。spinner周期132ms，title及ambient264ms，waiting pulse1309ms，action半周期500ms，slow interval83ms。pulse01为sin²(PI*elapsed/period)，spatial wave另加row/max(rows_per_cycle,1)*TAU；非零period只有debug断言，不提供零period稳定数值保证。next_aligned_deadline按origin的下个整interval计算，纳秒乘积饱和并夹u64；严格未来性质限未触及该上限的正常时间范围。本模块无动画禁用开关，不接收事件计数作为相位。
+
+#### Scenario: Missed frames
+- **WHEN** elapsed已跨过19个spinner周期且帧数8
+- **THEN** 直接计算index3，不重放错过帧。
+
+#### Scenario: Empty frames
+- **WHEN** phase_glyph接收空帧表
+- **THEN** 返回空字符串。
+
+#### Scenario: Aligned cadence
+- **WHEN** origin后100ms、interval33ms
+- **THEN** 下一deadline为origin后132ms。
+
+源码证据：`crates/codegen/pager/src/motion.rs` — `FrameStamp / phase_index / phase_glyph / pulse01 / spatial_wave01 / next_aligned_deadline / tests`。
+
+### Requirement: Allocator release hook installation and trace attribution
+
+Memory release seam SHALL 通过OnceLock保存fn()，首个install_release_hook生效，后续set失败被忽略；release_retained_memory委托reason=unattributed。release_retained_memory_with先检查memory_trace::is_active，仅active时采样before并优先footprint_bytes其次rss_bytes；随后捕获Instant，存在hook则在调用线程同步执行一次，active时调用record_purge(reason,hook是否存在,before,elapsed)。无hook不调用allocator，但trace active时仍采样并记录，不能将无hook描述成整个函数无副作用。inactive跳过此处memory gauge采样及record_purge，但仍查询hook、trace状态并计时。本层不选择allocator、不节流、不验证reason格式、不保证实际回收字节或生命周期触发点；这些由安装方、调用方和trace实现负责。
+
+#### Scenario: First hook wins
+- **WHEN** 连续安装两个不同hook
+- **THEN** 保留第一个，后者不替换。
+
+#### Scenario: Trace without hook
+- **WHEN** trace active但尚无release hook
+- **THEN** 仍采样并record_purge，hook存在标志为false。
+
+#### Scenario: Repeated release
+- **WHEN** 同一线程调用两次release且已安装hook
+- **THEN** 同步调用hook两次，不在此合并或限频。
+
+源码证据：`crates/codegen/pager/src/memory_release.rs` — `install_release_hook / release_retained_memory / release_retained_memory_with / test_support / release_invokes_installed_hook_per_call`。
+- `crates/codegen/pager/src/memory_trace.rs` — `purge_events_carry_cliff_attribution`。
+
+
+### Requirement: Process memory gauge platform projection and provider seams
+
+memory_trace sample_process_memory SHALL 直接调用平台imp，不在该函数检查trace是否启用。macOS用task_info TASK_VM_INFO和本地prefix结构查询当前task，非零返回码则两个gauge均None，成功取phys_footprint和resident_size；未另验证返回count。Linux读取/proc/self/statm失败返回两个None，读取成功但第二字段缺失或解析失败则rss_pages=0；页大小通过OnceLock首次sysconf(_SC_PAGESIZE)获得，非正回退4096，RSS为pages乘page，footprint=None。其他平台两个None。allocator stats及dump provider分别独立OnceLock、首安装生效；stats返回可选六项字节gauge，dump返回String，不在安装时采样或执行dump。
+
+#### Scenario: Linux malformed resident field
+- **WHEN** statm读取成功但RSS字段不能解析
+- **THEN** 返回Some(0) RSS而非None。
+
+#### Scenario: Unsupported platform
+- **WHEN** 平台不是macOS或Linux
+- **THEN** 返回默认ProcessMem，两个gauge均None。
+
+#### Scenario: Repeated provider installation
+- **WHEN** 再次安装不同stats provider
+- **THEN** 首个provider继续生效。
+
+源码证据：`crates/codegen/pager/src/memory_trace.rs` — `ProcessMem / sample_process_memory / imp::sample / install_allocator_stats_provider / install_allocator_dump_provider`。
+- `crates/codegen/pager/src/memory_trace.rs` — `process_memory_sampling_returns_gauges`。
+
+
+### Requirement: Memory trace threshold hysteresis and JSONL rotation accounting
+
+Thresholds SHALL 以max(first_bytes,64MiB)开始逐项饱和倍增，Sink固定创建六个初始armed桶；observe在armed且gauge>=bucket时触发并disarm，只有disarmed且gauge严格小于bucket/2才rearm，同次observe可触发多个桶。Sink write_line持file Mutex，poison恢复inner；首次懒建父目录并create+append打开，失败静默返回。line写成功后尝试换行但忽略换行错误，计数加line字节数加1；轮转比较fetch_add返回的旧计数是否严格大于rotate_bytes，不是写后总量，因此默认4MiB不是文件硬上限。满足时rename到追加.1路径、无论rename成功与否都计数归零并重新append打开原路径；各IO错误不向调用方传播。初始计数不从已有文件长度恢复。record采样process和可选allocator、emit后再以footprint优先rss更新threshold，即使emit失败也可消耗桶并fire_threshold；没有gauge则不观察桶。
+
+#### Scenario: Half threshold
+- **WHEN** 已触发的bucket观测值恰等于bucket/2
+- **THEN** 保持disarmed，必须严格更低才重新armed。
+
+#### Scenario: First oversized line
+- **WHEN** 旧计数0且单行超过rotate_bytes
+- **THEN** 本次不会因写后大小触发轮转，后续写入再比较旧计数。
+
+#### Scenario: Failed emission
+- **WHEN** JSONL无法写入但process gauge可用
+- **THEN** record仍执行threshold观察与触发。
+
+源码证据：`crates/codegen/pager/src/memory_trace.rs` — `Thresholds::new / observe / Sink::new / write_line / emit / record`。
+- `crates/codegen/pager/src/memory_trace.rs` — `thresholds_fire_once_and_rearm_after_halving / thresholds_floor_prevents_degenerate_buckets / sample_events_are_valid_jsonl_and_rotate`。
+
+
+### Requirement: Memory trace startup environment and threshold dump reporting
+
+Memory trace start SHALL 仅当GROW_MEMTRACE精确为0/false/off时禁用，不trim或忽略大小写；默认启用。已有SINK则返回，否则先安装秒级timestamp-pid.jsonl路径的Sink，再尝试spawn命名grow-memtrace线程，spawn错误被忽略且不撤回Sink。interval解析u64默认30秒、最少5秒；threshold MB解析u64默认1024并饱和乘MiB，后由Thresholds施加64MiB下限。线程每次先sleep完整interval，首次设置wrote_start后emit含pid/CARGO_PKG_VERSION的start，再record sample；emit失败不重试start，无显式停止/join机制。文件懒建不代表首interval前必无文件，因为record_purge可先写。with_sink持读锁执行整个回调；is_active只表示Sink存在。fire_threshold有dump provider时生成全局递增seq文件名并尝试写dump，写失败仍将name写入threshold event；threshold event的footprint_bytes装的是所选gauge，Linux可能实际RSS，rss字段None。随后warn，不额外调用所谓threshold hook；dump文件无本层轮转/数量限制。
+
+#### Scenario: Uppercase disable value
+- **WHEN** GROW_MEMTRACE=FALSE
+- **THEN** 不匹配禁用值，仍启用。
+
+#### Scenario: Sampler spawn failure
+- **WHEN** Sink安装后线程spawn失败
+- **THEN** Sink仍active，后续purge可以记录但没有该采样线程。
+
+#### Scenario: Dump write failure
+- **WHEN** provider存在但dump文件无法写入
+- **THEN** threshold event仍可包含该dump_file名字，不能以名字证明文件存在。
+
+源码证据：`crates/codegen/pager/src/memory_trace.rs` — `fire_threshold / with_sink / is_active / record_purge / enabled_by_env / interval_from_env / first_threshold_from_env / start`。
+
+### Requirement: Cached terminal OSC8 hyperlink route projection
+
+hyperlink_route SHALL 首次使用时从terminal_context解析并OnceLock缓存HyperlinkRoute，后续调用不重新探测环境。resolve_hyperlink_route从context获得capabilities和skip_reason，仅osc8==Native且skip_reason=None时emit_osc8=true；emit_id额外要求caps.id_param，关闭OSC8时id必为false；skip_reason按context原值返回。此模块只投影终端能力，不解析URL、判定应用内外链接、执行打开或输出OSC序列；品牌、SSH及multiplexer规则由TerminalContext负责。
+
+#### Scenario: Unsupported capability
+- **WHEN** caps.osc8不是Native
+- **THEN** emit_osc8和emit_id均false。
+
+#### Scenario: Skip reason present
+- **WHEN** Native能力但context返回skip原因
+- **THEN** 禁用OSC8并保留该原因。
+
+#### Scenario: Cached environment
+- **WHEN** 首次hyperlink_route后环境发生改变
+- **THEN** 此OnceLock接口继续返回已缓存route。
+
+源码证据：`crates/codegen/pager/src/hyperlink_route.rs` — `HyperlinkRoute / hyperlink_route / resolve_hyperlink_route / tests`。
+
+### Requirement: Pager unified log buffering and dispatch ownership baseline
+
+Unified log entry SHALL 保存当前UTC毫秒RFC3339时间、pid、version::VERSION、level、可选sid、msg和ctx原值；本层不脱敏/截断或限制buffer字节。ACP_TX首init生效，但每次init均tokio::spawn一秒interval任务并Skip missed ticks，没有本层去重timer。push持BUFFER Mutex，poison时丢弃；达到16项且sender存在则drain全部后send_entries。send_entries在sender缺失、序列化失败或当前线程没有Tokio Handle时直接返回，已drain批次不回填；可发时spawn detached acp_send并忽略结果。flush亦先drain再发送，所以pre-init flush可消费buffer；flush_blocking先drain再检查sender，只await本次批次的acp_send并忽略结果，不等待历史detached批次。build_notification空entries为None，其他封装GrowPager source及LOG_METHOD。本契约记录此分支源码，不能据名称或注释承诺可靠交付。
+
+#### Scenario: Non-runtime flush
+- **WHEN** sender存在且buffer非空，但flush调用线程无Tokio Handle
+- **THEN** drain后send_entries返回，该批次不重新排队。
+
+#### Scenario: Repeated init
+- **WHEN** 再次调用init
+- **THEN** sender保持首个，但仍创建新的interval任务。
+
+#### Scenario: Blocking exit flush
+- **WHEN** 历史批次已经detached发送
+- **THEN** 只等待本次从buffer取出的批次，不汇总历史发送任务。
+
+源码证据：`crates/codegen/pager/src/unified_log.rs` — `init / push_entry / build_notification / send_entries / flush / flush_blocking / info / warn / error / debug`。
+
+### Requirement: Input diagnostic ring retention and snapshot sanitization
+
+InputRingBuffer SHALL 默认保留200条(Instant,RawInputEntry)，push满时移除最旧一条，再以当前Instant追加；不按秒过期。raw在内存仍保存完整KeyCode，包括Char值，脱敏发生在snapshot_entries：BS/DEL字符分别Char(BS)/Char(DEL)，其余所有Char均Char，其他key及mods/kind/pane/outcome使用Debug字符串。snapshot不消费buffer，ts_ms相对当前最旧条目，wall_ts原值复制；可选cursor/text_len/selection/changed为None时序列化省略。time_span_ms取首末Instant差，空为0。InputDump仅定义序列化结构，含session/terminal及当前textarea元数据，不在本模块写文件或实现快捷键；format_key_code_raw仅cfg(test)保留字符输出。
+
+#### Scenario: Retention limit
+- **WHEN** 连续追加250条
+- **THEN** 只保留最近200条，时间基准为保留的首条。
+
+#### Scenario: Character snapshot
+- **WHEN** raw含普通或Unicode字符
+- **THEN** 输出key为Char，不输出字符值，但raw内存仍保留。
+
+#### Scenario: Repeated snapshot
+- **WHEN** 对同一buffer多次snapshot
+- **THEN** 返回格式化副本，不清空记录。
+
+源码证据：`crates/codegen/pager/src/input_log.rs` — `InputRingBuffer / RawInputEntry / InputRecord / InputDump / sanitize_key_code / tests`。
+
+### Requirement: Per directory Git cache refresh and notification replacement
+
+Git cache SHALL 以传入PathBuf为key、不在此canonicalize，存Option<CwdGitInfo>和刷新时间；新增key且len>=64时移除最旧timestamp一项，更新已有key不淘汰。cwd_git_info_lazy锁poison返回None；缺失或时间>=5秒时先保留旧值并更新时间预占slot，再释放锁并尝试spawn刷新，立即返回旧值。无Tokio Handle不刷新但预占时间仍生效；eager populate直接spawn不经过TTL。后台spawn_blocking对compute用catch_unwind，panic退None；Some结果覆盖、None保留同key已有值，两者都更新时间；无generation验证，较早请求晚返回也可覆盖新通知。update_from_notification保留旧worktree_label，branch按传入Option复制，main_repo Some即is_worktree=true，写入Some信息及新timestamp。本层使用Mutex并非无锁，不保证注释所称绝不阻塞；spawn刷新不在此调用async_view wake。
+
+#### Scenario: Failed refresh with cache
+- **WHEN** compute返回None且已有有效值
+- **THEN** 保留旧值并更新时间，无法区分已离开repo和暂时发现失败。
+
+#### Scenario: No runtime lazy read
+- **WHEN** 缺失缓存且当前无Tokio runtime
+- **THEN** 记录None及新时间，返回None，五秒内不再次尝试lazy刷新。
+
+#### Scenario: Notification label preservation
+- **WHEN** 已有worktree_label且收到branch通知
+- **THEN** 更新branch/main_repo并保留label。
+
+源码证据：`crates/codegen/pager/src/git_info.rs` — `update_from_notification / populate_from_cwd_async / cwd_git_info_lazy / spawn_cwd_git_refresh / apply_cwd_git_refresh / cwd_cache_insert`。
+- `crates/codegen/pager/src/git_info.rs` — `cwd_git_info_lazy_non_repo_is_none / cwd_cache_insert_evicts_least_recently_refreshed / apply_cwd_git_refresh_preserves_last_good_on_none`。
+
+
+### Requirement: Git discovery labels path display and branch glyph policy
+
+compute_snapshot SHALL 用git2 discover，失败返回全None；repo_root来自workdir，compute_cwd_git_info要求其Some，故bare repo无workdir亦返回None。head失败branch=None，head成功但shorthand失败或为HEAD时branch=Some空串。repo.path与commondir不同时以commondir.parent缩写为main_repo。label lookup打开默认DB并从cwd逐级祖先查询，首个存在record即决定结果；该record缺metadata/label或空label时直接None，不继续找更高祖先。label index列出DB记录，非空字符串label才收录（不trim），path canonicalize失败用原path，同key后项覆盖。collapse_home按显示字符串strip_prefix(HOME)替换为波浪号，不检查路径组件边界。branch_icon首次OnceLock缓存；GROW_NERD_FONTS存在时仅精确0/false禁用，其他值启用；缺失时Windows或AppleTerminal/Iterm2品牌禁用，其余启用。启用使用Powerline，否则Windows用≡、其他用⎇；不检测实际字体。
+
+#### Scenario: Nearest unlabeled record
+- **WHEN** cwd祖先首先命中无label记录而更上层有label
+- **THEN** 返回None，不跳过该记录继续继承。
+
+#### Scenario: Textual home prefix
+- **WHEN** 路径字符串以HOME字符串开头但不是其目录后代
+- **THEN** 仍进行字符串前缀缩写。
+
+#### Scenario: Explicit font override
+- **WHEN** GROW_NERD_FONTS为空字符串或FALSE
+- **THEN** 视为启用，不trim或忽略大小写。
+
+源码证据：`crates/codegen/pager/src/git_info.rs` — `compute_snapshot / compute_cwd_git_info / worktree_label_index / lookup_worktree_label / collapse_home / branch_icon / decide_branch_icon / decide_nerd_fonts / home_dir`。
+- `crates/codegen/pager/src/git_info.rs` — `windows_default_avoids_powerline_and_alt_key / windows_terminal_brand_is_irrelevant_without_nerd_fonts / nerd_fonts_opt_in_forces_powerline_even_on_windows / nerd_fonts_opt_out_forces_platform_fallback / non_windows_defaults_to_powerline / macos_stock_font_terminals_use_alt_key / iterm2_nerd_fonts_opt_in_forces_powerline`。
+
+
+### Requirement: Wrap CLI direct shell and PTY fallback routing
+
+wrap run SHALL 空command返回错误；Unix从同次shell/PATH判断建立PTY和fallback两spawn plan。单参数含Unicode whitespace时原样作为shell命令行；否则非空、不含斜杠和whitespace且PATH不可解析的首词走shell，首词不引用、后续每词POSIX单引号并转义内嵌单引号；其他直接program+argv。shell使用非空SHELL且is_file通过的路径，否则/bin/sh，不检查可执行权限。PTY计划shell参数-i -c，fallback为-c；非Unix直接计划。should_wrap要求Unix或Windows且stdin/stdout/stderr全TTY，不按终端品牌判断；run_wrapped_command成功以其code退出，任何Err均打印提示并exec fallback，不仅类型上限于setup失败。Unix fallback exec替换进程、仅错误返回；非Unixspawn wait后按status.code或1退出。本层不实现OSC52过滤或resize。
+
+#### Scenario: Quoted command string
+- **WHEN** command只有一个含空白字符串
+- **THEN** 交shell原样解释。
+
+#### Scenario: Unknown bare program
+- **WHEN** Unix首词不含路径/空白且PATH未找到
+- **THEN** 走shell，首词保持裸文本，后续参数逐个引用。
+
+#### Scenario: Non TTY output
+- **WHEN** stdout不是TTY
+- **THEN** 跳过PTY走fallback计划。
+
+源码证据：`crates/codegen/pager/src/wrap_cmd.rs` — `run / derive_spawn / join_command_line / quote_word / resolve_shell / should_wrap / exec_command`。
+- `crates/codegen/pager/src/wrap_cmd_tests.rs` — `single_arg_with_whitespace_always_routes_via_shell / resolvable_program_spawns_directly / direct_route_passes_args_verbatim_without_quoting / alias_route_keeps_first_word_bare_and_quotes_the_tail / plain_shell_mode_drops_dash_i / quote_word_edge_cases / quote_word_neutralizes_shell_metacharacters / join_command_line_shapes / resolve_shell_falls_back_to_bin_sh / resolve_shell_uses_existing_file / joined_line_roundtrips_words_through_real_sh`。
+
+
+### Requirement: Wrapped PTY startup and single writer channel
+
+run_wrapped_command SHALL 读取终端尺寸失败回退80x24，以零pixel尺寸openpty；CommandBuilder设置program/argv并覆盖GROW_OSC52_SINK与LC_GROW_OSC52_SINK为1，再spawn child并drop slave。child已启动后才clone reader、enable_raw_mode、建立TerminalRestoreGuard并take_writer，因此返回Err不必然意味着子进程从未启动。所有master写入经std mpsc Vec字节channel交单一writer线程，write_all后flush，任一失败退出writer；stdin线程4096字节块读取并入channel，EOF/读错/send错退出。此channel无本层有界容量，线程未join。Unix另安装HUP/INT/TERM信号迭代器，失败只debug，成功spawn处理线程；SIGWINCH另线程持master，Windows本函数保留master但不启动该resize线程。具体信号收尾与输出过滤由后续路径负责，不能据本段保证启动失败会kill/reap已启动child。
+
+#### Scenario: Terminal size failure
+- **WHEN** size查询失败
+- **THEN** 使用80列24行创建PTY。
+
+#### Scenario: Post-spawn setup error
+- **WHEN** child启动后clone reader或raw mode失败
+- **THEN** 函数可返回Err，不能当作尚未执行用户命令的证明。
+
+#### Scenario: Writer error
+- **WHEN** writer write_all或flush失败
+- **THEN** 退出writer接收循环，不在此重试字节。
+
+源码证据：`crates/codegen/pager/src/pty_wrap.rs` — `run_wrapped_command startup / writer thread / stdin thread`。
+
+
+### Requirement: Wrapped PTY output forwarding and child wait
+
+run_wrapped_command SHALL 持stdout锁以8192字节块读取PTY并交Osc52Filter，非空过滤结果write_all，写失败退出读取，flush失败忽略；PTY EOF和任意读错均退出读取而不直接返回该错误。输出循环结束后child.wait，成功后Unix标记child_reaped并把exit_code转i32返回，wait错误向调用方传播。host image请求每次spawn独立线程取得frame、追加换行并入共享writer channel，send失败忽略；本层没有worker数量上限或完成顺序保证。Unix SIGWINCH线程安装失败debug后返回，成功后每次收到信号重新取size，仅成功时resize且忽略resize错误，无退出或join协议。
+
+#### Scenario: Output read failure
+- **WHEN** PTY read返回错误
+- **THEN** 停止输出循环并继续等待child，不把读错作为返回错误。
+
+#### Scenario: Image requests overlap
+- **WHEN** 连续请求host image
+- **THEN** 独立worker分别入队，完成顺序不保证与请求顺序一致。
+
+#### Scenario: Child wait failure
+- **WHEN** child.wait失败
+- **THEN** 传播Err，guard执行终端恢复；调用方仍可能进入fallback。
+
+源码证据：`crates/codegen/pager/src/pty_wrap.rs` — `run_wrapped_command output and wait / sigwinch_loop`。
+
+
+### Requirement: Wrapped terminal restore and termination signal boundaries
+
+TerminalRestoreGuard SHALL 在Drop调用restore_terminal；begin_restore胜者按tracker快照生成恢复字节，仅stdout仍TTY且字节非空时写出，然后忽略disable_raw_mode错误并finish_restore。败者每1ms检查完成，最多等待100ms后返回，不保证胜者已完成。Unix恢复使用fd1 write循环绕过stdout锁，短写继续、Interrupted重试、其他错误停止；该写本身无时间上限且可与输出交错。非Unix使用stdout锁write_all和flush并忽略错误。终止线程处理首个信号；有pid且child_reaped为false时向该pid转发同一信号并忽略kill结果，随后恢复并exit(128+signal)，不等待child退出，也不向进程组转发；reaped检查与kill不是原子身份保护。
+
+#### Scenario: Restore already claimed
+- **WHEN** 其他线程已claim但尚未finish
+- **THEN** 最多等100ms，然后允许返回，不能宣称恢复字节全部到达。
+
+#### Scenario: Termination signal
+- **WHEN** 线程收到HUP INT或TERM且child未标记reaped
+- **THEN** 尝试转发给child pid，恢复终端后以128加signal退出。
+
+#### Scenario: Restore tests scope
+- **WHEN** 审阅两个wait_restore_done测试
+- **THEN** 仅证明源码包含已完成立即返回及未完成超时用例，不证明真实终端或信号恢复。
+
+源码证据：`crates/codegen/pager/src/pty_wrap.rs` — `TerminalRestoreGuard::drop / restore_terminal / wait_restore_done / write_stdout_unlocked / terminate_signal_loop / tests`。
+
+
+### Requirement: Wrapped mode tracking and deterministic restore byte order
+
+ModeTracker SHALL 从调用方提供的完整CSI中按末字节和去掉前两字节后的body识别模式，不自行校验ESC前缀。DEC h/l仅处理问号前缀，以分号分别解析非空ASCII十进制u32，溢出或非法项跳过；跟踪25、47、1000、1002、1003、1004、1005、1006、1015、1016、1047、1049、2004、2026，25反向记录隐藏，其他记录set。kitty末字节u且body首字节为大于号时无flags校验地fetch_add一次；小于号时按整个剩余body解析正数，否则默认1，以饱和减法降至零。kitty只维护一个全局u32深度，不按screen区分，push没有饱和或容量保护。snapshot分别SeqCst读取modes与depth，不是联合原子快照；begin_restore首次swap获胜，finish_restore只设完成标志，不清空模式或阻止继续observe。restore_bytes为空状态输出空Vec，否则依次输出2026关闭、25显示、1000/1002/1003/1005/1015/1016/1006/2004/1004关闭、每个kitty深度一个pop、1047/47/1049退出；仅输出已记录项，分配大小随深度增长。
+
+#### Scenario: Invalid decimal mode
+- **WHEN** DEC参数含非法项或超过u32
+- **THEN** 该项忽略，其他合法分号项仍独立更新。
+
+#### Scenario: Kitty malformed pop count
+- **WHEN** 小于号后的count为零、空、非法或溢出
+- **THEN** 按1 pop并在零处饱和。
+
+#### Scenario: Balanced state
+- **WHEN** 所有被记录启用都已对应关闭且kitty净深度零
+- **THEN** restore_bytes返回空字节。
+
+#### Scenario: Cross screen kitty stack
+- **WHEN** child跨screen进行kitty push和pop
+- **THEN** 使用同一个深度，不能保证按各screen独立栈精确恢复。
+
+源码证据：`crates/codegen/pager/src/wrap_restore.rs` — `ModeTracker::observe_csi / apply_dec_mode / snapshot / begin_restore / finish_restore / restore_bytes / parse_decimal / tests`。
+
+
+### Requirement: Wrap clipboard image request response and size fitting
+
+Wrap图片请求 SHALL 仅在osc52 sink启用、local_image为None且text/file URLs经trim为空或None时尝试写stderr；请求为ESC ]加999;GrowWrapClipboardImage?加BEL，write_all及flush都成功才返回true。解码仅精确GROW_WRAP_NONE返回NoImage；非GROW_WRAP_IMG前缀返回None，有该前缀但后续缺换行、MIME或base64等格式错误返回NoImage。MIME仅检查非空，不验证类型或图片内容；base64先trim_end，以len乘3除4估算超过20MiB即拒绝，再用STANDARD解码，空或实际超过20MiB拒绝。编码None或空data输出bracketed paste的NONE；非空且不超过20MiB直接保留MIME和字节，不解码验证。超限时按猜测格式解码，设置宽高各16384、max_alloc为48乘1024乘1024乘4字节；没有独立width乘height检查。随后以JPEG质量85/70/55/40/25逐次编码，首个非空且不超20MiB结果采用；全部失败则thumbnail到宽高各半至少1，以质量60再试，失败输出NONE。成功frame为GROW_WRAP_IMG换行MIME换行base64，外包ESC[200~与ESC[201~；本函数不追加外部换行。
+
+#### Scenario: Local empty image present
+- **WHEN** local_image为Some但data为空
+- **THEN** 仍禁止host请求，不以data长度判断本地miss。
+
+#### Scenario: Malformed magic
+- **WHEN** paste以GROW_WRAP_IMG开头但缺合法字段
+- **THEN** 返回NoImage以区别普通文本。
+
+#### Scenario: Unvalidated small payload
+- **WHEN** 非空数据不超过20MiB且MIME非标准
+- **THEN** 编码路径原样保留，不证明数据是有效图片。
+
+#### Scenario: Oversized invalid image
+- **WHEN** 超过20MiB且格式猜测或decode失败
+- **THEN** 编码NONE响应。
+
+源码证据：`crates/codegen/pager/src/wrap_clipboard_image.rs` — `maybe_request_wrap_host_image_with / write_request_osc / try_decode_wrap_host_image_paste / encode_wrap_image_response / fit_image_for_wrap / tests`。
+
+
+### Requirement: Wrap streaming OSC interception and CSI observation boundaries
+
+Osc52Filter SHALL 保留跨feed状态；普通字节直接输出，ESC候选暂存。CSI遇0x40至0x7e末字节先通知tracker再原样输出；新ESC中断旧CSI并输出旧片段，重新识别ESC；其他非法字节或非final时长度超过128原样输出且不报告。没有EOF flush接口，未结束候选不会由feed自动补出。普通OSC以BEL或ESC反斜杠结束；精确host图片请求即消费，无handler也消费。tmux仅识别固定DCS前缀tmux;双ESC加右方括号，完成后只尝试OSC52，不分发host图片请求，不实现通用DCS嵌套解码。OSC52必须有52;及后续selection分隔分号，但不验证selection；base64接受有或无padding，解码后超过768KiB则拒绝，空数据允许。语法/解码/大小拒绝均原样输出，不是安全过滤丢弃；sink无返回状态，调用后即消费，默认sink对非UTF8或系统set_text失败只warn，失败不恢复原OSC。每字节状态处理后若仍暂存超过1MiB则原样输出并reset；此上限是候选缓冲阈值，不是feed输出、解码临时分配或全部进程内存上限。host_clipboard_image_frame委托system_clipboard_get_image后编码，不在此增加身份或请求频率限制。
+
+#### Scenario: No image handler
+- **WHEN** 完整普通OSC为host图片请求但未安装handler
+- **THEN** 消费请求且不输出、不调用图片读取。
+
+#### Scenario: Clipboard sink failure
+- **WHEN** base64合法但默认sink拒绝非UTF8或写剪贴板失败
+- **THEN** 记录告警，原OSC仍被消费。
+
+#### Scenario: Truncated sequence
+- **WHEN** 最后一次feed以未完成CSI或OSC结束
+- **THEN** 候选留在filter内，函数无EOF flush。
+
+#### Scenario: Invalid OSC52
+- **WHEN** OSC52缺selection分隔符或base64非法
+- **THEN** 完整候选原样转发。
+
+源码证据：`crates/codegen/pager/src/wrap_filter.rs` — `Osc52Filter::feed / try_handle_consumed_osc / try_handle_tmux_osc52 / extract_and_set_clipboard / set_local_clipboard / host_clipboard_image_frame / tests`。
+
+
+### Requirement: Wrap image fallback completion and current input delivery
+
+ClipboardAttachmentProbed处理 SHALL 先apply本地probe结果，仅clipboard key来源且completion为FullMiss或AttachmentRead失败时尝试host请求；调用传image/file URLs为None，保留来源text供请求gate判断。无论是否发出请求都继续drain原target；仅请求成功发出时抑制X11提示和本次failure toast，不等待host响应确认。接收端Agent在子Agent路由和行为确认之后尝试识别Event::Paste magic；Image交from_clipboard_data和handle_image_paste_from_data，忽略其返回outcome、刷新slash并返回Changed；NoImage返回Unchanged。Dashboard在worktree dialog和rename拥有输入时先由其处理；普通paste分支识别magic，Image按当时peek是否存在选择peek_reply或dispatch输入，peek置focused并确保cwd；NoImage不插文本。该wire不携带原probe target或request id，接收分支不校验待处理请求或sink状态，不能保证延迟host响应仍落到最初输入目标。
+
+#### Scenario: Attachment read error fallback
+- **WHEN** clipboard key结果为AttachmentRead且host请求成功发出
+- **THEN** 抑制本次错误提示并继续drain，不等待图片返回。
+
+#### Scenario: Host no image response
+- **WHEN** 接收magic处理分支获得NoImage
+- **THEN** 返回Unchanged，不将magic插成文本。
+
+#### Scenario: Dashboard peek delivery
+- **WHEN** 响应抵达普通Dashboard paste分支时peek存在
+- **THEN** 图片交peek reply附加路径，而非按请求时的target路由。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `ClipboardAttachmentProbed / wrap_host_image_request_eligible`。
+
+源码证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `try_handle_wrap_host_image_paste / wrap_host_image_none_paste_not_inserted_as_text / wrap_host_image_malformed_paste_not_inserted_as_text`。
+
+源码证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `handle_input_inner wrap paste routing`。
+
+源码证据：`crates/codegen/pager/src/views/dashboard/state.rs` — `Event::Paste wrap routing`。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `wrap_host_image_request_eligible_covers_full_miss_and_attachment_error_only`。
+
+
+### Requirement: Local draft identity validation and durable store operations
+
+LocalDraftStore SHALL 默认使用grow_home/pager-drafts-v1；session key拒绝空或超过1024字节，cwd key先canonicalize，文件名为session或cwd前缀加身份字节blake3摘要及.json。记录schema version为1，JSON结构deny_unknown_fields，prompt限制128KiB文本、256chips、合法UTF8 cursor及range边界，chip仅paste和file ref；display仅保存span文本丢弃样式，不检查range重叠或display独立大小。load缺失返回None，metadata长度超过256KiB或JSON/version/record验证失败则移入quarantine随机UUID .bad并返回None，隔离失败传播错误；实际读取take 256KiB加1，读取后无独立长度复核。write无payload先remove，再校验非空记录；根目录Unix权限700，新增目标在根目录.json名称数量达到64时拒绝，计数忽略read_dir entry错误且不检查文件类型。序列化超过256KiB拒绝；同目录临时文件Unix600，write_all、文件sync_all、persist替换、目录sync顺序执行，后续错误不等于未发布。remove缺失成功，删除成功后sync目录；rekey相同key或来源不存在成功，否则直接fs::rename再sync，未采用write路径的persist覆盖机制。quarantine不设数量或字节上限，只sync根目录；非Unix权限和目录sync helper为空操作。
+
+#### Scenario: Invalid stored record
+- **WHEN** JSON未知字段或version不符
+- **THEN** 尝试隔离，成功返回None而非恢复无效数据。
+
+#### Scenario: Record quota
+- **WHEN** 新目标不存在且根目录至少64个.json名称
+- **THEN** 拒绝新增，已有目标仍可进入覆盖路径。
+
+#### Scenario: Post publication sync failure
+- **WHEN** persist已成功但sync_dir失败
+- **THEN** write返回错误，不能据此断言旧文件仍在。
+
+源码证据：`crates/codegen/pager/src/local_drafts.rs` — `LocalDraftKey / DraftPrompt::from_parts / LocalDraftStore / validate_record / count_records / set_mode / sync_dir`。
+
+
+### Requirement: Local draft runtime capture recovery and RPC ownership transfer
+
+LocalDraftRuntime SHALL 遍历root agents，以有效session key优先、canonical cwd后备；key变更先flush旧key再尝试rekey，失败仅warn仍迁移内存tracked并重开新key加载。loaded在load前插入，读取失败不会自动每轮重读。capture取question/plan approval/permission/casual/general stash中首个，否则当前composer；images含undo stash拒绝，单个未带wire_blocks、非skill、无combined_texts的Prompt可作为staged，多匹配项、staged images或非空composer与staged并存拒绝。capture失败移除tracked并尝试删除磁盘记录。恢复要求当前composer文本和images均空，否则连deferred mode恢复也跳过；staged优先回填composer，不重建队列或发送，mode仅在当前None时恢复。fingerprint把revision置零比较，变化时全局revision饱和递增，普通变化200ms debounce，deferred mode变化立即due；active key切换flush两侧，write失败改为now加1秒，成功清due。flush_all只尝试已有due，不重新capture或等待重试。SendPrompt与SendPromptBlocks在effects execute前转移归属：删除tracked并尝试删除当前key及不同的session key，删除失败只warn，不阻止RPC；不清keys/loaded。事件循环按最早due唤醒sync，正常退出和quit effect后flush_all；不保证进程异常退出时恢复最新输入。
+
+#### Scenario: Failed initial load
+- **WHEN** 某key首次load返回错误
+- **THEN** 记录warn且保留loaded标记，本轮后续仍capture，不自动重复加载旧文件。
+
+#### Scenario: Unsafe composer
+- **WHEN** composer含图片或与staged并存
+- **THEN** 拒绝capture，清tracked并尝试移除已有草稿。
+
+#### Scenario: Prompt submission
+- **WHEN** 执行SendPromptBlocks或SendPrompt effect
+- **THEN** 先移交本地草稿归属，即使删除失败仍进入effect执行。
+
+#### Scenario: Write retry
+- **WHEN** store.write失败
+- **THEN** due改到当前now后一秒，避免持续过期deadline。
+
+源码证据：`crates/codegen/pager/src/local_drafts.rs` — `LocalDraftRuntime / capture_agent / normal_stash / restore_agent / tests`。
+
+源码证据：`crates/codegen/pager/src/app/actions.rs` — `Effect::prompt_rpc_identity`。
+
+源码证据：`crates/codegen/pager/src/app/root/mod.rs` — `sync_local_drafts / flush_local_drafts`。
+
+源码证据：`crates/codegen/pager/src/app/root/event_loop.rs` — `local_draft_tick / effect execution ownership transfer / exit flush`。
+
+
+### Requirement: Scrollback activity statistics aggregation and display helpers
+
+ToolUsageStats SHALL 从给定ScrollbackState条目聚合ToolCall、Thinking及AgentMessage，忽略其他RenderBlock；不按实际屏幕viewport另行过滤。Session取0..len，SelectedTurn取turn.range，选中优先current_turn否则最后turn，无turn或无效turn返回空SelectedTurn统计。ToolCall类别按block variant，IntegrationSearch/UseTool/MemorySearch/Lifecycle归Other；entry.is_running优先Running，否则按block is_success分类，Lifecycle固定成功且无耗时。Thinking按running或Success并累加其elapsed，Message同状态规则但duration=None；所有三类都计入total_operations，sequence_positions保存原scrollback索引，lineage按遍历顺序。耗时直接相加Option中的i64，不在此保证非负或去除并行重叠；computed_at为本次Instant。sorted_categories稳定按count降序，同数保留BTreeMap枚举顺序。percent_of在分母零时返回0，其余不截断100%；format_time零为长破折号，秒数零显示ms，小于60秒显示三位毫秒，否则分钟加整数秒。该聚合API不自行触发UI刷新、持久化或接入Usage弹窗。
+
+#### Scenario: Thinking and message counts
+- **WHEN** 范围内包含Thinking与AgentMessage
+- **THEN** 两者计入总操作数，与文件头旧MVP注释不同。
+
+#### Scenario: Running tool with error
+- **WHEN** entry仍running而block已有error
+- **THEN** 状态计入Running，不计Failed。
+
+#### Scenario: Missing turn
+- **WHEN** 请求turn不存在
+- **THEN** 返回空SelectedTurn统计。
+
+源码证据：`crates/codegen/pager/src/tool_usage.rs` — `ToolCategory / CategoryStats / ToolUsageStats / tests`。
+
+
+### Requirement: Tracing pane entries bounded channel and fixed subscriber filter
+
+TracingEntry SHALL 保存raw ANSI、解析styled和从styled逐行拼接的plain，解析失败用原始文本；restyle只重建styled不更新plain。基本绿黄红蓝紫青映射theme语义色，None/Reset/White用text_primary，其余颜色归gray，背景清空；ListItem content只返回首行并expect存在，search_text包含全部行。TracingModel要求capacity大于零，push和push_entry分配递增seq，长度严格超过capacity加hysteresis时一次删到capacity，不是只删hysteresis；clear清entries并重置seq，未设字节上限。TracingChannelWriter每次write对整个buf trim_ascii并lossy UTF8转换，不按换行拆分或拼接分次write；空跳过，非空try_send到16384项channel，Full丢当前项并增加进程级Relaxed计数但返回原buf长度，Closed返回io错误；flush无操作，无单项大小上限。init_tracing使用固定directive和WARN默认：shell/tools/acp为info、pager trace、sampling_log off、ACP summary debug、payload off、RMCP SSE噪声error；本函数不读取RUST_LOG，fmt带target和ANSI，附加instrumentation/sampling/hooks layers后委托install_firehose(tui)。LazyJson仅Display时serde序列化，失败显示空串，不在包装时提前序列化。
+
+#### Scenario: Eviction threshold
+- **WHEN** model长度从capacity加hysteresis增加一项
+- **THEN** 删除到capacity，删去hysteresis加1项。
+
+#### Scenario: Full log channel
+- **WHEN** try_send遇Full
+- **THEN** 丢当前write项并累计drop计数，向writer调用方报告成功长度。
+
+#### Scenario: Fixed pane filter
+- **WHEN** 调用init_tracing
+- **THEN** 使用代码构造的directive，不按旧注释读取RUST_LOG。
+
+源码证据：`crates/codegen/pager/src/tracing.rs` — `TracingEntry / TracingModel / TracingChannelWriter / LazyJson / init_tracing`。
+
+源码测试证据：`crates/codegen/pager/src/tracing.rs` — `tests: lazy_json_not_serialized_when_payload_target_off / lazy_json_serialized_when_payload_target_on / model_eviction_triggers_at_threshold / channel_writer_error_on_closed_receiver / channel_to_model_end_to_end / channel_to_model_with_eviction`。
+
+
+### Requirement: MCP CLI list projection and add transport validation
+
+grow mcp SHALL 提供list/add/remove/enable/disable/doctor入口，list和doctor支持json；add默认user scope和stdio，transport旗标决定解释，不自动把URL切为HTTP。add名称要求非空ASCII字母数字横线下划线，无本层长度限制。stdio要求command为Some、拒绝header与形如合法环境键等号值的command，argv原样保存；env按首等号分割，只要求key非空，不trim，重复key后项覆盖。未显式transport且command以http://、https://或localhost开头只告警，仍存stdio。HTTP/SSE仅检查URL以小写http://或https://开头，不执行完整URL解析；拒绝尾随argv和env，header按首冒号分割并trim名字和值，空名字拒绝，同大小写key后覆盖，不验证HTTP token或值语法。SSE保存为StreamableHttp且transport_type=sse，HTTP该字段None。run_add构建enabled=true、max_access=All，其余setup/timeout/image exposure为None，委托所选scope保存。list使用含project配置加载器和disabled名称集合，JSON序列化完整config并添name/scope/enabled，不在本层隐藏env或header；文本显示command及空格连接argv或URL，以及disabled/project标记，不进行连接探测。
+
+#### Scenario: URL without transport flag
+- **WHEN** add command为https URL但未指定transport
+- **THEN** 给出告警并存stdio命令。
+
+#### Scenario: Duplicate environment keys
+- **WHEN** 多个env参数key相同
+- **THEN** 最后一个值覆盖，不修改key空白。
+
+#### Scenario: Remote URL syntax
+- **WHEN** URL仅满足http前缀但其余格式异常
+- **THEN** 本层前缀检查不保证URL或连接有效。
+
+源码证据：`crates/codegen/pager/src/mcp_cmd.rs` — `run_list / run_add / resolve_add / parse_env_vars / parse_headers`。
+
+
+### Requirement: MCP CLI scoped removal enable verification and doctor exit status
+
+MCP remove SHALL 在user配置和反向遍历find_project_configs得到的最近project定义间选择；显式scope只接受该scope命中，未指定且两scope都有定义则打印歧义并exit1，均无则exit1；仅删除选定文件的一项，删除helper返回不存在视为竞争失败exit1。成功后重新查询，若仍有定义则提示最近project优先、user后备，不递归删除全部定义。enable/disable只拒绝空name，不套用add名称字符限制；known集合由cli_known_mcp_server_names提供，未知时打印排序可用名并exit1。保存后重新读disabled集合，若有效状态仍不符合请求则warn并exit1，否则输出改变或already状态及helper返回的修改路径。doctor委托shell mcp_doctor报告；指定name但servers空时即使json也先stderr报未找到并exit1，不输出JSON；其他情况输出pretty JSON或文本报告，failing_count大于零exit1，否则成功。所有需要cwd的路径在current_dir失败时直接stderr并exit1，不回退当前点目录。
+
+#### Scenario: Ambiguous removal
+- **WHEN** 未指定scope且user和project同名
+- **THEN** 拒绝删除并提示选择scope。
+
+#### Scenario: Surviving definition
+- **WHEN** 删除最近project后祖先仍定义同名
+- **THEN** 提示仍有定义，不继续删除。
+
+#### Scenario: Enable ineffective
+- **WHEN** save后disabled集合仍包含目标
+- **THEN** 退出1，不仅凭保存调用成功报告启用。
+
+#### Scenario: Doctor named miss
+- **WHEN** 指定name且报告servers为空
+- **THEN** stderr报错退出1，json模式也不输出报告。
+
+源码证据：`crates/codegen/pager/src/mcp_cmd.rs` — `select_remove_site / surviving_definition / run_remove / run_set_enabled / run_doctor / tests`。
+
+
+### Requirement: Plugin CLI installed and available inventory projection
+
+Plugin list SHALL 从InstallRegistry列出repo，文本按repo展示插件名称集合、git URL或local source_path及可选marketplace来源；JSON按每插件输出status=installed、name、repo_key、version、repo根path、source和marketplace，不以插件子目录替换path。available旗标在clap层requires json，JSON先放installed再追加available。available读取effective config失败使用空TOML；逐source处理，local要求is_dir，git调用UseTtl同步cache并在扫描期间持SourceCacheLease，因此列出available可能触发git缓存同步。root不可用或扫描失败跳过source；git同步失败warn。去重依据source identity与plugin.relative_path的installed查询，不按同名全局去重；identity为git URL或local显示path，不含git branch。available项输出name/version/description/marketplace和Some时的components，不输出repo path或安装状态开关。扫描结束释放lease，不在本层排序或自动安装。
+
+#### Scenario: Unavailable source
+- **WHEN** source根目录解析或扫描失败
+- **THEN** 跳过其available项，继续其他source。
+
+#### Scenario: Same plugin name
+- **WHEN** 不同source存在同名插件
+- **THEN** 不以名称本身判定已安装，使用source identity与relative_path。
+
+#### Scenario: Git available listing
+- **WHEN** list --json --available包含git源
+- **THEN** 使用UseTtl cache同步并持lease扫描，不能视为纯注册表读取。
+
+源码证据：`crates/codegen/pager/src/plugin_cmd.rs` — `cmd_list / installed_plugins / available_plugins / resolve_marketplace_root`。
+
+
+### Requirement: Plugin CLI install trust management outcomes and manifest inspection
+
+Plugin install SHALL 优先解析marketplace ref，否则按普通source处理；无trust时普通source仅解析来源并打印重跑提示exit1，marketplace先解析来源名，解析失败返回错误，成功提示后exit1。带trust委托安装，warnings逐项记录；成功诊断trust固定true，失败来源类型未知时诊断默认Git。marketplace already_installed打印update提示并返回Ok，但诊断success=false且category=already_installed。uninstall把confirm和keep_data传底层；NeedsConfirm返回含整repo插件列表和--confirm重跑建议的错误，不交互读stdin；成功诊断confirmed=true并按keep_data显示后缀。update顶层调用失败返回Err，但各RepoUpdateOutcome::Failed仅stderr输出，循环结束仍Ok；Pinned/LiveLocal只显示跳过或实时本地状态。enable/disable要求registry.find_plugin命中，先尝试移除相反列表项，失败仅warn，再添加目标列表，后者失败返回Err；无有效配置复读或事务回滚。details打印所属repo及其中所有插件，尝试repo根manifest失败静默省略组件，不按所选插件subdir加载。validate要求路径is_dir后load_manifest及validate，通过才展示组件目录数量和hooks/MCP/LSP存在性，不等同执行组件或连接测试。
+
+#### Scenario: Partial update failure
+- **WHEN** outcomes含Failed项目
+- **THEN** 打印失败，CLI函数仍返回Ok。
+
+#### Scenario: Already installed marketplace plugin
+- **WHEN** 安装结果already_installed
+- **THEN** 返回Ok并建议update，同时诊断标记already_installed失败。
+
+#### Scenario: Opposite list removal fails
+- **WHEN** 启用时remove_disabled失败
+- **THEN** 告警后继续add_enabled，不在此验证最终有效状态。
+
+源码证据：`crates/codegen/pager/src/plugin_cmd.rs` — `cmd_install / cmd_install_marketplace / cmd_uninstall / cmd_update / cmd_enable / cmd_disable / cmd_details / cmd_validate`。
+
+
+源码测试证据：`crates/codegen/pager/src/plugin_cmd.rs` — `trust_prompt_marketplace_has_no_error_framing / trust_prompt_git_and_local_subjects`。
+
+### Requirement: Plugin tag and marketplace source mutation boundaries
+
+Plugin tag SHALL 要求目录和manifest version，以去掉单个v或V前缀再加v构造tag；非force运行git status --porcelain，只检查stdout非空而不检查status成功。dry_run在此检查之后仅打印，真实执行git tag并可带force，push固定origin且可force，失败返回错误，不回滚已创建tag。marketplace命令读取effective config失败回退空表；list JSON输出name/kind及git URL/branch或local path，文本不列branch或插件清单。add trim输入，拒绝空与不存在local目录；git按去尾.git比较重复，local按路径相等；非force git先probe，force不绕过其他检查。写grow_home/config.toml前read_to_string任意失败用空内容，解析成功后追加marketplace.sources表项，直接fs::write，无本层原子替换、创建父目录或回滚。remove按唯一精确name优先，再规范URL/路径首个匹配；重名name拒绝。先委托卸载该identity插件，再尝试删除user配置源块；读取/匹配失败或写失败仅告警，仍打印Removed并Ok。update只按source.name精确过滤，git强制同步，local跳过；指定不存在name返回Err，任意同步失败汇总stderr但仍Ok；未指定且全local时也打印No marketplace sources configured。
+
+#### Scenario: Push fails after tag
+- **WHEN** git tag成功而git push失败
+- **THEN** 返回错误但保留本地tag。
+
+#### Scenario: Source config removal fails
+- **WHEN** 插件已卸载但源配置写回失败
+- **THEN** 告警后仍返回Ok，不回滚卸载。
+
+#### Scenario: Marketplace sync errors
+- **WHEN** 至少一个git源同步失败
+- **THEN** 汇总错误但CLI函数返回Ok。
+
+源码证据：`crates/codegen/pager/src/plugin_cmd.rs` — `cmd_tag / marketplace_add / find_removal_source / marketplace_remove / marketplace_update_with_cache_root`。
+
+源码测试证据：`crates/codegen/pager/src/plugin_cmd.rs` — `find_removal_source_matches_by_name / find_removal_source_matches_by_url_ignoring_git_suffix / find_removal_source_matches_local_path / find_removal_source_not_found_lists_names / find_removal_source_duplicate_names_require_url / marketplace_update_force_syncs_fresh_git_cache`。
+
+
+### Requirement: Structured edit diff construction and conservative hunk stitching
+
+build_diff_hunks SHALL 每个SearchReplaceEditDetail独立以split_inclusive换行构建before/after Equal行，old/new行号饱和递增或递减；old与new均空且存在任一context时将new视为单换行，context全空则不伪造插入。TextDiff逐行比较，line_prefix按delete/insert各自首项标记添加，Equal只在两标记均未置时添加但仅置delete标记；因此前缀语义以实际标记算法为准。只保留首尾最多3个Equal上下文，随后剔除边缘ASCII空白Equal行；全Equal不产生hunk，内部长Equal段不另行切开。diff_hunks_from_strings构建无context/prefix且相同start_line的单detail。stitch_overlapping_hunks仅尝试当前最后hunk与下一hunk；无Equal/Insert覆盖、后者起始ln早于前者或有间隔则保持分开。共享ln的Equal要求去尾CR/LF文本一致；Delete在覆盖区必须紧接同ln单Insert且旧文本匹配，替换Equal为删除插入对或覆盖已有Insert以保留原删除；覆盖区独立Insert拒绝合并。超出覆盖尾部的非Delete行必须逐ln连续，Delete原样追加。任一失败放弃该次clone，不改原hunk；保留行的lo来自各自快照，不重新计算全文件旧行号。
+
+#### Scenario: Empty file write
+- **WHEN** old/new均空且无context
+- **THEN** 不生成新增空行。
+
+#### Scenario: Context mismatch
+- **WHEN** 重叠ln去尾CR/LF后文本不符
+- **THEN** 保留为分离hunks，不强制合并。
+
+#### Scenario: Repeated single line replacement
+- **WHEN** 下一hunk删除文本与已有Insert匹配并紧跟同ln Insert
+- **THEN** 保留原删除并用最终Insert替换中间结果。
+
+源码证据：`crates/codegen/pager/src/diff.rs` — `build_diff_hunks / diff_hunks_from_strings / stitch_overlapping_hunks / stitch_hunk_pair`。
+
+
+### Requirement: ACP edit hunk extraction precedence and patch serialization
+
+extract_edit_hunks SHALL 优先将raw_output整体解析为ToolOutput，若为SearchReplace EditsApplied则立即用details构建并返回，即使details或hunks为空，不回退content；反序列化失败warn仅含tool id与error kind，其他成功variant继续。随后仅处理content中的首个Diff：meta可解析结构且details非空则采用，否则以old_text缺省空串、new_text和meta.new_line的u64转usize（缺失默认1）构建文本差异，立即返回，不累计后续Diff。edit_count为hunks.len最大1，无Diff也返回空hunks和1，不等同真实编辑数量。diff_hunks_to_patch空hunks返回空字符串；非空外层先输出未经quote/escape的a/path和b/path header，即使所有内层hunk为空也保留header。非空hunk old/new start分别取首个非Insert/非Delete行号，找不到默认1，count按相应行数；每行添加空格/加/减前缀，去掉全部尾CR/LF再追加单LF，不输出No newline标记，不保留CRLF或原末尾缺换行信息。本函数不验证patch可应用，也不把纯插入/删除零行侧坐标转换为git约定的锚点。
+
+#### Scenario: Empty structured result
+- **WHEN** raw_output为EditsApplied但无可见hunks
+- **THEN** 返回空hunks及count1，不读取content补充。
+
+#### Scenario: Multiple Diff content blocks
+- **WHEN** content有多个Diff
+- **THEN** 只使用首个Diff，后续忽略。
+
+#### Scenario: Missing final newline
+- **WHEN** DiffLine原文本无末尾换行
+- **THEN** patch仍追加LF，不编码末尾无换行标记。
+
+源码证据：`crates/codegen/pager/src/diff.rs` — `extract_edit_hunks / diff_hunks_to_patch`。
+
+
+### Requirement: Adjacent edit block coalescing and copied patch source
+
+ACP tracker SHALL 仅合并严格相邻、未committed且非running/非pending user input/无hook_data的成功Edit，要求非空hunks、summary可信、prefix相等；路径两者可resolve时比较结果，两者均不可resolve才按原字符串相等。先尝试前邻，再后邻，循环合并且较早entry存活；合并拼接两者hunks并保守stitch，edit_count保存原两block之和而非新hunk数，change_counts按最终hunks重新计算，highlight置HunkOnly、cache失效并标记structural dirty，删除后entry及其pending highlight，非replay确保survivor待高亮。Edit转换路径依次从file_path/filePath/target_file/path取值，缺失用title且标记summary不可信，多于一个Diff也标记不可信；成功调用extract_edit_hunks但忽略返回count，失败建空hunks及error，write工具prefix为Creating。Edit.copy_text直接以当前path和hunks调用patch序列化；set_hunks默认count至少1，合并调用方随后覆盖为累计edit_count，复制不读取磁盘全文件。
+
+#### Scenario: Committed neighbor
+- **WHEN** 相邻Edit已有committed标记
+- **THEN** 不合并，保留原条目。
+
+#### Scenario: Multiple diff contents
+- **WHEN** ToolCall有多个Diff内容
+- **THEN** summary不可信，禁止进入上述合并，即使提取只取得首Diff。
+
+#### Scenario: Copy merged block
+- **WHEN** 对合并后的Edit调用copy_text
+- **THEN** 序列化最终保留hunks，不重新读取文件。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `coalescable_edit / edits_can_merge / try_coalesce_edit / merge_edit_entries / ToolKind::Edit`。
+
+源码证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `copy_text / set_hunks / compute_changes`。
+
+
+### Requirement: ACP notification metadata typed projection and replay stamp
+
+NotificationMeta::from_json SHALL 从可选map逐字段读取camelCase wire键，缺失map返回Default；totalTokens仅as_u64，三个时间戳仅as_i64，promptId/eventId仅字符串，isReplay仅bool否则false，单字段类型错误不使整体失败。event_id完整字符串保留，event_seq仅最后横线分段parse u64，不验证session前缀、横线存在或正数，因此纯数字字符串也可解析；空/非数字后缀不影响原字符串保留。本模块不执行去重、时间先后或prompt身份校验。ReplayMetaStamp使用camelCase serde并由replayed构建isReplay=true；NotificationMeta自身派生serde未设置rename_all，不能把其默认序列化误当原camelCase wire map。user_prompt_meta及user_message_chunk_meta提供displayText/displayAsSkill/displayAsCron/skillTokenRanges/messageId/promptIndex/hideFromScrollback常量，combined display键委托prompt_queue常量；这些常量定义不自行执行回显或展示。
+
+#### Scenario: Malformed field type
+- **WHEN** isReplay为字符串且eventId为合法字符串
+- **THEN** is_replay回退false，event_id仍保留。
+
+#### Scenario: Numeric only event id
+- **WHEN** eventId字符串仅为42
+- **THEN** event_seq可为42，不要求session前缀。
+
+#### Scenario: Non numeric suffix
+- **WHEN** eventId末段不是u64
+- **THEN** event_seq为None但原event_id保留。
+
+源码证据：`crates/codegen/pager/src/acp/meta.rs` — `NotificationMeta::from_json / ReplayMetaStamp / tests`。
+
+
+### Requirement: In process ACP worker bootstrap watchers and bounded shutdown join
+
+spawn_shell SHALL 先同步bootstrap配置和models，再建立父cancel的child token与ACP channels，创建命名acp-agent-worker线程；线程内current_thread Tokio加LocalSet构造Rc MvpAgent，可覆盖memory config，spawn_local gateway direct dispatch并启用tracing。函数返回线程句柄不是agent ready确认，runtime或agent构造错误由线程结果表达。config reload仅在收到ModelsChanged时发送内部reload_models，其他update忽略，失败warn；skills watcher收到Skills重载全部session，且新discovery目录时广告commands，Workflows只广告commands。worker yield后等待cancel，再await flush_all_sessions(SESSION_FLUSH_GRACE)，不在此取得逐session成功结果。AgentShutdownGuard Drop总是cancel，thread为None也取消；有thread时helper线程执行join，调用者两段recv_timeout，总预算grace加2秒，最初min(预算,1500ms)静默，超时且stderr TTY才提示。结果区分clean、worker error、panic、timeout、helper断开，异常仅warn；超时不kill线程、不join helper，不保证hooks或memory保存完成。panic字符串保留，其他payload固定描述。
+
+#### Scenario: No worker guard
+- **WHEN** guard thread=None时Drop
+- **THEN** 仍取消token，不执行join。
+
+#### Scenario: Worker startup fails
+- **WHEN** 线程内Tokio构造或agent构造失败
+- **THEN** spawn_shell可能已返回句柄，错误从join结果体现。
+
+#### Scenario: Shutdown timeout
+- **WHEN** worker超过等待预算
+- **THEN** 返回TimedOut并告警，helper和worker可能继续运行直到进程结束。
+
+源码证据：`crates/codegen/pager/src/acp/spawn.rs` — `spawn_shell / spawn_agent_thread_direct / AgentShutdownGuard::drop / join_agent_thread / tests`。
+
+
+### Requirement: Leader bridge channel swap outbound stale drop and cancellation
+
+leader bridge SHALL 以两个8MiB simplex在独立current_thread LocalSet线程连接typed ACP gateway与leader无界String channels；8MiB不限制JSON行长或无界channel总量。入站每项原字节追加换行，write错误退出reader；leader rx关闭时有reconnector则按policy重连，先替换rx及共享tx再notify_connected，忽略返回的disconnect_rx；重连失败或无reconnector取消共享token。出站read_line后trim_end，空项跳过；forward首次send成功即Sent，不等远端确认；失败保留line和失败channel身份，每100ms重试并阻塞后续行，观察tx换成不同channel时丢弃此line而不重发。该策略不按创建epoch识别：首次send在swap后才执行的旧行及后续排队行仍可发往新连接。helper在send失败后的等待才检查cancel，已取消但channel可写时仍可能Sent。DroppedStale记录method及长度到unified log，不记录整payload；writer EOF/读错仅退出writer，主线程仍等cancel，未以所有子任务退出作为完成条件。取消后abort reader/writer并返回Ok，不等待其join；handle_io/gateway本地任务不单独监督。
+
+#### Scenario: Dead sender swapped
+- **WHEN** 某行首次发送失败后共享sender替换
+- **THEN** 丢弃该行，后续行可发送到新连接。
+
+#### Scenario: Inbound disconnect no reconnect
+- **WHEN** leader rx关闭且无reconnector
+- **THEN** 取消token使主流程退出。
+
+#### Scenario: Already cancelled live sender
+- **WHEN** 直接调用forward helper时token已取消但sender可发送
+- **THEN** send可能先成功返回Sent，不保证取消优先。
+
+源码证据：`crates/codegen/pager/src/acp/leader_bridge.rs` — `forward_outbound_line / bridge_channels / tests`。
+
+
+### Requirement: ACP connection initialization capability defaults and eager authentication
+
+ACP connect SHALL 读取effective config并解析AgentConfig，resolve runtime字段、设置permission mode、可选reasoning override和非空CLI permission rules，写installer后spawn_shell，再initialize及authenticate，成功才返回worker句柄。此函数未在initialize/authenticate错误路径构造AgentShutdownGuard，不能由成功返回调用方的guard推断初始化失败也已join。leader连接警告experimental-memory/no-memory/subagents/permission rules，不阻止连接；构建client capabilities并connect_or_spawn Stdio，使用unbounded reconnect policy，返回agent_thread=None及status_rx，bridge线程句柄未交回。缺client_identifier时leader连接client_type用HEADLESS而initialize meta用PAGER。initialize发送V1、显式fs/terminal旗标及incrementalBashOutput/bashOutputNoColor/gitHeadChanged=true、canonical hunk mode；meta含clientType/version与Some rules原文。响应growShell缺失/非bool为false，cancelRewind缺失/非bool为true，sessionRecap缺失/非bool为false；modelState解析失败走None转换，availableCommands整体解析失败为空列表，defaultAuthMethodId只取字符串。认证优先采用已广告列表内的default id，否则首项；列表空报错，有选项则发Authenticate，无本层方法轮询回退。installer写回对读或TOML解析失败回退空document，只在cli是Table时写字段；建父目录失败忽略，直接write失败warn，不提供事务或错误传播。
+
+#### Scenario: Unknown preferred authentication
+- **WHEN** defaultAuthMethodId不在广告列表
+- **THEN** 使用首项而不发送未知id。
+
+#### Scenario: No authentication methods
+- **WHEN** initialize广告空列表
+- **THEN** authenticate返回No auth methods available。
+
+#### Scenario: Missing capability metadata
+- **WHEN** 响应无cancelRewind和sessionRecap
+- **THEN** 分别采用true与false。
+
+源码证据：`crates/codegen/pager/src/acp/mod.rs` — `connect / connect_via_leader / initialize / authenticate / apply_config_writes`。
+
+源码测试证据：`crates/codegen/pager/src/acp/mod.rs` — `tests: parse_available_commands_from_meta / parse_available_commands_invalid_json_returns_empty / parse_session_recap_available_non_bool_defaults_off / eager_auth_prefers_advertised_default_then_first / build_initialize_meta_uses_custom_client_identifier_when_set / client_capabilities_meta_defaults_absent_or_blank_mode_to_agent_only / client_capabilities_meta_accepts_only_canonical_off`。
+
+
+### Requirement: Tracker activity priority and blocking wait projection
+
+AcpUpdateTracker.activity SHALL 按retry override、compaction override、known blocking wait、current thinking、pending tool、current message顺序返回活动，否则None；pending tool取HashMap首个，不保证最早或固定顺序。工具description取非空trim字符串并保留首个非空行最多40个Unicode字符，title取raw_input.command字符串否则base.title，再尝试剥离重复cwd前缀。blocking_wait按TaskOutput、Sleep、Subagent、Model、AgentSwitch优先级选一个，同类无固定顺序；选中TaskOutput waits=false后返回无known wait，不再寻找次优Sleep等。drop_stale_blocking_waits只在current_stream为Some且stamp相同时保留，None清全部。WaitingReason.task_output构造空ids、无subject、waits=true；subject标签取首个非空trim行最多40字符并加省略号，空subject回退Waiting on task output，长度按字符非终端列宽。tool_title和pending entry查询只查pending map，claim_hook_occurrence用HashSet插入结果表示首次，remove_pending_tool只删pending map，不自行删除scrollback。
+
+#### Scenario: Multiple pending tools
+- **WHEN** 无更高优先级活动且多个tool pending
+- **THEN** 选择HashMap首项，不提供确定性先后保证。
+
+#### Scenario: Instant poll chosen
+- **WHEN** TaskOutput waits=false优先于其他等待被选中
+- **THEN** known wait返回None，继续thinking/tool/message活动判断。
+
+#### Scenario: Unknown current stream
+- **WHEN** drop_stale_blocking_waits参数None
+- **THEN** 所有blocking waits清除。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `activity / blocking_wait / drop_stale_blocking_waits / clamp_activity_subject`。
+
+
+### Requirement: Tracker update stream transitions and turn finalization projection
+
+handle_update SHALL 每次调用清retry override，包括replay和最终不处理的update。meta.stream_start_ms为Some且与已有Some不同才切流：有内容thinking结束，空thinking保留；当前agent message结束；非replay、无thinking且无known wait时预建thinking，随后更新last stream stamp。AgentMessageChunk先清所有blocking waits，ThoughtChunk仅保留同Some stream waits；AvailableCommandsUpdate总是替换pending commands为Some并返回true，tools及behavior仅parse Some时替换，workflow definitions/diagnostics则缺失或解析失败直接置None。Plan/CurrentMode及其他未处理类型返回false，但之前retry/切流副作用仍可发生。finish_turn结束thinking和message，drain pending tools并结束有entry者，若有pending compaction则生成CompactionCompleted，tokens_after取last_used否则estimate；清elapsed/stream stamp、compaction/retry活动、suppressed tools、blocking waits及orphan updates，不清hook occurrence集合、后台tool映射或pending command投影。finish_thinking删除空Thinking，否则以缓存elapsed完成；pre_create_thinking受show_thinking_blocks配置及current_thinking为空限制。defer_compaction覆盖旧pending且last_used重置None，note_context_used仅更新存在的pending，不在此校验event或turn身份。
+
+#### Scenario: Ignored update while retrying
+- **WHEN** 收到Plan update且retry override存在
+- **THEN** 清retry后返回false，false不保证tracker完全未变。
+
+#### Scenario: Workflow metadata absent
+- **WHEN** AvailableCommandsUpdate无workflow字段
+- **THEN** 清pending workflow快照，tools旧Some则保持。
+
+#### Scenario: Pending compaction finalization
+- **WHEN** finish_turn时有last_used
+- **THEN** 输出该last_used作为tokens_after而非estimate。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `handle_update / finish_turn / finish_thinking / pre_create_thinking / defer_compaction`。
+
+
+### Requirement: Tracker agent and thought chunk admission and timing
+
+handle_agent_chunk SHALL 先finish_thinking，再提取文本；空文本返回false，尚无current_agent_msg时trim为空的文本告警后丢弃，已有message时允许追加空白。首个有效chunk创建streaming agent并设running，仅新entry且有agent_timestamp时设created_at，UTC毫秒不可转换则回退Local::now；replay走deferred追加，live走普通追加。handle_thought_chunk仅show_thinking_blocks开启、ContentBlock::Text且非空时创建或追加，空白非空文本允许；首次按replay选择thinking构造器并set running，有agentTimestamp和streamStart时直接相减赋last_thinking_elapsed_ms，不在此截零、校验时间顺序或饱和运算，缺任一时间戳保留旧elapsed；replay使用deferred追加。工具start先finish_thinking并直接清current_agent_msg标识，本函数该步骤不显式finish旧message；被分类为todo/bg plumbing/task/goal/scheduler/workflow的工具加入suppressed集合并返回false，任务背景meta未明确true时登记Subagent等待。非抑制工具若已有orphan则合并并按completed路径创建，不在此再次依据merged status分支；无orphan时Completed/Failed走completed，其他状态立即创建running条目及pending记录。
+
+#### Scenario: Leading whitespace message
+- **WHEN** 无current message且文本仅空白
+- **THEN** 结束thinking后丢弃消息并返回false。
+
+#### Scenario: Whitespace thought
+- **WHEN** thinking显示开启且Text只有空格
+- **THEN** 按非空文本追加，不套用message首块trim规则。
+
+#### Scenario: Missing timestamp pair
+- **WHEN** 后续thought缺streamStart
+- **THEN** 保留先前elapsed而非重置。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `handle_agent_chunk / handle_thought_chunk / handle_tool_call / utc_ms_to_local`。
+
+
+### Requirement: Tracker incremental tool updates background deferral and orphan completion
+
+handle_tool_call_update SHALL 首先忽略bg_deferred_tools内id的所有更新。suppressed工具更新可补task background信息及TaskOutput ids/timeout，Task variant有task_id时记录run_in_background（缺省true），后台移除blocking wait；提取ids空不覆盖旧ids，timeout键存在才更新waits；Completed/Failed清suppressed及wait，仍返回false。普通非terminal更新仅处理已有pending，不存在直接丢弃；先取本次raw_output Bash结果，再update base。检测后台时无entry或无真实command的Execute placeholder删除pending/placeholder并登记deferred；有真实显示条目则重建block保留started_at、必要时标structural dirty，保留pending但后续更新因deferred入口被忽略。非后台重建或创建block，Bash output_delta为Some优先经每工具Utf8Decoder追加，否则完整output lossy UTF8替换；其他更新返回true。terminal更新取出pending合并并替换block/结束running/尝试Edit合并，或无entry新建completed；找不到pending则按id覆盖保存最后orphan update，返回false，不累计多次orphan。此路径未显式flush Utf8Decoder末尾残片，完成块以合并后的ToolCall输出构建。
+
+#### Scenario: Early nonterminal update
+- **WHEN** 尚无pending工具且更新非Completed/Failed
+- **THEN** 直接返回false，不存orphan。
+
+#### Scenario: Repeated orphan completion
+- **WHEN** 同id多次terminal更新且start尚未抵达
+- **THEN** 最后更新覆盖此前orphan。
+
+#### Scenario: Deferred background completion
+- **WHEN** id已进入bg_deferred_tools后收到Completed
+- **THEN** 入口直接忽略，不走普通terminal清理。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `handle_tool_call_update / Utf8Decoder::decode`。
+
+
+### Requirement: Tracker user echo reconciliation combined display and hidden message ordering
+
+handle_user_message SHALL 在提取文本为空时直接返回false；否则先结束thinking/current agent message并drain pending tools结束其running条目，再处理用户回声。messageId仅接受chunk meta字符串，通过反向查找最近同id UserPrompt去重，已有prompt_index为空才补u64转usize的索引，不替换文字并返回false。Text内容meta的combinedDisplayTexts过滤非字符串和空字符串后至少两段才生效，各段共享messageId且仅最后一段设置prompt_index；此分支先于隐藏检查返回，不应用普通单块的时间戳设置。普通分支仅chunk meta hideFromScrollback严格true时隐藏，不依据消息文本或id；隐藏前上述运行状态已收尾。displayText字符串覆盖正文，标记优先cron再skill再普通，且此路径不使用skillTokenRanges；无覆盖时非空解析范围交给with_skill_tokens验证。范围parser接受数组的前两个u64元素、跳过错误项，不在此检查范围顺序或UTF8边界。普通新块时间优先turn_start_ms再agent_timestamp_ms。
+
+#### Scenario: Echo reconciliation has lifecycle effects
+- **WHEN** 非空回声命中已有messageId
+- **THEN** 先结束当前运行条目，再仅补缺失prompt_index并返回false。
+
+#### Scenario: Combined hidden message
+- **WHEN** 至少两段有效combinedDisplayTexts且hideFromScrollback为true
+- **THEN** 合并展示分支先创建多块并返回，未执行后续隐藏检查。
+
+#### Scenario: Display kind precedence
+- **WHEN** displayText存在且cron和skill标记均为true
+- **THEN** 创建cron展示块，不采用skill token范围。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `handle_user_message / combined_display_texts_from_chunk / parse_skill_token_ranges / user_message_hidden_from_scrollback`。
+
+
+### Requirement: Tracker tool update merge and execute read rendering
+
+merge_tool_call_update SHALL 采用update id，title/kind/status/content/locations有值覆盖base，raw_input/raw_output以Some覆盖，meta保留base。tool_call_to_block仅Failed视为status失败。Execute命令优先非空白raw command（保留原字符串），否则非空且不是已知函数名的title；函数名识别ASCII大小写不敏感但不trim。原始Execute读取meta bash_mode布尔，未知kind的函数名回退Execute不读取该标记。Bash结构化输出lossy解码；Failed或非零exit才设error，优先signal再exit code再Command failed，单独signal且exit0不触发error。无Bash时成功不从content填output，失败以Text content或默认消息作error。Read路径依次file_path/target_file/path/title；成功解析ReadFile后按结果变体设置内容、错误或图片引用，不再补Failed状态错误。FileContent仅offset或limit存在时设置范围，start=offset默认0加1、end=min(offset+limit,total_lines)或total_lines，此处无饱和或范围顺序校验。
+
+#### Scenario: Signal with zero exit
+- **WHEN** Bash output有signal但exit_code为0且status不是Failed
+- **THEN** 该转换分支不设置执行错误。
+
+#### Scenario: Read status and payload disagree
+- **WHEN** status为Failed但raw_output解析为FileContent
+- **THEN** 按FileContent构建内容，不进入fallback错误分支。
+
+#### Scenario: Update metadata
+- **WHEN** update携带字段且base有meta
+- **THEN** 字段按Some覆盖，合并结果meta保留base。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `merge_tool_call_update / tool_call_to_block / execute_command_from_tool_call / content_text / extract_raw_field / extract_bash_output_from_value`。
+
+
+### Requirement: Tracker search fetch and fallback tool rendering precedence
+
+tool_call_to_block SHALL 先按明确Execute/Read/Edit/Search/Fetch kind分支，再依次匹配target_directory字符串、variant SearchTool、variant UseTool、Memory search标题，最后通用回退。Search取pattern再glob_pattern再title，缺少可解析grep结果使用默认空结果，Failed统一Search failed。Fetch取url再剥离精确Fetch: 前缀再title，仅WebFetch Content解析成功填HTTP元数据，Text content拼接作为output，Failed统一Fetch failed。SearchTool limit接受u64后as u8转换而非校验范围；UseTool优先非空Text content再结构化输出，失败把output移入error并清output，无输出用Tool call failed。Memory search:匹配与剥离Memory search: 空格前缀不同，无空格标题保留原title作为query。通用回退对已知执行函数名生成Execute；其余名称title为空用kind，skill或skill:前缀大小写不敏感生成Skill块，保留冒号后文本。通用失败有Text时同一文字同时作为error和output，默认Failed只在无Text时使用。content_text仅提取ToolCallContent Content内Text并以换行拼接，忽略其他内容类型。
+
+#### Scenario: Fallback discriminator precedence
+- **WHEN** 未知kind同时有target_directory及variant UseTool
+- **THEN** 先生成ListDir块。
+
+#### Scenario: Integration limit truncation
+- **WHEN** SearchTool limit为256
+- **THEN** as u8投影为0，不在此拒绝。
+
+#### Scenario: Failed integration output
+- **WHEN** UseTool失败且存在非空Text输出
+- **THEN** 输出转移至error，output不保留同份内容。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `merge_tool_call_update / tool_call_to_block / execute_command_from_tool_call / content_text / extract_raw_field / extract_bash_output_from_value`。
+
+
+### Requirement: Tracker suppressed tool classification and wait input normalization
+
+Tracker分类 SHALL 对todo采用精确title todo_write/TodoWrite/Updating plan或variant TodoWrite，对task采用task/Task/spawn_subagent或variant Task，对goal采用update_goal、Goal:前缀或UpdateGoal/WorkflowSignal变体。workflow仅title workflow或variant Workflow且action严格run/control_run时抑制；scheduler按title scheduler_或variant Scheduler前缀。Task/Write/TodoWrite变体仅精确单一拼写。后台Execute要求kind Execute或已知执行函数名且is_background严格布尔true。等待TaskOutput优先于Sleep；timeout_ms仅u64且大于0时waits=true，缺失、错误类型或0均为即时poll。task_ids数组仅保留trim后非空字符串，按首次出现去重；有任何有效数组id则忽略单数task_id，数组无有效id才回退单数字符串。
+
+#### Scenario: Workflow query remains visible
+- **WHEN** workflow action为list
+- **THEN** 不符合run/control_run抑制条件。
+
+#### Scenario: Task ids fallback
+- **WHEN** task_ids只有空白和非字符串，task_id有效
+- **THEN** 回退单数id并trim。
+
+#### Scenario: Poll timeout
+- **WHEN** timeout_ms缺失或为0
+- **THEN** TaskOutput waits为false。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `blocking_wait_reason / timeout_waits / task_ids_from_raw_input / is_*_tool / extract_search_meta / extract_grep_output / parse_search_tool_results / extract_use_tool_output / make_relative_path / parse_tools_meta / update_summary / json_size_hint`。
+
+
+### Requirement: Tracker search paths error labels and integration output decoding
+
+Tracker搜索与集成解析 SHALL 对SearchReplace错误投影固定简短标签，不展示其携带的原错误文本；EditsApplied及其他无法解析结果默认Edit failed。搜索path优先非空path再target_directory，转相对后点号隐藏，glob/type仅过滤空字符串，-i/multiline仅布尔true生效。GrepSearch文件结果保留行号和文字并转换path，仅结构化file_matches为空且match_count>0时把stdout lossy文本按行解析路径；跳过空行、以<或Found 空格开头行，不trim或解析XML。make_relative_path使用进程current_dir的lossy字符串前缀剥离，不校验路径组件边界、canonicalize或使用session cwd，完全相同返回点号。SearchTool结果JSON要求results数组和每组tools数组，缺tool_name字符串跳过，空名称允许；server/description缺省空、score缺省0，保留顺序和重复，不投影input_schema。UseTool结构化MCP成功或错误均提取文本，Text直接取text后尝试JSON美化，Dynamic直接pretty JSON；解析失败仅原始字符串可回退。tool_input仅对象转顶层键值展示，字符串不加引号、嵌套JSON紧凑序列化。
+
+#### Scenario: Prefix sibling path
+- **WHEN** 进程cwd为/work/app且路径为/work/application/file
+- **THEN** 字符串前缀被剥离为lication/file，不按组件边界判断。
+
+#### Scenario: Grep whitespace
+- **WHEN** stdout行只含空格或缩进XML标签
+- **THEN** 不被空行或首字符<过滤条件排除。
+
+#### Scenario: Discovered duplicate tools
+- **WHEN** 结果含重复tool_name和input_schema
+- **THEN** 保留重复工具投影，不保存input_schema。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `blocking_wait_reason / timeout_waits / task_ids_from_raw_input / is_*_tool / extract_search_meta / extract_grep_output / parse_search_tool_results / extract_use_tool_output / make_relative_path / parse_tools_meta / update_summary / json_size_hint`。
+
+
+### Requirement: Tracker advertised tools empty arrays and summary size boundaries
+
+parse_tools_meta SHALL 在meta缺失、tools缺失或非数组时返回None，数组则过滤非字符串并始终Some，包含零字符串时Some空向量，与附近注释的None说法不同。behavior availability直接按目标类型反序列化，失败None。update_summary不序列化完整raw payload，以content计数和json_size_hint摘要替代，但直接格式化tool id/title、mode id；content摘要Text只字节数，Image/Audio带未截断mime，ResourceLink带完整URI；meta_summary直接带prompt_id。因此日志摘要没有固定100B上限。json_size_hint对字符串取字节数、数组取元素数、对象取key数量及直接字符串字节数/数组元素数之和，忽略嵌套对象，~B不是实际JSON序列化大小。
+
+#### Scenario: No string tools
+- **WHEN** tools数组为[1,true]或空数组
+- **THEN** 返回Some空向量，而非None。
+
+#### Scenario: Long tool title
+- **WHEN** 工具title很长
+- **THEN** 摘要完整格式化title，长度随title增长。
+
+#### Scenario: Nested JSON object
+- **WHEN** raw payload顶层字段值全为对象
+- **THEN** inner大小提示为0而非递归估算。
+
+源码证据：`crates/codegen/pager/src/acp/tracker.rs` — `blocking_wait_reason / timeout_waits / task_ids_from_raw_input / is_*_tool / extract_search_meta / extract_grep_output / parse_search_tool_results / extract_use_tool_output / make_relative_path / parse_tools_meta / update_summary / json_size_hint`。
+
+
+### Requirement: Terminal progress escape capability gate and tmux passthrough encoding
+
+Progress序列构建 SHALL 仅对Ghostty、WezTerm及TerminalContext版本判断达到3.6的Iterm2返回Some；其他品牌返回None。Indeterminate使用OSC 9;4;1;-1 BEL，Clear使用OSC 9;4;0;0 BEL。tmux passthrough仅context为tmux-backed且版本判断达到3.3时包装，否则仍返回原始OSC而非禁用进度。包装将所有ESC字符加倍后置于ESC P tmux;与ESC反斜杠之间，不解析或验证输入序列。build_progress_escape只构建字符串；emit_progress在支持时使用locked stderr write_all再flush，忽略两者错误。调用方通知管理器在progress_bar开启且busy时首次或keepalive到期追加构建结果，即使构建None也将progress_active设true并记录发送时间；clear仅在内部active时尝试构建并清内部状态。
+
+#### Scenario: Old tmux with supported brand
+- **WHEN** Ghostty处于版本不足3.3的tmux context
+- **THEN** 返回未包装的OSC序列，不返回None。
+
+#### Scenario: Unsupported terminal
+- **WHEN** 品牌不在支持列表
+- **THEN** 构建返回None，emit不写序列。
+
+#### Scenario: Embedded escape wrapping
+- **WHEN** 输入包含多个ESC及BEL
+- **THEN** 每个ESC加倍，BEL原样保留，添加tmux DCS外层。
+
+源码证据：`crates/codegen/pager/src/notifications/progress.rs` — `supports_progress_bar / progress_sequence / emit_progress / build_progress_escape`。
+
+源码证据：`crates/codegen/pager/src/notifications/tmux.rs` — `tmux_passthrough / passthrough_available`。
+
+源码证据：`crates/codegen/pager/src/notifications/mod.rs` — `progress keepalive branch / clear_progress_into`。
+
+
+### Requirement: Focus tracker notification thresholds and automatic recap retry state
+
+FocusTracker SHALL 初始focused=true、lost_at为空，分别保存通知idle与recap阈值秒数。每次on_focus_lost均设置当前Instant并清recap shown及last attempt，即使已经失焦也重置；on_focus_gained仅设focused并清lost_at，不直接清shown/attempt。should_notify仅在失焦且lost elapsed达到idle阈值时true，不自行消费或去重。recap_due要求失焦、当前away尚未shown、最近attempt距今至少90秒（若存在）且lost elapsed达到独立recap阈值；判断本身不记录attempt。note_auto_recap_attempt无条件记录当前Instant，mark_recap_shown无条件置true，均无session id、请求id或away epoch参数。当前实现shown和attempt为该tracker实例全局状态，不按会话划分；Shell接纳条件不在此验证，未收到shown时允许90秒后重试。
+
+#### Scenario: Repeated focus loss
+- **WHEN** 已失焦且达到通知阈值后再次on_focus_lost
+- **THEN** 重新计时并重新允许本away的recap尝试。
+
+#### Scenario: Attempt without shown
+- **WHEN** 已发自动recap但未mark shown且90秒已过
+- **THEN** 若仍满足away阈值则再次due。
+
+#### Scenario: Independent thresholds
+- **WHEN** idle阈值0但recap阈值180
+- **THEN** 失焦后可立即should_notify而recap不立即due。
+
+源码证据：`crates/codegen/pager/src/notifications/focus.rs` — `FocusTracker / on_focus_lost / on_focus_gained / should_notify / recap_due / note_auto_recap_attempt / mark_recap_shown`。
+
+
+### Requirement: Desktop notification protocol selection and raw stderr emission
+
+select_protocol SHALL 对Zellij优先返回Bel；否则Iterm2/WezTerm/Warp为Osc9，Kitty为Osc99，Ghostty/Vte/Terminator/Foot为Osc777，其余枚举品牌为Bel，自动选择不返回None。协议as_str为osc9/osc99/osc777/bel/none。emit_notification按传入protocol编码，不重新校验品牌；Osc9与Osc99正文为body、空格中点空格、title，分别BEL与ST终止；Osc99固定i=grow；Osc777使用固定Grow标题和body，不使用传入title。Bel只BEL，None立即返回。title/body直接插入，没有在该函数内过滤ESC、BEL、分号或限制长度。任何tmux-backed context均包装tmux DCS，包括Bel且不检查tmux版本，与进度条的3.3门槛不同；非tmux直接写序列。写入使用locked stderr并flush，错误均忽略，无成功反馈。
+
+#### Scenario: Tmux version absent
+- **WHEN** context tmux-backed且无版本
+- **THEN** 通知仍包装DCS，不采用progress的版本门槛。
+
+#### Scenario: OSC777 title
+- **WHEN** 传入自定义session title
+- **THEN** 通知固定使用Grow标题，正文采用body。
+
+#### Scenario: Explicit none
+- **WHEN** 调用emit传入None
+- **THEN** 立即返回，不写stderr。
+
+源码证据：`crates/codegen/pager/src/notifications/protocol.rs` — `select_protocol / NotificationProtocol::as_str / emit_notification`。
+
+
+### Requirement: Notification configuration defaults enum spellings and template projection
+
+NotificationConfig SHALL 缺失字段采用默认：method auto、condition unfocused、idle_threshold_secs 3、events依次turn_complete/approval_required、sleep_prevention/progress_bar/session_recap均true、session_recap_threshold_secs 30、hooks为空。TitleConfig缺省enabled=true，items依次action-required/spinner/activity/session-name/grow。method与condition枚举以lowercase序列化，事件以snake_case，title items以kebab-case；额外事件支持session_ready/task_complete/agent_error，额外title项支持cwd/model/turn-timer。NotificationHook command为必填字符串，events缺省空、only_unfocused=true、timeout_secs=10；本配置类型不拒绝空command或对u64阈值额外限幅，不设置deny_unknown_fields。to_toml_with_comments返回固定默认配置模板，不读取实例当前值；hook示例保持注释，事件as_str输出人类可读英文标签而非serde枚举拼写。 load_notification_config从raw TOML的ui.notifications取值，重新序列化并反序列化，任一步失败或缺失均整体回退NotificationConfig::default，不保留同表其他有效自定义字段且不在此告警。
+
+#### Scenario: Minimal hook
+- **WHEN** hooks项仅command字段
+- **THEN** 补空events、only_unfocused true和timeout 10。
+
+#### Scenario: Partial configuration
+- **WHEN** 仅method bel和idle阈值60
+- **THEN** 其他缺失字段仍采用结构默认。
+
+#### Scenario: Template generation
+- **WHEN** 运行时配置已自定义
+- **THEN** 静态模板函数仍输出固定默认值。
+
+源码证据：`crates/codegen/pager/src/notifications/config.rs` — `NotificationConfig / TitleConfig / NotificationHook / enum serde attributes / to_toml_with_comments`。
+
+
+### Requirement: Notification hook shell execution enrollment and timeout boundaries
+
+run_hook SHALL 克隆command、event body及session id，以event.kind.as_str的人类标签设置GROW_EVENT，每次派生独立线程，不返回join或执行结果；timeout_secs截下限1秒。execute_hook启动sh -c command，stdin/stdout/stderr均null，继承环境和工作目录，覆盖GROW_EVENT/GROW_MESSAGE，session id仅Some时覆盖GROW_SESSION_ID，None不主动移除继承值。Unix pre_exec尝试setsid但忽略失败。spawn成功尝试ProcessGroup attach及global scope register，失败退回无group；wait_timeout只要Ok(Some(status))即结束，不检查退出码。超时或wait错误尝试group.kill或child.kill，再无超时child.wait，忽略kill/reap错误，随后drop group；因此timeout不构成整个函数严格墙钟上界。本helper不检查hook.events或only_unfocused；当前pager/src中run_hook调用仅来自本模块测试，通知服务未直接接入此执行函数，不能仅因配置存在宣称用户hook已自动运行。
+
+#### Scenario: Inherited session id
+- **WHEN** event session_id为None但父环境有GROW_SESSION_ID
+- **THEN** 该函数不删除父环境变量。
+
+#### Scenario: Nonzero shell exit
+- **WHEN** wait_timeout返回Some且退出码非零
+- **THEN** 不判定或上报命令失败状态。
+
+#### Scenario: Zero configured timeout
+- **WHEN** run_hook timeout_secs为0
+- **THEN** 传入execute_hook的timeout为1秒。
+
+源码证据：`crates/codegen/pager/src/notifications/hooks.rs` — `run_hook / execute_hook / attach_to_global_scope`。
+
+
+### Requirement: Notification service event gates emission accounting and idle output
+
+NotificationService SHALL 初始化时从terminal context解析协议并构建焦点、sleep及title状态；显式method直接映射协议，不走auto品牌选择。notify先要求events包含kind，再按Always直接允许、Unfocused调用should_notify、Never拒绝；通过后调用emit_notification并记录NotificationEmitted，包含protocol/event标签及focused状态，即使协议None或写入失败仍记录，日志不证明用户收到通知。notify不读取config.hooks、不自行检查或更新permission_notified；权限去重由独立query/mark/clear接口交调用方维护。flush_idle_state与build_idle_escapes均按title.enabled更新标题，仅state.is_busy=false才清进度；前者直接locked stderr写入并flush，后者返回可选字符串但也已修改内部状态。shutdown无条件调用title reset并写stderr，再尝试清active进度，写入错误忽略；本函数不显式释放sleep inhibitor。
+
+#### Scenario: No notification protocol
+- **WHEN** 事件和condition通过但协议None
+- **THEN** emit直接返回，服务仍记录NotificationEmitted。
+
+#### Scenario: Permission flag
+- **WHEN** permission_notified=true后直接调用notify
+- **THEN** notify本身不检查该标记，依赖调用方先筛选。
+
+#### Scenario: Build idle with busy input
+- **WHEN** 传入state仍busy
+- **THEN** 不清进度，函数名不强制idle状态。
+
+源码证据：`crates/codegen/pager/src/notifications/mod.rs` — `NotificationService::new / notify / flush_idle_state / build_idle_escapes / shutdown / resolve_protocol`。
+
+
+### Requirement: Sleep inhibition platform acquisition failure latch and release
+
+SleepInhibitor SHALL 初始inactive，disabled、已active或platform_unavailable时inhibit直接返回；平台获取返回false后永久锁存unavailable，本实例release不重置。macOS调用NoIdleSleepAssertion、level255、reason grow: agent turn in progress的IOKit assertion，返回0保存id并active；release失败仅warn仍清id及active，不重试释放。Linux启动systemd-inhibit --what=idle --who=grow --why=agent turn in progress sleep infinity，三标准流null，使用tty_utils detach与parent-death辅助设置；仅spawn成功即保存child并active，不等待inhibit锁已获取或检查进程后续存活。release对保存child pid发SIGTERM并无超时wait，忽略错误，再清active；未在此杀整个子进程组或设置升级kill期限。其他平台获取false并锁存不可用。Drop调用release；状态为Cell/RefCell局部管理，不构成跨线程同步。
+
+#### Scenario: Spawn succeeds then exits
+- **WHEN** Linux systemd-inhibit已spawn但立即失败退出
+- **THEN** active仍为true直到release，不在此健康检查。
+
+#### Scenario: Acquisition fails
+- **WHEN** 第一次平台获取失败
+- **THEN** 后续inhibit跳过，即使release已调用也不重试。
+
+#### Scenario: Mac release fails
+- **WHEN** IOKit释放返回非零
+- **THEN** warn后仍清assertion id，下一次release不再持有该id。
+
+源码证据：`crates/codegen/pager/src/notifications/sleep.rs` — `SleepInhibitor::inhibit / release / platform_inhibit / platform_release / Drop`。
+
+
+### Requirement: Terminal title composition deduplication and control character filtering
+
+TitleManager SHALL 克隆配置items按顺序组合，以空格连字符空格分隔有效项，允许重复项，无有效项回退grow；本manager不检查config.enabled，由服务调用方控制。每帧基于同一FrameStamp计算spinner/attention，只在未清理控制字符的composed与last_title不同才返回escape并更新cache；reset总返回grow escape并设cache grow。SessionName过滤空字符串后截40个Unicode字符、Model截30、Cwd仅按正斜杠取最后段且非空时截30，超过字符数追加省略号；无全标题总长度上限。Spinner在busy或activity存在时展示；Activity有值优先，否则busy显示Waiting。TurnTimer仅elapsed整秒>=1显示Ns，不要求busy；ActionRequired仅有pending permissions显示，focused时静态，unfocused按motion phase显隐。ToolRunning优先trim非空description并使用waiting subject格式，空title显示Running tool，否则Running: 加截30字符title；其他活动固定Thinking/Responding/Compacting、Retrying(attempt/max)或reason.label。最终escape过滤所有char::is_control再交crossterm SetTitle编码，不写stderr；由于去重发生在过滤前，控制字符差异也可能触发相同可见标题的重复输出。
+
+#### Scenario: Trailing slash cwd
+- **WHEN** cwd为/proj/
+- **THEN** 最后段为空，Cwd项不显示。
+
+#### Scenario: Disabled manager config
+- **WHEN** 直接构造enabled=false的TitleManager并调用update
+- **THEN** manager仍按items生成标题，enabled门禁在外部服务。
+
+#### Scenario: Control character only change
+- **WHEN** 两帧原始标题仅控制字符不同
+- **THEN** 可能再次生成相同清理后的标题escape。
+
+源码证据：`crates/codegen/pager/src/notifications/title.rs` — `TitleManager::update_at / reset / write_item / write_activity / write_truncated / build_title_escape`。
+
+
+### Requirement: Reusable smart case text matching and sorted position wrap navigation
+
+TextMatcher SHALL 保存原始query并编译Regex，不持有语料或UI状态。smart case依据原始query是否含Unicode uppercase字符：无则设置case_insensitive true，有则false；Substring先regex::escape，Regex直接使用用户pattern。Regex编译失败设置is_error=true并使用永不匹配的\z.；Substring编译失败则退回空模式(?:)且is_error=false，会匹配任意文本，不共享Regex错误路径。compiled_regex暴露编译结果供高亮，is_match委托Regex。next_index_after与prev_index_before假定输入升序，返回匹配切片内的位置而非切片保存的值；next取严格大于current的首项否则绕回0，prev取严格小于current的末项否则绕至最后，空切片None。函数不排序或检查前提，相同值被严格比较跳过。
+
+#### Scenario: Invalid user regex
+- **WHEN** Regex模式编译失败
+- **THEN** is_error为true且任何文本都不匹配。
+
+#### Scenario: Position not value
+- **WHEN** sorted为[0,2,4]且current为0
+- **THEN** next返回Some(1)，表示值2的位置。
+
+#### Scenario: Empty navigation
+- **WHEN** sorted为空
+- **THEN** 两个方向均None。
+
+源码证据：`crates/codegen/pager/src/search/matcher.rs` — `TextMatcher::new / compiled_regex / is_match`。
+
+源码证据：`crates/codegen/pager/src/search/mod.rs` — `next_index_after / prev_index_before`。
+
+
+### Requirement: Project picker recent directory aggregation and option path alignment
+
+collect_recent_dirs SHALL 先请求最多500条recent session summaries，失败warn并返回空；聚合在spawn_blocking中跳过hidden，以原cwd字符串为key保留最大updated_at，不canonicalize合并别名；仅保留当前is_dir且workspace classifier判为project的路径，按时间降序再truncate调用者limit，同时间来自HashMap顺序不保证稳定，blocking join失败warn并空。build_project_question总将cwd置首，不要求它是项目；从传入recent按原顺序排除等于cwd者后最多5项，不再排序或去重。近期名交truncate_str上限22，未来timestamp差值转换失败作零时长；当前home标签~，其他file_name非UTF8回退current directory，近期回退?。末尾Dont ask me again选项无对应resolved path，dont_ask_index等于resolved_paths长度，question为单选；这里只构造选项，不保存偏好或切换目录。display_path按Path组件剥离home后显示~/相对路径，home本身显示~/，其余display字符串。
+
+#### Scenario: Duplicate recent entries
+- **WHEN** 传入recent含两个相同非cwd路径
+- **THEN** 构造器保留重复，受最多5项限制。
+
+#### Scenario: Hidden history
+- **WHEN** summary标记hidden
+- **THEN** 聚合阶段跳过，不作为最近项目来源。
+
+#### Scenario: Trailing preference option
+- **WHEN** 完成question构建
+- **THEN** 末项索引无resolved path，不能作为普通目录索引读取。
+
+源码证据：`crates/codegen/pager/src/project_picker/mod.rs` — `build_project_question / ProjectQuestion`。
+
+源码证据：`crates/codegen/pager/src/project_picker/sources.rs` — `collect_recent_dirs / display_path`。
+
+
+### Requirement: Grow home disk usage metadata walk and report serialization
+
+grow du SHALL 从未缓存且不创建目录的GROW_HOME var_os或default_grow_home解析根，根metadata跟随根symlink，NotFound返回零空报告，非目录或根读取失败报错。子项使用symlink_metadata计量，自身计费且只递归同device的真实目录，不跟随子symlink；Unix按blocks乘512，其他平台len且device恒0。total只累计根下子树不含根目录自身；未按inode去重硬链接，未限制递归深度/条目数或使用饱和累加。子stat/read错误记warnings并继续，stat失败贡献0，目录读取失败仍保留自身费用。条目名lossy转换，按bytes降序再name升序；扫描只读metadata和目录项，不打开普通文件内容，但不是防并发目录替换的句柄式遍历。JSON为camelCase、schemaVersion字符串1、root/totalBytes/entries/warnings，pretty后换行；human按二进制单位到EiB、非B保留一位小数，按输入条目顺序对齐输出。write_report成功后warnings再逐项写stderr，包括JSON模式；写报告失败提前返回，不执行后续warning打印。
+
+#### Scenario: Missing home
+- **WHEN** 根不存在
+- **THEN** 零报告，不创建Grow home。
+
+#### Scenario: Nested symlink
+- **WHEN** 子项为目录symlink
+- **THEN** 只计链接自身，不递归目标。
+
+#### Scenario: Unreadable subtree
+- **WHEN** 子目录read_dir失败但stat成功
+- **THEN** 保留目录自身费用并追加warning，继续其他项。
+
+源码证据：`crates/codegen/pager/src/du_cmd/mod.rs` — `scan_with / subtree_size / resolve_grow_home / run_with_writer`。
+
+源码证据：`crates/codegen/pager/src/du_cmd/human.rs` — `format / human_size`。
+
+源码证据：`crates/codegen/pager/src/du_cmd/json.rs` — `write / JsonReport::from`。
+
+
+### Requirement: Worktree CLI ACP dispatch envelope and partial removal outcomes
+
+worktree CLI SHALL 提供list/show/rm/gc及db rebuild/stats/path，启动本地shell后立即建立shutdown guard，再initialize ACP V1并声明headless client、空fs capabilities和terminal false；初始化失败亦经guard取消与join。ext_call将params序列化为raw JSON并发送扩展请求，按result Option<T>/error Option<Value>解析，非空error优先报错，result缺失或null报missing result。因此show的T=Option<WorktreeRecord>遇result:null也在外层失败，不能到达内部None的worktree not found分支。list原样传repo、type列表、includeAll，show传idOrPath；rm按输入顺序逐个发送force/dryRun，单项错误只stderr打印继续，最终Ok；dry_run成功响应无论removed值都打印would remove，非dry且removed=false无成功输出。gc原样传可选maxAge，不在客户端解析，失败传播；db无参数用unit序列化，按响应打印。GcReport/DbStats/RebuildReport使用字段原snake_case，remove_failed缺省0，RemoveResponse采用camelCase且resolvedPath可省。
+
+#### Scenario: Partial removal failure
+- **WHEN** 一个remove RPC失败而其他成功
+- **THEN** 继续剩余id并最终Ok，不汇总为命令错误。
+
+#### Scenario: Null show result
+- **WHEN** show响应result为null且无error
+- **THEN** 外层Option解析为None，报missing result。
+
+#### Scenario: Envelope with result and error
+- **WHEN** 响应同时有可解析result和非null error
+- **THEN** error优先报错。
+
+源码证据：`crates/codegen/pager/src/worktree_cmd/mod.rs` — `run / ext_call / cmd_list / cmd_show / cmd_rm / cmd_gc / cmd_db`。
+
+
+### Requirement: Worktree display formatting and best effort logical size scan
+
+Worktree展示 SHALL 保持传入记录顺序，空表打印No worktrees found；ID宽度至少16且按最大字节长度，不截ID，label列宽按字节长度clamp5到24后按字符截断，repo截6字符、branch截20字符，截断保留max减1字符加省略号。缺git_ref显示(detached)，label仅metadata对应字符串否则空。类型统计来自HashMap，分组顺序不保证稳定。JSON直接pretty序列化完整records，失败回退[]后println。show输出路径/id/type/source/creation/status及可选ref、HEAD、时间、session、pid、label；HEAD超过12字节直接切前12，不检查UTF8边界。age使用有符号saturating_sub，未来时间可能负Ns ago；timestamp不可转换回退原数值；bytes按1024换算但标签KB/MB/GB/TB，非零一位小数。show在path.exists时调用递归逻辑文件长度统计，目录本身和子symlink不计、无卷边界或硬链接去重，读目录/条目/metadata错误静默忽略，dir_size始终Ok可能返回部分值或0；与grow du物理块统计不同。
+
+#### Scenario: Unreadable show directory
+- **WHEN** path.exists为true但read_dir失败
+- **THEN** 打印0或部分逻辑大小，不传播扫描错误。
+
+#### Scenario: Future creation time
+- **WHEN** created_at大于当前时间
+- **THEN** age可显示负秒ago，不截为0。
+
+#### Scenario: Missing label
+- **WHEN** metadata缺失或label非字符串
+- **THEN** 展示label为空。
+
+源码证据：`crates/codegen/pager/src/worktree_cmd/display.rs` — `print_table / print_show / print_json / format_age / format_bytes / truncate / dir_size_recurse`。
+
+
+### Requirement: Doctor CLI report collection fix preview confirmation and post verification
+
+Doctor CLI SHALL 无子命令时采集standalone terminal/probe快照并输出human或JSON；SSH或official VSCode remote跳过本地managed alias configured投影，否则以home与SHELL识别shell配置路径。fix无id仅列适用自动修复，yes要求id且顶层参数与子命令冲突；run_with_writer拒绝任何Fix，即使yes。有id时先resolve/probe/FixRequest/plan，再总是写preview。未yes且stdin非TTY报错；交互只接受trim后大小写无关y/yes，其他含EOF空行均打印取消并Ok。确认后apply_fix；SatisfiedNow重新采集并按outcome保存的alias配置状态投影，只要同finding id仍存在即报已应用但仍有问题；其他activation执行verify_persistent_fix，false报已应用但无法验证。后验证失败没有在此回滚；成功才打印format_fix_success。报告生成并不因存在findings直接设置失败，写入或内部错误由Result传播。
+
+#### Scenario: Noninteractive without yes
+- **WHEN** 计划已构造且stdin非TTY未yes
+- **THEN** 先写preview再拒绝应用。
+
+#### Scenario: Declined fix
+- **WHEN** 输入不是y或yes
+- **THEN** 取消并返回Ok，不apply。
+
+#### Scenario: Post verification failure
+- **WHEN** apply完成后原finding仍存在
+- **THEN** 报已应用但未解决，不在此撤销修改。
+
+源码证据：`crates/codegen/pager/src/doctor_cmd/mod.rs` — `run / run_with_writer / collect_report / configured_report_for_terminal / run_fix / apply_fix_plan`。
+
+
+### Requirement: Doctor human report fact grouping probe suppression and remediation wording
+
+Doctor human formatter SHALL 按Environment、Clipboard、非空Findings、非空Checks not completed、按需Needs a running session及最终issue/recommendation计数输出，保持输入findings/notes顺序。terminal version区分NoReply与Unavailable，color两者统一unavailable；可用theme数量等于total即显示all，否则显示数量及名字，不核验集合身份。keyboard存在时按OS为macOS标OS rescue active，其余unavailable；newline统一Alt+Enter前缀并显示对应能力解释。native clipboard按preflight映射local/container/remote/unavailable/off；delivery Failed显示unavailable。Wayland才显示data-control，Error取首个同probe note的message。Checks not completed无条件隐藏runtime.xtversion、terminal.color、wayland.data-control三个probe名，不检查上方是否实际显示；live TUI提示仍依据全部notes。Finding按disposition显示!或i；automatic优先human_fix_command否则原command；remediation有config_path显示Add，否则有automatic显示One-off，其他Run，note随后输出。字符串直接拼接且不在此过滤控制字符或截长，label宽28为最小格式宽度；仅计数等于1使用单数。
+
+#### Scenario: Suppressed probe note
+- **WHEN** note名为wayland.data-control但显示环境不是Wayland
+- **THEN** 该note仍不出现在Checks not completed。
+
+#### Scenario: Automatic and manual remedy
+- **WHEN** finding同时有automatic且remediation无config_path
+- **THEN** 显示Automatic setup及One-off。
+
+#### Scenario: Failed clipboard delivery
+- **WHEN** delivery为Failed
+- **THEN** 人类status输出unavailable。
+
+源码证据：`crates/codegen/pager/src/doctor_cmd/human.rs` — `format / fact_already_shows_probe / format_finding / format_newline`。
+
+
+### Requirement: Doctor JSON schema facts nullable values and complete probe notes
+
+Doctor JSON writer SHALL pretty序列化后追加换行，错误传播，不回退空报告。顶层camelCase包含schemaVersion字符串1、facts、findings、probeNotes、counts；findings和probeNotes保持原顺序，保留全部probe notes不采用human按名隐藏，counts.probeNotes为原数组长度。Option字段没有skip_serializing_if，缺值为null。terminal.xtversion及color.level采用status/value，status区分available/no_reply/unavailable；即使color不可用仍输出availableThemes与totalThemes。newline为kind蛇形标签vte/xterm_js/no_kitty_keyboard_protocol，变体字段camelCase；keyboard为cmd/opt/os可空对象。clipboard保留nativeRoute/nativeTool/nativePreflight/tmuxRoute/osc52Route/osc52Capability/wrapSink/displayServer/containerNoDisplay/dataControl/delivery/fix，Failed编码failed而非human的unavailable。Finding保留id、issue/recommendation、message、remediation fix/configPath、automaticRemediation fixId/原command、note，不使用human_fix_command替换。枚举显式映射稳定小写或snake_case，terminal WarpTerminal映射warp、VsCode映射vs_code；未知modifier/display server回退unknown，未知HostOs回退other。
+
+#### Scenario: Absent optional fact
+- **WHEN** keyboard或newline缺失
+- **THEN** JSON键仍存在且值null。
+
+#### Scenario: Human-hidden note
+- **WHEN** probe note为runtime.xtversion
+- **THEN** JSON仍保留并计入counts.probeNotes。
+
+#### Scenario: Failed delivery
+- **WHEN** clipboard delivery Failed
+- **THEN** JSON值为failed，区别于human文案。
+
+源码证据：`crates/codegen/pager/src/doctor_cmd/json.rs` — `write / JsonReport::from / JsonFacts::from / JsonFinding::from / enum mapping helpers`。
+
+
+### Requirement: Minimal renderer hook registration and absent hook dispatch
+
+Pager SHALL 通过进程级OnceLock保存仅含draw函数指针的MinimalHooks，install首次成功写入后忽略后续注册，不提供卸载或替换，hooks返回可空静态引用。AppView::draw先捕获FrameStamp、更新notifications并同步announcement slash gate，再在minimal模式调用已安装draw并返回；没有hook也直接返回，不回退fullscreen绘制，因此无hook不等于整个draw没有副作用。非minimal模式不调用该hook。pager-minimal::install注册自身draw；该接口不包含transcript回调。
+
+#### Scenario: Repeated installation
+- **WHEN** hook已安装后再次install
+- **THEN** 保留首次注册的draw。
+
+#### Scenario: Missing renderer
+- **WHEN** minimal模式且hooks为None
+- **THEN** 完成draw前置更新后返回，不进入fullscreen路径。
+
+源码证据：`crates/codegen/pager/src/minimal/hook.rs` — `MinimalHooks / install / hooks`。
+
+源码证据：`crates/codegen/pager/src/app/root/mod.rs` — `AppView::draw`。
+
+源码证据：`crates/codegen/pager-minimal/src/lib.rs` — `install`。
+
+
+### Requirement: Minimal btw correlated response and suspension lifecycle
+
+Minimal BTW lifecycle SHALL 由AgentView持有。start创建独立request UUID和revision UUID、替换Loading question并清除focus。finish仅接受Active且request_id匹配的响应，再take面板并要求Loading；不匹配或Suspended返回false，不应用响应。匹配但面板非Loading时take已清空面板，返回false且生命周期不变。接受响应后request_id清空并刷新revision，成功建立Done且聚焦，失败建立Error且不聚焦。clear在生命周期None时直接返回，否则清除生命周期、面板、focus、几何、selection与close hit区域；仅当pending或active drag anchor属于BTW时清除drag相关字段。suspend仅在Active且存在面板时取走state和focus、保留revision标记；restore仅在原Suspended revision仍匹配时恢复state/request/focus，不能覆盖期间的新生命周期。minimal输入Occluded分支围绕共享输入处理执行suspend/restore；带minimal_request_id的响应按agent_id调用finish后直接返回空effects，缺失agent忽略。
+
+#### Scenario: Stale response
+- **WHEN** 响应request UUID与Active不匹配
+- **THEN** 返回false并保留当前面板。
+
+#### Scenario: Replaced suspension
+- **WHEN** 共享处理期间生命周期被清除或替换
+- **THEN** 旧suspension不恢复。
+
+#### Scenario: Matching nonloading panel
+- **WHEN** request匹配但面板不是Loading
+- **THEN** take清空面板后返回false，生命周期不变。
+
+源码证据：`crates/codegen/pager/src/minimal/api.rs` — `start_minimal_btw / finish_minimal_btw / clear_minimal_btw / suspend_minimal_btw / restore_minimal_btw`。
+
+源码证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `handle_minimal_input`。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `handle_btw_response`。
+
+
+### Requirement: Minimal transcript request snapshot and expansion retry queue
+
+Minimal transcript请求 SHALL 在AppView已有build时直接返回；非Agent视图或agent缺失同样无操作。按当前scrollback位置收集EntryId并绑定owner AgentId，只快照ID而不复制正文；空列表向该agent加入No conversation transcript to view yet notice，不创建build。非空build初始化next=0、out空字符串。take移走整个build，set直接替换可空build，progress返回next与ids.len，不校验上界。pending_expand的take清空队列，requeue将传入IDs放在现有队列之前，不去重、不检查ID归属或存在性。请求函数自身不检查screen mode或hook安装。
+
+#### Scenario: Concurrent request
+- **WHEN** 已有transcript build时再次请求
+- **THEN** 保留原build，忽略新请求。
+
+#### Scenario: Expansion retry
+- **WHEN** 重试IDs与新队列均非空
+- **THEN** 重试IDs保持顺序前置，重复项保留。
+
+源码证据：`crates/codegen/pager/src/minimal/api.rs` — `request_minimal_transcript / take_minimal_transcript / set_minimal_transcript / minimal_transcript_progress / requeue_minimal_pending_expand`。
+
+
+### Requirement: Minimal control O transcript and interjection ownership
+
+Minimal Ctrl+O谓词 SHALL 在registry不将该键绑定InterjectPrompt时返回true；绑定时若无有效active agent也返回true。EditingQueued无论turn状态均返回false，否则仅在turn运行且trim后composer非空或held_queue_top_sendable时返回false。可发送队首优先取首个可见server行，其kind必须Prompt；没有可见server行才检查本地front为Prompt且wire_matches_display，不能越过不可发送队首去找后续Prompt。minimal_key_intercept为true时返回OpenTranscriptPager action，为false时调用active agent的handle_prompt_key并累积effects。谓词本身不验证screen mode。
+
+#### Scenario: Editing queued row
+- **WHEN** Ctrl+O绑定interject且正在编辑队列
+- **THEN** 保留该键供保存或interject，即使当前idle。
+
+#### Scenario: Running without payload
+- **WHEN** turn运行但composer仅空白且没有可发送队首
+- **THEN** Ctrl+O打开transcript。
+
+源码证据：`crates/codegen/pager/src/minimal/api.rs` — `minimal_ctrl_o_opens_transcript`。
+
+源码证据：`crates/codegen/pager/src/app/agent_view/queue.rs` — `held_queue_top_sendable`。
+
+源码证据：`crates/codegen/pager/src/actions/mod.rs` — `interjection_possible`。
+
+源码证据：`crates/codegen/pager/src/app/root/mod.rs` — `minimal_key_intercept / minimal_ctrl_o_transcript_predicate_tracks_interject_binding`。
+
+
+### Requirement: Minimal view facade projection and btw geometry thresholds
+
+Minimal view facade SHALL 直接访问AppView/AgentView所有的状态，不建立独立session副本。with_minimal_live_state始终调用闭包并提供cursor、可空active AgentView和appearance，非Agent或缺失agent仅使agent参数为空。pending pager setter直接覆盖path和ansi，不验证文件。context_used保留0，context_total仅返回大于0的值；behavior_switch_hint要求switch target存在且banner存在，但不在此检查banner时间。BTW尺寸可绘制要求width至少12且height至少3；visible_height在desired=0或width/available不满足阈值时为0，否则返回min(desired,available)，因此desired为1或2可返回低于最小可绘制高度。clear_agent_btw_geometry仅重置area与selection model，不清除面板或生命周期。其余render/picker/frontier包装调用共享实现；MCP rows返回labels/group_keys/data_indices三元组，dropdown仅投影items Rect，session entry的at变体使用frame.wall_now转UTC。
+
+#### Scenario: Small desired height
+- **WHEN** width=12、available=3、desired=1
+- **THEN** visible_height返回1，独立paintable判断仍为false。
+
+#### Scenario: Zero context total
+- **WHEN** context存在且used=0、total=0
+- **THEN** used为Some(0)，total为None。
+
+源码证据：`crates/codegen/pager/src/minimal/api.rs` — `with_minimal_live_state / agent_context_used / agent_context_total / agent_behavior_switch_hint / minimal_btw_visible_height / facade wrappers`。
+
+
+### Requirement: Settings registry ordered search and runtime model choices
+
+SettingsRegistry SHALL 保留声明顺序，defaults与from_entries均在重复key时panic；find精确匹配key，by_category按原顺序过滤。search将query Unicode小写并按空白拆词，以AND子串匹配label/description/key/keywords拼接文本，空白查询返回全部；label与description小写，key和keywords原样拼接，构造器不强制它们小写。search本身不根据hidden_in_minimal、group或feature gate过滤。ActiveModelCatalog动态选项先放canonical空字符串的(no override)，再按snapshot.available_models顺序使用ID同时作为canonical和display，忽略原label，不排序或去重。模型解析按原顺序对label或ID执行ASCII不区分大小写匹配，不trim，首项胜出。hunk mode仅精确识别all_dirty/off，其余agent_only；screen mode仅精确minimal，其余fullscreen。
+
+#### Scenario: Whitespace search
+- **WHEN** 查询只含空白
+- **THEN** 返回所有条目且保持声明顺序。
+
+#### Scenario: Duplicate catalog entries
+- **WHEN** 模型snapshot含重复ID
+- **THEN** 动态选项保留重复项并在首项保留清除选项。
+
+#### Scenario: Noncanonical mode
+- **WHEN** screen mode为Minimal或inline
+- **THEN** 返回fullscreen。
+
+源码证据：`crates/codegen/pager/src/settings/registry.rs` — `SettingsRegistry / assert_unique_keys / build_search_haystack / dynamic_enum_choices / PagerLocalSnapshot::resolve_model_name_or_id / canonical_screen_mode / canonical_hunk_tracker_mode`。
+
+
+### Requirement: Settings current value sources and metadata defaults
+
+current_value_for SHALL 按key显式映射而不查询registry或owner，未知key返回None。UiConfig提供compact_mode、timestamps缺省true、timeline/page_flip resolver、combine_queued_prompts缺省false、simple_mode缺省true、七个contextual_hints缺省true、display_refresh_auto_cadence缺省false、hunk/screen规范值、theme及auto_dark/light规范值、permission_mode、remember_tool_approvals缺省false、default_selected_permission、max_thoughts_width与fork_secondary_model。未知theme回退grownight；auto dark/light排除auto后分别回退grownight/growday。permission_mode仅保留always-approve/auto/default，其余ask，表示未来session默认而非snapshot当前permission。PagerLocalSnapshot提供vim_mode、scroll_speed、respect_manual_folds、current_model_id（default_model缺省空串）、show_tips缺省false、auto_update缺省true、ask_user_question timeout缺省共享常量。keep_text_selection、scroll_mode、invert_scroll、scroll_lines（缺省3）、show_thinking_blocks、group_tool_verbs、prompt_suggestions和render_mermaid直接调用appearance cache loader，因此此函数并非全部取自两个传入快照。default_value_for直接映射SettingKind元数据，DynamicEnum变为String，Group返回Bool(false)占位；不校验Int范围、enum选项或字符串validator。
+
+#### Scenario: Permission source
+- **WHEN** snapshot.permission_mode与ui.permission_mode不同
+- **THEN** Settings当前值按ui解析。
+
+#### Scenario: Unset model and tips
+- **WHEN** snapshot current_model_id和show_tips均None
+- **THEN** default_model为空串，show_tips为false。
+
+#### Scenario: Group default helper
+- **WHEN** 直接对Group调用default_value_for
+- **THEN** 返回Bool(false)，不是None。
+
+源码证据：`crates/codegen/pager/src/settings/registry.rs` — `current_value_for / default_value_for`。
+
+
+### Requirement: Settings static choice catalogs and permission default distinction
+
+Settings静态目录 SHALL 声明theme选项依序auto/grownight/growday/tokyonight/rosepine-moon/oscura-midnight；auto_dark与auto_light共用去掉auto的五项，不按明暗分组限制选择。permission目录只有ask/auto/always-approve且保持该顺序；current_value_for可返回default并不意味着目录存在default选项。default_selected_permission目录按AlwaysAllowAllSessions/AllowCommandAlways/AllowOnce/Reject排列，canonical/display委托共享枚举。Mermaid目录auto/on/off，scroll目录Auto/Wheel/Trackpad共享canonical，selection目录Flash/Hold/WordSelect共享canonical，hunk目录agent_only/all_dirty/off，screen目录fullscreen/minimal。max_thoughts_width声明范围40至500。contextual_hints group声明七个child按undo/plan_mode/image_input/send_now/small_screen/word_select/ssh_wrap顺序。以上为注册元数据，不单独证明权限执行、预览或持久化效果。
+
+#### Scenario: Light bucket catalog
+- **WHEN** 为auto_light选择具体主题
+- **THEN** 目录仍包含所有五个具体主题，包括dark主题。
+
+#### Scenario: Default permission display value
+- **WHEN** 当前permission字符串为default
+- **THEN** 读取器可返回default，但静态picker目录没有对应条目。
+
+源码证据：`crates/codegen/pager/src/settings/defs.rs` — `static EnumChoice catalogs / MAX_THOUGHTS_WIDTH_MIN / MAX_THOUGHTS_WIDTH_MAX / CONTEXTUAL_HINTS_CHILDREN`。
+
+源码证据：`crates/codegen/pager/src/settings/registry.rs` — `current_value_for permission_mode`。
+
+
+### Requirement: Settings catalog ownership restart and minimal visibility metadata
+
+Settings default_settings SHALL 每次构造新的metadata Vec，当前共40项，包含contextual_hints Group及其七个独立Bool children。唯一Pager owner为respect_manual_folds；Shared为compact_mode/show_timestamps/show_timeline/page_flip_on_send/combine_queued_prompts/simple_mode/theme/auto_dark_theme/auto_light_theme/max_thoughts_width，其余Shell。restart_required仅screen_mode、remember_tool_approvals、display_refresh_auto_cadence、toolset.ask_user_question.timeout_enabled、show_tips、auto_update、hunk_tracker_mode为true；hidden_in_minimal仅show_timeline、page_flip_on_send、theme、auto_dark_theme、auto_light_theme、display_refresh_auto_cadence为true。Enum的supports_preview仅三个theme设置为true，两个DynamicEnum模型项均false且默认空串。Int范围分别max_thoughts_width 40..500、scroll_speed 1..100、scroll_lines 1..10。目录没有String kind。这些标记不自行执行重启、隐藏或保存。
+
+#### Scenario: Future permission default
+- **WHEN** 读取permission_mode元数据
+- **THEN** owner为Shell、preview=false、restart_required=false。
+
+#### Scenario: Pager-owned folds
+- **WHEN** 读取respect_manual_folds元数据
+- **THEN** owner为Pager、无需重启且Minimal不隐藏。
+
+源码证据：`crates/codegen/pager/src/settings/defs.rs` — `default_settings`。
+
+
+### Requirement: Setting persistence completion and unversioned rollback
+
+PersistSetting effect SHALL 为每次请求spawn异步任务，调用persist_setting后成功返回SettingPersisted key/value，失败返回SettingPersistFailed key/rollback_value/error。成功TaskResult只记录trace并返回空effects；失败不检查当前值、request ID或revision，直接apply_setting_rollback，再记录warn、scrub错误并显示Could not save toast，返回rollback产生的companion effects。SettingPersistFailedBestEffort仅记录warn与错误toast，保持乐观内存值，不回滚。respect_manual_folds setter对相同值无操作，变化时先更新appearance和modal、显示成功toast，再发带旧Bool的PersistSetting；persist helper要求Bool并通过spawn_blocking调用appearance持久化，join及内部错误均传播。其rollback直接调用inner setter，不重新产生PersistSetting。
+
+#### Scenario: Stale failure completion
+- **WHEN** 较早写入失败在后续设置修改后到达
+- **THEN** 该处理器仍直接应用早先rollback值，没有版本判定。
+
+#### Scenario: Best effort failure
+- **WHEN** 收到SettingPersistFailedBestEffort
+- **THEN** 保留内存值并显示经scrub的失败提示。
+
+源码证据：`crates/codegen/pager/src/app/root/effects/mod.rs` — `Effect::PersistSetting`。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `SettingPersisted / SettingPersistFailed / SettingPersistFailedBestEffort`。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/setters.rs` — `set_respect_manual_folds`。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `apply_setting_rollback respect_manual_folds arm`。
+
+源码证据：`crates/codegen/pager/src/app/root/effects/helpers.rs` — `persist_setting respect_manual_folds arm`。
+
+
+### Requirement: Setting rollback type mapping and unrecoverable value behavior
+
+apply_setting_rollback SHALL 按key与SettingValue类型分派inner setter，不重新提交持久化；simple_mode可收集companion effects。permission_mode回滚仅恢复未来session默认和current_ui，未知canonical回退Ask。default_model空串清空app.models.current和reasoning_effort；非空仅在当前catalog resolve_by_id成功时调用默认模型inner，无法解析则warn并保留乐观值。scroll_speed与scroll_lines在调用inner前将i64以as转换u8；未知scroll_mode/keep_text_selection/render_mermaid canonical不调用inner，但仍刷新modal。display cadence回滚false恢复None；show_tips/auto_update/ask_user_question timeout等于effective default时恢复None。auto_dark/light为auto时清除override并invalidate theme cache；hunk/screen先canonical fallback。fork_secondary_model恢复字符串。未知key或类型无匹配时显示ROLLBACK_NO_ARM_TOAST并提前返回，不执行末尾modal refresh；正常匹配后刷新modal。外层SettingPersistFailed处理随后再显示通用失败toast。
+
+#### Scenario: Unresolved model rollback
+- **WHEN** 旧default_model ID已不在catalog
+- **THEN** warn后保留乐观值并刷新modal。
+
+#### Scenario: Invalid scroll enum
+- **WHEN** 回滚scroll_mode为未知字符串
+- **THEN** 不调用scroll setter，但仍刷新modal。
+
+#### Scenario: Wrong rollback type
+- **WHEN** key存在但SettingValue类型不匹配任何arm
+- **THEN** 显示无回滚分支提示并提前返回。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `apply_setting_rollback`。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `TaskResult::SettingPersistFailed`。
+
+
+### Requirement: Settings modal mounting and app model snapshot ownership
+
+dispatch_open_settings SHALL 在非Agent视图时切换到agents迭代首项，若没有agent则走dispatch_new_session并保留其effects，未产生Agent视图即返回。有效agent上clone registry/current_ui；模型ID和目录取app.models的新session模板而非agent.session.models，目录以ID作label。permission/behavior/multiline与Workflow/Goal可用性取所属agent，CLI和fold/auto gates取app，vim/scroll_speed取cache。已有Settings且无focus_key时debug断言失败，release清除窗口后返回；有focus_key则重建窗口。focus成功后尝试enum picker，成功才置close_on_picker_exit。refresh_open_settings_modals在没有Settings/ResetSettingsConfirm时早退，否则遍历所有agent的两类窗口，先rebuild_rows再替换ui_snapshot和pager_snapshot；嵌入确认框的Settings也更新，模型模板仍共用app.models。
+
+#### Scenario: Per-agent model differs
+- **WHEN** agent当前模型与app默认模型不同
+- **THEN** 设置窗口模型snapshot取app默认模板。
+
+#### Scenario: Refresh confirmation
+- **WHEN** agent正处于ResetSettingsConfirm
+- **THEN** 更新其中保存的settings snapshot。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `dispatch_open_settings / refresh_open_settings_modals`。
+
+
+### Requirement: Settings reset confirmation state retention and idempotent dispatch
+
+Settings reset SHALL 仅对有效active agent处理。open_reset_confirm取出Settings state并嵌入ResetSettingsConfirm，target key随modal保存，不在确认action重复携带。确认Reset或Cancel均先恢复原Settings state；Cancel返回空effects。Reset从当前registry查key、从metadata取default，并重新build pager snapshot结合current_ui读当前值；相等则仅already at default toast，不发setter。否则经action_for_reset映射typed action并递归dispatch。未注册key或无reset action只记录error返回空effects，原Settings已恢复。错误modal路由在take之后debug_assert，debug会panic；release恢复原modal并无操作。open本身不检查key是否注册。
+
+#### Scenario: Cancel reset
+- **WHEN** 用户取消有效ResetSettingsConfirm
+- **THEN** 恢复保存的Settings state，不产生effects。
+
+#### Scenario: Already default
+- **WHEN** 当前值等于metadata默认值
+- **THEN** 只显示already at default，不提交持久化。
+
+#### Scenario: Unknown target
+- **WHEN** 确认modal携带未注册key
+- **THEN** 恢复Settings后记录错误并返回空effects。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `dispatch_open_reset_confirm / dispatch_confirm_reset_setting`。
+
+
+### Requirement: Settings shortcut toggles and terminal mouse reporting state
+
+设置快捷切换 SHALL 对compact取反current_ui用户值而非auto-compact派生外观；timestamps取反appearance.show_timestamps并调用共享setter。vim切换从cache取反，无active agent也执行inner和modal刷新，始终返回带旧值rollback的PersistSetting。Agent视图向存在的agent scrollback加入notice；Dashboard设置list_focused为enabled且agents非空，其余视图toast。mouse capture切换读取Acquire原子后在locked stderr执行Enable/DisableMouseCapture，忽略IO错误，随后Release存储新状态；Windows关闭时额外调用native selection helper。启用时递归清除所有agent sticky toast并在active agent显示瞬时提示；关闭时递归设置MOUSE_OFF_HINT。该函数不产生持久化effect，也不因终端写入失败回滚原子状态。
+
+#### Scenario: No agent vim toggle
+- **WHEN** 当前没有active agent
+- **THEN** 仍更新vim并提交PersistSetting。
+
+#### Scenario: Mouse output failure
+- **WHEN** mouse capture终端命令写入失败
+- **THEN** 仍更新原子状态和提示。
+
+#### Scenario: Automatic compact active
+- **WHEN** 短终端已强制compact但用户值为false
+- **THEN** 快捷键将用户值改为true而非取反派生值。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `dispatch_toggle_compact_mode / dispatch_toggle_vim_mode / dispatch_toggle_timestamps / dispatch_toggle_mouse_capture`。
+
+
+### Requirement: Settings reset action conversion validation boundaries
+
+action_for_reset SHALL 按key/type映射typed Action，不自行读取registry。permission仅接受ask/auto/always-approve并映射SetDefaultPermissionMode，不切换active session；default返回None。default_model与fork_secondary_model只接受空String映射Clear，非空记录error并返回None。render_mermaid/keep_text_selection/scroll_mode必须通过各自from_canonical，否则None；theme/auto themes/default_selected_permission/hunk/screen直接转拥有的String而不在此校验。三个Int原值传给setter action，不在此clamp。未知key、Group或不匹配类型返回None。
+
+#### Scenario: Nonempty model default
+- **WHEN** 模型reset输入非空String
+- **THEN** 记录error并返回None，不映射模型切换。
+
+#### Scenario: Invalid theme default
+- **WHEN** theme reset输入未知Enum字符串
+- **THEN** 仍生成SetTheme，校验留给后续setter。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `action_for_reset`。
+
+
+### Requirement: Settings setters explicit override and idempotence distinctions
+
+设置setter SHALL 按各自状态判定幂等。multiline仅更新当前Agent或Dashboard局部字段，相同值/缺失视图无操作，无持久化；Agent分支刷新modal，Dashboard不刷新。render_mermaid按cache判等，变化只改cache并提交canonical Enum及旧值。screen_mode将输入规范化，但仅raw值精确Some(canonical)时跳过，因此None选择fullscreen仍提交显式覆盖；hunk_tracker按规范化旧值判等，None选择agent_only跳过。两者仅更新current_ui并提示restart，不修改当前screen/session；rollback携带规范化旧值，不能保留原None/未知字符串。vim setter只有cache和所有顶层agent.vim_mode都等于新值时跳过，不检查嵌套subagent；否则递归更新每个agent及cache并提交持久化。remember_tool_approvals仅旧Some且effective相等才跳过，None选择false也提交；rollback仅保留effective Bool。
+
+#### Scenario: Explicit fullscreen
+- **WHEN** screen_mode未配置且用户选择fullscreen
+- **THEN** 提交显式fullscreen覆盖。
+
+#### Scenario: Inherited hunk default
+- **WHEN** hunk_tracker未配置且选择agent_only
+- **THEN** 按effective相等跳过写入。
+
+#### Scenario: Nested vim discrepancy
+- **WHEN** cache和顶层agent均匹配但嵌套view不同
+- **THEN** 幂等检查仍返回空effects。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/setters.rs` — `set_multiline_mode / set_render_mermaid / set_screen_mode / set_hunk_tracker_mode / set_vim_mode / set_remember_tool_approvals`。
+
+
+### Requirement: Thinking and tool grouping setting invalidation scope
+
+show_thinking_blocks与group_tool_verbs setter SHALL 从各自cache读旧值，相同即返回空effects；变化时更新cache，对每个顶层agent和其直接subagent_views逐一clear_group_expansion并invalidate_heights，不在此递归访问更深层后代。随后refresh modal、toast并提交Bool新旧值的PersistSetting，inner不更新current_ui对应字段。prompt_suggestions同样按cache判等，但inner同时设置cache与current_ui.prompt_suggestions=Some(new)，本函数不清除已存suggestion或发起/取消预测请求。keep_text_selection按cache enum判等，变化更新cache、刷新modal并提交canonical新旧值；不在此直接清除已有selection。ask_user_question timeout以共享常量解析None，仅旧Some且effective等于新值时跳过，None确认相同默认仍提交显式Bool，显示restart提示。
+
+#### Scenario: Grouping changed
+- **WHEN** group_tool_verbs值改变
+- **THEN** 清除顶层及直接child的展开状态和高度缓存。
+
+#### Scenario: Suggestion already effective
+- **WHEN** cache值与请求相同但current_ui镜像不同
+- **THEN** setter直接跳过，不修复该镜像。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/setters.rs` — `set_show_thinking_blocks_inner / set_group_tool_verbs_inner / set_prompt_suggestions / set_keep_text_selection / set_ask_user_question_timeout_enabled`。
+
+
+### Requirement: Scroll setting clamps cache rebuild and unset rollback loss
+
+scroll_speed setter SHALL 先将i64限制1..100再转u8，与cache相等跳过；scroll_lines先限制1..10，仅旧值Some(clamped)才跳过，None即使显示默认3也视为变更。scroll_mode与invert_scroll按cache判等。四个inner均先调用相应cache setter，再由ScrollConfig::from_settings重建app.scroll_config，不直接覆盖其他滚动配置为默认，不更新current_ui。变化后刷新modal、显示toast并提交类型对应PersistSetting。scroll_lines旧None在rollback payload中折为Int(3)，不能恢复未配置状态；直接setter选择3会建立覆盖，而reset流程若current_value_for显示3且metadata default为3则提前幂等返回。
+
+#### Scenario: Unset lines commit
+- **WHEN** scroll_lines cache为None，直接set_scroll_lines(3)
+- **THEN** 产生持久化effect，rollback值为3。
+
+#### Scenario: Out of range speed
+- **WHEN** raw scroll_speed为1000
+- **THEN** 先限制为100再判等和写入。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/setters.rs` — `set_scroll_speed / set_scroll_mode / set_invert_scroll / set_scroll_lines / inner helpers`。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `dispatch_confirm_reset_setting`。
+
+
+### Requirement: Simple input mode reconciliation and contextual hint overrides
+
+set_simple_mode SHALL 不作outer幂等跳过：每次更新current_ui Some(new)与cache，新值true映射Simple、false映射Vim，遍历顶层agent仅对input_mode不同者调用set_input_mode并收集effects；刷新modal和toast后追加PersistSetting，即使全局值未变化也提交。rollback旧值来自current_ui.unwrap_or(true)。contextual hint各setter仅prev==Some(new)时跳过；None确认true仍写入显式覆盖。inner写对应hint Some(new)，基于整个current_ui.contextual_hints重新resolve并apply_contextual_hints，不仅改变单个已解析gate；持久化rollback将None折为true。combine_queued_prompts按cache判等，变化只写current_ui/cache、刷新并提交effect，setter本身不立即合并或drain队列。
+
+#### Scenario: Repeated simple setting
+- **WHEN** 请求simple_mode等于当前配置
+- **THEN** 仍协调不匹配agent并追加持久化effect。
+
+#### Scenario: Inherited hint confirmed
+- **WHEN** hint旧值None，新值true
+- **THEN** 建立Some(true)并重新解析全部hints。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/setters.rs` — `set_simple_mode / set_simple_mode_inner / set_contextual_hint / set_contextual_hint_inner / set_combine_queued_prompts`。
+
+
+### Requirement: Theme commit and preview state separation
+
+theme commit SHALL 拒绝无法canonical_name解析的输入并error返回空effects；有效输入不作相等跳过，更新current_ui.theme为canonical、设置auto mode flag并应用显示，随后刷新modal、toast和提交PersistSetting。旧值优先current_ui有效canonical，否则取cache.current_kind，不固定回退grownight。应用Auto通过resolve_auto后apply_kind。preview只验证并应用显示，不写current_ui、不改变auto flag、不提交持久化或toast，返回空effects。auto_dark commit拒绝Auto与未知输入，有效值更新current_ui并invalidate_auto_theme_config，仅auto flag开启且系统检测为Dark时应用显示；检测None不应用。其旧值过滤Auto并回退GrowNight，有效重复提交也不跳过。 auto_light commit采用同样验证与无幂等流程，旧值过滤Auto后回退GrowDay，仅auto模式且系统Light时应用显示。auto_dark/light preview均拒绝Auto和未知名称，仅live时apply_kind，返回空effects，不修改current_ui、auto mode flag或invalidate_auto_theme_config；匹配检测失败时不应用。
+
+#### Scenario: Repeated theme commit
+- **WHEN** 新theme与旧canonical相同
+- **THEN** 仍应用并提交持久化。
+
+#### Scenario: Auto preview
+- **WHEN** 预览auto而此前auto flag关闭
+- **THEN** 解析并应用显示，但不打开auto flag。
+
+#### Scenario: Dormant dark setting
+- **WHEN** auto mode关闭或系统非Dark
+- **THEN** 保存auto_dark状态但不直接应用显示。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/setters.rs` — `set_theme / set_theme_inner / preview_theme / apply_theme_kind_for_display / auto_theme_setting_is_live / set_auto_dark_theme / set_auto_light_theme / preview_auto_dark_theme / preview_auto_light_theme`。
+
+
+### Requirement: Default and fork model setters use different catalogs
+
+set_default_model SHALL 验证app.models.available包含ID，未知ID返回空effects；旧app.models.current等于新ID时跳过，否则更新app新session模板、刷新窗口并以canonical ID持久化，旧None编码空串，不发送SwitchModel。clear_default_model无条件清空app.models.current及reasoning_effort并提交空串；旧ID为空的startup分支只toast和effect，不刷新modal，旧ID非空则刷新。set_fork_secondary_model要求有效active Agent，验证该agent.session.models目录而非app模板目录；有效不同ID只更新current_ui.fork_secondary_model、刷新和提交，旧字符串原样保留rollback。clear_fork_secondary_model不要求active agent，旧值为空时只already at default toast、不提交，否则清空镜像并持久化。窗口选项使用app目录，但fork setter使用agent目录，二者不同会导致选项提交被拒绝。
+
+#### Scenario: Different model catalogs
+- **WHEN** 选中的fork ID存在app目录但不存在active agent目录
+- **THEN** fork setter返回空effects并记录error。
+
+#### Scenario: Startup default clear
+- **WHEN** app默认模型镜像为None
+- **THEN** 仍提交清除持久化请求。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/setters.rs` — `set_default_model / clear_default_model / set_fork_secondary_model / clear_fork_secondary_model`。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `build_pager_snapshot / dispatch_open_settings`。
+
+
+### Requirement: Startup setting default drift and width clamp
+
+max_thoughts_width setter SHALL 在outer和inner限制40..500，outer以current_ui旧宽度与clamped值判等，变化写u16镜像、刷新并提交Int及旧值。show_tips与auto_update setter均将旧None解析为true；仅旧Some且相等才跳过，变化更新app Option、刷新、restart toast和持久化。display cadence旧None解析false，同样要求旧Some才幂等。pr13_effective_default却返回show_tips=true、auto_update=false；rollback用该helper判断恢复None。因此show_tips registry显示None=false与setter旧值None=true不一致；auto_update显示/旧值None=true与rollback helper默认false不一致。该差异按当前代码保留，不将注释“匹配consumer默认”当作事实。
+
+#### Scenario: Tips failed first commit
+- **WHEN** show_tips原None、提交false后失败
+- **THEN** rollback payload true被helper折回None，显示再次为false。
+
+#### Scenario: Update failed first commit
+- **WHEN** auto_update原None、提交false后失败
+- **THEN** rollback payload true不等于helper false，恢复Some(true)而非None。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/setters.rs` — `set_max_thoughts_width / pr13_effective_default / set_show_tips / set_auto_update / set_display_refresh_auto_cadence`。
+
+源码证据：`crates/codegen/pager/src/settings/registry.rs` — `current_value_for`。
+
+源码证据：`crates/codegen/pager/src/app/root/dispatch/settings/ui.rs` — `apply_setting_rollback`。
+
+
+### Requirement: Settings modal row filtering and focus boundaries
+
+设置窗口 SHALL 按SettingCategory::ALL及registry内顺序构建行，从进程minimal_mode_active读取模式并隐藏hidden_in_minimal条目；所有Group声明的children不作为顶层行，空分类不产生header。搜索只筛选已构建行，section有匹配才保留header，不会将匹配的group child提升至顶层。set_query重新筛选并将隐藏selection移至首个可选行；无结果保留旧selection。focus_key查找完整rows并返回found，再按filter夹selection，因此true不保证最后焦点是请求key。select_at只校验完整rows中的可选性，不校验filter。导航跳过header且不循环。rebuild_rows保留仍存在的旧key，子面板key消失则退Browse；恢复旧key分支没有再按filter夹选中项。
+
+#### Scenario: Hidden child search
+- **WHEN** 查询只匹配一个group child且不匹配任何顶层行
+- **THEN** 结果为空，child不会独立出现。
+
+#### Scenario: Filtered focus request
+- **WHEN** focus_key目标在rows存在但被当前filter隐藏且另有匹配行
+- **THEN** 返回true，最终焦点移至可见可选行。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/state.rs` — `build_rows / compute_filtered / focus_key / rebuild_rows`。
+
+
+### Requirement: Settings modal picker seeding and validation boundaries
+
+枚举面板 SHALL 用snapshot过滤permission Auto gate，静态有效choice数只在debug断言不超过32，动态目录豁免。当前非空String模型在动态目录失效且存在真实选项时选择index1，否则index0；保存原始值用于后续退出处理，不在入面板时提交或清除。空String选择sentinel；静态Enum未匹配选择index0。字符串编辑初始化即验证，Any全接受，NonEmptyToken拒空或任意Unicode空白，KnownModel空串有效、目录空时报告加载中、其余ASCII忽略大小写匹配label/id且不trim。整数编辑只保存buffer及min/max，进入编辑本身不夹值。Bool切换要求当前值确为Bool且存在action映射，否则记录错误并无Action。
+
+#### Scenario: Stale model selection
+- **WHEN** 动态模型当前非空String不在目录且目录含sentinel与真实模型
+- **THEN** 初始选择首个真实模型，original_value仍保存旧String。
+
+#### Scenario: Model whitespace
+- **WHEN** KnownModel buffer带额外空白且目录无该精确label/id
+- **THEN** 验证失败，不自动trim。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/state.rs` — `try_enter_picking_enum / try_enter_editing_value / validate_string / toggle_focused_bool`。
+
+
+### Requirement: Settings picker keyboard commit and close semantics
+
+设置键盘入口 SHALL 忽略Release以及Space/Enter的Repeat；F2或含Control/Super的逗号优先返回Close，绕过子面板取消逻辑。枚举导航上下或j/k有界不循环，只有支持preview且可映射的静态choice返回预览Action。Enter按当前索引提交，动态目录经String模型映射；普通进入退Browse，deep-link返回ActionThenClose或Close。Esc对原始Enum可映射主题返回恢复Action，对其他值仅退出；d无modifier先退Browse，有preview时返回恢复与OpenResetConfirm的有序ActionPair。apply_settings_outcome处理Close直接移除modal，不额外恢复preview；ActionThenClose先移除modal再转交Action。因此全局关闭快捷键与picker Esc的恢复路径不同。
+
+#### Scenario: Picker cancel
+- **WHEN** 主题picker收到Esc且original_value是可映射Enum
+- **THEN** 返回原主题Preview Action，deep-link同时请求关闭。
+
+#### Scenario: Global close while previewing
+- **WHEN** 主题picker收到F2
+- **THEN** 返回Close，outcome转换移除modal且不生成恢复Action。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/input.rs` — `handle_settings_key / handle_picking_enum`；`crates/codegen/pager/src/app/agent_view/mod.rs` — `apply_settings_outcome`。
+
+
+### Requirement: Settings browse and committed filter navigation
+
+设置Browse SHALL 用上下/jk导航可见设置，PageUp/Down最多移动10项，g/G跳过滤集合首尾。无modifier右/l展开当前描述、左/h折叠，允许多项保持展开。Enter依次尝试Group、Bool、Enum、String/Int，Space只切Bool；d仅对非Group设置请求reset，不预判是否默认。/或i无modifier进入filter，Enter保留查询退Browse，Esc清查询退Browse；filter内Ctrl+u清查询但保留filter模式。Browse Backspace从已提交查询末尾删一个grapheme而非当前cursor位置。过滤文本变化重算匹配并夹selection，cursor变化只请求重绘。
+
+#### Scenario: Keep filtered result
+- **WHEN** filter输入查询后按Enter
+- **THEN** 退Browse且保留查询，随后可操作过滤后的设置。
+
+#### Scenario: Clear filter
+- **WHEN** filter内按Esc
+- **THEN** 清空查询并退Browse，不直接关闭窗口。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/input.rs` — `handle_browse / handle_filter_focused / apply_filter_edit`。
+
+
+### Requirement: Settings mouse activation and picker asymmetry
+
+设置鼠标处理 SHALL 在列表区域内左键选择命中设置；不同row通常只选择，已选row或value命中则激活。首行首列triangle优先切换描述展开，不修改值。列表滚轮每次最多移动3个可选项，区域外忽略。Enum子面板点击不同choice只移动焦点并按支持情况预览，同choice再点击无操作，滚轮不操作且不以点击提交。Group子面板单击直接选中并切Bool；其当前值非Bool或缺失按false生成true，与键盘要求明确Bool后才切换不同。breadcrumb清deep-link退出标记并调用子面板Esc，返回Browse而不因deep-link关闭。编辑器鼠标仅步进命中区域合成上下键，其他事件无操作。
+
+#### Scenario: Enum click does not commit
+- **WHEN** 枚举picker点击一个不同有效choice
+- **THEN** 只选择并可返回Preview Action，仍需Enter提交。
+
+#### Scenario: Breadcrumb from deep link
+- **WHEN** deep-link枚举picker点击breadcrumb
+- **THEN** 恢复原值的Esc路径返回Browse，清除close_on_picker_exit。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/input.rs` — `handle_settings_mouse / handle_picker_mouse / handle_group_mouse / handle_editor_mouse`。
+
+
+### Requirement: Settings render admission and geometry reset
+
+设置渲染入口 SHALL 在chrome拒绝或content高度小于2、宽度小于10时清理内容hit rect并返回overlay是否存在；因此true表示overlay分支状态，不保证确认提示实际绘出。正常Enum/Group/Editor分支先清理旧geometry再生成当前面板geometry；Browse清子面板rect，行渲染将row/value rect重置为与rows等长的空矩形，即使可见高度为0。搜索区域高度至少3时显示搜索栏、分隔线和列表，高度2时省略分隔线，更低时仅列表。Reset overlay先清geometry，以提示替换搜索栏，再渲染列表并将选中行范围以外区域变暗；render_rows会重新填充row rect，因此不能仅凭overlay开头reset认定结束时所有rect为空。
+
+#### Scenario: Chrome refusal with overlay
+- **WHEN** 存在reset overlay但chrome不提供content
+- **THEN** 清理hit rect并返回true，不保证提示可见。
+
+#### Scenario: Zero height row render
+- **WHEN** render_rows收到高度0区域
+- **THEN** row/value rect按rows长度重置为空矩形并返回。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/render.rs` — `render_settings_modal / render_reset_confirm_overlay / render_rows`。
+
+
+### Requirement: Settings variable height scrolling and description hit areas
+
+设置列表 SHALL 以filtered_cache中的位置保存scroll_offset，而非终端行号；根据预测行高及分类header间隔反向计算可容纳的起始位置，使选中项可见，并按最后项限制最大offset。选中项自身预测高度超过viewport时从该项开始，至少显示标签。普通设置在宽度不足时申请两行，剩余仅一行则降为一行；Group及缺当前值行占一行。展开描述按剩余空间最多绘8行，缩进最多4列，计入滚动高度但不扩展row hit rect；普通两行标签和值区域的row rect覆盖两行。非首分类header在仍有空间时前置一空行。
+
+#### Scenario: Oversized expanded row
+- **WHEN** 选中项预测高度超过可见终端行数
+- **THEN** scroll起点为该项，描述按剩余空间裁剪。
+
+#### Scenario: Expanded description click area
+- **WHEN** 设置行绘出标签和值后绘展开描述
+- **THEN** row rect仍只覆盖标签和值行，描述行不加入该设置的row命中区域。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/render.rs` — `render_rows / compute_min_scroll_offset_for_visibility / compute_filtered_row_heights / wrapped_description_height`。
+
+
+### Requirement: Settings picker committed marker and group viewport
+
+枚举选择器 SHALL 每次渲染从当前snapshot生成有效目录，以进入picker时original_value的canonical标记已提交圆点，焦点和hover独立着色。按描述换行计算choice高度，溢出时尝试预留一行显示剩余选项数，滚动起点由当前choice索引及可用高度计算；只有末尾仍有未绘选项且提示行容纳得下才显示N more。正常绘制结束将与目录等长的choice rect经thread-local scratch交给外层并取空。Group子面板从第一个child开始逐行绘制至viewport底部，不根据child_idx滚动；不存在metadata的child跳过，未绘child保持空rect。Group圆点代表焦点而非启用状态，on/off单独读取当前值，仅Bool(true)显示on。
+
+#### Scenario: Preview focus marker
+- **WHEN** 枚举导航到与original_value不同的choice
+- **THEN** 焦点背景变化，已提交圆点仍标记original_value对应选项。
+
+#### Scenario: Group beyond viewport
+- **WHEN** group的child_idx移动到当前viewport外
+- **THEN** renderer仍从首child绘制，不自动滚动到该焦点。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/render.rs` — `render_picking_enum / render_picking_group / picker_scroll_offset`。
+
+
+### Requirement: Settings integer stepping and thought width preview
+
+设置整数编辑器 SHALL 按注册区间跨度选择步长：跨度不超过20时小步为1、大步为max(span/5,1)，跨度不超过100时为1/5，更大时为5/10。渲染至少8列且完整布局可容纳时显示左右箭头并建立精确单格命中区，否则只居中显示值且命中区保持为空；空buffer显示破折号。仅max_thoughts_width在stepper下方剩余高度至少5时尝试实时预览，预览区域宽度不足30则省略；buffer解析失败取注册下限，随后夹至40..500并安全转u16。预览内容宽度为min(pending, area.width)，pending随键盘步进变化时下一帧按新宽度重新换行；内容优先占用可用行，pending超过区域宽度时，只有内容下方至少余两行才绘clamped提示。编辑该键且terminal_width减8大于标准最大宽度110时，modal宽度改为terminal_width减8；否则沿用标准尺寸。离开编辑态后下一帧恢复标准尺寸。
+
+#### Scenario: Narrow integer editor
+- **WHEN** 整数编辑区域不足8列或完整箭头布局放不下
+- **THEN** 只绘当前值，鼠标增减命中区为空，但键盘步进仍由input处理。
+
+#### Scenario: Invalid thought width preview buffer
+- **WHEN** max_thoughts_width预览收到无法解析的buffer且区域至少30列、5行
+- **THEN** 按注册下限40计算预览宽度，再受实际区域宽度限制。
+
+#### Scenario: Live thought width reflow
+- **WHEN** max_thoughts_width步进器的pending值改变
+- **THEN** 下一帧预览按新pending宽度重新换行，不等待提交。
+
+#### Scenario: Thought width modal widening
+- **WHEN** 处于max_thoughts_width编辑态且terminal_width减8超过110列
+- **THEN** modal扩为terminal_width减8；离开编辑态即恢复标准宽度上限。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/render.rs` — `int_step_sizes / render_editing_value / render_int_stepper / parse_max_thoughts_width_buffer / render_max_thoughts_width_preview`。
+
+
+### Requirement: Settings preview paint and row layout decisions
+
+最大思考宽度预览 SHALL 在区域顶部保留一空行，以effective width绘一行固定小写标题preview，再绘经该宽度换行且受高度预算截断的示例内容；标题为粗体、斜体、下划线及visual背景，正文为斜体及highlight背景，两者背景只覆盖effective width。发生宽度夹取时，提示位于内容后一空行，使用secondary文字、基础背景且无modifier，空间不足则省略。设置行值 SHALL 将Bool映射on/off、空DynamicEnum String映射(no override)、已知Enum映射显示名、未知Enum原样显示。单行预算包含左侧triangle、标签、至少一格间距、值、chevron列、可选restart pill和右侧padding；超出时值降到第二行，标签本身仍超出则选择带标签截断的双行布局。最大标签列按全registry最长显示宽度计算，但限制为24列及内容宽度一半。终端原生锁定或视觉背景为Reset时，选中和hover均用DarkGray，否则选中优先visual背景、hover用hover背景。
+
+#### Scenario: Clamped preview without slack
+- **WHEN** pending width超过区域宽度且换行内容占尽预览高度
+- **THEN** 内容按区域宽度绘制，不显示clamped提示。
+
+#### Scenario: Unknown enum value
+- **WHEN** 当前Enum canonical不在自身choice目录
+- **THEN** 设置行原样显示canonical而不是空值或报错。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/render.rs` — `render_preview_block / compute_settings_max_label_w / value_display / row_layout / settings_list_row_bg`。
+
+
+### Requirement: Settings row painting and activation hit boxes
+
+设置值行 SHALL 将Bool(false)以灰色显示，其余值使用用户强调色；仅Enum、String和DynamicEnum绘chevron，Int不绘。restart_required仅在描述展开时绘制restart pill。单行与双行均永久预留2列chevron列以对齐Bool与可打开类型；value命中区包含值文本及该预留列，即使Bool列内没有glyph。双行命中区只位于第二行，row命中区由调用方覆盖两行；当调用方只分配一行时，即使布局计算要求双行也强制单行并通过截断避免覆盖值。展开描述缩进最多4列并按区域高度截断。current_value缺失时以错误强调色绘感叹号、截断标签和(no read mapping)，不建立value命中区，也不显示展开描述。
+
+#### Scenario: Boolean reserved chevron area
+- **WHEN** Bool设置以单行或双行绘制
+- **THEN** 不绘chevron，但value命中区仍包含两列预留chevron区域。
+
+#### Scenario: Missing current value
+- **WHEN** 已注册设置的current_value_for返回None
+- **THEN** 绘制错误行(no read mapping)，该行无法通过value区域激活编辑器。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/render.rs` — `render_setting_row / render_expanded_description / render_setting_row_no_value`。
+
+
+### Requirement: Settings contextual shortcut footer
+
+设置窗口 SHALL 按当前子状态生成不可点击的快捷键说明。Browse显示导航、首尾、Space、Enter、展开、搜索、reset和关闭，并根据焦点是否Bool将Enter标为toggle或edit，随后追加Vim导航搜索提示。Filter显示输入、上下导航、Backspace、Enter提交和Esc清除。Enum根据supports_preview将上下及Esc分别标为try/revert或nav/cancel，并显示Enter提交与d reset。Int按区间实际步长生成两组方向提示并显示提交、取消、reset；String显示编辑、cursor、提交、取消；Group显示导航、切换及返回。Reset确认层替换普通快捷键，仅y/n按钮可点击，Esc/F2只作文本提示。
+
+#### Scenario: Preview capable enum footer
+- **WHEN** 进入supports_preview枚举picker
+- **THEN** footer将上下标为try、Esc标为revert。
+
+#### Scenario: Reset confirmation footer
+- **WHEN** 设置窗口渲染reset确认层
+- **THEN** 普通模式快捷键被y reset、n cancel、Esc cancel、F2 cancel替代，只有y/n具有点击ID。
+
+源码证据：`crates/codegen/pager/src/views/settings_modal/render.rs` — `build_shortcuts / build_reset_confirm_shortcuts / int_step_footer_labels`。
+
+
+### Requirement: Action registry exact routing and presentation
+
+ActionRegistry SHALL 以注册顺序对指定When做精确匹配，先匹配default_key再匹配同一ActionDef的alt_keys；不在registry内执行context冒泡。matches_id忽略When但仍只看该动作键集合。lookup_with_mode仅在ScrollbackFocused或DashboardFocused且vim关闭时抑制裸字母与Shift字母，其他键继续匹配。hints只选指定contexts内带priority的动作并按priority升序；key_for_mode对非Vim scrollback裸字母返回首个非字母alt，没有则None。interjection_possible仅在turn运行且存在payload时为真。
+
+#### Scenario: Exact context lookup
+- **WHEN** 同一按键分别查询Always与ScrollbackFocused
+- **THEN** 只返回各自context中最先注册的匹配动作，不隐式查询其他层。
+
+#### Scenario: Non Vim text input
+- **WHEN** vim关闭并在scrollback或dashboard查询裸j/k
+- **THEN** 裸字母不解析为动作，箭头等非字母alternate仍可解析。
+
+源码证据：`crates/codegen/pager/src/actions/mod.rs` — `ActionRegistry / lookup / matches_id / lookup_with_mode / hints / key_for_mode / interjection_possible`。
+
+
+### Requirement: Default actions adapt to screen and terminal
+
+默认动作目录 SHALL 按terminal_context与ScreenMode生成。Minimal移除ScrollbackFocused、DashboardFocused、DashboardOverlay、OpenDashboard和FocusScrollback，保留PromptFocused、AgentScreen及合法全局动作，并将Ctrl+G绑定EditPromptExternal；其他模式Ctrl+G绑定ToggleTasks。Apple Terminal的steer主键为Ctrl+O并保留Ctrl+Enter/Ctrl+I，VS Code家族仅用Ctrl+L且禁用OpenExtensions快捷键，其他终端主键Ctrl+Enter并以Ctrl+I备用。VS Code家族以Ctrl+D退出且half-page-down改为Shift+D；其他终端Ctrl+Q退出并保留Ctrl+D备用。仅本地macOS VS Code家族把queue主键设为Ctrl+4并保留Ctrl+分号与Ctrl+单引号。NewSession、Quit与DashboardOverlayStop标记requires_confirmation；OpenDashboard为Always，其余dashboard list与overlay动作使用各自精确context。
+
+#### Scenario: Minimal Ctrl G ownership
+- **WHEN** 以Minimal模式创建默认registry
+- **THEN** Ctrl+G只对应外部编辑，tasks与dashboard/scrollback表面动作不存在。
+
+#### Scenario: VS Code steering ownership
+- **WHEN** 终端属于VS Code家族
+- **THEN** Ctrl+L只绑定steer，extensions使用Null占位且无alternate。
+
+源码证据：`crates/codegen/pager/src/actions/defaults.rs` — `mode_ctrl_g_action / default_actions`；`crates/codegen/pager/src/actions/mod.rs` — screen mode and terminal family registry tests。
+
+
+### Requirement: Pager action effect completion protocol
+
+pager应用协议 SHALL 用Action表达同步用户意图，用Effect表达由dispatch产生并交给事件循环异步执行的副作用，用TaskResult携带完成结果并经Action::TaskComplete重新进入同步dispatch。Effect::prompt_rpc_identity只将SendPrompt与SendPromptBlocks识别为启动ACP prompt RPC的effect。需要拒绝过期完成的域在Effect与TaskResult中回传其关联身份：会话/agent、prompt_id、seq、generation、revision、nonce或独立SessionControlToken；ControlRpcOutcome::AuthoritativeUpdatePending表示RPC完成但仍等待session update提交状态，Superseded表示本地意图已被更新请求替代。
+
+#### Scenario: Prompt RPC classification
+- **WHEN** 查询任意Effect的prompt_rpc_identity
+- **THEN** 仅SendPrompt及SendPromptBlocks返回agent与session身份，其他effect返回None。
+
+#### Scenario: Control RPC acknowledgement
+- **WHEN** 模型、agent或behavior控制RPC返回成功
+- **THEN** completion仍携带原control token及AuthoritativeUpdatePending或Superseded，不把transport成功等同于状态提交。
+
+源码证据：`crates/codegen/pager/src/app/actions.rs` — `Action / Effect / Effect::prompt_rpc_identity / TaskResult / ControlRpcOutcome`。
+
+
+### Requirement: Pager leader roster wire parsing
+
+pager leader roster SHALL 解析snake_case活动Working/Idle/NeedsInput/Dormant/Completed/Dead及camelCase entry字段。RosterEntry对title、worktree、model、permission、resident、last-change与origin提供默认，sessionId、cwd及activity必填；origin kind默认为空且host可选。list parser先将body解析为JSON Value，若顶层有result则解析该值，否则解析裸body；任一步失败返回None。list与changed容器缺失数组默认为空，changed广播按裸upserted/removed载荷解析。
+
+#### Scenario: Wrapped roster list
+- **WHEN** grow/sessions/list返回result包裹的sessions
+- **THEN** 先剥离result后保留全部entry，而不是因顶层未知字段宽松解析为空列表。
+
+#### Scenario: Bare roster list
+- **WHEN** 响应直接以sessions为顶层字段
+- **THEN** 同样解析为RosterListResponse。
+
+源码证据：`crates/codegen/pager/src/app/roster.rs` — `RosterActivity / RosterEntry / RosterListResponse / RosterChanged / parse_roster_list_response`。
+
+
+### Requirement: Pager external editor draft ownership and file bounds
+
+外部编辑器 SHALL 选择首个trim后非空的VISUAL、EDITOR，否则Windows用notepad.exe、其他平台用vi，并以shlex解析且拒绝空程序或非法引号。Prompt草稿在系统临时目录以UUID、create_new创建markdown文件，Unix权限0600，写入后flush；读取先检查metadata长度，再最多读取4MiB加1字节，超过4MiB或非UTF-8拒绝，owner Drop删除文件且除NotFound外只warn。prepare在创建文件前重新检查目标agent仍允许外部编辑，附件、paste pending或其他输入surface持有所有权时显示notice并取消。editor只有成功exit才读文件；完成时若当前草稿不同于original则保留当前值并报告stale，否则成功文本替换composer、关闭history search、清history、将cursor置于UTF-8字节末尾、刷新slash并清suggestion。启动/非零/read失败均保留原草稿。Config文件不做prompt所有权检查，完成时不论非零status都可刷新指定agents modal，只有spawn错误记录warn。
+
+#### Scenario: Draft changed during edit
+- **WHEN** editor返回成功但composer已不等于启动时original_text
+- **THEN** 丢弃外部文件结果，保留更新草稿并向对应agent scrollback报告stale。
+
+#### Scenario: Oversized editor file
+- **WHEN** 保存文件超过4MiB
+- **THEN** 拒绝读取与应用，保留original，临时文件在owner销毁时删除。
+
+源码证据：`crates/codegen/pager/src/app/external_editor.rs` — `resolve_editor_command / PromptEditorFile / revalidate / prepare / finish / apply_prompt_outcome / apply_prompt_text`。
+
+
+### Requirement: Pager XTVERSION reply reassembly and hold bounds
+
+XtversionFilter SHALL 仅在terminal层标记reply pending时armed，5秒arm窗口从首次filter调用开始而非构造时开始；窗口到期且没有已确认intro的hold时disarm并record_no_reply。过滤器接受crossterm的Alt-P或bare Esc再P作为DCS intro，随后严格要求`>|`，payload只允许ASCII字母数字、空格、点、下划线、连字符、括号和加号且最多64字节，以Alt-backslash或Ctrl-G结束。完成后保存payload、disarm并只释放交错的pass-through事件；同batch后续事件原样通过。intro前dead hold恢复全部事件及原顺序/时间戳，intro确认后的mismatch或timeout丢弃DCS tentative但保留交错pass-through。filter_with_fragment_wait对每个后续片段等待150ms并以1秒总hold截止，完成时record_reply并异步重发带xtversion的terminal诊断。
+
+#### Scenario: Split XTVERSION reply
+- **WHEN** DCS intro、payload或ESC-backslash terminator跨多个input batch到达
+- **THEN** 在bounded hold内重组成一个payload并吞掉全部reply字符。
+
+#### Scenario: Confirmed stalled reply
+- **WHEN** 已读完`>|`但后续片段150ms无到达或总hold超过1秒
+- **THEN** 丢弃已确认reply fragment，只释放期间交错的非key pass-through事件。
+
+#### Scenario: Pre intro mismatch
+- **WHEN** 仅hold bare Esc或intro尚未确认便遇到不匹配事件
+- **THEN** 按FIFO恢复tentative与pass-through，不吞掉用户输入。
+
+源码证据：`crates/codegen/pager/src/app/xt_filter.rs` — `XtversionFilter / resolve_dead_hold / filter_with_fragment_wait / is_xt_payload_char / is_dcs_terminator`。
+
+
+### Requirement: Pager read only agent activity projection
+
+AgentActivityProjection SHALL 只读聚合root session与直接child session用于chrome，不写回scheduler。foreground_busy在session state非idle或turn_activity存在时为真；queued_prompts取本地pending FIFO非空；needs_input取root needs_input或任一child同时question_pending、其session_id可在parent subagent_sessions命中且info未finished。replaying取loading_replay，background_tasks仅任一Running，scheduled_work取集合非空，subagents仅未finished且无workflow_run_id，workflows取任一active run，goal_active仅GoalDisplayStatus::Active。working包含除needs_input外全部工作旗标；animates包含needs_input但排除queued_prompts，因此静态队列算工作但不动画，单独等待输入动画但不算working。
+
+#### Scenario: Queued work without motion
+- **WHEN** root只有pending prompt且其余活动为空
+- **THEN** working为true、animates为false。
+
+#### Scenario: Live child question
+- **WHEN** child view有question_pending且parent registry同session记录未finished
+- **THEN** needs_input与animates为true；记录finished后不再贡献needs_input。
+
+源码证据：`crates/codegen/pager/src/app/session/activity.rs` — `AgentActivityProjection::from_sessions / working / animates`。
+### Requirement: Pager simple slash action routes and session gates
+
+基础slash command的run SHALL 直接映射：resume→ShowSessionPicker、config-agents→OpenConfigAgentsModal(None)、quit→Quit、home→ExitSession、mcps→OpenExtensionsModal(McpServers, SlashCommand)、new→NewSession、rewind→RewindShowPicker、view-plan→ShowPlan、shortcuts→OpenShortcutsHelp。rewind与view-plan只通过session_scoped元数据声明范围，run本身不检查session；delete、context、session-info和rename除session_scoped外还要求ctx.session_id存在，否则分别返回本地错误，成功映射DeleteCurrentSession、ShowContextInfo、ShowSessionInfo和trim后RenameSession。trajectory与gboom同为session_scoped并拒绝非空参数，但run不自行检查session ID；gboom及scroll-debug的visible恒false，表示可精确输入但不列入dropdown。这里只定义CommandResult，不证明后续Action成功执行。
+
+#### Scenario: Delete without active session
+- **WHEN** 直接运行/delete且ctx.session_id为空
+- **THEN** 返回No active session to delete错误，不产生DeleteCurrentSession。
+
+#### Scenario: Hidden exact command
+- **WHEN** 调用/gboom或/scroll-debug的visible
+- **THEN** 返回false；命令实现仍可由精确名称运行。
+
+证据：`crates/codegen/pager/src/slash/commands/resume.rs` — `ResumeCommand::run`；`crates/codegen/pager/src/slash/commands/config_agents.rs` — `ConfigAgentsCommand::run`；`crates/codegen/pager/src/slash/commands/exit.rs` — `ExitCommand::run`；`crates/codegen/pager/src/slash/commands/home.rs` — `HomeCommand::run`；`crates/codegen/pager/src/slash/commands/mcps.rs` — `McpsCommand::run`；`crates/codegen/pager/src/slash/commands/new.rs` — `NewCommand::run`；`crates/codegen/pager/src/slash/commands/rewind.rs` — `RewindCommand::session_scoped / run`；`crates/codegen/pager/src/slash/commands/view_plan.rs` — `ViewPlanCommand::session_scoped / run`；`crates/codegen/pager/src/slash/commands/delete.rs` — `DeleteCommand::session_scoped / run`；`crates/codegen/pager/src/slash/commands/context.rs` — `ContextCommand::session_scoped / run`；`crates/codegen/pager/src/slash/commands/session_info.rs` — `SessionInfoCommand::session_scoped / run`；`crates/codegen/pager/src/slash/commands/rename.rs` — `RenameCommand::session_scoped / run`；`crates/codegen/pager/src/slash/commands/trajectory.rs` — `TrajectoryCommand::session_scoped / run`；`crates/codegen/pager/src/slash/commands/gboom.rs` — `GboomCommand::visible / session_scoped / run`；`crates/codegen/pager/src/slash/commands/scroll_debug.rs` — `ScrollDebugCommand::visible / run`；`crates/codegen/pager/src/slash/commands/shortcuts.rs` — `ShortcutsCommand::run`。
+
+### Requirement: Pager slash preference toggle routes and mode support
+
+compact-mode与vim-mode的run SHALL 分别返回ToggleCompactMode和ToggleVimMode，不在命令层读取当前值。timestamps与timeline则在run时读取全局appearance cache并返回当前值取反后的SetTimestamps(bool)或SetTimeline(bool)，忽略传入参数文本；arg placeholder只由timestamps声明on/off。timeline的mode_support固定FullscreenOnly，并给出切换模式remedy；其他三个使用trait默认模式支持。本层不持久化设置，也不保证从读cache到dispatch之间没有其他写入。
+
+#### Scenario: Timeline in minimal mode
+- **WHEN** 命令可用性层查询mode_support
+- **THEN** 得到FullscreenOnly及需要interactive scrollback pane的SwitchMode remedy。
+
+#### Scenario: Cached timestamp enabled
+- **WHEN** 运行/timestamps时cache为true
+- **THEN** 产生SetTimestamps(false)，命令本身不写cache。
+
+证据：`crates/codegen/pager/src/slash/commands/compact_mode.rs` — `CompactModeCommand::run`；`crates/codegen/pager/src/slash/commands/vim_mode.rs` — `VimModeCommand::run`；`crates/codegen/pager/src/slash/commands/timestamps.rs` — `TimestampsCommand::arg_placeholder / run`；`crates/codegen/pager/src/slash/commands/timeline.rs` — `TimelineCommand::mode_support / run`。
+
+### Requirement: Pager slash side request memory and compact payload handling
+
+recap SHALL 标记session_scoped并无条件返回SendRecap{auto:false}。btw标记session_scoped、takes_args与args_required，run将参数trim后返回SendBtw，即使被直接以空白调用也生成空字符串，必填约束依赖外围执行器。remember允许参数：trim后为空进入EnterRememberMode，非空以trim文本SendRememberNote。compact标记session_scoped且参数可选；空白参数产生QueueCommand(`/compact`)，否则只用trim判断非空，却以原始args拼接`/compact `，保留前后空白并进入普通queue command pipeline。命令层不证明recap/btw绕队列后的响应归属、memory落盘或compact完成。
+
+#### Scenario: Remember without inline note
+- **WHEN** 参数为空或只有空白
+- **THEN** 返回EnterRememberMode而非发送空note。
+
+#### Scenario: Compact raw spacing
+- **WHEN** 参数为两个前导空格加focus及尾随空格
+- **THEN** 结果在固定`/compact `后保留该原始参数，不规范化内部或边缘空白。
+
+证据：`crates/codegen/pager/src/slash/commands/recap.rs` — `RecapCommand::session_scoped / run`；`crates/codegen/pager/src/slash/commands/btw.rs` — `BtwCommand::takes_args / args_required / run`；`crates/codegen/pager/src/slash/commands/remember.rs` — `RememberCommand::takes_args / run`；`crates/codegen/pager/src/slash/commands/compact.rs` — `CompactCommand::session_scoped / takes_args / args_required / run`。
+
+### Requirement: Pager slash local validation and release notes retrieval
+
+usage SHALL trim参数，空时返回ShowUsage，非空返回包含trim值及`Use /usage`的错误。trajectory、scroll-debug与gboom均以trim非空为usage错误，空时分别返回OpenTrajectory、ToggleScrollDebugHud及OpenGboom；后两者隐藏于dropdown，gboom要求session_scoped。rename要求session ID和trim后非空title。release-notes在run内同步构造ChangelogManager并fetch；markdown存在时trim内容后返回标题固定Release Notes的ShowReleaseNotes，缺失时返回固定offline错误，空markdown仍成为空content Action。测试只允许release-notes返回任意Action或Error，没有锁定网络/cache来源或正文。
+
+#### Scenario: Unknown usage argument
+- **WHEN** 运行/usage foo
+- **THEN** 返回本地Unknown argument错误，不产生ShowUsage。
+
+#### Scenario: No changelog markdown
+- **WHEN** ChangelogManager fetch结果markdown为None
+- **THEN** 返回No release notes available (offline)错误。
+
+证据：`crates/codegen/pager/src/slash/commands/usage.rs` — `UsageCommand::run`；`crates/codegen/pager/src/slash/commands/trajectory.rs` — `TrajectoryCommand::run`；`crates/codegen/pager/src/slash/commands/scroll_debug.rs` — `ScrollDebugCommand::run`；`crates/codegen/pager/src/slash/commands/gboom.rs` — `GboomCommand::run`；`crates/codegen/pager/src/slash/commands/rename.rs` — `RenameCommand::run`；`crates/codegen/pager/src/slash/commands/release_notes.rs` — `ReleaseNotesCommand::run / release_notes_returns_action_or_error`。
+
+### Requirement: Pager reasoning effort dropdown row construction
+
+build_effort_arg_items SHALL 按输入ReasoningEffortOption顺序生成同数ArgItem；只有mark_active且current_effort等于option.value时在label后追加` (active)`。insert_text完全由调用closure决定，description缺失变空字符串；match_text为单个由`b'a' + idx as u8`得到的排序前缀、空格及insert_text，以便匹配器字母tie-break保持小型菜单顺序。前缀计算没有长度检查，对超过u8/ASCII加法安全范围的选项集合不提供稳定或无panic保证；该helper不筛选重复value、空ID或不可用effort。
+
+#### Scenario: Second active effort
+- **WHEN** 第二项value等于current且mark_active=true
+- **THEN** 其display追加(active)，match_text以前缀b开头，insert_text保持closure结果。
+
+#### Scenario: Missing description
+- **WHEN** option.description为None
+- **THEN** 生成空description而不丢弃该项。
+
+证据：`crates/codegen/pager/src/slash/commands/effort_levels.rs` — `build_effort_arg_items`。
+
+### Requirement: Pager slash discovery navigation and status entrypoints
+
+help SHALL 返回OpenCommandPalette，feedback返回OpenUrl到固定`https://github.com/LordCasser/grow/issues/new`，两者不要求session。jump标记session_scoped和FullscreenOnly，remedy说明minimal使用终端原生scrollback，run直接返回JumpShowPicker且不检查session。tutorial不要求session但同样FullscreenOnly，run返回OpenTutorial；mode gate用于防止minimal无modal host时不可见拦截。history标记session_scoped并返回OpenHistorySearch，文件内测试另确认名称可从真实builtin registry解析。queue与tasks均标记session_scoped并在run中要求session_id，成功分别返回ShowQueue和ShowTasks；它们不限制screen mode。命令层不读取历史、队列或任务数据，也不证明browser、modal或picker打开成功。
+
+#### Scenario: Status command without session
+- **WHEN** 直接运行/queue或/tasks且ctx无session_id
+- **THEN** 返回No active session错误，不产生展示Action。
+
+#### Scenario: Minimal tutorial availability
+- **WHEN** screen mode为minimal且执行器检查mode_support
+- **THEN** 命令被FullscreenOnly gate阻止并可建议切换模式。
+
+证据：`crates/codegen/pager/src/slash/commands/help.rs` — `HelpCommand::run`；`crates/codegen/pager/src/slash/commands/feedback.rs` — `FEEDBACK_ISSUES_URL / FeedbackCommand::run`；`crates/codegen/pager/src/slash/commands/jump.rs` — `JumpCommand::session_scoped / mode_support / run`；`crates/codegen/pager/src/slash/commands/tutorial.rs` — `TutorialCommand::mode_support / run`；`crates/codegen/pager/src/slash/commands/history.rs` — `HistoryCommand::session_scoped / run / resolves_via_builtin_registry`；`crates/codegen/pager/src/slash/commands/queue.rs` — `QueueCommand::session_scoped / run`；`crates/codegen/pager/src/slash/commands/tasks.rs` — `TasksCommand::session_scoped / run`。
+
+### Requirement: Pager slash modal transcript and minimal expansion gates
+
+SettingsCommand::run SHALL 不检查session或参数并返回OpenSettings；其trait默认takes_args行为及外围执行器可能另行限制真实带参调用。WorkflowsCommand只在workflows_available且当前behavior精确为Workflow时visible，固定FullscreenOnly并返回ToggleWorkflows；run本身不复查两项可用性。TranscriptCommand标记session_scoped并要求ctx.session_id，成功返回OpenTranscriptPager，run忽略参数且不限制screen mode。ExpandCommand标记session_scoped和MinimalOnly，fullscreen remedy提示聚焦scrollback后按右箭头；run要求session ID并返回MinimalExpandLast，但不检查ctx.screen_mode。上述命令只产生Action，不读取transcript、不展开block或绘制modal。
+
+#### Scenario: Workflow catalog reload
+- **WHEN** workflows_available为true但behavior已不是Workflow
+- **THEN** workflows命令仍不可见，防止仅凭catalog显示workspace入口。
+
+#### Scenario: Expand direct run in fullscreen
+- **WHEN** 绕过外围mode_support且ctx有session
+- **THEN** run仍返回MinimalExpandLast，模式阻止依赖统一执行器。
+
+证据：`crates/codegen/pager/src/slash/commands/settings_cmd.rs` — `SettingsCommand::run / args_still_dispatches_open_settings`；`crates/codegen/pager/src/slash/commands/workflows.rs` — `WorkflowsCommand::visible / mode_support / run`；`crates/codegen/pager/src/slash/commands/transcript.rs` — `TranscriptCommand::session_scoped / run`；`crates/codegen/pager/src/slash/commands/expand.rs` — `ExpandCommand::session_scoped / mode_support / run`。
+
+### Requirement: Pager minimal external edit and extension modal slash routes
+
+EditPromptCommand SHALL 标记session_scoped与MinimalOnly，remedy说明full TUI的Ctrl+G属于tasks pane；run要求session ID并返回EditPromptExternal，不检查screen mode、composer是否为空或draft所有权。hooks、plugins、marketplace与skills四个命令不要求session，run分别返回OpenExtensionsModal的Hooks、Plugins、Marketplace、Skills tab，trigger固定SlashCommand；它们不接受管理subcommand且run参数未使用。命令层不启动editor、不保存draft，也不加载、信任、安装或删除extension。
+
+#### Scenario: Edit prompt without session
+- **WHEN** 直接运行/edit-prompt且ctx无session
+- **THEN** 返回No active session错误，不产生外部编辑Action。
+
+#### Scenario: Marketplace route
+- **WHEN** 运行/marketplace
+- **THEN** 只打开Extensions modal的Marketplace tab，并标记SlashCommand触发来源。
+
+证据：`crates/codegen/pager/src/slash/commands/edit_prompt.rs` — `EditPromptCommand::session_scoped / mode_support / run`；`crates/codegen/pager/src/slash/commands/plugin.rs` — `HooksCommand::run / PluginsCommand::run / MarketplaceCommand::run / SkillsCommand::run`。
+
+### Requirement: Pager mouse reporting slash config gate
+
+ToggleMouseReportingCommand SHALL 通过进程级mouse_reporting_toggle_enabled原子快照同时决定visible与run。启用时可见且run返回ToggleMouseCapture；禁用时不可见，直接run返回固定提示，要求在`~/.grow/config.toml`设置`[ui] mouse_reporting_toggle = true`，不产生Action。run不要求session、不读取当前mouse capture状态，命令只请求toggle；测试串行修改全局atomic并在启用测试后手工恢复false，未使用panic guard。
+
+#### Scenario: Feature disabled
+- **WHEN** 缓存的mouse reporting toggle flag为false
+- **THEN** dropdown隐藏命令，直接运行只返回配置提示。
+
+#### Scenario: Feature enabled
+- **WHEN** 缓存flag为true
+- **THEN** 命令可见并产生ToggleMouseCapture，不声明切换后的终端状态。
+
+证据：`crates/codegen/pager/src/slash/commands/toggle_mouse_reporting.rs` — `ToggleMouseReportingCommand::visible / run / visible_tracks_config_flag`。
+
+### Requirement: Pager dashboard location and scrollback search slash inputs
+
+CdCommand SHALL 接受可选参数并标记dashboard_only；trim后为空返回DashboardOpenLocationPicker，非空把trim字符串原样放入DashboardChangeLocation.input，不展开`~`、环境变量、相对路径或symlink。run不检查当前surface，非dashboard拒绝与toast属于dispatch层。FindCommand接受可选参数、标记session_scoped并返回FullscreenOnly remedy；trim后为空产生OpenScrollbackSearch(None)，非空产生Some(trim文本)。find的run不检查session或screen mode，命令层也不执行搜索、聚焦scrollback或验证目录存在。
+
+#### Scenario: Dashboard home shorthand
+- **WHEN** 运行`/cd   ~/projects/foo  `
+- **THEN** Action.input为`~/projects/foo`，波浪号留给下游解析。
+
+#### Scenario: Blank find query
+- **WHEN** find参数为空或全空白
+- **THEN** 打开无初始query的scrollback search。
+
+证据：`crates/codegen/pager/src/slash/commands/cd.rs` — `CdCommand::takes_args / dashboard_only / run`；`crates/codegen/pager/src/slash/commands/find.rs` — `FindCommand::session_scoped / takes_args / mode_support / run`。
+
+### Requirement: Pager announcement slash visibility and first token parsing
+
+AnnouncementsCommand SHALL 接受必填参数并始终建议hide、show两项，suggest_args忽略query；visible只由AppCtx.has_session_announcements决定，与具体announcement是否已隐藏无关，以便hide后仍可发现show。run只读取split_whitespace后的首token且大小写敏感：hide与show分别产生AnnouncementsHide/AnnouncementsShow，后续token全部忽略；空值或其他首token返回固定usage错误。命令不要求session，不选择announcement ID，也不持久化隐藏集合。
+
+#### Scenario: Hide with trailing tokens
+- **WHEN** 参数为`hide extra`
+- **THEN** 只按首token产生AnnouncementsHide，不报告多余参数。
+
+#### Scenario: No announcements
+- **WHEN** AppCtx.has_session_announcements为false
+- **THEN** 命令不出现在建议列表，但直接run的解析行为不变。
+
+证据：`crates/codegen/pager/src/slash/commands/announcements.rs` — `AnnouncementsCommand::suggest_args / visible / run`。
+
+### Requirement: Pager copy slash ordinal and file path parsing
+
+CopyCommand SHALL 标记session_scoped并接受可选`[N] [file]`。parse_copy_args先trim：空值为n=1且无file；首token可解析usize时，0返回usage错误，正数作为ordinal，首个空白后的全部剩余trim文本作为单个PathBuf；首token解析失败时把完整trim参数作为file path并令n=1。因此负数、溢出数字和混合数字token不报ordinal错误，而成为路径。路径不展开`~`、不canonicalize、不拒绝绝对路径或空白；run不检查session，只把结果放入CopyAssistantMessage，clipboard失败fallback和实际写文件由下游负责。
+
+#### Scenario: Ordinal and spaced path
+- **WHEN** 参数为`2 ~/exports/my note.txt`
+- **THEN** 产生n=2及完整`~/exports/my note.txt` PathBuf。
+
+#### Scenario: Overflowing numeric token
+- **WHEN** 首token是超过usize范围的纯数字
+- **THEN** 解析失败后整段被视为latest消息的文件路径。
+
+证据：`crates/codegen/pager/src/slash/commands/copy.rs` — `CopyCommand::session_scoped / run / parse_copy_args`。
+
+### Requirement: Pager agent slash discovery rows and single token switch
+
+agent_scope_label SHALL 把built-in、builtin、system显示为system，保留user/project/bundled/workflow，未知scope回退user。AgentCommand标记session_scoped、接受可选agent；suggest_args忽略query并按ctx.agents原顺序输出全部行，current只以名称精确相等标记，display拼接current与scope，match_text拼接name/description/scope，insert_text为完整discovery name且不加空格，允许含`/`。run的trim结果为空时打开agent参数picker；非空按Unicode whitespace分token，只接受一个token并返回SwitchAgent，第二token即Unexpected argument。run不检查session、不验证名称存在于discovery、不改变Behavior；含空白的agent ID无法表达。
+
+#### Scenario: Nested discovery ID
+- **WHEN** 参数为software-engineering/software-architect
+- **THEN** 斜杠不分词，完整ID进入SwitchAgent。
+
+#### Scenario: Unknown scope
+- **WHEN** 建议项scope不是已知五类
+- **THEN** 展示标签回退user，原scope字符串不进入match_text。
+
+证据：`crates/codegen/pager/src/slash/commands/agent.rs` — `agent_scope_label / AgentCommand::suggest_args / run`。
+
+### Requirement: Pager docs slash aliases suggestions and guide routing
+
+DocsCommand SHALL 接受可选target并始终建议how-to、web，再按all_titles迭代顺序追加所有内置guide title；suggest_args忽略query。run trim参数：空值或大小写无关how-to/howto/guides/guide/list/tui返回OpenHowtoGuides；web/online/browser/site/www返回固定仓库README URL的OpenUrl；否则交find_doc按其标题规则查找，命中后复用ShowReleaseNotes Action并原样使用doc title/content，未命中返回含原trim target及示例的错误。命令不要求session；它不读取远程文档，也不验证browser或DocViewer展示。
+
+#### Scenario: How-to alias
+- **WHEN** 参数为大小写混合的Guides
+- **THEN** ASCII小写匹配后打开内置guide picker。
+
+#### Scenario: Known guide title
+- **WHEN** find_doc返回Getting Started文档
+- **THEN** 以该文档标题和正文构造ShowReleaseNotes Action。
+
+证据：`crates/codegen/pager/src/slash/commands/docs.rs` — `BUILD_DOCS_URL / DocsCommand::suggest_args / run / is_howto_list_arg / is_web_arg`。
+
+### Requirement: Pager export slash path completion and action boundary
+
+ExportCommand SHALL 标记session_scoped并接受可选filename；run要求session ID，trim后空值产生ExportConversation{file_path:None}，非空只构造原trim文本PathBuf，不在命令层展开`~`、创建父目录或强制.md扩展。路径建议仅在trim_start后非空时同步工作：先用shellexpand展开tilde以决定读取目录；末尾为/则列该目录，否则列parent或cwd，并用用户原始最后slash前缀构造insert_text。相对目录基于AppCtx.cwd；read_dir失败返回空，单项错误跳过，点开头名称跳过，文件名lossy UTF-8；entry.path().is_dir跟随symlink决定尾随/。最多按read_dir迭代先取1000项，再在该子集内目录优先、display字典序排序并截100，因此超大目录不是全局排序前100。建议为空时返回None；命令不写文件或clipboard。
+
+#### Scenario: Directory drill down
+- **WHEN** query以/结束且目标可读
+- **THEN** 列其非隐藏children，目录insert_text带/以保持参数dropdown继续打开。
+
+#### Scenario: Large directory cap
+- **WHEN** 目录超过1000个可读非隐藏entry
+- **THEN** 只收集迭代遇到的前1000项再排序截100，后续更靠前名称不会参与。
+
+证据：`crates/codegen/pager/src/slash/commands/export.rs` — `ExportCommand::suggest_args / run / list_path_completions`。
+
+### Requirement: Pager theme slash candidates and canonical commit action
+
+ThemeCommand SHALL 仅支持Fullscreen并提供SwitchMode remedy，参数可选且支持preview。suggest_args忽略query，始终先放auto，再按ThemeKind::available当前顺序放具体主题；候选display/match/insert均用display_name。auto mode开启时只给auto描述标active，关闭时只给与Theme::current_kind相等的具体主题标active。run先trim参数：空值按available中current位置循环到下一项，找不到current时以索引0为基准再取下一项，并返回该display_name的SetTheme；非空值通过ThemeKind::from_name解析auto、canonical或alias，成功统一为canonical display_name后返回SetTheme。显式选择truecolor-only主题不在命令层按terminal能力拒绝；未知值返回包含auto及ThemeKind::ALL名称的错误。命令不直接改cache、写盘或toast，实际提交由Action dispatcher负责；空参数也不打开picker且显式循环选择会退出auto语义。
+
+#### Scenario: Auto candidate active
+- **WHEN** auto mode开启且当前显示已解析为某个具体主题
+- **THEN** 只有auto候选标active，解析后的具体主题不标active。
+
+#### Scenario: Alias commit
+- **WHEN** 参数dark可解析为GrowNight别名
+- **THEN** 返回SetTheme(grownight)，不把原alias交给dispatcher。
+
+#### Scenario: Bare theme cycle
+- **WHEN** 参数为空且当前主题位于available列表
+- **THEN** 返回下一具体主题的SetTheme Action，不打开参数picker。
+
+源码证据：
+- `crates/codegen/pager/src/slash/commands/theme.rs` — `ThemeCommand::mode_support / suggest_args / run`。
+
+### Requirement: Pager theme slash transient preview and cancellation
+
+ThemeCommand SHALL 声明supports_preview=true，并以Theme::current_kind的display_name作为preview_state。preview_arg仅在ThemeKind::from_name成功时动作：auto先经theme_cache::resolve_auto解析系统外观对应的具体主题，其他名称直接取解析结果，再调用Theme::apply_kind；未知名称无操作。cancel_preview仅在previous可解析时直接apply_kind恢复，未知previous无操作。两条预览路径不发送SetTheme Action，因此自身不写current_ui、不持久化、不toast，也不改变auto mode flag；apply_kind对terminal能力或native lock的收紧仍由Theme实现负责。preview_state只保存当前具体kind名称而非auto flag，取消的职责是恢复可见主题，auto状态仍由既有cache保持。
+
+#### Scenario: Auto preview
+- **WHEN** 系统外观mock为Light且auto配置映射GrowDay
+- **THEN** preview_arg(auto)即时应用GrowDay，但不提交auto设置。
+
+#### Scenario: Unknown preview
+- **WHEN** preview或cancel收到不可解析主题名
+- **THEN** 当前可见ThemeKind保持不变。
+
+源码证据：
+- `crates/codegen/pager/src/slash/commands/theme.rs` — `ThemeCommand::supports_preview / preview_state / preview_arg / cancel_preview`。
+
+### Requirement: Pager builtin slash catalog order names and visibility integration
+
+builtin_commands SHALL 是pager本地内建slash目录的单一构造入口，按函数中固定展示顺序返回71个Arc命令对象；同一目录同时注册两个screen-mode构造项、两个behavior shortcut以及hooks/plugins/marketplace/skills等独立对象。所有生产builtin的aliases均为空且kind不得回退到外部Extension类别；历史短名与旧别名保持未注册。隐藏gboom、scroll-debug及release中不可见的debug仍在目录注册，因此精确名称可由registry解析，visible只控制列表展示。工具需求和服务能力由CommandRegistry在目录之后收紧：loop缺scheduler_create时get为None、有该工具时可取；recap缺sessionRecap advertisement时fail-closed，显式启用后可取。每个canonical name及未来alias必须同时出现在测试维护的Shell reserved集合，防止Shell与pager对同一slash名称产生不同所有权；该集合测试只证明名称保留，不证明Shell执行语义。
+
+#### Scenario: Hidden command exact lookup
+- **WHEN** 构造生产CommandRegistry并按gboom或debug精确查询
+- **THEN** 命令存在且可执行，即使它不出现在普通dropdown。
+
+#### Scenario: Scheduler tool absent
+- **WHEN** registry收到不含scheduler_create的available tools
+- **THEN** loop查询返回None，其他无该需求的builtin仍可取。
+
+#### Scenario: Removed alias
+- **WHEN** 查询cost、summarize、prefs或其他测试列出的历史名称
+- **THEN** registry保持未知，不映射到现有canonical命令。
+
+源码证据：
+- `crates/codegen/pager/src/slash/commands/mod.rs` — `builtin_commands / shell_collision_contract_covers_every_pager_command / removed_aliases_are_not_registered / production_builtin_catalog_registers_no_aliases / every_builtin_declares_a_user_facing_purpose / loop_command_hidden_when_scheduler_tools_absent / recap_hidden_by_default_in_registry_until_revealed`。
+
+### Requirement: Pager slash registry layered lookup restrictions and tool gates
+
+CommandRegistry SHALL 以原样String key精确且区分大小写解析canonical或alias；new默认hard-hide agents、recap、auto，并menu-hide share。get先应用get_for_dispatch的hard-hidden、tier restricted及required-tools过滤，再过滤menu_hidden；get_for_dispatch仅绕过menu_hidden，因此完整输入的share仍可到pager handler，而关闭feature的auto、agents、缺工具命令和restricted命令都不可执行。set_dashboard_visible实际控制agents，set_plugins_visible只共同控制hooks/plugins，recap和auto各自有独立hard gate；set_share_visible只改变menu gate并先清除同名hard hide。tier deny entry先trim、移除开头slash并Unicode lowercase，丢弃空值；限制可命中canonical或alias，执行查询返回None但trigger保留以显示upsell，is_restricted再规范化输入并扫描完整commands，因此即使工具gate使key map缺项仍能识别受限命令。restricted_commands排序返回，deny在可见性重新开启和ACP重同步后仍生效。无required_tools的命令不受工具集影响；有需求的命令在工具集未知时fail-closed，已知时要求每一项都存在。set_available_tools只能置为Some并替换集合；set_acp_state的tools=None保留旧集合，Some替换，当前没有恢复unknown状态的入口。
+
+#### Scenario: Menu hidden typed dispatch
+- **WHEN** share处于默认menu_hidden且没有其他hard gate
+- **THEN** get与triggers不提供share，但get_for_dispatch仍返回命令。
+
+#### Scenario: Auto feature off
+- **WHEN** auto mode capability尚未开启或再次关闭
+- **THEN** get和get_for_dispatch都返回None，完整输入不能绕过hard gate。
+
+#### Scenario: Restricted tool gated command
+- **WHEN** 命令既在tier deny list又因工具握手未知而没有key map项
+- **THEN** get_for_dispatch为None且is_restricted仍从完整目录识别它。
+
+源码证据：
+- `crates/codegen/pager/src/slash/registry.rs` — `CommandRegistry::new / get / get_for_dispatch / set_restricted_commands / is_restricted / tools_satisfied / set_available_tools / set_acp_state / visibility setters`。
+
+### Requirement: Pager slash command metadata defaults classification and completeness bits
+
+SlashCommand SHALL 要求实现name、description、usage和同步run，其余元数据默认：aliases空、kind按name经内建分类表推导、source=BuiltIn、takes_args=false、takes_args_now跟随takes_args、args_required=false、suggest_args=None、visible=true、session_scoped=false、offered_when_session_less=false、dashboard_only=false、mode_support=Both、arg_placeholder=None、is_skill=false、required_tools空、supports_preview=false、preview_state=None且preview/cancel无操作。未知name的默认kind为Extension；CommandKind六类标签固定SESSION/CONTROL/RUN/VIEW/SETTINGS/EXTENSION，CommandSource四类标签固定BUILT-IN/SKILL/WORKFLOW/EXTENSION。动态takes_args_now只影响补全插入、args-phase快照与建议；Enter完整性仍由静态takes_args/args_required二元组决定。session_scoped默认在无session surface抑制，只有显式offered_when_session_less可例外；dashboard_only表达只在dashboard dispatch输入提供；mode_support声明同时约束补全和中央dispatch，命令run无需重复这些surface gate。
+
+#### Scenario: Unknown default category
+- **WHEN** 新SlashCommand未覆写kind且名称不在内建分类表
+- **THEN** 其kind为Extension而source默认仍为BuiltIn，目录测试应阻止生产builtin落入此状态。
+
+#### Scenario: Dynamic arguments
+- **WHEN** takes_args_now随AppCtx变为false但静态takes_args=true且args_required=true
+- **THEN** 补全可不进入动态参数阶段，Enter完整性仍按静态必填参数阻止空提交。
+
+源码证据：
+- `crates/codegen/pager/src/slash/command.rs` — `CommandKind / CommandSource / SlashCommand`。
+
+### Requirement: Pager slash suggestion and execution context ownership
+
+AppCtx SHALL 只读提供model目录、agent候选/current agent、behavior与goal状态、auto permission可用性/current permission、当前cwd、session announcement、workflow可用性及effective screen mode，供visible与suggest_args使用。CommandExecCtx SHALL 为同步run提供只读models、可选session ID、bundle state、screen mode及命令构建时的PagerLocalSnapshot；命令需要异步ACP或持久化时必须返回CommandResult交dispatch处理，而不是在trait中await。pager_state只是快照，真实mutation仍由dispatcher拥有，因此基于快照计算toggle不提供并发原子性。AgentArg只承载已由UI discovery解析的name、description、scope，slash层不负责扫描；ArgItem把display、match_text、insert_text、description四种候选语义分开。
+
+#### Scenario: Sessionless execution context
+- **WHEN** CommandExecCtx.session_id为None且命令run需要当前session
+- **THEN** 命令可自行返回错误；trait上下文本身不伪造session ID。
+
+#### Scenario: Asynchronous side effect
+- **WHEN** 同步slash命令需要切换模型或写配置
+- **THEN** 返回Action供dispatch effect pipeline消费，run接口本身不异步等待。
+
+源码证据：
+- `crates/codegen/pager/src/slash/command.rs` — `ArgItem / AgentArg / AppCtx / CommandExecCtx / SlashCommand::run`。
+
+### Requirement: Pager slash command result and host invocation vocabulary
+
+CommandResult SHALL 区分无输出Handled、声明为no-op的HandledNoOp、Doctor请求、本地Error/Message、pager Action、原始QueueCommand、结构化InjectSkill及ACP HostCommand。InjectSkill同时携带用户可见display_text、发送给模型的ContentBlock序列、是否按skill样式显示及可选ScheduledTaskPreview；preview含prompt、human_schedule、可选next_fire_at和tag，只提供即时tasks pane占位，不代表scheduler已创建权威任务。HostCommandRequest::new保留command与description，并为每次构造生成`host-command-<UUID v4>` invocation_id；该类型不在此决定running turn走out-of-band还是idle inference路径。DoctorRequest仅表达Report、ListFixes或带DiagnosticId的Fix。枚举值只表达后续路由意图，本文件不证明Action、队列、host调用或诊断已经成功执行。
+
+#### Scenario: Provisional loop result
+- **WHEN** 内建命令构造InjectSkill且附ScheduledTaskPreview
+- **THEN** UI可立即展示占位，随后仍需真实ScheduledTaskCreated通知替换。
+
+#### Scenario: Distinct host invocations
+- **WHEN** 以相同command和description两次调用HostCommandRequest::new
+- **THEN** 两次请求各生成带host-command前缀的新UUID invocation_id。
+
+源码证据：
+- `crates/codegen/pager/src/slash/command.rs` — `ScheduledTaskPreview / DoctorRequest / HostCommandRequest::new / CommandResult`。
+
+### Requirement: Pager slash controller context defaults and MRU recording
+
+SlashController::new SHALL 接受registry与cwd，创建隔离且不持久化的in-memory MRU；with_mru可注入共享store。controller默认不隐藏session命令、无announcement/workflow/agent/current goal、Normal behavior、auto permission不可用、current permission为ask、screen mode为Fullscreen且command tag map为空。各setter只更新对应controller镜像；set_auto_mode_available同时更新AppCtx布尔值和registry hard gate。app_ctx按当前镜像借用models、agents、cwd及其他选择状态。record_command_use先trim command_name并移除所有开头`/`，空key无操作；用get_for_dispatch把已知alias或menu-hidden key规范化为canonical，未知key原样记录，再touch MRU并取得待持久化快照。快照存在时异步提交；若writer不可用且同步fallback也失败，重新mark_dirty供下次记录重试。prefix传入MRU touch，但canonical化不依赖typed prefix。with_builtins只组合生产builtin registry与上述默认值。
+
+#### Scenario: Menu hidden alias usage
+- **WHEN** record_command_use收到可dispatch但不在menu显示的alias
+- **THEN** MRU记录其canonical command name，而不是alias或带slash文本。
+
+#### Scenario: Persistence dispatch unavailable
+- **WHEN** MRU产生snapshot但persist_async返回false
+- **THEN** store重新标记dirty，后续record可重试。
+
+源码证据：
+- `crates/codegen/pager/src/slash/mod.rs` — `SlashController::new / with_mru / setters / app_ctx / record_command_use / with_builtins`。
+
+### Requirement: Pager slash command suggestion ranking tags and selection ghost
+
+command_suggestions SHALL 先以registry triggers对应命令的command_offered结果建立可见子集。trim query为空时按trigger顺序每个command_index只生成一行，不限制数量、不使用MRU；row是否追加参数空格取takes_args_now，tag只按canonical名称从共享map复制，最终稳定地把有tag行移到无tag行之前并保持组内registry顺序。非空query包含任意`/`时返回空；否则对可见canonical/alias triggers做fuzzy rank，每个command保留最高score，score相同优先与trim query精确相等的trigger，再优先canonical。最终依次按fuzzy score降序、MRU recency降序、Builtin优先于ACP、display字典序排序；tag不改变该分支排序。command row保留kind/source/tag，arg row三者为空；command insert按动态takes_args_now追加一个空格。move_selection循环首尾，scroll_selection在边缘clamp；refresh只在同command query或同args range上下文中携带选择，优先按insert_text找回旧行，否则收紧旧index。inline ghost只能补全当前selected row且要求Smart prefix：全小写query按ASCII不区分大小写，有任意大写则精确区分大小写；已识别完整command、非prefix fuzzy命中或空suffix均无ghost，移动选择后同步更新。
+
+#### Scenario: Bare menu tags
+- **WHEN** registry顺序alpha、bravo、charlie、delta且bravo和delta有tag
+- **THEN** 空query顺序为bravo、delta、alpha、charlie。
+
+#### Scenario: Fuzzy tie
+- **WHEN** 两个候选fuzzy score相同但一个MRU时间更新
+- **THEN** 较新canonical排在前，ghost与该selected/Tab目标一致。
+
+#### Scenario: Mouse and keyboard edges
+- **WHEN** selection位于首尾并分别执行键盘move与滚轮scroll
+- **THEN** 键盘环绕，滚轮停在边缘。
+
+源码证据：
+- `crates/codegen/pager/src/slash/mod.rs` — `SuggestionRow / command_prefix_matches_smart / inline_ghost_from_selected_command / sync_inline_ghost_to_selection / SlashController::command_suggestions / carry_selection / move_selection / scroll_selection`。
+
+### Requirement: Pager slash surface mode and command visibility offering
+
+command_offered SHALL 同时要求command.mode_support支持AppCtx.screen_mode、command.visible(ctx)=true，并执行surface关系：hide_session_scoped=true时抑制session_scoped但未offered_when_session_less的命令；dashboard_only命令仅在hide_session_scoped=true时提供。默认agent surface保留session-scoped但隐藏dashboard_only；dashboard保留pager-global与显式sessionless opt-in。FullscreenOnly在Fullscreen与Inline提供而在Minimal隐藏，MinimalOnly相反。该函数用于completion、recognition并要求dashboard typed execution在run前复查；registry get_for_dispatch故意不应用mode_support，使完整输入仍到中央mode refusal而非作为原始prompt泄漏。registry的hard/menu/tier/tool gate先于或独立于此函数：command_offered不能复活registry未返回的命令。refresh在cursor位于leading command token时即使后面已有args仍打开command menu；cursor越过token才转args建议。command recognized只在parse成功、dispatch-tier lookup成功并通过offering时设置，同时仅当完整args文本为空才显示placeholder。
+
+#### Scenario: Dashboard opt in
+- **WHEN** dashboard无current session且命令session_scoped但offered_when_session_less=true
+- **THEN** 在其他visible/mode gate满足时仍提供并识别。
+
+#### Scenario: Mode typed refusal path
+- **WHEN** Minimal模式完整输入FullscreenOnly的/theme
+- **THEN** completion不提供，但registry dispatch lookup仍解析，以便中央gate给出remedy。
+
+#### Scenario: Dashboard only command
+- **WHEN** 查询/cd
+- **THEN** 只在hide_session_scoped dashboard surface提供，在agent view隐藏。
+
+源码证据：
+- `crates/codegen/pager/src/slash/mod.rs` — `command_offered / SlashController::is_command_offered / refresh / arg_suggestions_for_input`。
+
+### Requirement: Pager slash fuzzy matcher ranking limits and highlight state
+
+FuzzyMatcher SHALL 以单column Nucleo MultiPattern和默认Matcher config在单线程controller内复用状态。rank在limit=0或items空时返回空；query先trim，空query按输入顺序返回前min(items.len,limit)项且score=0，不读取空key。非空query以CaseMatching::Smart、Normalization::Smart且append=false重解析pattern，跳过key为空项，对其余Utf32String评分；结果按score降序、key String字典序升序稳定排序后截limit，返回原items index与u32 score。indices不重解析query，使用最近一次pattern对给定text产生Unicode字符位置，空text为空；因此调用方必须保证最近pattern对应当前rank。indices_for独立trim query，query或text空返回None；否则重解析同一Smart pattern，只有score成功才返回相对display的字符indices，同时改变后续indices所用pattern。该matcher只提供基础score/tie与indices，MRU、source和tag二级排序归SlashController。
+
+#### Scenario: Empty query cap
+- **WHEN** items为alpha、beta、gamma且limit为2
+- **THEN** 返回index 0和1、score均为0，不按字典序重排。
+
+#### Scenario: Display relative indices
+- **WHEN** indices_for以query sw匹配ssh-wrap
+- **THEN** 返回字符位置0和4。
+
+#### Scenario: Equal fuzzy score
+- **WHEN** prompts与pager-headless对单字母p得到相同score
+- **THEN** matcher自身以key升序打破平局；controller可再按MRU重排。
+
+源码证据：
+- `crates/codegen/pager/src/slash/matcher.rs` — `FuzzyMatcher::new / rank / indices / indices_for`。
+
+### Requirement: Pager slash mode support matrix and actionable refusals
+
+ModeSupport SHALL 提供Both、FullscreenOnly(Remedy)与MinimalOnly(Remedy)。supports对Both始终true；FullscreenOnly在Fullscreen和Inline为true、Minimal为false；MinimalOnly仅Minimal为true。refusal在支持时返回None；不支持时以当前mode命名，并按Remedy生成：SwitchMode追加why括号说明与`Run /fullscreen|/minimal to switch this session`，UseInstead只给替代操作且不附relaunch，AlreadyInMode只返回`You're already in <mode> mode.`。token原样放在前导slash后。生产目录的非Both命令集合与完整文案由外置测试锁定：agents/find/jump/theme/timeline/tutorial/workflow-run/workflows为FullscreenOnly，edit-prompt/expand/fullscreen为MinimalOnly，minimal为FullscreenOnly；其中expand用UseInstead，minimal/fullscreen用AlreadyInMode，其余使用各自SwitchMode说明。测试只验证纯支持矩阵与字符串，不执行进程relaunch、按键替代或UI surface。
+
+#### Scenario: Inline full TUI
+- **WHEN** FullscreenOnly命令在ScreenMode::Inline查询supports/refusal
+- **THEN** 视为支持且不生成refusal。
+
+#### Scenario: Use instead
+- **WHEN** MinimalOnly expand在Fullscreen且remedy指定Tab与右箭头
+- **THEN** 拒绝文案给出替代操作，不建议/minimal。
+
+#### Scenario: Already target mode
+- **WHEN** 在Minimal输入minimal切换命令
+- **THEN** 返回已经处于minimal的简短陈述。
+
+源码证据：
+- `crates/codegen/pager/src/slash/mode_support.rs` — `Remedy / ModeSupport::supports / ModeSupport::refusal`。
+- `crates/codegen/pager/src/slash/mode_support_tests.rs` — `inline_counts_as_fullscreen / mode_specific_builtin_refusals_are_pinned`（测试源码已读，本轮未运行）。
+
+### Requirement: Pager slash MRU loading normalization decay and capacity
+
+SlashMru SHALL 以大小写敏感的canonical command到last_used Unix秒数的扁平HashMap排名，typed prefix不参与存储或查询。normalize先trim并移除所有开头slash，空名称忽略；now在system time早于epoch时回退0。默认store为loaded=false、dirty=false、persist_enabled=true，路径固定`grow_home()/slash-mru.json`；in-memory store预置loaded=true且禁止持久化。首次访问时NotFound只标loaded并保留持久化；其他read错误标loaded且关闭本session持久化以避免覆盖不可读文件；合法JSON要求仅含by_command，载入后按timestamp降序裁至256项；JSON解析失败忽略内容但仍允许后续touch持久化新表。touch写当前秒、裁容并仅在持久化启用时dirty；last_used缺项/非法名称为0。rank_score对0返回0，否则以saturating age计算`last_used * max(0.5^(age/7days),0.1)`并截为u64；未来timestamp的age为0。该模型只记最后一次使用，不累计次数；衰减factor不会低于0.1，但最终u64转换仍可把极小的合成timestamp截为0。
+
+#### Scenario: Unreadable store
+- **WHEN** slash-mru.json读取发生非NotFound IO错误
+- **THEN** 本session使用空或既有内存表并关闭持久化，不在每次rank重试读取。
+
+#### Scenario: Corrupt JSON
+- **WHEN** 文件可读但不符合deny-unknown MruFile
+- **THEN** 忽略文件并标loaded，后续有效touch仍可生成新持久化snapshot。
+
+#### Scenario: Capacity trimming
+- **WHEN** map超过256项
+- **THEN** 只保留timestamp最大的256项；相同timestamp的保留顺序不构成契约。
+
+源码证据：
+- `crates/codegen/pager/src/slash/mru.rs` — `MruFile / SlashMru::default / new_in_memory / normalize_command / ensure_loaded / trim_to_cap / touch / last_used / rank_score / recency_score`。
+
+### Requirement: Pager slash MRU dirty snapshot and serialized atomic persistence
+
+take_persist_snapshot SHALL 仅在persist_enabled且dirty时clone完整by_command表、序列化canonical MruFile并生成拥有path/bytes的Send snapshot；序列化失败保持dirty，成功后立即清dirty而不等待IO。mark_dirty只在持久化开启时重新置位。MruSnapshot::write best-effort创建父目录，在固定同目录`slash-mru.json.tmp`创建并写全量bytes、sync_all文件后rename到目标；任一步失败记录debug并尝试删除temp，成功返回true。persist_async通过process内OnceLock创建唯一名为slash-mru-writer的长期mpsc worker，worker串行recv并写但忽略write返回值；成功send即返回true，不代表磁盘写成功。thread spawn失败或channel断开时对当前snapshot同步best-effort write并返回其结果；调用方收到false才可mark dirty。每个snapshot是完整map，下一次touch可覆盖先前异步失败；该机制不合并其他进程的map，也不提供跨进程锁。
+
+#### Scenario: One dirty snapshot
+- **WHEN** touch后连续两次take_persist_snapshot
+- **THEN** 第一次返回snapshot并清dirty，第二次返回None。
+
+#### Scenario: Writer channel closed
+- **WHEN** 发送snapshot时后台receiver已退出
+- **THEN** 从SendError取回snapshot并同步写，不静默丢弃当前更新。
+
+#### Scenario: Asynchronous disk failure
+- **WHEN** snapshot成功入队但worker写盘失败
+- **THEN** persist_async仍已返回true；只有未来touch产生的新全量snapshot会再次尝试。
+
+源码证据：
+- `crates/codegen/pager/src/slash/mru.rs` — `SlashMru::take_persist_snapshot / mark_dirty / MruSnapshot::write / persist_async`。
+
+### Requirement: Pager mouse scroll terminal profile and settings projection
+ScrollConfig::from_settings SHALL combine detected terminal brand/multiplexer with scroll caches. Auto leaves classification open; wheel/trackpad force it, invert_scroll flips direction, scroll_lines overrides both line rates, and speed 1/50/100 maps to 0.1/1/6x. Native profiles select terminal rates; tmux/screen/zellij/herdr replace the outer profile with ept=1/wheel_lpt=1, while cmux/undetected preserve it. Explicit overrides win and positive numeric values clamp to at least one. Viewport height sets flush_cap=max(6, rows/2).
+
+#### Scenario: Remultiplexed terminal
+- **WHEN** VS Code is under tmux without numeric overrides
+- **THEN** the conservative multiplexer profile replaces the VS Code profile.
+
+#### Scenario: Shared line override
+- **WHEN** scroll_lines is 4
+- **THEN** both wheel and trackpad lines-per-tick become 4.
+
+#### Scenario: Viewport cap
+- **WHEN** viewport height is 60
+- **THEN** the per-flush cap is 30 lines.
+
+源码证据：`crates/codegen/pager/src/input/mouse.rs`；`crates/codegen/pager/src/input/mouse/tests.rs`。
+
+### Requirement: Pager mouse scroll stream classification and boundary handling
+MouseScrollState SHALL group same-direction events until a gap strictly greater than 80ms or a direction flip. Forced mode fixes kind; Auto ept>=2 promotes to Wheel when the first tick completes within its threshold, while ept=1 promotes to Trackpad after more than two events with an eligible average below the terminal threshold. Remaining Unknown finalizes as a short ept=1 Wheel or Trackpad otherwise. Sub-6ms intervals count as movement but not acceleration/detection evidence. Direction reversal discards prior backlog; cancel_stream drops stream and carry. Only ScrollUp/ScrollDown mouse kinds map to a direction, with inversion applied before handling.
+
+#### Scenario: Prompt wheel
+- **WHEN** three ept=3 events arrive within 12ms
+- **THEN** the stream promotes to Wheel and flushes promptly.
+
+#### Scenario: Direction reversal
+- **WHEN** Down follows an active Up stream
+- **THEN** old Up backlog is discarded before the Down stream starts.
+
+#### Scenario: Duplicate reports
+- **WHEN** two reports are under 6ms apart
+- **THEN** both add demand but the interval does not enter the rolling window.
+
+源码证据：`crates/codegen/pager/src/input/mouse.rs`；`crates/codegen/pager/src/input/mouse/tests.rs`。
+
+### Requirement: Pager mouse scroll demand pricing cadence and cap
+Confirmed Trackpad demand SHALL use a normalized three-event divisor and per-event acceleration weights, add carry after speed/acceleration, and permanently clamp accelerated demand to max(raw pricing, applied+flush_cap). Other kinds use terminal ept without acceleration; wheel-like nonzero gestures deliver at least one line. Eligible rolling intervals select 1.0x through 2.5x, capped by trackpad_accel_max. Every kind shares flush_cap; event-bearing excess stays backlog. Only nonzero delivery advances last_redraw_at. The scroll deadline chooses cadence or the strict 80ms gap only when work is flushable and disarms without a stream.
+
+#### Scenario: Mid-cadence stop
+- **WHEN** events stop with lines pending
+- **THEN** the scroll clock flushes within one cadence.
+
+#### Scenario: Wheel flood
+- **WHEN** one slot accumulates more than flush_cap
+- **THEN** each flush is capped and excess drains later.
+
+#### Scenario: Deceleration
+- **WHEN** fast events are followed by slow events
+- **THEN** prior demand does not shrink and deadlines do not busy-spin.
+
+源码证据：`crates/codegen/pager/src/input/mouse.rs`；`crates/codegen/pager/src/input/mouse/tests.rs`。
+
+### Requirement: Pager mouse scroll coast finalize and carry accounting
+After input stops, finalization SHALL wait while flushable backlog remains. Coast flushes deliver min(pending, max(lines_per_tick,pending/2), remaining one-cap budget), spending the budget and producing bounded decay. Final classification may reduce but never increase pre-finalize demand. Non-wheel finalization carries only a fractional final-line remainder to the same direction; Wheel carries zero and integer backlog is never carried. Carry is added after multipliers and reversal cancels stale backlog.
+
+#### Scenario: Unknown glide finalize
+- **WHEN** Auto changes Unknown to Trackpad at finalize
+- **THEN** classification does not mint a rear-end burst.
+
+#### Scenario: Coast budget
+- **WHEN** backlog exceeds one cap after input
+- **THEN** post-input delivery is at most one cap and remaining whole lines are dropped.
+
+#### Scenario: Fractional regrasp
+- **WHEN** a Trackpad stream leaves a fraction
+- **THEN** the next same-direction stream receives under one final-line unit without rescaling.
+
+源码证据：`crates/codegen/pager/src/input/mouse.rs`；`crates/codegen/pager/src/input/mouse/tests.rs`。
+### Requirement: Pager leader roster changed upsert and removal projection
+
+A `grow/sessions/changed` notification SHALL parse RosterChanged or warn and return false. Every upserted entry is passed to app.upsert_roster_entry in payload order, followed by every removed session id passed to app.remove_roster_entry. The handler returns true when either list contained at least one item, even if an upsert or removal was idempotent, and false for a valid empty change. It does not resolve conflicts between an id present in both lists beyond applying removal after upsert.
+
+#### Scenario: Upserts
+- **WHEN** the payload contains entries
+- **THEN** each is applied in order and affected becomes true.
+
+#### Scenario: Removals
+- **WHEN** the payload contains ids
+- **THEN** each is removed after all upserts and affected becomes true.
+
+#### Scenario: Same id
+- **WHEN** an id is upserted and removed in one payload
+- **THEN** the removal is applied last.
+
+#### Scenario: Empty
+- **WHEN** both lists are empty
+- **THEN** false is returned.
+
+#### Scenario: Malformed
+- **WHEN** RosterChanged parsing fails
+- **THEN** a warning is logged and false returned.
+
+证据：`crates/codegen/pager/src/app/acp_handler/settings.rs` — `handle_sessions_changed`。
+
+### Requirement: Pager announcement update filtering hidden-id pruning and slash gate
+
+A valid announcements update SHALL filter expired announcements, replace active_announcements, project the first remaining announcement as current, prune hidden ids against the active set, enqueue PersistAnnouncementsHidden with the cloned survivors only when pruning changed them, synchronize the session announcement slash gate, and return true. Parse failure returns false without logging in this function. A valid identical or empty update still returns true and runs slash synchronization.
+
+#### Scenario: Filter
+- **WHEN** the payload parses
+- **THEN** expired items are removed and the first active item becomes current.
+
+#### Scenario: Hidden prune
+- **WHEN** stored hidden ids no longer correspond to active announcements
+- **THEN** they are pruned and one persistence effect is queued.
+
+#### Scenario: No prune
+- **WHEN** hidden ids remain unchanged
+- **THEN** no persistence effect is added.
+
+#### Scenario: Empty active
+- **WHEN** all announcements expire or input is empty
+- **THEN** current announcement becomes absent and slash gate is synchronized.
+
+#### Scenario: Malformed
+- **WHEN** typed parsing fails
+- **THEN** false is returned.
+
+证据：`crates/codegen/pager/src/app/acp_handler/settings.rs` — `handle_announcements_update`。
+### Requirement: Pager typed UI notice projection live progress and coordination merge
+
+UiNotice projection SHALL map shell tone/category into typed or event-id terminal notices with ordered metadata. Fresh Progress becomes live feedback; replay/loading/already-terminal progress is ignored. Command terminal clears matching feedback and pending memory browse. Outgoing inquiry notices are hidden; structured incoming inquiry notices upsert passive coordination rows, while missing audit identity preserves a raw notice.
+
+#### Scenario: Progress
+- **WHEN** a fresh progress notice has no command result
+- **THEN** live feedback is set instead of a retained row.
+
+#### Scenario: Coordination
+- **WHEN** a structured incoming inquiry notice arrives
+- **THEN** one identity-based coordination row is upserted.
+
+#### Scenario: Opaque audit
+- **WHEN** incoming inquiry identity cannot be parsed
+- **THEN** the raw notice fact is retained.
+
+证据：`crates/codegen/pager/src/app/acp_handler/session_notification.rs` — `ui_notice_block`、`apply_ui_notice`。
+### Requirement: Pager image compression fallback visibility
+
+ImageCompressed with an empty images list SHALL warn, retain the message and return true; nonempty images logs successful compression and remains invisible. Individual entries and replay state are not inspected.
+
+#### Scenario: Fallback
+- **WHEN** images is empty
+- **THEN** a persistent warning notice is appended.
+
+#### Scenario: Success
+- **WHEN** images is nonempty
+- **THEN** only info logging occurs.
+
+证据：`crates/codegen/pager/src/app/acp_handler/session_notification.rs` — `apply_image_compressed`。
+
+### Requirement: Pager scrollback viewport painting and visible search highlighting
+
+Pager scrollback renderer SHALL use precomputed EntryLayoutInfo and usize virtual coordinates to paint only entries intersecting the viewport, preserving logical entry indices through content_y0 and entry_index_base. It SHALL compute slice-end total_height including gaps, report selected geometry and clipping, optionally dim rendered cells from a logical entry onward, and invert regex matches only on the glyph columns of each currently rendered wrapped row. Empty entries or zero-sized viewports return an empty result. ScratchBuffer preparation resizes and resets prior cells before reuse. This file does not prove layout-cache construction, paint-window caller scheduling, regex search indexing/navigation, terminal frame submission, or runtime performance.
+
+#### Scenario: Viewport intersection
+- **WHEN** a full list or a caller-supplied paint window intersects the same viewport
+- **THEN** visible buffer cells, logical indices, selection geometry and clipping agree while virtual height uses usize coordinates.
+
+#### Scenario: Search paint
+- **WHEN** a regex matches one or more visible rendered rows
+- **THEN** exactly the matching display cells on each row are reversed; missing regexes and nonmatches paint no reversed cells.
+
+#### Scenario: Selection rectangle
+- **WHEN** the selected entry is wholly or partly visible
+- **THEN** selected_area reports its row-layout selection area and the independent top/bottom clipping flags.
+
+#### Scenario: Reuse and empty boundary
+- **WHEN** scratch storage is prepared or rendering receives no drawable area
+- **THEN** stale buffer cells are reset, while empty entries or zero width/height yield the default result.
+
+证据：`crates/codegen/pager/src/scrollback/render.rs`。
+
+### Requirement: Pager scrollback folded-run labels and synthetic header selection
+
+Scrollback painting SHALL rebuild verb-run and truncation-fold labels from the current GroupSpan on every frame when spans and the grouping vocabulary are available. A collapsed truncation label describes its hidden prefix, an expanded truncation label describes the whole run, and verb labels remain bounded to their run including eligible hidden thinking and subagent-start members; absent spans or a disabled group-tool-verbs setting retain the plain count fallback. A labeled header SHALL expose one synthetic selectable line under the reserved GROUP_HEADER_RANGE_ID with its hit geometry shifted past diamond chrome, while a plain-count header exposes none. Expanded verb slots SHALL map member zero one row below the independently selectable header. Synthetic headers SHALL not leak hidden content into links, highlights, selectable lines, or media placements. This file does not prove how grouping spans are formed, persisted, toggled, or invalidated.
+
+#### Scenario: Current run label
+- **WHEN** a folded verb run or truncation span is painted
+- **THEN** the label reflects the bounded current run, its hidden or whole-run scope, and failure/count vocabulary.
+
+#### Scenario: Fallback label
+- **WHEN** truncation spans are absent or grouped tool vocabulary is disabled
+- **THEN** the renderer keeps the legacy plain count and does not manufacture a selectable label.
+
+#### Scenario: Header copy geometry
+- **WHEN** an aggregated label is visible
+- **THEN** one reserved-range selectable row starts after header chrome and reconstructs exactly the displayed label.
+
+#### Scenario: Expanded verb slot
+- **WHEN** a verb group is expanded
+- **THEN** the header and first member occupy separate screen rows and selection ranges.
+
+#### Scenario: Hidden-content isolation
+- **WHEN** an entry slot is replaced by a synthetic header
+- **THEN** hidden body links, search matches, selectable lines and media placements do not project onto that header or following rows.
+
+证据：`crates/codegen/pager/src/scrollback/render.rs`。
+
+### Requirement: Pager scrollback resolved text-selection geometry and cached boundaries
+
+For every visible non-synthetic selectable BlockLine, scrollback rendering SHALL register logical entry/range/block-line identity, screen position, selectable display columns, derived text and soft-wrap joiner in ResolvedSelectionModel. Top and bottom clipping SHALL admit only visible content rows and exclude vertical padding. Message-style UserPrompt, AgentMessage and Btw blocks SHALL reserve ten columns for timestamps in both cache derivation and VisibleBlockGeometry.content_width. Cached block-specific selection boundaries SHALL be attached only when supplied by the rendered output, remain aligned after clipped prefix rows, and ordinary text without such sidecars SHALL still be selectable without a fabricated boundary. This file does not prove pointer gesture interpretation, multi-range reconstruction outside the exercised helpers, clipboard delivery, or timestamp painting itself.
+
+#### Scenario: Visible lines
+- **WHEN** wrapped selectable content is wholly or partially visible
+- **THEN** only visible content rows enter the resolved model in increasing screen order with stable logical identity.
+
+#### Scenario: Padding exclusion
+- **WHEN** a block reserves vertical padding
+- **THEN** padding rows do not become selectable content lines.
+
+#### Scenario: Timestamp width parity
+- **WHEN** a message-style block is cached and mapped
+- **THEN** selection geometry records the same content width used to wrap output after the ten-column timestamp reservation.
+
+#### Scenario: Boundary sidecar
+- **WHEN** cached structured boundaries accompany a clipped visible line
+- **THEN** the boundary is keyed to the resolved hit and retains source indentation; ordinary selectable output has no synthetic sidecar.
+
+证据：`crates/codegen/pager/src/scrollback/render.rs`。
+
+### Requirement: Pager scrollback source-aware Markdown hyperlink projection
+
+Markdown hyperlink overlay construction SHALL resolve authoritative targets before clipping and project them through BlockLine link_source coordinates onto only surviving visible source fragments. Wrapped fragments SHALL retain one complete target and hyperlink id while screen rows and columns reflect display width, repeated quote/list chrome is excluded, viewport row/column clipping is enforced, and incomplete paint uses Opaque presentation. Explicit local links may preserve a declared missing target; inferred local paths require the conservative resolver, while known transcript media and cwd-relative project links resolve to complete file targets. Synthetic rows and collapsed or truncated-away content SHALL contribute no source fragments, and explicit targets SHALL suppress overlapping generic rescans rather than duplicate links. Source coordinates remain usize until viewport projection, so long logical lines are not truncated to u16. This file does not prove markdown parsing correctness, filesystem contents after rendering, OSC 8 emission, opener success, or terminal link support.
+
+#### Scenario: Wrapped source projection
+- **WHEN** one Markdown target spans wrapped visible fragments
+- **THEN** each visible fragment maps to its display cells with the same complete target and id, including CJK and quote/list chrome.
+
+#### Scenario: Viewport clipping
+- **WHEN** source rows or columns fall partly or wholly outside the viewport
+- **THEN** only nonempty visible intersections become overlay links and partial paint is opaque.
+
+#### Scenario: Local target provenance
+- **WHEN** Markdown names explicit, inferred, media, absolute or cwd-relative local paths
+- **THEN** explicit/known paths keep their complete file target while missing inferred paths are not promoted.
+
+#### Scenario: Synthetic and hidden rows
+- **WHEN** display output inserts headers, truncates input or collapses a body
+- **THEN** only source-bearing visible rows project links and hidden text cannot leak into chrome.
+
+#### Scenario: No double scan
+- **WHEN** an authoritative Markdown link overlaps text recognizable by the generic scanner
+- **THEN** one semantic link group owns those cells rather than a duplicate generic link.
+
+证据：`crates/codegen/pager/src/scrollback/render.rs`。
+
+### Requirement: Pager scrollback generic content and tool-file link ownership
+
+For non-Markdown or otherwise unclaimed selectable regions, scrollback link collection SHALL scan complete logical text across continuation rows but treat selection-range changes, skipped leading continuations, explicit link_target rows, link_source rows and nonselectable chrome as hard boundaries. Visible head and retained tail regions may each yield links; collapsed bodies do not, while visible collapsed headers remain scannable. Tool header link_target metadata SHALL project only onto its selectable path cells after bullets and verbs, preserve the complete file target while clipping before u16 conversion, and drop zero-width intersections. File presentation SHALL be SelfResolvingPath only when painted text can safely identify the target; basename, clipped, duplicate-name or outside-cwd paint remains Opaque and Grow-owned. In official VS Code remote sessions only self-resolving presentation is delegated to terminal recognition. This file does not prove scanner grammar, OS path validity, terminal-native recognition, link click routing, or that a resolved target still exists when activated.
+
+#### Scenario: Generic region scan
+- **WHEN** selectable logical text continues across rendered rows
+- **THEN** scanning joins only rows in the same region and never bridges chrome, selection ranges, or unavailable source-owned rows.
+
+#### Scenario: Display visibility
+- **WHEN** an execute block is expanded, truncated or collapsed
+- **THEN** URLs are emitted only from visible header/head/tail content, with separator and hidden body rows excluded.
+
+#### Scenario: Tool path geometry
+- **WHEN** a Read/Edit header carries an explicit file target
+- **THEN** its overlay covers only visible selectable path cells, clips before coordinate narrowing, and retains the complete semantic path.
+
+#### Scenario: Remote presentation policy
+- **WHEN** official VS Code remote resolves a file overlay
+- **THEN** only fully self-resolving path paint is delegated; opaque basename or clipped paint keeps OSC/open ownership in Grow.
+
+证据：`crates/codegen/pager/src/scrollback/render.rs`。
+
+### Requirement: Pager scrollback inline media and Mermaid placement geometry
+
+Scrollback rendering SHALL report visible post-flush media and lazy Mermaid affordance placements separately from Ratatui cell painting. Inline-image reservation SHALL fit source dimensions into content width with two-column margin, clamp image height to four through twenty rows, and reserve three additional rows. Visible tool-media placements SHALL crop against the viewport, keep timestamp-reserved columns clear, expose the second output row as a filepath copy target, and mark that an overlay button row is reserved. Non-graphics text fallback SHALL instead expose a centered [Open Image] click rectangle and filepath rectangle with zero image rows and no overlay button row. Mermaid blocks SHALL emit a one-row blank affordance placement carrying source text and SHALL NOT masquerade as inline media. Group-header replacement suppresses both placement families. This file does not prove image decoding beyond test fixture construction, graphics protocol transmission, native-open/copy handlers, Mermaid rendering, or post-flush ordering.
+
+#### Scenario: Image reservation
+- **WHEN** inline media dimensions and content width are known
+- **THEN** fitted image rows are bounded and total reservation includes the three header/button/spacer rows.
+
+#### Scenario: Overlay placement
+- **WHEN** a tool image intersects the viewport under an inline graphics protocol
+- **THEN** the result reports cropped image geometry, filepath hit geometry, full row count and a reserved overlay-button row.
+
+#### Scenario: Text fallback
+- **WHEN** media uses the native-open text fallback
+- **THEN** the filepath and centered open-button rows are exposed without claiming an inline image area.
+
+#### Scenario: Diagram affordance
+- **WHEN** an enabled Mermaid fence reserves its action row
+- **THEN** one visible blank-row placement carries the source and no inline-media placement is emitted.
+
+证据：`crates/codegen/pager/src/scrollback/render.rs`。
+
+### Requirement: Pager scrollback identity, immutable events and reconnect frontier
+
+ScrollbackState SHALL keep transcript entries in insertion order under non-reused EntryId identity, deduplicate only immutable domain events carrying the same event id, maintain minimal-mode native-scrollback commitment by EntryId, and stage reconnect continuations in a shared monotonic id and invalidation-generation space. A full replay SHALL inherit native commitment only across a semantically equivalent committed prefix, permitting old local notices without durable identity to be skipped but treating durable notices or divergent blocks as a frontier stop. Tail merge SHALL preserve entry ids, running/dirty/committed state and advance both invalidation generations. The bounded expand history retains at most 256 folded committed ids and skips ids no longer present. This file does not prove RenderBlock::replay_equivalent semantics, terminal writes, reconnect caller ordering, or coordination-row merge behavior implemented in the coordination submodule.
+
+#### Scenario: Immutable event identity
+- **WHEN** a durable event id is inserted repeatedly, removed, cleared, or rebuilt during merge
+- **THEN** one indexed row represents that id while local notices without event ids remain distinct and removal/clear permits a later fresh insertion.
+
+#### Scenario: Replay commitment frontier
+- **WHEN** a rebuilt transcript is compared with previously committed native-scrollback entries
+- **THEN** only the committed replay-equivalent common prefix is inherited, old local non-durable notices may be skipped, and durable or branch divergence stops inheritance.
+
+#### Scenario: Reconnect continuation identity
+- **WHEN** a fresh continuation is merged or discarded
+- **THEN** EntryIds are not reused, view preferences survive staging, and generation floors advance beyond every state consumers may have cached.
+
+#### Scenario: Ordered access and removal
+- **WHEN** entries are read by index/id or removed
+- **THEN** IndexMap order and O(1)-average id lookup remain aligned while auxiliary identity and commit indexes are updated.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs`。
+
+### Requirement: Pager scrollback mutation, materialization and cache invalidation
+
+ScrollbackState SHALL own entry materialization and mutation invalidation: pushes allocate identity, apply the effective Edit display policy, index immutable events, update turns/layout incrementally when possible, and advance content plus link generations. Streaming agent, thinking, execute and hook mutations SHALL invalidate affected render/height state; display, scroll, appearance and viewport-only changes SHALL leave content_generation unchanged. Edit replacement SHALL preserve Edit-to-Edit user mode except an untrusted-summary rising edge, honor pinned folds when configured, and reset genuine kind transitions to the new block default. Stop hooks SHALL attach only to the latest attributable terminal turn marker, with prompt identity required when stamped. Cwd changes invalidate every cwd-dependent entry cache. This file does not prove renderer output, hook execution, tracker call ordering, appearance cache loading, or the incremental layout algorithms delegated to layout.rs.
+
+#### Scenario: Edit materialization
+- **WHEN** an Edit is pushed or a placeholder/refinement is replaced
+- **THEN** failed edits collapse, untrusted successful summaries expand, the appearance default controls trusted success, and eligible user display choices survive later Edit refinement.
+
+#### Scenario: Stop hook attribution
+- **WHEN** stop hooks arrive stamped, unstamped, repeated, or after interleaved rows
+- **THEN** only the latest compatible turn-terminal marker accepts them and same-name or foreign-turn attachment is refused.
+
+#### Scenario: Streaming mutation
+- **WHEN** agent, thinking or execute content changes through typed mutation methods
+- **THEN** only compatible existing block kinds mutate, their render/height cache is dirtied, and content/link generations advance.
+
+#### Scenario: Generation separation
+- **WHEN** content, display, scroll, resize or batching changes state
+- **THEN** content changes advance both generations while view-only changes advance link geometry without redefining the searchable corpus, and the next layout preparation reconciles dirty or appended heights.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs`。
+
+### Requirement: Pager scrollback running, finish flash and pending-input lifecycle
+
+ScrollbackState SHALL track running entries separately from transcript order, request animation only for running rows overlapping the current viewport, and use an absolute finish-flash deadline for one final visible repaint. Finishing SHALL finalize supported streaming blocks, record completion time, remove running state, apply thinking/tool display policy, dirty layout and advance content generation. Pending-user-input flags SHALL be idempotent, participate in structural grouping, clear in bulk or on entry completion, and remain distinct from running state. Off-screen render-cache eviction SHALL preserve layout geometry. This file does not prove scheduler cadence, real elapsed duration, terminal repaint, tool completion authority, or the eviction/viewport algorithms implemented in layout.rs.
+
+#### Scenario: Viewport animation gate
+- **WHEN** running entries move outside or inside a prepared viewport
+- **THEN** only visible running rows demand motion frames, with pre-layout state conservatively animated.
+
+#### Scenario: Finish deadline
+- **WHEN** a running row completes and its flash expires or the row is removed
+- **THEN** periodic animation stops, one visible expiry repaint is requested, and stale flash ids drain.
+
+#### Scenario: Pending input
+- **WHEN** a row begins, repeats, resolves, completes, or is bulk-cleared from awaiting input
+- **THEN** actual flag transitions are reported, group structure is dirtied, and no stale pending mark remains.
+
+#### Scenario: Thinking completion mode
+- **WHEN** streaming thinking was untouched, manually expanded, toggled back, or governed by sticky expansion
+- **THEN** completion selects the corresponding collapsed or expanded resting mode.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs`。
+
+### Requirement: Pager scrollback turn, viewport and layout orchestration
+
+ScrollbackState SHALL orchestrate a three-case layout preparation boundary: missing/width-changed cache causes a full rebuild and width-cache invalidation, dirty entries cause incremental height processing with structural or streaming virtual-position repair, and clean stable width recomputes current visible-range height. Follow mode, exact visible measurement and deferred warm-above processing run at that boundary. Viewport snapshots SHALL restore scroll/follow/selection/turn/width state and invalidate layout so the restored width is fully prepared again. Direct scroll positioning clamps to the available range and disables follow. This file does not independently specify navigation, turn detection, selection fixing, grouping, height calculation, sticky layout, or scroll-anchor algorithms located in sibling modules.
+
+#### Scenario: Layout case selection
+- **WHEN** width, height, cache presence or dirty-height state changes
+- **THEN** width changes take full Case 1, dirty state takes Case 2, and stable clean or height-only changes remain Case 3.
+
+#### Scenario: Height and appearance
+- **WHEN** prompt vertical padding or appended entries change measured content
+- **THEN** cached heights and total height reflect the effective appearance after preparation.
+
+#### Scenario: Turn navigation projection
+- **WHEN** prompt-delimited entries are selected or turn navigation moves
+- **THEN** turn ranges, current turn, selection and pinned-prompt state remain coherent at the tested boundary.
+
+#### Scenario: Viewport snapshot
+- **WHEN** a temporary guest view mutates width, height, follow, selection, turn and scroll state
+- **THEN** restore reinstates the captured interaction state, discards the guest layout cache and rebuilds at the restored width.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs`。
+
+### Requirement: Pager scrollback permission epochs and ordered insertion
+
+ScrollbackState SHALL aggregate subagent permission decisions into one stable running block per primary-turn permission epoch, ignoring intervening UI rows; terminal primary-turn completion seals that group and advances the epoch. Reconnect tail merge SHALL combine same-epoch members into the original open group, seal it when the tail crossed a terminal boundary, and retain post-terminal members in a new epoch. insert_block_before SHALL allocate a unique id, preserve anchor order and selection identity, rebuild positional turn state, pull the minimal commit cursor back to the insertion point, and fall back to append when the anchor vanished. Its uncommitted-anchor precondition is enforced only by debug_assert. This file does not prove permission decision correctness, persistence, primary-turn terminal detection at callers, or release-mode recovery from precondition violation.
+
+#### Scenario: Open permission epoch
+- **WHEN** multiple permission decisions arrive around unrelated UI rows before primary completion
+- **THEN** one stable running group accumulates the epoch members without reordering those UI rows.
+
+#### Scenario: Reconnect permission merge
+- **WHEN** a continuation contains decisions before and/or after an epoch terminal
+- **THEN** same-epoch members merge into the original group, the original seals, and later decisions remain a new running group.
+
+#### Scenario: Ordered insertion
+- **WHEN** a finalized block is inserted before a live uncommitted anchor
+- **THEN** it receives a unique id at the anchor position, selection stays with its prior entry, turns rebuild, and the native commit scan cannot skip it.
+
+#### Scenario: Missing or committed anchor
+- **WHEN** the anchor disappeared or was already committed
+- **THEN** missing anchors append, while committed anchors violate the documented precondition and panic only in debug builds.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs`。
+
+### Requirement: Pager scrollback layout cache lifecycle and incremental geometry updates
+
+Pager scrollback state SHALL maintain one width-keyed layout cache whose parallel entry heights, truncated prompt heights, measured flags, virtual offsets, prompt descriptors and group spans are rebuilt from cheap estimates and exposed only as cached views. Invalidation SHALL dirty all entry heights; exact dirty-height updates SHALL refresh prompt metadata, and height-only changes SHALL shift later virtual offsets without recomputing structural gaps. A synchronized single append SHALL measure the new entry exactly, recompute the preceding pairwise gap, append its virtual offset and optional prompt descriptor, while an out-of-sync append SHALL fail so the caller can rebuild. Full and arithmetic rebuilds SHALL reapply hidden-thinking spacing and group folding before deriving total height.
+
+#### Scenario: Full cache lifecycle
+- **WHEN** the cache is absent, stale in width/count, explicitly invalidated, or structurally rebuilt
+- **THEN** parallel cache arrays, pairwise gaps, group spans, prompt descriptors and usize total height are regenerated from current entries.
+
+#### Scenario: Dirty height patch
+- **WHEN** existing entries are marked dirty without a structural change
+- **THEN** they are measured exactly and later virtual offsets plus affected prompt descriptors shift by the accumulated signed height delta.
+
+#### Scenario: Streaming append
+- **WHEN** exactly one entry follows a synchronized cache
+- **THEN** the cache remains allocated, the previous gap is corrected, the new exact layout and virtual offset are appended, and a prompt gains a descriptor.
+
+#### Scenario: Desynchronization boundary
+- **WHEN** cache vectors do not end exactly at the appended index
+- **THEN** incremental extension returns false and leaves fallback invalidation to its caller.
+
+证据：`crates/codegen/pager/src/scrollback/state/layout.rs`。
+
+### Requirement: Pager scrollback screen-row hit testing sticky prompts and permission members
+
+Pager scrollback hit testing SHALL map only rows inside the scrollback rectangle and entry content spans to logical entries, return no entry for inter-entry gaps, and resolve sticky header rows through the current sticky layout. Entry selection geometry SHALL use the configured horizontal selection area, report top/bottom clipping, and exclude content hidden behind sticky rows while returning pushed or pinned prompt geometry. Permission audit hit testing SHALL map a singleton content row to member zero, treat collapsed and expanded group headers as non-members, and map expanded member rows one-based below the header. Sticky prompt selection SHALL require the current turn prompt at the visible-range start and a positive scroll offset; a short unmeasured resumed prompt SHALL not inherit empty rows from its conservative truncated-height seed.
+
+#### Scenario: Content row lookup
+- **WHEN** a row is inside an entry, a gap, a restricted visible range, or outside the viewport
+- **THEN** lookup returns the owning entry only for its half-open content rows.
+
+#### Scenario: Sticky geometry
+- **WHEN** scrolling pins or pushes a user prompt
+- **THEN** header rows resolve through sticky metadata and content selection areas are clipped below the header with explicit clipping flags.
+
+#### Scenario: Permission member rows
+- **WHEN** a singleton, collapsed group, or expanded permission group is clicked
+- **THEN** only the singleton row or expanded one-based member rows resolve to member indices.
+
+#### Scenario: Lazy prompt seed
+- **WHEN** an old one-line prompt is pinned before exact measurement
+- **THEN** the visible sticky height is clamped to its full height instead of the maximum truncated seed.
+
+证据：`crates/codegen/pager/src/scrollback/state/layout.rs`。
+
+### Requirement: Pager scrollback lazy viewport measurement warmup and tall-history bounds
+
+Pager scrollback layout SHALL seed bulk history with non-rendering height estimates, measure every visible entry plus only a fixed below margin, monotonically replace estimates with exact heights, rebuild offsets until the visible window settles, and pin the bottom while following or preserve the top while manually scrolled. A one-shot bottom-following resume warmup SHALL measure bounded pages above the viewport, but SHALL skip manual and preserve-scroll modes and defer during width changes until the width is stable. Target-independent visibility gating SHALL fail open for missing or wedged layout state. Offscreen render-cache eviction SHALL retain a padded measurement window and the selected entry while preserving cached geometry. Cumulative virtual positions, scroll offsets and total height SHALL remain usize so sessions beyond 65,535 rows reach their final entry.
+
+#### Scenario: Bounded lazy resume
+- **WHEN** a large history is bulk loaded
+- **THEN** only the viewport, below margin and eligible warm pages are exactly rendered while far history remains estimated.
+
+#### Scenario: Measurement convergence
+- **WHEN** exact heights reveal more content or a dirty fast-path frame lands on estimated rows
+- **THEN** visible measurement iterates to a stable cache and a repeated layout with unchanged dimensions is a no-op.
+
+#### Scenario: Warmup policy
+- **WHEN** bottom-following resume, preserve-scroll mode, manual scroll, active resize, or the stable frame after resize is prepared
+- **THEN** above-viewport warming occurs only in the safe bottom-pinned stable cases.
+
+#### Scenario: Tall and degenerate content
+- **WHEN** content is empty, shorter than the viewport, a single tall entry, wedged past its end, or exceeds u16 row capacity
+- **THEN** layout remains bounded and panic-free, redraw gating fails open when healing is needed, and the true bottom remains reachable.
+
+#### Scenario: Eviction boundary
+- **WHEN** styled render caches lie outside the padded viewport window
+- **THEN** unselected output caches may be evicted without changing height or virtual geometry, while no-layout state evicts nothing.
+
+证据：`crates/codegen/pager/src/scrollback/state/layout.rs`。
+
+### Requirement: Pager scrollback resize anchoring and bounded navigation measurement
+
+Pager scrollback state SHALL capture the viewport top as an entry, logical line and signed wrapped-row offset before width-driven reflow, then restore it from the new layout while clamping the intra-line row to the rewrapped logical line and the final scroll to valid bounds. Manual resize SHALL preserve the viewed content, including a top gap attributed to the entry above; follow mode SHALL repin the bottom. Entry top/center navigation and offscreen selection movement SHALL first measure a viewport-bounded target span, and SingleTurn centering SHALL additionally measure its sticky prompt. Visible upward selection and non-anchored folding SHALL not measure above the viewport or move its top; anchored folding SHALL settle before applying its anchor.
+
+#### Scenario: Width-stable anchor
+- **WHEN** a manually scrolled viewport narrows or widens
+- **THEN** its entry/logical-line anchor stays at the top and a stale sub-row cannot spill into the next logical line.
+
+#### Scenario: Gap and follow boundaries
+- **WHEN** the top is an inter-entry gap or follow mode is active during resize
+- **THEN** the gap remains attributed to the preceding entry and follow mode remains pinned to the new bottom.
+
+#### Scenario: Target navigation
+- **WHEN** top, center, page, or offscreen selection navigation reaches estimated entries
+- **THEN** only a viewport-bounded neighborhood is measured before computing the destination.
+
+#### Scenario: Fold anchoring
+- **WHEN** a fold toggles with anchoring enabled or disabled
+- **THEN** the visible region is settled before anchored math, while the disabled path leaves the existing viewport top unchanged.
+
+#### Scenario: Single-turn sticky input
+- **WHEN** a far target is centered in SingleTurn mode
+- **THEN** both the target window and the turn prompt are exact before sticky-header-aware centering.
+
+证据：`crates/codegen/pager/src/scrollback/state/layout.rs`。
+
+### Requirement: Pager scrollback folded ranges and viewport paint-window selection
+
+Pager scrollback grouping queries SHALL prefer the authoritative folded span after layout and otherwise predict current verb runs with the same member, transparent-thinking and break semantics used by folding; dense runs SHALL exclude verb-claimed entries. Paint-window selection SHALL use binary search over full-history usize virtual offsets, back off for the sole entry straddling the viewport top, return an empty range outside content, and extend any visible synthetic group header through its authoritative verb or truncation span while clamping to the visible range. The returned content origin SHALL be relative to the visible-range base.
+
+#### Scenario: Group identity
+- **WHEN** an index belongs to an eager verb fold, dense collapsed run, transparent thinking row, or non-groupable entry
+- **THEN** its toggle range follows the authoritative span or the current fold predicate without crossing claimed boundaries.
+
+#### Scenario: Viewport intersection
+- **WHEN** content begins above, at, below, or entirely after the viewport
+- **THEN** the paint range includes exactly intersecting entries and reports the first entry virtual origin relative to the visible base.
+
+#### Scenario: Offscreen aggregate members
+- **WHEN** a visible verb or truncation header summarizes zero-height or offscreen members
+- **THEN** the paint range extends through the complete span so label computation sees every member.
+
+#### Scenario: Range boundary
+- **WHEN** a group span exceeds SingleTurn or another visible subrange
+- **THEN** paint selection clamps the extension to that visible range.
+
+证据：`crates/codegen/pager/src/scrollback/state/layout.rs`。
+
+### Requirement: Pager picker frame and search chrome geometry
+
+Pager shared picker chrome SHALL dispatch Floating, Popup and FullScreen modes to their respective frame layouts, reject areas below each frame's minimum dimensions, and return content and close-button rectangles that match the painted chrome. Floating and popup frames dim and clear their bounded panel; fullscreen frames use a separated title row and may reclaim that row when no title is supplied. Embedded/minimal presentation SHALL use transparent base backgrounds for picker rows and dividers. Search chrome SHALL show a hint only while inactive with an empty query, render active or always-active queries through either the canonical LineEditor viewport or the raw-string compatibility path, and reserve a requested trailing counter only when at least one input/caret cell plus the separator gap remains. Tab and filter chrome SHALL return hit rectangles for only the labels actually painted, with a right-aligned close affordance and active/hover styling. This file does not prove modal embedding policy selection, terminal composition, theme correctness, counter text painting by callers, or that returned hit rectangles receive mouse events.
+
+#### Scenario: Frame dispatch
+- **WHEN** a picker frame is requested in Floating, Popup or FullScreen mode with sufficient area
+- **THEN** the matching layout paints its documented border/background treatment and returns its usable content and close geometry.
+
+#### Scenario: Small frame
+- **WHEN** the available area is below a frame's width, height or derived inner-content minimum
+- **THEN** frame rendering returns None before popup side effects where preflight is implemented.
+
+#### Scenario: Search counter reservation
+- **WHEN** trailing status text and a query share a search row
+- **THEN** the counter reservation is kept only if the editor retains at least one caret cell and neither query text nor caret enters the reserved columns.
+
+#### Scenario: Search focus presentation
+- **WHEN** the query is active, nonempty, always-active, or inactive and empty
+- **THEN** the renderer selects query/caret or slash-hint presentation according to those states and Unicode display width.
+
+#### Scenario: Tab and filter hit geometry
+- **WHEN** tab labels or a filter indicator fit their chrome row
+- **THEN** returned rectangles identify the painted labels while non-fitting tabs have no rectangle.
+
+证据：`crates/codegen/pager/src/views/picker.rs`。
+
+### Requirement: Pager picker row painting and visual-row viewport
+
+Picker row rendering SHALL compute and paint one primary row plus collapsed summaries or expanded descriptions and fields using the same display-width wrapping budget. It SHALL distinguish expandable/group and leaf glyphs, preserve indentation, selection, hover, dimming and embedded styling, bound the right label so the left label retains space, render bracket-marked emphasis without brackets, and record an underlined link band only for painted rows of the final expanded description when opted in. Content rendering SHALL handle zero area, loading and empty states without item hits; calculate entry heights again after reserving a scrollbar column; scroll in visual rows around selection or a clamped caller offset; insert spacing before non-leading headers; expose hit rectangles only for selectable rows or explicitly clickable non-selectable rows; and paint a scrollbar when total visual height exceeds the viewport. This file does not prove caller row construction, semantic validity of badges/fields/links, mouse activation, scrollbar visibility policy, or terminal clipping outside the supplied Buffer.
+
+#### Scenario: Row height parity
+- **WHEN** summaries, descriptions or fields wrap at the available width
+- **THEN** compute_row_height and render_picker_row use corresponding visual-row budgets for viewport placement.
+
+#### Scenario: Bounded primary row
+- **WHEN** a row has competing label, badge and right-label content
+- **THEN** the right label is truncated within its budget and at least the allocated left-label region remains available.
+
+#### Scenario: Description link band
+- **WHEN** the final expanded description is configured as a link and is at least partly painted
+- **THEN** only its painted visual rows are underlined and returned as the link band; opt-out or full vertical clipping returns no band.
+
+#### Scenario: Visual-row scrolling
+- **WHEN** variable-height entries exceed the content viewport
+- **THEN** scrolling, selection centering, hit rectangles and the scrollbar use visual-row heights rather than entry count.
+
+#### Scenario: Non-content states
+- **WHEN** content is zero-sized, loading, or empty
+- **THEN** no entry hit rectangles are returned and the applicable spinner or no-match message is the only content response.
+
+证据：`crates/codegen/pager/src/views/picker.rs`。
+
+### Requirement: Pager picker state lifecycle and unified render composition
+
+PickerState SHALL keep selection, canonical single-line query/cursor, search focus, expansion, mode, hover, visual scroll and last-render hit geometry as caller-owned state. Default state starts collapsed and unfocused in Floating mode; input_active starts search-focused; reset clears transient query, selection, expansion, hover, focus and hit state while preserving the display mode; clear_query clears query-linked selection, scroll and expansion without clearing tab focus or hit rectangles; set_query delegates newline sanitization and end-cursor placement to LineEditor; and expand_all_for_search marks every current entry index when the count is nonzero. Unified rendering SHALL compose optional frame, tab row, search or title row, filter, divider, pinned note, visual-row content, scrollbar and shortcut row, then return geometry matching the painted controls. Modal helpers SHALL render content without owning outer close/tab/filter chrome and SHALL omit search chrome when requested. This file does not prove host filtering, expansion persistence across rebuilt entry identities, correctness of caller-provided non-selectable arrays, shortcut dispatch, or persistence beyond the in-memory state.
+
+#### Scenario: State initialization
+- **WHEN** a picker uses Default or input_active
+- **THEN** shared transient fields use the same defaults while only input_active begins with search focus.
+
+#### Scenario: State reset
+- **WHEN** reset or clear_query is applied
+- **THEN** query-linked list state is cleared with the documented difference in preserved mode, tab focus and hit geometry.
+
+#### Scenario: Canonical query replacement
+- **WHEN** set_query receives text containing line breaks
+- **THEN** the canonical editor removes those breaks and places its byte cursor at the sanitized text end before host filtering.
+
+#### Scenario: Selectable clamp
+- **WHEN** the entry set changes and selection points outside the set or at a marked header
+- **THEN** selection is bounded and advanced or rescanned to a selectable entry, or reset to zero for an empty set.
+
+#### Scenario: Composite render
+- **WHEN** optional tabs, title/search, filter, note, entries and shortcuts are configured
+- **THEN** each component consumes its assigned rows and the returned PickerHitAreas mirrors the controls and entries painted in that frame.
+
+证据：`crates/codegen/pager/src/views/picker.rs`。
+
+### Requirement: Pager picker pointer keyboard and canonical query outcomes
+
+handle_picker_input SHALL clamp selection before dispatch and classify each event as a semantic PickerOutcome so hosts refresh filtering only for QueryChanged. Left-click SHALL close, focus search, change tabs, cycle filters, select rows, or activate explicitly clickable non-selectable rows according to last-render hit geometry; motion SHALL update independent close/filter/row hover and may move valid selection; wheel input SHALL move the visual offset by three rows; resize SHALL request repaint. Keyboard input SHALL ignore releases, route paste through the canonical editor, distinguish cursor-only from text changes, clear selection/expansion/scroll exactly once on text mutation, support search/list/tab edge focus, skip non-selectable entries, prioritize custom action keys over built-ins, expose expand/collapse/copy/tab/filter/mode/submit/close outcomes, and keep direct query editing disabled when disable_search applies. Slash on an empty unfocused always-active picker SHALL focus without inserting, while slash in a nonempty or already-focused query remains literal. This file does not prove clipboard availability or normalization, host application of outcomes, filtering results, entry identity stability after QueryChanged, or that click geometry is current rather than stale.
+
+#### Scenario: Query activation
+- **WHEN** printable input or slash reaches hint-based or always-active search outside Vim normal mode
+- **THEN** focus and literal insertion follow the hint, empty-query and existing-focus rules.
+
+#### Scenario: Query edit classification
+- **WHEN** LineEditor reports cursor movement, handled no-change or text mutation
+- **THEN** the outcome is Changed for visual-only edits and QueryChanged with one list-state reset for text edits.
+
+#### Scenario: Paste
+- **WHEN** a paste event reaches an enabled non-Vim query
+- **THEN** sanitized text is inserted through LineEditor, optional hint focus activates, and expansion changes remain a host decision.
+
+#### Scenario: List and action routing
+- **WHEN** navigation, Enter, expansion, copy, action, tab, filter, mode or Escape keys are pressed
+- **THEN** non-selectable boundaries and configured precedence determine the corresponding outcome without directly executing host work.
+
+#### Scenario: Pointer routing
+- **WHEN** pointer coordinates intersect current PickerHitAreas
+- **THEN** click and hover outcomes use the associated semantic entry indices rather than visual hit-array positions.
+
+证据：`crates/codegen/pager/src/views/picker.rs`。
+
+### Requirement: Pager picker Vim normal and search mode transitions
+
+When vim_normal_first is enabled, an unfocused picker SHALL behave as a navigation mode: plain characters and paste do not edit the query, j/k navigate selectable rows and clamp at list edges without automatically opening search or jumping to tabs, and only unbound i or slash enters search when search is enabled. Once search is active, canonical character and paste editing applies; Escape exits search and clears a nonempty query, while Escape in normal mode closes. Up from search may focus a configured tab region; j/Down from that tab focus returns to the list rather than reopening search, and a configured action bound to i takes precedence over Vim search entry. disable_search keeps i and slash inert. These transitions apply with or without the visual slash hint. This file does not prove global Vim-mode configuration, scrollback Vim parity outside this picker, caller tab changes, action execution, or host filtering after the emitted outcome.
+
+#### Scenario: Normal-mode admission
+- **WHEN** Vim mode is active and search is unfocused
+- **THEN** plain text and paste are ignored while unbound i or slash enters enabled search without inserting text.
+
+#### Scenario: Vim navigation
+- **WHEN** j or k is pressed in normal mode
+- **THEN** selection moves among valid rows and remains clamped at top or bottom without edge-cycling into search or tabs.
+
+#### Scenario: Search exit
+- **WHEN** Escape is pressed during Vim search
+- **THEN** search focus ends and a retained query is cleared with QueryChanged; Escape from normal mode returns Closed.
+
+#### Scenario: Tabs transition
+- **WHEN** Up leaves Vim search for a configured tab region and j or Down follows
+- **THEN** focus moves into the first list entry without reopening search.
+
+#### Scenario: Precedence and disabled search
+- **WHEN** i is a custom action or search is disabled
+- **THEN** the configured action wins, or i and slash remain inert respectively.
+
+证据：`crates/codegen/pager/src/views/picker.rs`。
+
+### Requirement: Pager extensions modal tabs actions and transient state
+
+扩展弹窗 SHALL 以 Hooks、Plugins、Marketplace、Skills、MCP Servers 五个标签页为固定循环顺序，并为每页集中发布动作键及稳定的 diagnostics action 名称；完整 cheatsheet 直接覆盖页签键表，紧凑 footer 只显示 action_key_display 可映射的字符（当前 MCP setup 的 s 可解析且进入 cheatsheet/diagnostics，但不进入紧凑 footer）。Space 根据当前行显示 enable、disable 或 enable/disable。状态初始化时各数据源处于 Loading、各过滤器为 All，切页清除与旧索引绑定的输入、设置、消息、pending/result、选择、滚动和展开瞬态而保留搜索词及标签栏焦点；加载中或 pending 时报告动态画面，动作结果仅存活至绝对截止时间。
+
+#### Scenario: Tab traversal
+- **WHEN** 用户前后切换标签页
+- **THEN** 顺序在五页首尾循环且 diagnostics tab 与活动页一致。
+
+#### Scenario: Action identity
+- **WHEN** 页签渲染 cheatsheet/紧凑 footer 或解析字符动作
+- **THEN** cheatsheet 与 diagnostics 覆盖页签键表、解析器支持已声明动作；紧凑 footer 仅纳入有 display 映射的键，Space 文案由当前行启用状态决定。
+
+#### Scenario: Transient reset
+- **WHEN** 状态初始化、切页或结果提示到期
+- **THEN** 数据/过滤初值、切页清理范围和绝对截止时间按状态契约生效。
+
+证据：`crates/codegen/pager/src/views/extensions_modal.rs`。
+
+### Requirement: Pager extensions modal inline form editing and path completion
+
+扩展弹窗内联表单 SHALL 为每字段维护独立的 Unicode 安全单行编辑器、字节光标、焦点和必填规则；Esc 取消，Enter 在必填为空时列出字段名、否则返回前缀与全部字段文本，多字段 Tab/Shift+Tab 循环焦点，单字段 Tab 对光标前路径执行补全；粘贴优先进入表单焦点字段，其次仅在搜索激活时进入查询，并移除 CR/LF。编辑、光标移动及已处理的无变化键要求重绘，未处理键不要求重绘。
+
+#### Scenario: Validation and focus
+- **WHEN** 表单收到 Enter、Esc、Tab 或 Shift+Tab
+- **THEN** 必填验证、取消、循环字段焦点或单字段路径补全分别返回明确 outcome。
+
+#### Scenario: Canonical editing
+- **WHEN** 用户输入字符、删除、readline/word 快捷键、Unicode grapheme 或粘贴
+- **THEN** 共享 LineEditor 保持字符边界、光标可见性，并只在文本修改时清除验证错误。
+
+#### Scenario: Path completion
+- **WHEN** 光标前文本指向目录或部分文件名
+- **THEN** 展开 home、忽略隐藏项、排序匹配，并返回唯一项或最长公共前缀；无有效匹配返回 None。
+
+证据：`crates/codegen/pager/src/views/extensions_modal.rs`。
+
+### Requirement: Pager extensions modal rendering overlays and width safety
+
+扩展弹窗渲染 SHALL 在终端小于 40×12 时不绘制并清除按钮命中区；正常帧先从当前数据重建标签、字段、原始索引、group key、选择性与 badge，再在成功绘制后原子发布映射，防止早退造成选择与旧映射错位。输入/setup 模式独占内容区并隐藏搜索列表；pending 无目标时覆盖内容区，目标 pending 与完成结果覆盖对应 badge；错误/确认使用换行安全的覆盖层与专属 footer 提示，结果通知使用非覆盖 footer、显示宽度截断和绝对到期。所有裁剪、换行、输入 viewport 均不得切断 UTF-8 或使宽字符溢出。
+
+#### Scenario: Atomic paint state
+- **WHEN** 数据过滤改变或窗口太小导致渲染早退
+- **THEN** footer 使用本帧临时映射，只有成功绘制后提交 clamped selection 与 entry caches。
+
+#### Scenario: Mode overlays
+- **WHEN** WHEN输入、MCP setup、pending、错误、确认或结果提示激活
+- **THEN** 相应表单/覆盖层/footer 获得唯一视觉所有权且列表、搜索和快捷键按模式隐藏或替换。
+
+#### Scenario: Display width
+- **WHEN** 文本含 CJK、emoji、多字节字符或超过区域宽度
+- **THEN** wrap、truncate 和 viewport 以字符/显示宽度边界输出，不切断编码。
+
+证据：`crates/codegen/pager/src/views/extensions_modal.rs`。
+
+### Requirement: Pager dashboard root composition and empty-state rendering
+
+Pager 仪表盘渲染器 SHALL 以 DashboardState 的暂存工作目录、筛选、分组、选中项、peek/attach 状态和 roster 快照构造当前帧；每帧先用主题基础色覆盖完整区域并重新锚定可见选择。attached agent 时只保留顶部 dashboard banner 并把底部交给 agent popup；未 attached 时，peek 在高度允许时替换 dispatch，且依次渲染 header、列表、dispatch/peek、footer，最后由 shortcuts、location 或 worktree modal 覆盖并抑制底层光标。无行时 SHALL 区分加载中、真正空白与筛选无匹配，roster-only 行仍视为可见会话；本文件仅证明 Ratatui Buffer、状态字段和传入闭包的静态渲染行为，不证明事件循环、ACP 数据时序、鼠标/键盘 handler 或真实终端帧提交。
+
+#### Scenario: Frame composition
+- **WHEN** a dashboard frame is rendered without an attached agent
+- **THEN** the complete area is repainted, visible rows drive selection, peek may replace dispatch, and modal layers paint last while owning the cursor.
+
+#### Scenario: Attached composition
+- **WHEN** attached_agent is present
+- **THEN** dashboard dispatch/footer chrome is cleared, a compact row banner is painted above popup_rect, and the dashboard itself returns no cursor.
+
+#### Scenario: Empty and loading states
+- **WHEN** no visible row exists
+- **THEN** loading, no-agent, and active-filter no-match states render distinct nonblank hints, while a roster-only row suppresses the empty hint.
+
+#### Scenario: Preview boundary
+- **WHEN** the two ignored visual preview tests are invoked explicitly
+- **THEN** representative dashboard and overlay buffers are printed for human inspection; they are not part of the default test run.
+
+证据：`crates/codegen/pager/src/views/dashboard/render.rs`。
+
+### Requirement: Pager dashboard header location status and creation affordances
+
+仪表盘 header SHALL 在右侧绘制创建按钮与非零的顶层状态计数，在左侧绘制 DashboardState.cwd 对应的位置行；worktree 模式仅在已暂存且 cwd 有 Git ancestor 时把按钮标为 New Worktree。计数 SHALL 忽略 subagent 与 Inactive roster 行，按 awaiting、working、blocked、idle、done、failed 顺序着色，并在空间不足时优先保留右侧状态/创建区、截断位置文本。location、创建按钮和可选 promo CTA SHALL 记录本帧点击矩形；hover 只提升可点击文字，位置 hover 不给空白与 branch icon 加下划线，pinned promo 才附带 caption。该证据不证明点击或 Ctrl+O 的 dispatch handler 会执行，也不证明 Git 信息缓存刷新。
+
+#### Scenario: Location and worktree label
+- **WHEN** state.cwd or the staged worktree mode changes
+- **THEN** the header reflects the staged location and selects New Worktree only for an eligible Git directory.
+
+#### Scenario: Top-level state chips
+- **WHEN** visible rows include top-level and nested or inactive rows
+- **THEN** only actionable top-level states contribute nonzero chips and the nested rows do not inflate counts.
+
+#### Scenario: Responsive reservation
+- **WHEN** location, promo, status chips and the create button compete for width
+- **THEN** location truncates before reserved right-side affordances and hit rectangles remain within painted text.
+
+#### Scenario: Hover styling
+- **WHEN** location or create/promo hit areas are hovered
+- **THEN** only meaningful text receives underline or brighter foreground while the base background remains unchanged.
+
+证据：`crates/codegen/pager/src/views/dashboard/render.rs`。
+
+### Requirement: Pager dashboard location picker rendering
+
+位置选择器 SHALL 通过共享 modal/picker chrome 绘制可编辑 path 字段、候选目录和点击区域；候选来源取当前 visible_candidates，目录名优先完整保留而 detail path 先截断，worktree 目录显示 badge。目标目录处于 Git 仓库且宽度足够时 SHALL 显示并登记 worktree on/off 切换，非仓库或过窄时隐藏；错误占用分隔线行，Vim 导航态追加 i search 提示。该文件只负责显示 LocationPickerState 已计算的候选、错误和 repo 判定，不证明目录访问、模糊匹配、路径规范化、worktree 创建或 cwd 切换成功。
+
+#### Scenario: Candidate rendering
+- **WHEN** the picker has visible recent or typed candidates
+- **THEN** title, editable path, candidate labels, details, worktree badges and content hit areas are painted.
+
+#### Scenario: Repository toggle
+- **WHEN** the highlighted target is a Git repository and the modal is wide enough
+- **THEN** a clickable worktree:on/off control is shown; otherwise no toggle or hit rect is emitted.
+
+#### Scenario: Path priority
+- **WHEN** label and detail exceed row width
+- **THEN** the directory label is preserved where possible and the detail path is truncated first.
+
+#### Scenario: Vim footer
+- **WHEN** Vim navigation mode leaves the search input inactive
+- **THEN** the modal footer exposes i search, and hides that hint while the input is active.
+
+证据：`crates/codegen/pager/src/views/dashboard/render.rs`。
+
+### Requirement: Pager dashboard grouped line model idle folding and focus order
+
+仪表盘 SHALL 从排序后的 DashboardRow 构造与渲染、键盘 focusables 和 section ownership 共用的 DashboardLine 序列。State grouping 下，连续 pinned 顶层 cluster 位于 Pinned section，随后按顶层 state transition 插入 header，subagent 随父级且不建立自己的 header；Directory grouping 或单一 state filter 禁用 state headers，collapsed section 保留 header 并隐藏所属行。未筛选、未搜索的 Idle 组 SHALL 默认显示至少 8 个最新顶层行，过去一小时内活跃的行不折叠，至少隐藏两行才生成可聚焦 overflow；show-all、过滤和 collapse 分别展开或绕过该上限。next_wall_clock_deadline 只计算实际绘制行的相对时间/Idle 新鲜度下一次变化；本文件不证明 row 排序输入、后台时钟唤醒调度或 collapse 持久化。
+
+#### Scenario: Pinned and state sections
+- **WHEN** grouping is State
+- **THEN** pinned parent clusters appear first, top-level state changes create counted headers, and child rows remain under their parent section.
+
+#### Scenario: Suppressed and collapsed headers
+- **WHEN** grouping is Directory, a State filter is active, or a section is collapsed
+- **THEN** redundant headers are omitted or only the selected section header remains while owned rows are hidden.
+
+#### Scenario: Idle cap
+- **WHEN** an unfiltered Idle group contains old rows beyond the visible limit
+- **THEN** the oldest rows fold behind a focusable more/fewer line, but fresh, filtered, searched, expanded, or singly excess rows remain visible according to the cap rules.
+
+#### Scenario: Shared navigation model
+- **WHEN** focus order or a hidden row owner is queried
+- **THEN** focusables and section_of_row derive from the same line construction used by rendering, including collapsed headers and Idle overflow.
+
+#### Scenario: Wall-clock deadline
+- **WHEN** painted rows have age labels or an Idle freshness transition pending
+- **THEN** the earliest strictly future repaint instant is returned and hidden rows do not schedule wakeups.
+
+证据：`crates/codegen/pager/src/views/dashboard/render.rs`。
+
+### Requirement: Pager dashboard responsive row painting scrolling and hit geometry
+
+宽布局 SHALL 把普通行绘制为三格高的 title、可选 secondary 与 breathing gap，并以整项高度计算 viewport、把偏移向下吸附到 item 起点、用半块 halo 延伸 selected/hover 背景且在右边缘叠加不占布局宽度的 scrollbar；窄布局每项单行但保留 section、selection、删除与滚动语义。行 title SHALL 包含 selection bar、按状态选择的 diamond/spinner、缩进、截断 label/subtitle、可显示 badge 及 age；NeedsInput bullet 以 330ms 半周期闪烁且 Pending: 前缀告警色，选中 secondary 提亮，New session #id 分色。只有非 subagent 且允许删除的 settled row 在 hover 或确认 armed 时用年龄列显示删除按钮并登记矩形；所有 row/section/overflow hit rect SHALL 覆盖完整项且无间隙。该证据不证明终端 Unicode 字形宽度在所有字体一致、动画驱动实际定时、删除 handler 或滚轮输入。
+
+#### Scenario: Wide row geometry
+- **WHEN** rows and section headers are rendered in a wide viewport
+- **THEN** complete-item hit rectangles tile without dead zones, title-only content is vertically centered, selected/hover halos surround content, and the scrollbar overlays without shifting text.
+
+#### Scenario: Narrow geometry
+- **WHEN** width is below MIN_DASHBOARD_WIDTH
+- **THEN** labels truncate into one-line rows while row, section, overflow and delete hit rectangles remain registered and selected headers can move the viewport.
+
+#### Scenario: State vocabulary
+- **WHEN** rows span working, awaiting, idle/inactive, done, failed and blocked states
+- **THEN** each resolves to a glyph and color, the spinner advances at its cadence, and NeedsInput blinks while highlighting Pending:.
+
+#### Scenario: Deletion affordance
+- **WHEN** a deletable settled top-level row is hovered or armed
+- **THEN** its age column is replaced by the ballot-X hit target; busy, child and placeholder rows do not expose it.
+
+#### Scenario: Whole-item scrolling
+- **WHEN** a cell offset falls inside a mixed-height row or header
+- **THEN** the offset snaps to the preceding item boundary, including safe empty and past-end inputs.
+
+证据：`crates/codegen/pager/src/views/dashboard/render.rs`。
+
+### Requirement: Pager dashboard inline rename viewport and caret rendering
+
+正在重命名的可见行 SHALL 保留 selection marker、缩进和状态 icon，仅用 `rename: ` 与已清理的 RenameDraft 替换 title 内容；宽窄布局共用基于显示列的 viewport，长 ASCII、CJK、combining sequence 与 ZWJ emoji 不得在当前视窗边界被破坏。光标 SHALL 根据 row hit rect、chrome 宽度、draft cursor display column 与行内垂直居中位置计算，并限制在可绘制最后一格；目标行不可见时不返回 rename caret。该证据依赖 RenameDraft 已执行输入清理，不证明 rename 的保存、冲突处理、持久化或终端 grapheme 实际显示。
+
+#### Scenario: Chrome preservation
+- **WHEN** a wide or narrow row enters rename mode
+- **THEN** the state icon and selection chrome stay fixed while rename text begins at the normal title column.
+
+#### Scenario: Sanitized content
+- **WHEN** a rename draft contains terminal control input
+- **THEN** the rendered wide and narrow buffers omit the control byte while retaining visible characters.
+
+#### Scenario: Unicode viewport
+- **WHEN** a long Unicode draft moves its cursor from the end into the middle
+- **THEN** the viewport keeps complete CJK, combining and ZWJ content visible and reports the caret from display columns within the row.
+
+#### Scenario: Invisible target
+- **WHEN** the renamed row has no current row rectangle
+- **THEN** no rename cursor position is returned.
+
+证据：`crates/codegen/pager/src/views/dashboard/render.rs`。
+
+### Requirement: Pager dashboard dispatch search and completion rendering
+
+Dashboard dispatch SHALL 清空其区域，并在高度至少三行时绘制圆角框、顶边 typed UiFeedback badge、底边当前或 staged model、默认 agent、behavior、permission 与 multiline 标记；短区域退化为单行。list focus 时边框变暗且无 caret；search mode 使用带告警色 `Search: ` 前缀的单行 EditBuffer viewport 和真实 cursor，极窄宽度不得越界。普通空输入始终代表新 session，仅在失焦时显示 Dispatch a new agent；非空输入委托共享 PromptWidget，保留普通粘贴预览与 image chip 但关闭 image overlay，文本行数最多占面板约三分之一且不超过八行。可见的 slash 或 @file completion SHALL 在输入框上方绘制，空间/宽度不足时清除 hit state；@file 在 peek reply 下以 parent/top-level cwd 为根，file completion 优先于 slash。该文件不证明命令执行、模型可用性、文件搜索结果正确性、图片解码、dispatch admission 或 session 创建。
+
+#### Scenario: Dispatch chrome and config
+- **WHEN** normal dispatch has enough height
+- **THEN** rounded chrome, typed feedback, staged configuration and a focused caret are painted; a one-row area retains a usable prefix without chrome.
+
+#### Scenario: Search cursor safety
+- **WHEN** search text has an interior cursor or only one through nine columns
+- **THEN** the single-line viewport follows that cursor and writes only inside the supplied rectangle.
+
+#### Scenario: New-session semantics
+- **WHEN** the empty dispatch is focused, unfocused, or a row is selected
+- **THEN** the prompt remains a new-session composer, showing its placeholder only while unfocused and never presenting a reply placeholder.
+
+#### Scenario: Rich input boundary
+- **WHEN** generic paste or an image is present
+- **THEN** generic paste content remains previewable, image chips remain visible, and image format/preview overlay details are suppressed.
+
+#### Scenario: Completion placement
+- **WHEN** slash or file search has matches and room exists above the active composer
+- **THEN** the dropdown and item hit area are painted above it; file search wins mutual exclusion and otherwise missing room produces no stale hit rect.
+
+证据：`crates/codegen/pager/src/views/dashboard/render.rs`。
+
+### Requirement: Pager dashboard context-sensitive footer hints
+
+Dashboard footer SHALL 使用 ActionRegistry 与共享 ShortcutsBar 在每帧生成与实际焦点/模式一致的提示，并为左侧保留两格。应用级 pending hint 优先；有效 delete confirmation 次之（list focus 为 y/n，否则 second Ctrl+X），随后 rename、search、list-focused、peek、section、Idle overflow、new-agent button 或 row-selected 分支。list focus 不显示冗余 nav chip；section/overflow 没有 stop，空 draft 显示 toggle/open/create，非空 draft 显示 send 与 Ctrl+S send+open。peek SHALL 根据 question focus/option、reply focus、Vim 与草稿决定 answer/select/input/open/send/back；Working/NeedsInput 用 stop，其他允许删除状态用 delete。multiline SHALL 把提交提示改为 Shift+Enter，终端无法区分时改 Alt/Option+Enter；过期 delete arm 必须回到常规提示。该证据不证明 handler bindings 与提示绝对一致、用户自定义键的所有冲突、终端修饰键上报或按键副作用。
+
+#### Scenario: Priority modes
+- **WHEN** pending confirmation, rename, or search owns input
+- **THEN** its dedicated hints replace the normal dashboard matrix in that priority order.
+
+#### Scenario: List and section focus
+- **WHEN** the list, a row, a section, or Idle overflow is focused
+- **THEN** the footer advertises only actions valid for that target, omitting nav and stop where they would be misleading.
+
+#### Scenario: Peek question and reply
+- **WHEN** peek focus, Vim mode, question selection, and reply text vary
+- **THEN** hints switch among input, select, answer, open, send, send+open, back and New Agent according to the same state distinctions.
+
+#### Scenario: Dispatch text
+- **WHEN** a button, row, section or overflow target coexists with typed dispatch text
+- **THEN** send and send+open replace empty-draft create/open/toggle semantics without adding a stop action to non-session targets.
+
+#### Scenario: Multiline and expiry
+- **WHEN** multiline compose is enabled or a delete arm expires
+- **THEN** the footer uses Shift/Alt Enter for submit and suppresses stale press-again text after expiry.
+
+证据：`crates/codegen/pager/src/views/dashboard/render.rs`。
+
+### Requirement: Pager attached-session popup and title-bar chrome
+
+附着 session 的 popup rect SHALL 占满视图底部与全宽，只在足够高的终端保留 6 至 14 行 dashboard banner；小终端取消 banner。popup overlay SHALL 使用共享 bordered frame，登记 outer/close rect，将 frame content 交给一次性 draw_agent 闭包并透传 cursor 与 post-flush；框过小时不调用 agent，而绘制可关闭提示。独立的 session overlay SHALL 绘制带 divider 的边框，header 变体 SHALL 按给定 top/side padding 只绘制无框标题带，两者共享左侧截断 title 和右侧 `[i/n][‹][›][Dashboard]` chrome；仅 total>1 时提供相邻 prev/next 点击区，hover 只改前景。该文件不证明 attach/cycle/close 事件路由、agent 内部绘制、图片 post-flush 提交或 popup 外点击策略。
+
+#### Scenario: Popup allocation
+- **WHEN** terminal height is sufficient
+- **THEN** popup spans the full bottom width below a clamped banner; short terminals grant the popup the whole height.
+
+#### Scenario: Canonical popup frame
+- **WHEN** popup area can host the shared frame
+- **THEN** divider and close/outer hit rects survive inner agent painting and cursor/post-flush values are returned.
+
+#### Scenario: Small fallback
+- **WHEN** popup area is below the frame minimum
+- **THEN** an outlined terminal-too-small hint is painted, close hit is absent, and draw_agent is not invoked.
+
+#### Scenario: Cycle chrome
+- **WHEN** overlay position has more than one row
+- **THEN** position, adjacent previous/next controls and Dashboard close are painted with hit rects; absent or singleton positions omit the cycle controls.
+
+#### Scenario: Chromeless header
+- **WHEN** the padded session header variant is requested
+- **THEN** title and controls align to side/top padding, no frame glyph is painted, and full-width content begins below the header band.
+
+证据：`crates/codegen/pager/src/views/dashboard/render.rs`。
+
+### Requirement: Pager shortcuts cheatsheet registry projection and contextual filtering
+
+The pager shortcuts cheatsheet SHALL project the action registry into the fixed Getting Started, Input, Conversation Navigation, Conversation Actions, Panels, Session and Dashboard category order, omitting empty categories and slash-only actions without real keys. Within a category it SHALL deduplicate the default key while preferring the definition active in the current context, include alternate keys without duplicate rendered spellings, suppress or trim scrollback letter bindings when vim mode is disabled, and prevent dashboard-overlay claimed keys from appearing as reachable bindings in another active context. It SHALL add the display-only scrollback-search, clipboard edit and prompt-history rows with their host-specific dimming and platform paste help. Filtering SHALL match labels, raw or pretty key displays and descriptions case-insensitively; hide dimmed rows on request; retain only headers with visible matches; honor collapsed sections outside search; and let search inspect collapsed contents. Initial selection SHALL target the first hint. This file does not prove ActionRegistry completeness or binding dispatch, active-context construction by hosts, terminal delivery of advertised chords, platform clipboard behavior, or the correctness of help prose outside the constants inspected here.
+
+#### Scenario: Registry projection
+- **WHEN** a registry and active contexts are projected into cheatsheet entries
+- **THEN** actionable bindings appear in the fixed category order with per-category key deduplication, active-context precedence and empty sections removed.
+
+#### Scenario: Vim and overlay reachability
+- **WHEN** vim mode is disabled or a dashboard overlay claims a chord
+- **THEN** unreachable letter bindings or shadowed active-context keys are removed while surviving alternatives remain visible.
+
+#### Scenario: Display-only discoveries
+- **WHEN** search, paste, undo, redo or prompt history lacks an ActionRegistry definition
+- **THEN** the cheatsheet adds the matching pseudo-row with stable help and context dimming without assigning an ActionId.
+
+#### Scenario: Filter and collapse
+- **WHEN** a query, dimmed filter or collapsed-section set changes
+- **THEN** the returned original indices contain only matching visible hints and the section headers needed to group them, with search opening collapsed contents.
+
+证据：`crates/codegen/pager/src/views/shortcuts_help.rs`。
+
+### Requirement: Pager shortcuts cheatsheet browse detail and input routing
+
+The shortcuts cheatsheet SHALL expose Browse and Detail modes through shared keyboard, mouse and modal-chrome routing. In Browse, slash or unmodified i activates search, f requests the dimmed-row filter toggle, section headers expand or collapse with Enter, Space, e/E, arrows and vim h/l where applicable, and expandable hints toggle inline help with the corresponding expansion keys. Enter or a row click SHALL open Detail for every registry row and only those pseudo-rows carrying long help; entry from an active search clears the committed query and search state. Search Esc SHALL clear the query before modal close, while Browse Esc delegates close through the picker; F1 and Ctrl+X remain inert here. Detail SHALL reserve Esc, Left and Backspace for return to Browse, arrows/Page keys and Home for bounded scroll-state updates, ignore vim letter navigation, and accept mouse wheel scrolling. The chrome adapter SHALL preserve all close, filter, section, expansion and changed outcomes. Pasted text SHALL mutate only an active Browse search and reset its selection viewport after text change. This file does not prove the caller applies ToggleFilter, ToggleSection or ToggleExpand outcomes, close-button mouse geometry, global key precedence outside the modal, or persistence of picker and expansion state between frames.
+
+#### Scenario: Browse controls
+- **WHEN** browse mode receives search, filter, navigation, section or inline-expand keys
+- **THEN** it mutates picker state or returns the precise host-owned outcome without dispatching the advertised application action.
+
+#### Scenario: Open detail
+- **WHEN** Enter or a click selects a registry row or a pseudo-row with long help
+- **THEN** Detail is populated and any active search is cleared; display-only rows without help remain in Browse.
+
+#### Scenario: Detail navigation
+- **WHEN** Detail receives back, scroll, Home, mouse-wheel or vim-letter input
+- **THEN** back keys return to Browse, supported scrolling updates saturating state, and vim letters remain inert.
+
+#### Scenario: Chrome and paste
+- **WHEN** the host routes a key through modal chrome or pastes into the modal
+- **THEN** detail Esc bypasses chrome close, browse outcomes retain their type, and paste edits only active Browse search.
+
+证据：`crates/codegen/pager/src/views/shortcuts_help.rs`。
+
+### Requirement: Pager shortcuts cheatsheet detail and inline rendering
+
+The shortcuts cheatsheet renderer SHALL use one shared modal-window composition for agent and dashboard hosts. Browse rendering SHALL build owned filtered rows, show collapsed headers with counts, render hints with key labels, context dimming and one wrap-flowed inline-help block only while their stable expansion key is selected, paint search and divider chrome, delegate visual-row content and scrollbar painting to the shared picker, and publish the resulting search and item hit areas. Detail rendering SHALL paint title, optional keys, distinct body paragraphs separated by blank rows and an inactive-context note, pre-wrap to the available width, clamp over-scroll to the final visible window, and omit a body identical to the title. Zero-sized detail areas SHALL be inert, and compact sizing SHALL derive from the shared modal sizing preset. This file does not prove terminal color fidelity, Unicode wrapping correctness inside shared wrapping/picker modules, host frame timing, hit-test consumption, scrollbar policy, or visual behavior at dimensions not exercised by the embedded tests.
+
+#### Scenario: Browse rows
+- **WHEN** registry and pseudo entries are filtered and built for the current frame
+- **THEN** headers, hint labels, key labels, selection, dimming and expansion descriptions map one-to-one into picker rows.
+
+#### Scenario: Inline help
+- **WHEN** an expandable row is expanded
+- **THEN** long help or description is shown as a newline-joined wrap-flowed block, while empty help adds no description row and collapsed rows show none.
+
+#### Scenario: Detail body
+- **WHEN** detail content exceeds its width or viewport or repeats its title
+- **THEN** wrapping and clamped scrolling preserve the last visible rows, paragraphs receive blank separation, and duplicate title text is omitted.
+
+#### Scenario: Shared modal composition
+- **WHEN** either host renders Browse or Detail
+- **THEN** the same modal sizing, footer, search chrome, picker content and hit-area construction are used.
+
+证据：`crates/codegen/pager/src/views/shortcuts_help.rs`。
+
+### Requirement: Pager semantic text line and table selection
+
+Pager agent selection SHALL resolve word selection against configured separators with URL preference, select full rendered lines with hidden prefix/suffix boundaries restored, and select either a table cell or the entire table grid when table geometry is available. Successful semantic selections SHALL persist their exact entry/range endpoints, origin and selection kind, copy nonempty text through the debounced clipboard path, select ordinary scrollback entries but leave the /btw sentinel out of scrollback selection, and timestamp the highlight. Flash-mode highlights SHALL expire after the configured duration, while keep-selection mode holds them until another interaction clears them. Selection sources for an active child SHALL use that child's scrollback, appearance and cwd. This file does not prove clipboard backend delivery, configured separator loading, rendering registration completeness, or timer scheduling frequency.
+
+#### Scenario: Semantic word or URL
+- **WHEN** a double-click target resolves to selectable text
+- **THEN** URL bounds take precedence over word separators, hidden edit boundaries do not enter the semantic copy, and an empty range creates no selection.
+
+#### Scenario: Full rendered line
+- **WHEN** a full line is selected
+- **THEN** its visible width defines endpoints while registered hidden prefix and suffix boundaries are restored in copied text.
+
+#### Scenario: Table cell or grid
+- **WHEN** a triple-click lands inside a detected table cell or on its border/divider
+- **THEN** the cell or entire grid is copied and persisted with matching table geometry; absence of a grid permits caller fallback to line selection.
+
+#### Scenario: Highlight lifetime
+- **WHEN** a persisted selection ages past the flash duration
+- **THEN** flash mode clears selection and table geometry, while keep-selection mode does not timer-dismiss it.
+
+#### Scenario: Active child source
+- **WHEN** copy reconstruction targets an active child view
+- **THEN** full-output derivation uses the child scrollback and child cwd rather than rebuilding it against the parent cwd.
+
+证据：`crates/codegen/pager/src/app/agent_view/selection.rs`。
+
+### Requirement: Pager drag copy reconstruction and persisted shape
+
+Pager text-drag completion SHALL reconstruct from the anchor entry's full output at the drag-start content-width snapshot when possible, so wrapped content may still copy after the anchor scrolls out. Table-shaped drags SHALL use frozen side-car geometry only if re-detection against current full output exactly matches; otherwise they SHALL degrade to linear reconstruction, persist Linear kind, and discard stale table geometry. /btw drags SHALL reconstruct from the overlay's full selection model at the captured width and remain linear. A nonempty successful reconstruction SHALL be copied and persisted; failure or empty output SHALL leave no new highlight. This file does not prove system clipboard delivery, render-cache stability during concurrent streaming, or cross-entry linear text dragging.
+
+#### Scenario: Linear full-output copy
+- **WHEN** a text drag finishes after its anchor block leaves the visible model
+- **THEN** a captured content width permits reconstruction from full entry output and absence of both snapshot and visible geometry may fail cleanly.
+
+#### Scenario: Table preservation
+- **WHEN** frozen table geometry still matches full output
+- **THEN** table cell/grid text and kind are preserved without border glyphs outside the selected cells.
+
+#### Scenario: Table degradation
+- **WHEN** table-aware reconstruction cannot run or geometry no longer matches
+- **THEN** linear text is used when available and the persisted highlight drops the abandoned table kind and side-car.
+
+#### Scenario: BTW width snapshot
+- **WHEN** an overlay drag finishes after panel geometry is unavailable
+- **THEN** the drag-start width drives full overlay reconstruction and the copied shape remains Linear.
+
+证据：`crates/codegen/pager/src/app/agent_view/selection.rs`。
+
+### Requirement: Pager scrollback multi-click action dispatch
+
+Pager scrollback click handling SHALL count clicks only for the same entry within the multi-click timeout and, for permission groups, the same member. It SHALL select the clicked entry before dispatching entry-specific behavior: group headers collapse or toggle expansion, plan tools show preview on single click, background tasks and subagents open their viewers on double-click, permission members open only their own details, workflow rows open the matching run id, coordination notices open detail text, and ordinary foldable rows toggle inline folding with prompt and triple-click scroll-to-top rules. Repeated double-clicks on assistant text within ten seconds SHALL request the word-selection tip only while word-select mode is disabled; fold-affordance rows do not arm it. This file does not prove upstream hit-testing, viewer rendering, plan-preview contents, workflow snapshot freshness, or enabled inline-edit behavior.
+
+#### Scenario: Entry-specific double click
+- **WHEN** the second click targets a background task, subagent, permission member, workflow, coordination notice or ordinary foldable row
+- **THEN** the corresponding viewer, detail, workflow, or inline fold action runs instead of an unrelated action.
+
+#### Scenario: Permission member identity
+- **WHEN** clicks move between members in one expanded permission block
+- **THEN** click counting is scoped to the member and only the double-clicked member detail opens.
+
+#### Scenario: Prompt and group navigation
+- **WHEN** a prompt, group header or ordinary non-prompt receives repeated clicks
+- **THEN** its fold and scroll behavior follows the documented double/triple-click branch and the click state resets after the third click.
+
+#### Scenario: Word-selection education
+- **WHEN** assistant text receives two separate double-click gestures within ten seconds while fold/nav selection is configured
+- **THEN** only the second gesture requests the tip; tool and other fold-affordance rows never arm it.
+
+证据：`crates/codegen/pager/src/app/agent_view/selection.rs`。
+
+### Requirement: Pager text drag arming motion and post-render reclamp
+
+Pager text dragging SHALL arm only from a selectable range, snapshot the anchor block width, promote after the drag threshold, freeze any table geometry once at arming, and keep anchor identity fixed while updating the head within that range. Pointer position SHALL be stored from promotion onward. After render rebuilds a selection model, the active head SHALL reclamp to the line now under the held pointer only for the surface just rebuilt; a missing pointer, absent active drag, missing range, or other-surface rebuild is a no-op. Promotion misses collapse the head to the anchor, while later motion misses keep the previous head. Active /btw drags never arm scrollback autoscroll. This file does not prove draw calls reclamp after every model rebuild or that every input route honors the same event ordering.
+
+#### Scenario: Threshold promotion
+- **WHEN** a selectable press moves beyond the drag threshold
+- **THEN** it becomes an active drag with fixed anchor, current nearest head, captured width and stored pointer.
+
+#### Scenario: Fresh-model reclamp
+- **WHEN** scrolling, streaming or resize rebuilds the anchored surface model under a held pointer
+- **THEN** the head moves to the fresh hit without moving the anchor or using the other surface model.
+
+#### Scenario: Missing geometry
+- **WHEN** the range disappears before promotion or during an active drag
+- **THEN** promotion uses the anchor as head while later motion retains the previous head.
+
+#### Scenario: Guarded reclamp
+- **WHEN** no drag, no held pointer, the wrong surface rebuild, or no fresh hit is present
+- **THEN** reclamp leaves selection state unchanged.
+
+证据：`crates/codegen/pager/src/app/agent_view/selection.rs`。
+
+### Requirement: Pager deferred text anchor and input ownership
+
+A left press in scrollback chrome, a dead gap, recap chrome, or the passive strip above the prompt SHALL arm a one-way deferred text latch when no selectable text is under the pointer, subject to higher-priority interactive controls and modal ownership. The first drag position entering selectable scrollback text SHALL become both anchor and head, capture that entry's width, and cancel any pending or active block drag. Until conversion, existing block drag and click behavior SHALL continue; after conversion, motion over chrome/gaps remains a text drag. Motion owned by the deferred latch SHALL not leak into todo, block viewer or prompt handlers. Release, stale non-drag input, or recovery SHALL clear all associated latches and derived autoscroll/pointer state. /btw non-text presses remain exact-hit only. Plan feedback prompt routing SHALL continue a left drag and release outside its rect once armed inside. This file does not prove outer mouse hit priority beyond the paths exercised here or TextArea's own drag behavior.
+
+#### Scenario: Chrome or gap conversion
+- **WHEN** an anchorless press later enters selectable text
+- **THEN** that entry position becomes the text anchor and any block drag is cancelled permanently for the gesture.
+
+#### Scenario: No conversion
+- **WHEN** a motionless press releases or a drag never enters text
+- **THEN** ordinary click/block behavior completes where applicable and no text selection remains.
+
+#### Scenario: Passive strip ownership
+- **WHEN** the strip arms a deferred gesture
+- **THEN** motion cannot alter the focused prompt and may still convert when it reaches scrollback text.
+
+#### Scenario: Interactive and modal priority
+- **WHEN** scrollbar, cancel button, prompt, block viewer or /btw panel owns the press
+- **THEN** the deferred scrollback latch is not armed.
+
+#### Scenario: Recovery and prompt drag
+- **WHEN** recovery or stale input occurs, or a plan prompt drag exits its rectangle
+- **THEN** stuck scrollback state is cleared, while an already armed plan prompt drag continues through its release.
+
+证据：`crates/codegen/pager/src/app/agent_view/selection.rs`。
+
+### Requirement: Pager block drag copy and held-pointer autoscroll
+
+Pager block dragging SHALL arm only on drag-startable visible blocks, promote after its threshold, update the head by visible block identity, and on release copy the inclusive entry interval in order while skipping nonselectable or group-hidden entries and preferring live background-task stdout. Active text and block drags SHALL derive autoscroll solely from pointer motion at pane edges; each tick scrolls the active main or child scrollback by the latched direction and speed without rewriting that state. Text heads are estimated against the stale frame then reclamped after render, while block heads snap to the next visible block when their prior head scrolls out. Reaching a scroll clamp or receiving an independent wheel event SHALL not reverse or oscillate the latched direction. This file does not prove tick cadence, terminal clipboard delivery, every RenderBlock copy representation, or active-child whole-block copy routing.
+
+#### Scenario: Block interval copy
+- **WHEN** a promoted block drag finishes
+- **THEN** selectable visible-group content from the inclusive anchor/head interval is joined with blank lines, with live background stdout preferred.
+
+#### Scenario: Held edge pointer
+- **WHEN** a drag remains held in an edge zone
+- **THEN** ticks move monotonically in the latched direction and remain stable at the top or bottom clamp.
+
+#### Scenario: Head tracking
+- **WHEN** scrolling removes a block head or changes text beneath the pointer
+- **THEN** block head snaps in scroll direction and text head converges through post-render reclamp.
+
+#### Scenario: Independent wheel
+- **WHEN** wheel input moves opposite an armed autoscroll direction
+- **THEN** it applies once without changing the latch and later ticks settle toward their original clamp.
+
+证据：`crates/codegen/pager/src/app/agent_view/selection.rs`。
+
+### Requirement: Pager question state, selection and ACP answer projection
+
+The pager question overlay SHALL initialize one selection, cursor, scroll, freeform text and freeform-selection slot per question; single choice SHALL replace or toggle one option while multiple choice SHALL maintain a sorted-by-option-order label projection. Cursor and tab helpers SHALL clamp at available bounds, fixed-choice local questions SHALL make freeform input unreachable, and local question kind SHALL remain mutually exclusive by convention with the ACP response sender. Accepted ACP answers SHALL omit unanswered questions, preserve selected labels as separate ordered values, attach a single-choice preview and selected nonblank freeform notes when present, and use Other for freeform-only answers; Plan partial answers SHALL intentionally collapse selected labels to comma-separated text and omit notes. Sending SHALL consume the one-shot sender before serialization/delivery so no second response is attempted. This file does not prove callers preserve the public parallel-vector invariants, that local_kind and response_tx are actually exclusive, receiver delivery after send, downstream interpretation of duplicated question text keys, or host action translation for LocalQuestionKind.
+
+#### Scenario: State initialization
+- **WHEN** a question view is constructed
+- **THEN** per-question selection type and all parallel cursor, scroll and freeform slots match the question list and start at their neutral values.
+
+#### Scenario: Selection projection
+- **WHEN** single or multiple options are selected, toggled or queried
+- **THEN** single choice holds at most one index and multiple-choice labels are returned in source option order.
+
+#### Scenario: Fixed-choice freeform guard
+- **WHEN** freeform activation is requested for a no_freeform question
+- **THEN** focus, option selection and freeform-selection state remain unchanged and no input text is returned.
+
+#### Scenario: Accepted response
+- **WHEN** the current state is projected to an accepted ACP response
+- **THEN** only answered questions appear, labels stay separate, and eligible preview or nonblank selected notes appear in annotations.
+
+#### Scenario: Plan partial response
+- **WHEN** Plan actions request partial answers
+- **THEN** selected labels are comma-joined, freeform-only input becomes Other, and unanswered questions are omitted.
+
+#### Scenario: One-shot response
+- **WHEN** an ACP response sender is present and a response is sent
+- **THEN** the sender is consumed before the send attempt and subsequent attempts report that no sender remains.
+
+证据：`crates/codegen/pager/src/views/question_view.rs`。
+
+### Requirement: Pager question chrome, height and scroll geometry
+
+Question geometry SHALL measure option rows using the same focus-sensitive Markdown wrapping rules used to build their visual lines, map visual and screen rows back to option indices, and clamp line-granular scroll offsets against the visible viewport. The panel SHALL reserve question label, optional description and focused-option preview chrome, one sticky freeform row unless disabled, and two sticky Plan actions in Plan mode. Non-fullscreen height SHALL be capped to 33 percent of the screen with an eight-row floor and 80 percent ceiling, dynamically reducing description and preview caps to preserve at least three visible option rows where fixed overhead permits; fullscreen SHALL remove chrome caps but still fit the screen. Chrome rendering SHALL clip all writes at both panel and buffer bounds, and truncated descriptions or previews SHALL show the expansion indicator only when their cap can retain real content. The scrollbar SHALL appear only for a nonempty viewport whose measured option height exceeds it. This file does not prove draw-callers always pass the matching content width, mouse handlers consume fresh geometry, scrolling behavior under more than u16::MAX visual lines, or scrollbar measurement parity when the question panel is narrower than the backing Buffer.
+
+#### Scenario: Panel sizing
+- **WHEN** the question panel is measured in normal or fullscreen mode
+- **THEN** chrome, options, optional freeform and Plan rows are included under the corresponding screen cap and cached chrome limits.
+
+#### Scenario: Small terminal fallback
+- **WHEN** capped chrome would leave fewer than three option rows
+- **THEN** description budget is reduced first and remaining budget is assigned to preview including its separator where space permits.
+
+#### Scenario: Row mapping and scroll
+- **WHEN** wrapped focused rows create multiple visual lines
+- **THEN** line offsets map to the owning item and scroll stays between zero and the measured maximum.
+
+#### Scenario: Chrome clipping
+- **WHEN** stale or mismatched width accounting would draw below the panel or buffer
+- **THEN** rendering stops at the exclusive boundary instead of indexing outside Ratatui's Buffer.
+
+#### Scenario: Plan and fixed-choice reservation
+- **WHEN** Plan mode or no_freeform changes sticky rows
+- **THEN** the measured height and returned scrollable option region exclude exactly the rows reserved outside scrolling.
+
+#### Scenario: Scrollbar admission
+- **WHEN** the visible option region has positive height and content exceeds it
+- **THEN** a one-column styled scrollbar rect is returned; otherwise no scrollbar is painted.
+
+证据：`crates/codegen/pager/src/views/question_view.rs`。
+
+### Requirement: Pager question option rendering and terminal-width styling
+
+Question option rendering SHALL allocate at most 60 percent of content width to the widest normalized label, use six terminal columns for the stable shortcut and radio or checkbox prefix, and display shortcuts 1 through 9 followed by a through z while direct key mapping is intentionally limited to 1 through 9 and a through f. Unfocused options SHALL occupy one line with a collapsed description and an ellipsis whenever content is hidden; focused options SHALL expand their complete Markdown-rendered description, stacking labels that overflow the aligned column and wrapping them within the width after the prefix. Padding, truncation and wrapping SHALL use terminal display width so CJK and other wide glyphs do not displace the description. Cursor rows SHALL use embedded selection foregrounds without a background band in embedded mode and bg_visual with normal foregrounds in the full TUI; hover, selected markers, freeform previews, panel focus dimming, accent rail and sticky Plan actions SHALL use the current theme. This file does not prove keyboard dispatch for the displayed shortcuts, terminal font glyph width, Markdown parser behavior outside the renderer dependency, accessibility semantics, color contrast, or actual mouse hit routing.
+
+#### Scenario: Aligned option row
+- **WHEN** an unfocused label fits its capped column
+- **THEN** prefix, display-width padding and collapsed description occupy one visual row and hidden content gains one ellipsis.
+
+#### Scenario: Overflowing focused label
+- **WHEN** a focused label exceeds the capped label column
+- **THEN** it wraps after the six-column prefix and its description stacks beneath using the remaining full row width.
+
+#### Scenario: Wide-character padding
+- **WHEN** labels contain CJK or other multi-column glyphs
+- **THEN** explicit Unicode display-width padding keeps the description within the measured content width.
+
+#### Scenario: Selection styling
+- **WHEN** a keyboard cursor row is painted in embedded or full-TUI mode
+- **THEN** embedded mode uses selection foreground with transparent background while full TUI uses the visual background band.
+
+#### Scenario: Freeform row
+- **WHEN** the sticky Other row has selected or retained text
+- **THEN** its radio or checkbox state, prompt arrow, first-line preview and dimmed unselected preview reflect that state.
+
+#### Scenario: Narrow description
+- **WHEN** the collapsed-description budget is zero
+- **THEN** no description spans are emitted and row construction remains width-safe.
+
+证据：`crates/codegen/pager/src/views/question_view.rs`。
+
+### Requirement: Pager UI and dispatch module façade boundaries
+
+Pager module façades SHALL expose the declared scrollback block types, scrollback state/render/search/link types and view modules while keeping concrete implementations in their named submodules. The root dispatch façade SHALL map synchronous Action handling to state mutation plus Effect descriptions, expose only the listed crate-scoped helpers, and declare no terminal, network or filesystem execution; its session façade groups fork, lifecycle, list, load and modal dispatchers. These files establish module ownership and visibility only, not the behavior of the declared submodules.
+
+#### Scenario: Façade ownership
+- **WHEN** a caller imports pager scrollback, view or dispatch APIs
+- **THEN** the listed public or crate-scoped re-exports define the supported module boundary.
+
+#### Scenario: Dispatch purity boundary
+- **WHEN** an Action is handled through the dispatch tree
+- **THEN** synchronous code mutates state and returns Effect descriptions rather than executing asynchronous I/O.
+
+#### Scenario: Session grouping
+- **WHEN** root dispatch resolves session lifecycle work
+- **THEN** fork, lifecycle, list, load and modal remain the five private session dispatcher modules.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/mod.rs`、`crates/codegen/pager/src/scrollback/blocks/mod.rs`、`crates/codegen/pager/src/scrollback/mod.rs`、`crates/codegen/pager/src/views/mod.rs`、`crates/codegen/pager/src/app/root/dispatch/mod.rs`。
+
+### Requirement: Pager live tmux diagnostics adapter
+
+The pager diagnostics layer SHALL define TmuxOptionQuery with show_option, option_support and control_mode operations returning the terminal probe result alias. LiveTmuxProbe SHALL forward those calls directly to tmux_probe query_option, query_option_support and query_control_mode respectively. This adapter does not cache, normalize, retry or interpret tmux results.
+
+#### Scenario: Option query
+- **WHEN** diagnostics asks the live adapter for a named tmux option
+- **THEN** the request is forwarded to the canonical terminal option query.
+
+#### Scenario: Support query
+- **WHEN** diagnostics checks whether an option is supported
+- **THEN** the canonical support probe result is returned unchanged.
+
+#### Scenario: Control mode
+- **WHEN** diagnostics asks for tmux control mode
+- **THEN** the canonical control-mode probe result is returned unchanged.
+
+证据：`crates/codegen/pager/src/diagnostics/probes/tmux.rs`。
+
+### Requirement: Pager goal projection elapsed floor and clear suppression
+
+AgentView goal projection SHALL reject an update whose goal id equals last_cleared_goal_id. For an accepted update it SHALL preserve the maximum of incoming elapsed_ms and the current same-goal live elapsed value, stamp a new receive instant and replace goal_state. Clearing SHALL remember the removed goal id, close goal detail and return true even when no goal was present; the projection itself emits no durable notice.
+
+#### Scenario: Cleared goal suppression
+- **WHEN** an update repeats the most recently cleared goal id
+- **THEN** the projection rejects it without restoring goal state.
+
+#### Scenario: Elapsed monotonicity
+- **WHEN** the same goal receives another update
+- **THEN** the elapsed floor never falls below either current live elapsed time or the incoming elapsed value.
+
+#### Scenario: Clear
+- **WHEN** goal projection is cleared with or without current state
+- **THEN** an existing id is remembered, detail closes and the operation reports a state action.
+
+证据：`crates/codegen/pager/src/app/agent_view/goal.rs`。
+
+### Requirement: Pager dashboard lifecycle diagnostics facts
+
+Dashboard diagnostics SHALL log open with top-level agent count, the sum of each root direct subagent_sessions count and leader_mode; close SHALL log current top-level agent count. Attachment SHALL classify row identity as top_level, subagent or roster, and launch SHALL forward its static source string. These helpers only emit diagnostics events and do not alter dashboard state.
+
+#### Scenario: Open and close
+- **WHEN** the dashboard opens or closes
+- **THEN** the corresponding event carries the current asserted counts and leader flag where defined.
+
+#### Scenario: Attach kind
+- **WHEN** a top-level, subagent or roster row is attached
+- **THEN** the event kind is the matching stable snake-case value.
+
+#### Scenario: Launch source
+- **WHEN** a dashboard launch path reports its source
+- **THEN** the static source is forwarded into DashboardAgentLaunched.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/dashboard_diagnostics.rs`。
+
+### Requirement: Pager minimal external prompt editor admission
+
+Minimal-mode external prompt editing SHALL do nothing outside minimal mode, while another editor request is pending, outside an active agent view, or when the active agent is missing. It SHALL reject ownership conflicts silently, report the canonical paste-pending or attachment failure on those access states, and for Ready store a PromptDraft request with agent id and the exact current prompt text. Preparation returns no Effect because external execution is handled outside this function.
+
+#### Scenario: Admission gate
+- **WHEN** screen, pending request or active view is ineligible
+- **THEN** no editor request or effect is created.
+
+#### Scenario: Prompt conflict
+- **WHEN** editor access is paste-pending or has attachments
+- **THEN** the matching canonical failure is reported and no request is stored.
+
+#### Scenario: Ready draft
+- **WHEN** the active minimal agent grants Ready access
+- **THEN** pending_editor records that agent and the original prompt text.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/external_editor.rs`。
+
+### Requirement: Pager styled file reference spans
+
+styled_file_ref SHALL construct a Ratatui line containing an optional gray @ prefix, the owned path in theme.path, and when present a gray colon plus line-range text in theme.gray_bright. Omitting at_prefix removes only the leading @ span; the function performs no path validation, range parsing or truncation.
+
+#### Scenario: Prompt chip
+- **WHEN** a file reference requests an @ prefix
+- **THEN** the first span is gray @ followed by the styled path.
+
+#### Scenario: Viewer title
+- **WHEN** a file reference omits the prefix
+- **THEN** the line begins with the path span.
+
+#### Scenario: Line range
+- **WHEN** line-range display text is supplied
+- **THEN** a gray colon and bright-gray owned range span follow the path.
+
+证据：`crates/codegen/pager/src/views/file_search/mod.rs`。
+
+### Requirement: Pager composable scrollback wrapper façade
+
+The scrollback wrapper façade SHALL expose Accented, BlockRenderer, EntryRenderer and Padded as composable Renderable decorators, with group_header_chrome_prefix_width restricted to crate scope. The embedded composition check SHALL verify that standard padding around a foreground accent and a stub block preserves a three-row desired height, paints the accent at column two and begins content at column three on the content row. It does not prove every wrapper option or terminal rendering. 
+
+#### Scenario: Composition
+- **WHEN** a standard Padded wraps an Accented BlockRenderer for a one-line stub
+- **THEN** height remains three, the accent occupies column two and content begins at column three on row one.
+
+#### Scenario: Visibility
+- **WHEN** callers import wrapper primitives
+- **THEN** the four public wrapper types are exposed while the group-header width helper remains crate-scoped.
+
+证据：`crates/codegen/pager/src/scrollback/wrappers/mod.rs`、`crates/codegen/pager/src/scrollback/wrappers/mod.rs`。
+
+### Requirement: Pager jump picker admission preview and restoration
+
+The root jump dispatcher SHALL act only on an existing active agent and SHALL refuse when another prompt overlay owns the input slot. Fewer than two timeline turns SHALL show "Nothing to jump to yet". Otherwise it SHALL capture bookmark, selection and follow mode, select the turn at viewport top or the newest fallback, store JumpState and preview that prompt at the top. Selection resolves a stable EntryId; if it disappeared, the captured viewport is restored. Dismissal delegates to the active agent and all three paths return no Effect.
+
+#### Scenario: Admission
+- **WHEN** jump opens without an eligible active agent or while its slot is occupied
+- **THEN** no picker, toast or effect is created.
+
+#### Scenario: Insufficient history
+- **WHEN** the eligible transcript has fewer than two timeline turns
+- **THEN** the canonical nothing-to-jump toast is shown.
+
+#### Scenario: Preview
+- **WHEN** at least two turns exist
+- **THEN** the current top turn or newest fallback becomes selected and is scrolled to the top with restore state retained.
+
+#### Scenario: Stale selection
+- **WHEN** the selected stable prompt id disappeared before confirmation
+- **THEN** the captured viewport is restored instead of leaving the last preview position.
+
+#### Scenario: Dismiss
+- **WHEN** an active agent dismisses jump
+- **THEN** its jump picker state is closed without an effect.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/jump.rs`。
+
+### Requirement: Pager theme-independent debug overlay panel
+
+Debug overlay styles SHALL reset inherited modifiers and use explicit white-on-black body and yellow-on-black title colors. render_panel SHALL clamp width to the area, right-align the panel, saturating-offset its top, return for zero width or an offscreen top, cap height to remaining rows, prefill the full panel rectangle with body style, then truncate or space-pad each line to the requested character count and style only the first line as title. The unit check verifies the explicit colors and modifier clearing but does not cover Unicode cell width.
+
+#### Scenario: Style reset
+- **WHEN** body or title chrome is requested
+- **THEN** foreground/background are explicit ANSI colors and every inherited modifier is subtracted.
+
+#### Scenario: Empty bounds
+- **WHEN** effective width is zero or top begins below the area
+- **THEN** the renderer writes nothing.
+
+#### Scenario: Panel paint
+- **WHEN** visible lines are rendered
+- **THEN** the right-aligned rectangle is prefilled, height is clipped, first row is title style and later rows are body style.
+
+证据：`crates/codegen/pager/src/views/debug_style.rs`、`crates/codegen/pager/src/views/debug_style.rs`。
+
+### Requirement: Pager status bar placement gates
+
+StatusBar SHALL retain required left text plus optional center and right text through builder methods. Rendering SHALL return on zero height, use the current theme gray over base background, return without painting when width is below ten, otherwise paint the full area background and left content. Center text SHALL be byte-length centered only when its start clears left byte length plus two; right text SHALL be byte-length right aligned. This contract records the current byte-based placement and does not claim Unicode-safe alignment or collision prevention.
+
+#### Scenario: Construction
+- **WHEN** center and right builders are chained
+- **THEN** the optional labels are retained with the original left text.
+
+#### Scenario: Small area
+- **WHEN** height is zero or content width is below ten
+- **THEN** no status content is painted.
+
+#### Scenario: Normal row
+- **WHEN** a sufficiently wide row is rendered
+- **THEN** the base background and left text are painted, optional center is gated by left clearance and optional right is aligned to the right edge.
+
+证据：`crates/codegen/pager/src/views/status_bar.rs`。
+
+### Requirement: Pager conversation Markdown export
+
+render_blocks_to_markdown SHALL emit User sections with raw prompt text, coalesce consecutive AgentMessage blocks under one Assistant header using raw Markdown copy text, and group tool calls under Tools with one-line variant-specific summaries. Entering User or Assistant after tools SHALL terminate the tool section with a blank line; non-conversation blocks are skipped without changing assistant glue state, and trailing whitespace is removed. The empty iterator unit check SHALL return an empty string. The exporter does not escape user/tool data or persist files.
+
+#### Scenario: Empty transcript
+- **WHEN** no blocks are supplied
+- **THEN** the output is empty.
+
+#### Scenario: Conversation
+- **WHEN** user and consecutive assistant blocks are supplied
+- **THEN** User and one coalesced Assistant section preserve their copy text.
+
+#### Scenario: Tools
+- **WHEN** tool call variants are supplied
+- **THEN** one Tools section lists their canonical Read/Edit/Execute/ListDir/Search/WebFetch/UseTool/integration/memory/other/lifecycle summaries.
+
+#### Scenario: Chrome
+- **WHEN** thinking, session, background or other non-conversation blocks occur
+- **THEN** they add no exported section and thinking does not split assistant messages.
+
+证据：`crates/codegen/pager/src/scrollback/export.rs`、`crates/codegen/pager/src/scrollback/export.rs`。
+
+### Requirement: Pager dashboard rename and worktree staging
+
+Dashboard inline rename SHALL use the canonical single-line editor, reject unsafe display scalars, cap wire text at 100 Unicode scalar values, preserve pasted emoji ZWJ sequences, treat only unmodified Enter as commit, and route Esc or Ctrl+C to cancel. While a worktree-label dialog owns input, submit SHALL emit its confirmation action and cancel SHALL restore any stashed prompt including images and consume the stash; the dashboard worktree chord SHALL remain registry-routed. This file does not prove rename dispatch updates a remote session, worktree creation, repository validation, prompt stash implementation internals, or rendering of the dialog.
+
+#### Scenario: Bounded rename editing
+- **WHEN** rename receives keys or bracketed paste
+- **THEN** canonical cursor, word and grapheme editing applies while unsafe characters and excess scalars are rejected.
+
+#### Scenario: Rename completion
+- **WHEN** unmodified Enter, Esc or Ctrl+C is pressed
+- **THEN** rename commits or cancels through a dashboard action without leaking input to the hidden dispatch widget.
+
+#### Scenario: Worktree dialog lifecycle
+- **WHEN** a staged worktree prompt is cancelled or submitted
+- **THEN** the dialog closes and the prompt is restored on cancel or passed to the confirmation action on submit.
+
+证据：`crates/codegen/pager/src/views/dashboard/state.rs`。
+
+### Requirement: Pager dashboard peek reply and question interaction state machine
+
+An open dashboard peek SHALL own reply editing before hidden dispatch input. It SHALL route focused text, editing chords, paste and file search to the reply widget rooted lazily at the peeked row cwd; use empty or unfocused arrows for row navigation; make Enter send, attach, answer, or inline-expand according to focus and question state; make Ctrl+S send-and-open; implement the strict multiline Enter swap; and clear drafts plus undo history when the row changes. Pending questions SHALL require option selection, allow reject/Other text only on the matching option, strip image placeholders from text answers, and route permission and ask-question answers to their distinct actions. Dashboard-owned and app-global chords SHALL remain reachable without editing the hidden dispatch draft. This file does not prove downstream ACP delivery, question-option construction, file matcher results, system clipboard reads, or detail-view attachment.
+
+#### Scenario: Reply ownership
+- **WHEN** peek is open
+- **THEN** reply keys and paste cannot mutate the hidden dashboard dispatch widget, while allowed dashboard/global shortcuts bubble to their owners.
+
+#### Scenario: Navigation and focus
+- **WHEN** reply is empty, unfocused, vim-focused or contains text
+- **THEN** arrows, j/k/i/l, Tab and printable keys switch rows, open detail, move the caret, or change focus according to the explicit focus state.
+
+#### Scenario: Send and multiline
+- **WHEN** Enter, modified Enter or Ctrl+S is pressed
+- **THEN** the reply expands an inline element first or sends, opens, or inserts newline according to compose mode and content.
+
+#### Scenario: Question answer
+- **WHEN** a permission or ask question is visible
+- **THEN** digits select options, arrows navigate selection, and Enter emits the correct option or freeform action without attaching images.
+
+#### Scenario: Draft isolation
+- **WHEN** peek closes or changes row
+- **THEN** reply text, images, prompt-click state and undo history are cleared so prior content cannot target another row.
+
+证据：`crates/codegen/pager/src/views/dashboard/state.rs`。
+
+### Requirement: Pager dashboard dispatch composition focus and action routing
+
+The dashboard dispatch surface SHALL keep overview-list focus distinct from prompt focus, preserve drafts across Esc blur, and follow the cascade search, peek, filter, input blur, row or section deselection, then dashboard exit. Empty sends SHALL attach the selected row or create-and-open from the new-agent button; text SHALL dispatch verbatim, slash-prefixed text SHALL use slash dispatch, Ctrl+S SHALL request send-and-open, and multiline mode SHALL swap bare versus modified Enter. Registry actions SHALL be honored according to focus and vim mode, with destructive stop repeats suppressed and unsupported dashboard-context actions falling through. Mouse selection within dispatch or peek reply SHALL remain owned by the corresponding prompt widget. This file does not prove action dispatch side effects, registry construction beyond bindings exercised here, terminal modifier normalization, or prompt rendering.
+
+#### Scenario: Esc cascade
+- **WHEN** Esc is pressed repeatedly without a modal owner
+- **THEN** it clears the highest-priority transient/focus/selection layer before emitting dashboard exit and preserves the draft.
+
+#### Scenario: Dispatch resolution
+- **WHEN** send is requested
+- **THEN** empty input attaches or creates and nonempty input emits slash or ordinary dispatch with the requested attach flag.
+
+#### Scenario: Focus and vim routing
+- **WHEN** Tab, arrows, j/k/i/l, printable or registry chords arrive
+- **THEN** only the focused list or prompt consumes the applicable input and hidden prompt state is not edited.
+
+#### Scenario: Compose mode
+- **WHEN** bare or modified Enter is pressed
+- **THEN** single-line and multiline modes make exactly one of them newline and the other send/open.
+
+#### Scenario: Prompt mouse selection
+- **WHEN** pointer drag or click targets an active prompt rect
+- **THEN** that prompt receives caret/selection events and focus without activating unrelated rows.
+
+证据：`crates/codegen/pager/src/views/dashboard/state.rs`。
+
+### Requirement: Pager dashboard prompt elements and direct paste routing
+
+Dashboard dispatch and peek reply SHALL preserve multiline paste as prompt elements, expand the element under a bare Enter before sending, and dispatch image elements as aligned content. Wrap-host image payloads SHALL become image chips only on the visible eligible surface, Wrap-host no-image payloads SHALL never become literal text, and ordinary bracketed paste while peek is open SHALL target the reply. Question mode SHALL prevent image attachment and allow text paste only in the selected freeform/reject field. Image chips SHALL omit full source paths, and opening, closing or retargeting peek SHALL reset the shared prompt multi-click timer. This file does not prove image decoding fidelity, preview rendering, downstream content-block serialization, or host wrap payload provenance.
+
+#### Scenario: Prompt paste element
+- **WHEN** multiline text is pasted
+- **THEN** raw text is retained behind a compact element that bare Enter expands before a later send.
+
+#### Scenario: Visible surface routing
+- **WHEN** paste arrives with peek open or closed
+- **THEN** it lands only on the visible dispatch or reply widget.
+
+#### Scenario: Wrap-host image
+- **WHEN** a wrap-host image or no-image payload arrives
+- **THEN** an eligible image becomes a clean chip and a no-image marker inserts no text.
+
+#### Scenario: Question image guard
+- **WHEN** a pending question owns peek
+- **THEN** image attachment is refused and only the active freeform answer accepts text.
+
+#### Scenario: Multi-click reset
+- **WHEN** peek opens, closes, or changes row
+- **THEN** stale paste-chip double-click timing cannot carry across surfaces or targets.
+
+证据：`crates/codegen/pager/src/views/dashboard/state.rs`。
+
+### Requirement: Pager dashboard deferred clipboard attachment ordering
+
+Dashboard clipboard paste SHALL resolve pasted image paths synchronously, otherwise enqueue raster or file-URL probing off the input loop when gated, and otherwise insert plain text synchronously. Completion SHALL decrement the shared in-flight count, route results to the stamped dispatch or exact peek row, prefer raster then file URL over deferred caption, retain bracketed captions on dropped or failed probes, emit preparation effects for accepted images, and report full miss or failure distinctly. Peek completions SHALL drop after close, retarget, or question arrival, and sends attempted while probes remain SHALL resume only after all probes complete using current widget content; invalidated peek sends SHALL be consumed with feedback. This file does not prove platform clipboard probing, effect scheduling order, preview generation, image persistence, or downstream action execution.
+
+#### Scenario: Probe admission
+- **WHEN** paste may contain an attachment
+- **THEN** file paths attach inline, eligible clipboard payloads enqueue a stamped off-thread probe, and plain text stays synchronous.
+
+#### Scenario: Completion precedence
+- **WHEN** a deferred probe completes
+- **THEN** raster, file URL and caption are reduced in that order and the surface receives at most the applicable representation.
+
+#### Scenario: Peek target safety
+- **WHEN** a completion returns after peek closes, changes row, or becomes a question
+- **THEN** attachment and deferred send are dropped rather than reaching a hidden or different target.
+
+#### Scenario: Send ordering
+- **WHEN** send is requested while any probe is in flight
+- **THEN** one surface-local send is stashed and rebuilt from the updated widget only after the counter reaches zero.
+
+#### Scenario: Failure reporting
+- **WHEN** persistence or probing fails or all representations miss
+- **THEN** the completion category and dashboard feedback preserve whether the error was already reported, an attachment read failed, or the host clipboard was empty.
+
+证据：`crates/codegen/pager/src/views/dashboard/state.rs`。
+
+### Requirement: Pager dashboard search completion dropdown and row mouse priority
+
+The dashboard SHALL enter live search only through Ctrl+/, use the dispatch widget as a query while active, update filters on text changes, keep the confirmed filter on Enter, and clear it on cancel; ordinary slash, prefix, and free text SHALL remain dispatch content. Open slash and file-search dropdowns SHALL own hover, wheel, scrollbar and click before underlying dashboard rows, accept the selected completion, and return focus to the input. A row click SHALL focus and attach immediately, while clicks outside known hit areas are unchanged. This file does not prove filter application in row.rs, completion catalog accuracy, rendered hit-area registration, action execution, or terminal mouse delivery.
+
+#### Scenario: Search lifecycle
+- **WHEN** Ctrl+/, typing, cursor edits, Enter or Esc act on search
+- **THEN** query/filter state changes live, confirms without losing the filter, or cancels back to dispatch.
+
+#### Scenario: Literal dispatch prefixes
+- **WHEN** slash, a:, s: or # text is composed outside search
+- **THEN** it remains prompt content and does not silently alter filtering.
+
+#### Scenario: Dropdown hit priority
+- **WHEN** completion UI overlaps dashboard rows
+- **THEN** hover, scrollbar and selection events are consumed by the visible dropdown before any row attach.
+
+#### Scenario: Row click
+- **WHEN** a visible row receives a primary click
+- **THEN** it becomes the selected row and emits immediate attachment; empty space is a no-op.
+
+证据：`crates/codegen/pager/src/views/dashboard/state.rs`。
+
+### Requirement: Pager dashboard section cursor delete modal and reanchor invariants
+
+The dashboard SHALL maintain mutually exclusive focus among the new-agent button, row, section header and Idle overflow control. State sections SHALL collapse through arrows, Enter, vim h/l or mouse, Inactive SHALL start collapsed, and Idle overflow SHALL reveal or refold old rows. Selection reanchoring SHALL retain visible identities, move rows hidden by collapse to the owning header, move vanished headers or overflow to the new-agent button, and disarm stale delete confirmation. Delete SHALL require a second matching gesture within the confirmation window, ignore key repeat, and clear on navigation or focus change. Shortcuts modal input and chrome SHALL own key, mouse and paste while open and preserve browse state across detail. This file does not prove row grouping/render geometry, dispatcher authorization of stop/delete, actual deletion, modal rendering, or timer ticks beyond direct maintenance calls.
+
+#### Scenario: Exclusive cursor
+- **WHEN** focus moves among button, row, section and overflow
+- **THEN** exactly the requested target remains selected and incompatible cursor/delete state clears.
+
+#### Scenario: Collapse and overflow
+- **WHEN** section or Idle overflow controls receive keyboard, vim or mouse input
+- **THEN** visible grouping state toggles without consuming an active prompt when the list lacks focus.
+
+#### Scenario: Selection reanchor
+- **WHEN** filtering, collapse or row churn removes the current visible target
+- **THEN** the cursor stays on a valid visible identity or moves to the responsible section/button without auto-selecting an unrelated row.
+
+#### Scenario: Delete confirmation
+- **WHEN** stop/delete gestures target a settled row
+- **THEN** the first discrete gesture arms that row and only a matching timely confirm deletes; navigation, expiry and stale GC disarm it.
+
+#### Scenario: Shortcuts modal ownership
+- **WHEN** the shortcuts modal is open
+- **THEN** chrome, browse, inline expansion, detail and filtering input stay inside the modal until it requests close.
+
+#### Scenario: Mouse and binding priority
+- **WHEN** pointer or dashboard navigation chords arrive
+- **THEN** header, delete, section, row and dispatch hit areas resolve in priority order and Ctrl+backslash remains reserved for dashboard navigation.
+
+证据：`crates/codegen/pager/src/views/dashboard/state.rs`。
+
+### Requirement: Pager dashboard manual scroll and viewport clamping
+
+Dashboard list scrolling SHALL use saturating offset changes, mark nonzero wheel movement as manual, always clamp against the current maximum, and suppress selection snap while manual scrolling is active. Clearing manual mode SHALL restore selection-follow so an offscreen selected line moves the viewport just enough to become visible; zero-height viewports SHALL avoid selection arithmetic. This file does not prove renderer row counts, wheel delta normalization, terminal viewport dimensions, or animation.
+
+#### Scenario: Manual wheel scroll
+- **WHEN** a nonzero positive or negative scroll delta arrives
+- **THEN** offset changes with saturation and selection snapping is suspended.
+
+#### Scenario: Bounds clamp
+- **WHEN** visible or total row counts change
+- **THEN** offset never exceeds the last valid window even during manual scrolling.
+
+#### Scenario: Selection follow
+- **WHEN** manual mode is clear and selection lies outside the window
+- **THEN** offset moves to expose it at the nearest edge; clearing manual mode re-enables this behavior.
+
+#### Scenario: Degenerate viewport
+- **WHEN** viewport height is zero or scroll delta is zero
+- **THEN** no invalid selection calculation or unintended mode change occurs.
+
+证据：`crates/codegen/pager/src/views/dashboard/state.rs`。
+
+### Requirement: Pager dashboard location picker and directory completion
+
+The dashboard location picker SHALL own input while open, start with current and recent directories, fuzzy-filter non-path queries, switch slash/tilde and native Windows paths to directory prefix completion, hide dot-directories unless explicitly requested, cap directory reads and visible rows, tag canonical managed-worktree roots, and use either the selected candidate or raw typed path. Tab SHALL fill a selected path with a trailing separator, Enter or row click SHALL emit a change-location action, edits SHALL clear stale errors, and modal close SHALL emit its close action. Header click and Ctrl+L SHALL open the picker. This file does not prove async recent-directory loading, actual cwd mutation, git worktree creation, filesystem permission behavior beyond empty listings, cross-platform path behavior on hosts not executing the corresponding cfg branch, or picker rendering.
+
+#### Scenario: Recent filtering
+- **WHEN** query is not path-like
+- **THEN** current/recent candidates are substring-filtered across label, detail and path and capped.
+
+#### Scenario: Path completion
+- **WHEN** query is path-like
+- **THEN** its parent is resolved against home/base, subdirectories are prefix-filtered, hidden names are gated, and canonical worktrees receive labels.
+
+#### Scenario: Choose or complete
+- **WHEN** Tab or Enter acts on a candidate or unmatched typed path
+- **THEN** Tab drills into the selected directory and Enter emits the selected or raw input.
+
+#### Scenario: Modal lifecycle
+- **WHEN** header click, Ctrl+L, Esc, edit or row mouse input occurs
+- **THEN** the picker opens, closes, clears stale errors, updates hover, or applies a location through dashboard actions.
+
+证据：`crates/codegen/pager/src/views/dashboard/state.rs`。
+
+### Requirement: Pager dashboard peek viewport lease restoration
+
+Opening a dashboard peek SHALL capture one viewport snapshot for the exact row, switch the available local scrollback to all-turn follow mode, and keep that lease sticky while the same row remains peeked. Leaving or retargeting SHALL restore the prior viewport. A qualifying top-level page flip during the lease SHALL remember only an entry that still exists while follow-preserve is active; restoration SHALL re-pin that entry if it remains, otherwise retain the original snapshot. Roster rows and mismatched parent/subagent identities SHALL not mutate local scrollback. This file does not prove page-flip dispatch, scrollback layout correctness, renderer timing, or lifecycle calls from every dashboard close path.
+
+#### Scenario: Lease capture
+- **WHEN** peek begins on an available local row
+- **THEN** its current viewport is captured once and the guest view follows all turns.
+
+#### Scenario: Sticky same-row peek
+- **WHEN** begin is called again for the leased row
+- **THEN** the original snapshot is not replaced.
+
+#### Scenario: Page-flip tracking
+- **WHEN** the leased top-level row flips to an existing entry under follow-preserve
+- **THEN** that entry is remembered; mismatched, removed, roster or subagent-parent events are ignored.
+
+#### Scenario: Restore
+- **WHEN** the lease ends
+- **THEN** the original viewport returns and a still-existing flipped entry is selected, scrolled to top and followed without losing it.
+
+证据：`crates/codegen/pager/src/views/dashboard/state.rs`。
+
+### Requirement: Pager root state authority and cross-surface projection
+
+The pager root SHALL own the active surface, stable agent map, shared model and action registries, terminal and appearance state, startup gates, dashboard state, notification state and process-local UI clocks. Construction SHALL seed deterministic in-memory defaults, allocate no session implicitly, and expose the root active agent and established session id without treating a focused child transcript as the root. Worktree modes SHALL map Ask, Always and Never to their configuration strings and fall back to Never for unrecognised strings. Project-picker admission SHALL require an unresolved, enabled gate and a cwd that is not already a detected project. This file does not prove configuration-file parsing or persistence, filesystem project detection beyond the delegated predicate, dispatch-side agent creation, ACP connectivity, or screen-mode re-exec.
+
+#### Scenario: Root construction
+- **WHEN** an AppView is constructed
+- **THEN** its active surface and all top-level registries, gates, queues, overlays and clocks start from the explicit defaults in AppView::new without creating an agent.
+
+#### Scenario: Worktree preference
+- **WHEN** a worktree hint value is parsed or serialized
+- **THEN** Ask, Always and Never round-trip through their canonical strings and an unknown value resolves to Never.
+
+#### Scenario: Project-picker gate
+- **WHEN** startup evaluates whether to ask for a project
+- **THEN** the picker is requested only while the gate is enabled, has not been shown and the cwd is outside a detected project.
+
+#### Scenario: Root session projection
+- **WHEN** callers query the active agent or session id
+- **THEN** only the active root Agent view is returned and an unestablished or non-Agent surface yields no session id.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager root fan-out, queue echo and surface feedback
+
+The pager root SHALL fan local-draft synchronization, activity reconciliation, contextual command gates, appearance and effective compactness across the agents and child views that own those projections. Typed transient feedback SHALL route to the active child or root agent, dashboard feedback slot, or welcome toast. Leader roster updates SHALL replace by session id and dashboard roster selection SHALL use leader data only in leader mode. Queue broadcasts SHALL replace the server-known queue while retaining unmatched optimistic echoes, and an authoritative running or queued id SHALL retire its optimistic duplicate. This file does not prove local-draft disk durability, slash-command execution, queue broadcast delivery/order, dashboard persistence, rendering of the resulting fields, or appearance configuration loading.
+
+#### Scenario: Fan-out
+- **WHEN** a shared appearance, compact derivation, activity phase or slash availability changes
+- **THEN** the root propagates the derived value to every applicable root and child projection while retaining the canonical root snapshot.
+
+#### Scenario: Transient feedback
+- **WHEN** a typed toast is shown
+- **THEN** it targets the focused child/root agent, dashboard feedback slot, or welcome overlay according to ActiveView.
+
+#### Scenario: Authoritative queue merge
+- **WHEN** a queue-changed snapshot arrives
+- **THEN** it replaces the session queue, drops optimistic rows acknowledged by running or queued ids and appends still-unacknowledged optimistic rows exactly once.
+
+#### Scenario: Roster authority
+- **WHEN** a leader roster entry changes or the dashboard asks for rows
+- **THEN** entries are keyed by session id and leader mode selects the live roster while local mode selects the local session list.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager contextual tip admission and clipboard polling
+
+The pager root SHALL apply contextual-hint gates to existing prompt surfaces and admit one-shot small-screen and SSH-wrap tips only after an active agent has a stable measured terminal and a renderable, unoccupied tip slot. Clipboard-image hints SHALL poll only while enabled, supported, focused, outside cooldown and eligible for the active model/prompt; polling SHALL remain opportunistic and shall classify clipboard types only after a change-count delta. A successful display SHALL commit cooldown and dedup state, while a refused display SHALL consume neither. X11 PRIMARY paste provenance SHALL bypass terminal clipboard-attachment probing. This file does not prove native clipboard contents or APIs, OS focus delivery, environment detection, the downstream tip renderer, or user configuration persistence.
+
+#### Scenario: One-shot draw admission
+- **WHEN** small-screen or SSH conditions are evaluated before a stable eligible agent draw
+- **THEN** evaluation is deferred; once a stable decisive or successfully shown state is reached the corresponding one-shot is consumed.
+
+#### Scenario: Clipboard poll window
+- **WHEN** image-input hints are disabled, unsupported, unfocused, cooling down or ineligible
+- **THEN** the native clipboard is not polled and no animation clock is created.
+
+#### Scenario: Show then commit
+- **WHEN** a changed clipboard contains an eligible image and the tip row accepts the hint
+- **THEN** the tip is shown and its change-count/cooldown are committed; refusal leaves them available for a later attempt.
+
+#### Scenario: Paste provenance
+- **WHEN** a paste originated from X11 PRIMARY
+- **THEN** unrelated terminal clipboard image state is not probed as an attachment.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager explicit UI clocks, asynchronous completion and notification projection
+
+The pager root SHALL separate semantic simulation, transient UI maintenance, asynchronous worker completion, scroll-stream deadlines and visible motion cadence. UI maintenance SHALL advance deadline-owned state, visible parent/child controls, deferred image loads and static/streaming block viewers, and synchronize changed ACP command catalogs; asynchronous search and render completions SHALL be polled only through the background wake reducer. The next UI deadline SHALL be the earliest live transient deadline plus an aligned maintenance tick only while maintenance work exists. Visible frame demand SHALL depend on the displayed surface and its live projections, while hidden lifecycle watchdogs remain independently scheduled. Notification title/progress state SHALL follow the active root agent and remain busy for active goals or child/background activity. This file does not prove event-loop wake delivery, worker completion, terminal escape support, notification backend delivery, exact animation artwork, or wall-clock scheduling precision.
+
+#### Scenario: Clock separation
+- **WHEN** only a transient deadline, scroll stream, simulation or background completion is pending
+- **THEN** only its owning clock/reducer is armed and unrelated motion frames are not requested.
+
+#### Scenario: Visible motion
+- **WHEN** the visible agent, child, dashboard row/roster or welcome loader has live pixels
+- **THEN** the root selects fast or slow frame cadence as specified and parks when the visible surface becomes static.
+
+#### Scenario: Maintenance reducer
+- **WHEN** a UI deadline is reached
+- **THEN** expired confirmations/toasts and active surface state advance, image-load effects are queued, static viewers survive, missing dynamic sources close and changed command catalogs propagate.
+
+#### Scenario: Asynchronous reducer
+- **WHEN** a background search or render worker publishes a snapshot
+- **THEN** apply_async_view_updates polls every root and child receiver and reports whether a redraw is needed.
+
+#### Scenario: Notification projection
+- **WHEN** an active goal or other projected activity remains live while the turn itself is idle
+- **THEN** tab-title and progress projections remain busy until that activity becomes terminal or paused.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager minimal-screen top-level key remapping
+
+In minimal screen mode, the pager root SHALL intercept only the keys whose full-screen destinations are absent: Ctrl+T toggles the persistent todo-panel pin, Ctrl+E queues the newest committed folded block for expanded reprint, the registry ToggleQueue chord emits a committed queue snapshot, and Ctrl+O opens an expanded transcript unless Apple Terminal must yield it to a currently consumable interject. Ctrl+G and dashboard-opening chords SHALL retain the minimal behavior defined by the active input path, and no minimal-only state SHALL change in a non-minimal screen. This file does not prove external pager launch, transcript serialization, terminal brand detection, committed block rendering, queue mutation, or minimal hook installation.
+
+#### Scenario: Minimal panel keys
+- **WHEN** Ctrl+T, Ctrl+E or the configured queue chord is pressed in minimal mode
+- **THEN** the root toggles the todo pin, queues an honest expanded reprint, or emits ShowQueue instead of focusing an invisible full-screen pane.
+
+#### Scenario: Transcript versus interject
+- **WHEN** Ctrl+O is pressed in minimal mode
+- **THEN** it opens the transcript except on Apple Terminal while the prompt path can consume it as an interject.
+
+#### Scenario: Mode isolation
+- **WHEN** the same chords are pressed outside minimal mode
+- **THEN** the minimal todo pin and minimal-only intercepts remain unchanged.
+
+#### Scenario: Existing minimal routing
+- **WHEN** Ctrl+G or the full-screen dashboard chord is pressed
+- **THEN** the minimal input path preserves prompt editing and does not open a surface unavailable in minimal mode.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager welcome, trust, session-picker and new-worktree input routing
+
+The welcome surface SHALL give the new-worktree dialog, folder-trust gate and open session picker precedence over the home menu. The dialog SHALL edit a UTF-8 label under a 100-byte limit, accept unmodified Enter with trimmed optional text, cancel on Esc or control quit chords, and keep paste scoped to itself. Trust SHALL admit y/Y/Enter and reject n/N/Esc or quit chords without starting a session. The session picker SHALL route selection, worktree selection, query submission, expansion, copy, close and deep-search actions through its entry map. On the ungated home, captured shortcuts and menu navigation SHALL run first; any uncaught key or paste SHALL create a session and forward the same input. This file does not prove trust persistence or identity revalidation, worktree creation, session-list/network results, deep-search execution, clipboard acquisition, or dispatch of emitted actions.
+
+#### Scenario: Input precedence
+- **WHEN** a dialog, trust question or session picker is active
+- **THEN** it exclusively interprets eligible input before the underlying welcome menu.
+
+#### Scenario: Worktree label
+- **WHEN** the user types or pastes a label and presses unmodified Enter
+- **THEN** valid UTF-8 editing is capped at 100 bytes and a trimmed empty label submits None while nonempty text is threaded into NewWorktreeSession.
+
+#### Scenario: Session picker
+- **WHEN** the user selects, expands, copies, closes or changes a picker query
+- **THEN** the mapped session/content action is emitted and query changes request deep search without cursor-only motion doing so.
+
+#### Scenario: Home first input
+- **WHEN** no gate is active
+- **THEN** welcome shortcuts/menu actions are dispatched, while an otherwise uncaught key or paste emits NewSession and is forwarded to the new prompt.
+
+#### Scenario: Immediate welcome quit
+- **WHEN** a welcome quit chord or trust decline is pressed
+- **THEN** Quit is emitted on the first press because there is no session input to protect.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager global paging and double-press action confirmation
+
+The pager root SHALL normalize non-release input, let behavior and active-surface handlers run before global bindings, and arm confirmation for destructive or session-creating actions that require a second matching shortcut. A second identical live shortcut SHALL fire the pending action; a different key, expiry, or incompatible busy transition SHALL disarm it. Conversation page actions SHALL move the visible root or fullscreen-child scrollback without mutating prompt text. Ctrl+C SHALL cancel an active turn, clear a nonempty prompt where applicable, or arm quit when idle; Ctrl+D SHALL page from scrollback but participate in quit confirmation from the prompt according to terminal bindings. This file does not prove key delivery from terminal protocols, ActionRegistry completeness, action dispatch/effects, cancellation completion, or prompt widget editing beyond returned outcomes.
+
+#### Scenario: Layer order
+- **WHEN** a normalized non-release event arrives
+- **THEN** behavior confirmation, pending confirmation and the active view receive it before eligible global bindings.
+
+#### Scenario: Matching confirmation
+- **WHEN** the same confirmation shortcut is pressed twice within its bounded TTL
+- **THEN** the second press fires the armed action; another key, expiry or stale idle arm clears it.
+
+#### Scenario: Paging scope
+- **WHEN** page keys are pressed on a pageable conversation surface
+- **THEN** the visible root or active fullscreen-child scrollback moves while the composer remains unchanged.
+
+#### Scenario: Ctrl+C state routing
+- **WHEN** Ctrl+C arrives during a running, cancelling, nonempty-idle or empty-idle state
+- **THEN** it respectively cancels, escalates, clears text, or arms quit without leaving an unrelated pending action.
+
+#### Scenario: TTL bounds
+- **WHEN** the Esc confirmation duration override is absent, invalid, zero or oversized
+- **THEN** the default is used or a positive value is clamped to the test cap.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager Esc ownership, cancellation and idle back-out state machine
+
+The pager root SHALL preserve Esc ownership order across app overlays, prompt modes, active panes and agent state. During a running turn, non-vim full-screen prompt/scrollback and all minimal surfaces SHALL cancel while vim mode swallows Esc; cancelling SHALL retry cancellation. At idle, Esc consumers such as dropdowns, bash mode, search, input overlays and visual modes SHALL run before the double-Esc clear/rewind policy. An eligible nonempty prompt SHALL arm then clear, while an eligible empty conversation SHALL arm then open rewind; sends and policy consumers SHALL retire stale arms, and busy transitions SHALL prevent old idle arms from firing. This file does not prove cancellation RPC delivery, rewind execution, editor internals, dropdown rendering, or end-to-end timing under terminal latency.
+
+#### Scenario: Running turn
+- **WHEN** Esc arrives during a running or cancelling turn
+- **THEN** mode and pane policy either cancel/retry cancellation or deliberately swallow the key before idle rewind logic.
+
+#### Scenario: Idle double Esc
+- **WHEN** an eligible idle prompt or scrollback surface receives two Esc presses within the configured window
+- **THEN** nonempty draft content clears or an empty conversation opens rewind according to the armed action.
+
+#### Scenario: Consumer precedence
+- **WHEN** a dropdown, bash/search mode, pending input overlay, visual selection or matcher can consume Esc
+- **THEN** that consumer handles the press and no rewind/clear arm leaks through.
+
+#### Scenario: Stale-arm retirement
+- **WHEN** a send, policy consumer, expiry or transition to busy state occurs after an idle Esc arm
+- **THEN** the arm is disarmed or prevented from firing in the incompatible state.
+
+#### Scenario: App-level ownership
+- **WHEN** a top-level overlay owns Esc before the agent
+- **THEN** the agent hint projection does not advertise cancellation for that press.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager mouse-scroll stream and blocking-modal arbitration
+
+The pager root SHALL normalize wheel/trackpad input into a process-level scroll stream, remember its hit-test origin for residual flushes, route deltas to the visible child/root scrollback, dashboard popup, dropdown or dashboard list, and clear the origin when the stream ends. Opening a transcript/workflow surface SHALL cancel an in-flight stream. New-worktree, tutorial, agent modal and dashboard shortcuts overlays SHALL block app-level scroll routing, while the tutorial consumes its own wheel and Esc input. Mouse motion with a held left button SHALL promote a pending scrollback selection drag, while unheld motion shall not. This file does not prove OS mouse capture, MouseScrollState acceleration mathematics, downstream scrollback layout, dashboard hit rectangles before a draw, or terminal event ordering.
+
+#### Scenario: Stream origin
+- **WHEN** a scroll event begins outside a blocking modal
+- **THEN** the normalized stream stores its coordinates, dispatches whole-line deltas and reuses the origin for timed residual flushes until the stream ends.
+
+#### Scenario: Target routing
+- **WHEN** a delta lands on an active child, popup, dropdown or dashboard background
+- **THEN** it routes to that exact visible target rather than moving another surface.
+
+#### Scenario: Modal ownership
+- **WHEN** the tutorial or another scroll-blocking modal is open
+- **THEN** app-level stream state is not armed and the owning overlay handles its input.
+
+#### Scenario: Drag promotion
+- **WHEN** the pointer moves with a left button held over a pending scrollback selection
+- **THEN** the drag is promoted; ordinary motion leaves the pending click available for mouse-up selection.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager root rendering and terminal image cleanup
+
+The pager root SHALL capture one frame stamp, update notification escapes and announcement gates, then render exactly the active welcome, agent or dashboard surface. Minimal mode SHALL delegate to the installed minimal draw hook. Full-screen rendering SHALL register hit areas and cursor ownership, layer tutorial/debug surfaces, and merge notification escapes before render-produced post-flush operations. When the dashboard replaces an agent frame, Kitty image placements for undrawn agents SHALL be explicitly cleared, while the drawn popup agent retains ownership of its placements; no graphics protocol SHALL emit no clears. Offscreen render-cache eviction SHALL target only the visible root or focused child on its bounded cadence. This file does not prove terminal I/O success, ratatui geometry, graphics-protocol detection accuracy, minimal-hook installation, actual image decoder behavior, or visual pixel correctness.
+
+#### Scenario: Active surface
+- **WHEN** a non-minimal frame is drawn
+- **THEN** exactly the active welcome, agent or dashboard renderer receives the frame area and its returned cursor/post-flush state.
+
+#### Scenario: Post-flush ordering
+- **WHEN** notification and renderer escape operations coexist
+- **THEN** both are preserved in order inside the synchronized frame flush.
+
+#### Scenario: Dashboard image cleanup
+- **WHEN** dashboard rendering leaves agent surfaces undrawn
+- **THEN** their tracked Kitty placements are drained and the shared overlay slot is cleared only when no popup agent is drawn.
+
+#### Scenario: No protocol
+- **WHEN** no terminal graphics protocol is detected
+- **THEN** stale-image cleanup emits no escape sequence.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager dashboard popup and attached-session back-out routing
+
+The pager root SHALL treat an attached dashboard session as an input overlay with its own close, cycle and stop controls. Overlay exit keys and close hit targets SHALL return to the dashboard; previous/next controls SHALL cycle; Ctrl+X SHALL cancel a running turn but require a second matching press to close idle, cancelling or command-busy sessions. Esc and Left SHALL graduate through the agent's active prompt modes, question/plan viewers, search/matcher state, drafts, running/cancelling state and gboom ownership before they may back out. A dashboard popup SHALL close stale targets, forward in-bounds input/scroll to the attached agent, switch to an out-of-bounds clicked row, and close without deleting the agent when synchronous ExitSession is observed. This file does not prove dashboard dispatch effects, process/session termination, overlay geometry before rendering, plan/question response delivery, gboom simulation semantics, or the slash-command ExitSession path.
+
+#### Scenario: Overlay controls
+- **WHEN** exit, previous, next or stop bindings arrive on an attached-session overlay
+- **THEN** they close/cycle immediately or apply the state-sensitive two-press stop rule.
+
+#### Scenario: Graduated back-out
+- **WHEN** Esc or Left arrives
+- **THEN** active modal, selection, matcher, prompt mode, draft, question/plan state or running/cancelling ownership consumes it before a neutral surface exits to the dashboard.
+
+#### Scenario: Popup targeting
+- **WHEN** the dashboard popup target disappears or pointer input hits its close, body or another row
+- **THEN** stale state closes, in-bounds input forwards to the agent, and a different row emits DashboardAttach.
+
+#### Scenario: Stop safety
+- **WHEN** Ctrl+X is pressed on a running turn
+- **THEN** every press emits CancelTurn without arming session close; non-running states arm and require the matching second press.
+
+#### Scenario: Session retention
+- **WHEN** the attached agent synchronously requests ExitSession
+- **THEN** the popup closes and child focus clears while the agent remains in the root map for the outer lifecycle path.
+
+证据：`crates/codegen/pager/src/app/root/mod.rs`。
+
+### Requirement: Pager root startup configuration and guarded session launch
+
+The pager root SHALL construct AppView and its action registry from the resolved terminal mode, seed launch permission, plan/subagent/question, model, hints, announcement, notification, appearance, scrolling, update and session-recap state before normal interaction, and compute folder trust before any session-creating startup action loads repository-local execution configuration. It SHALL translate the materialized CLI startup intent into resume, fixed-id, fork, worktree, dashboard or minimal empty-session actions, deferring prompt/dashboard/session creation while the trust gate is closed. It SHALL issue XTVERSION immediately before starting a dedicated poll/read input thread, tolerate transient terminal parse errors up to the fixed consecutive-error limit, and stop that thread when the receiver closes. This file does not prove the correctness of config precedence helpers, trust-store or repository scans, diagnostics probes, startup action reducers, ACP initialization, terminal capability detection, or the spawned reader on a real TTY.
+
+#### Scenario: Resolved startup state
+- **WHEN** the root event loop starts
+- **THEN** terminal mode, permission and feature gates, presentation configuration, notifications, hints and session flags are projected into AppView before startup actions are dispatched.
+
+#### Scenario: Trust-first launch
+- **WHEN** a startup intent could create or load a session
+- **THEN** folder trust is seeded first and blocked intents are retained in deferred startup state until the gate permits them.
+
+#### Scenario: Materialized startup intent
+- **WHEN** resume, fixed-id, fork, worktree, dashboard or minimal startup was materialized
+- **THEN** the matching action is dispatched without rematerializing CLI intent inside the event loop.
+
+#### Scenario: Cancellation-safe terminal intake
+- **WHEN** terminal input begins
+- **THEN** XTVERSION probing precedes one dedicated poll/read thread whose channel feeds the async loop and whose pause acknowledgement supports later TTY handoff.
+
+证据：`crates/codegen/pager/src/app/root/event_loop.rs`。
+
+### Requirement: Pager root event scheduling fairness and presentation backpressure
+
+The pager root loop SHALL give cancellation, graceful quit and terminal-writer outcomes priority, batch at most 32 immediately ready ACP messages only while terminal input is empty, and re-check expired animation, UI, simulation and lifecycle work before each ACP batch. Terminal input draining SHALL be bounded at 256 immediately buffered events, while animation, UI maintenance, simulation, scroll, resize debounce, deferred draw, suspend retry, roster, recap and local-draft work retain independent deadlines. Presentation SHALL coalesce dirty requests behind the last queued writer sequence, preserve a requested full repaint until it can be drawn, avoid wedging when a draw queues no output, and surface writer failures as event-loop errors. Effects SHALL transfer local-draft ownership before execution and flush drafts before a quit effect. This file does not prove Tokio scheduler fairness, writer sequence monotonicity, renderer correctness, task-effect implementation, OS signal delivery, or elapsed-time behavior under real terminal load.
+
+#### Scenario: ACP firehose fairness
+- **WHEN** ACP remains continuously ready
+- **THEN** each bounded batch first claims due animation, UI, simulation and lifecycle work and yields to any queued terminal input.
+
+#### Scenario: Independent clocks
+- **WHEN** multiple reducer or rendering deadlines become due together
+- **THEN** each deadline is claimed independently rather than one clock suppressing another.
+
+#### Scenario: Writer backpressure
+- **WHEN** a frame is in flight
+- **THEN** later dirty and full-repaint requests remain pending until the target writer sequence is acknowledged.
+
+#### Scenario: Bounded drains
+- **WHEN** input or ACP producers outpace a loop iteration
+- **THEN** only the configured batch maximum is consumed before loop-top scheduling is revisited.
+
+证据：`crates/codegen/pager/src/app/root/event_loop.rs`。
+
+### Requirement: Pager leader reconnect multi-session restore orchestration
+
+On a newer leader connection generation, the pager SHALL abort and roll back any earlier reconnect reload window, restore an active dashboard peek before replacing scrollback, and plan reloads for every open agent with a session, ordering the active agent first. Each load SHALL use the session cwd unless empty, carry that session own canonical permission mode and optional last-seen cursor, and reinitialize/authenticate the replacement leader before sequential session loads within a bounded aggregate timeout. Completion SHALL apply process-scoped model, command, rewind and recap state, finalize each original agent by generation and its own load result, restore descendant state, reconcile controls, drain eligible queues and refresh agent metadata/commands. Whole-restore reporting requires initialization and every planned load; active restore is independently derived from the active agent own result. This file does not prove leader election or transport reconnect semantics, ACP replay fidelity, descendant disk recovery, reducer behavior, timeout sufficiency, or successful restoration against a live leader.
+
+#### Scenario: Per-session reload plan
+- **WHEN** an open agent has a session during reconnect
+- **THEN** its own session id, cwd, permission mode and optional replay cursor form the load request; agents without session ids are skipped.
+
+#### Scenario: Superseded reconnect
+- **WHEN** another connection generation arrives during reinitialization
+- **THEN** the prior task is aborted and its reload windows are failed before new windows open.
+
+#### Scenario: Independent tab outcome
+- **WHEN** one tab reloads and another fails
+- **THEN** each tab finalizes from its own result, while the global restored report remains false and a healthy active tab remains eligible to drain.
+
+#### Scenario: No active agent
+- **WHEN** reconnect completes while welcome or dashboard is active
+- **THEN** no active-agent restore is reported even if all planned background tabs succeeded.
+
+证据：`crates/codegen/pager/src/app/root/event_loop.rs`。
+
+### Requirement: Pager external child TTY ownership handoff and retry
+
+Before launching $EDITOR or $PAGER, the pager SHALL clear stale reader acknowledgement, assert the input pause, wait a bounded interval for the reader to park, and wait separately for all queued terminal frames to drain. A timeout SHALL start no child, restore reader ownership, preserve the one-shot request, schedule a deferred retry and emit only the first wait notice for that request through a minimal-mode system block or another mode toast. A successful handoff SHALL leave and restore the alternate screen when needed, disable and restore raw mode, discard buffered child query replies, drain the pre-park input race, resume the reader and request a full repaint; minimal mode SHALL re-anchor when the child moved the cursor. Transcript launch SHALL honor whitespace-separated PAGER arguments, add less raw-control and end-position flags for ANSI transcripts when absent, and remove the temporary file after return. This file does not prove child program correctness, shell-compatible parsing of quoted PAGER values, lossless handling of child exit errors, terminal raw/alternate-screen restoration on every OS failure, or real reader/writer synchronization timing.
+
+#### Scenario: Safe handoff gate
+- **WHEN** a child requests the terminal
+- **THEN** the reader parks and queued frames drain before raw or alternate-screen ownership changes.
+
+#### Scenario: Deferred timeout
+- **WHEN** parking or draining times out
+- **THEN** the child is not started, the request is requeued, retry waits 250 ms and feedback appears only once for that pending request.
+
+#### Scenario: Mode-aware feedback
+- **WHEN** a handoff is waiting
+- **THEN** minimal mode appends a notice to active root or child scrollback while inline and fullscreen modes show a toast.
+
+#### Scenario: Post-child restore
+- **WHEN** the child returns
+- **THEN** buffered replies and raced input are discarded, minimal cursor movement can re-anchor the viewport, reader ownership resumes and the next presentation is a full repaint.
+
+证据：`crates/codegen/pager/src/app/root/event_loop.rs`。
+
+### Requirement: Pager terminal input routing focus and primary-selection normalization
+
+Terminal events SHALL retain their reader arrival time through draining and routing. The root SHALL remove startup XTVERSION fragments before paste inference, preserve the persistent CSI fragment filter across batches, bypass key coalescing while the active game needs release events, and stop processing a buffered batch immediately after an event arms editor or transcript TTY suspension. Focus changes SHALL update notification focus state, optionally force a repaint, restore the prompt or dispatch an eligible automatic recap without overriding dashboard focus, and release latched game keys on focus loss. Input outcomes SHALL dispatch ordered actions and effects, re-forward the triggering event after session creation where required, distinguish resize-only changes, and preserve arrival timing for scroll stream spacing and reversal. On Linux only, an unmodified middle-button press with nonempty primary-selection text SHALL become an X11Primary paste; all other mouse shapes or empty reads remain terminal events. This file does not prove CSI/XTVERSION filter internals, AppView input dispatch, clipboard backend fidelity, recap dispatch behavior, terminal event ordering before channel arrival, or end-to-end focus and scroll rendering.
+
+#### Scenario: Ordered routed input
+- **WHEN** buffered events are normalized and processed
+- **THEN** their original arrival timestamps and paste provenance reach AppView in order until quit or a TTY handoff is armed.
+
+#### Scenario: Focus transition
+- **WHEN** focus is gained or lost
+- **THEN** notification, repaint, prompt, recap and game-key state are updated without stealing dashboard focus.
+
+#### Scenario: Delayed scroll batch
+- **WHEN** wheel events were buffered before routing
+- **THEN** their reader timestamps preserve measured spacing and a direction reversal starts a new stream.
+
+#### Scenario: Linux primary selection
+- **WHEN** an unmodified middle-button down can read nonempty primary text
+- **THEN** it becomes one X11Primary Paste; modified, wrong-button, release or empty cases preserve the original event.
+
+证据：`crates/codegen/pager/src/app/root/event_loop.rs`。
+
+### Requirement: Pager unbracketed and fragmented terminal paste recovery
+
+When a terminal batch has pasteable key presses but no bracketed Paste, the pager SHALL wait 2 ms for initial paste evidence and then collect subsequent events up to a 10 ms pasteable-key idle gap or 5000-event extension cap; mouse, focus and release traffic may be retained but SHALL NOT extend that gap. Pasteable input SHALL be Press events for characters with no modifiers, Shift or AltGr, or unmodified Enter and Tab; Repeat, Release, control chords and non-key events SHALL not qualify. A contiguous run of at least three key events SHALL become one Paste only when an Enter is followed by later character or tab content, preserving the first contributing arrival time; type-then-submit, character-only and Enter-only runs remain keys. Existing Paste fragments mixed with pasteable keys SHALL merge around preserved non-key boundaries while other key artifacts are discarded. On Windows only, at least eight characters with a recognized dropped-path anchor SHALL also coalesce. This file does not prove the drop-anchor classifier, terminal delivery cadence, AltGr classification, completeness for all keyboard layouts, semantic intent of extremely fast human typing, or actual behavior on Windows because tests were not executed.
+
+#### Scenario: Detection window
+- **WHEN** an unbracketed key batch may be a paste
+- **THEN** only a following pasteable key establishes paste collection and only later pasteable keys extend its idle deadline.
+
+#### Scenario: Multiline coalescing
+- **WHEN** at least three contiguous qualifying presses include content after Enter
+- **THEN** they become one Paste with characters, newlines and tabs in order and the first contributing arrival timestamp.
+
+#### Scenario: Typed input preservation
+- **WHEN** a run is too short, lacks content after Enter, contains only Enter, or is broken by a control or non-key event
+- **THEN** it remains distinct events apart from ignored release artifacts.
+
+#### Scenario: Fragmented bracketed paste
+- **WHEN** Paste fragments and qualifying keys are interleaved
+- **THEN** text merges into Paste segments around preserved mouse, focus or resize boundaries.
+
+#### Scenario: Windows dropped path
+- **WHEN** a sufficiently long Windows key burst begins with a supported path anchor
+- **THEN** it becomes one Paste even without a newline.
+
+证据：`crates/codegen/pager/src/app/root/event_loop.rs`。
+
+### Requirement: Pager quit result and fullscreen exit summary
+
+The pager SHALL build exit information only from the active root agent with an established session, even when a child view is focused. It SHALL include the session id and whether the screen is minimal, pass through update-restart and screen-mode relaunch intent, and generate a conversation summary only for fullscreen mode when at least one user or agent conversation line exists. The summary title SHALL come from the conversation entry title, the last prompt from the newest user prompt, and the last response SHALL be omitted when it predates an unanswered newer prompt. Inline and minimal modes SHALL omit the summary because native scrollback remains visible. This file does not prove summary helper parsing for every RenderBlock, caller printing of exit information, re-exec behavior, persistence of the session id, or the final terminal restore.
+
+#### Scenario: Fullscreen summary
+- **WHEN** quitting fullscreen from an agent session with conversation content
+- **THEN** exit info carries the root session and a title, latest prompt and only a corresponding latest response.
+
+#### Scenario: Unanswered latest prompt
+- **WHEN** the newest prompt has no later agent response
+- **THEN** an older response is not presented as its answer.
+
+#### Scenario: Native scrollback modes
+- **WHEN** quitting inline or minimal mode
+- **THEN** exit info retains session identity and mode but omits a duplicate summary.
+
+#### Scenario: No eligible agent content
+- **WHEN** the active view is welcome/dashboard or the active session has no conversation lines
+- **THEN** exit info or its summary is absent as appropriate.
+
+证据：`crates/codegen/pager/src/app/root/event_loop.rs`。
+
+### Requirement: Pager session close cleanup and optimistic rename dispatch
+
+Session close dispatch SHALL ignore an unknown id, refuse when the agents map contains exactly one entry with the canonical toast, and when closing the active id SHALL switch first to a surviving fork parent, otherwise the first other insertion-ordered agent, with Welcome as defensive fallback. It SHALL derive unregister effects from the closing session id, remove the agent, clear every surviving direct forked_from reference to that id and request retained-memory release. Rename SHALL require an active existing agent with a session id, set display_name before completion, and return one RenameSession effect carrying agent id, session id, title and cwd.
+
+#### Scenario: Unknown close
+- **WHEN** the requested id is absent
+- **THEN** no state or effect changes.
+
+#### Scenario: Single entry
+- **WHEN** the agents map contains exactly one entry
+- **THEN** close is refused with the canonical use-home toast.
+
+#### Scenario: Active fallback
+- **WHEN** the active entry is closed
+- **THEN** an existing fork parent or first peer is selected before removal.
+
+#### Scenario: Cleanup
+- **WHEN** an existing entry is removed
+- **THEN** unregister uses its optional session identity, surviving direct parent pointers clear and retained memory release is requested.
+
+#### Scenario: Rename
+- **WHEN** an active session-bound agent is renamed
+- **THEN** display_name changes optimistically and one cwd-scoped rename effect is returned.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/modal.rs`。
+
+### Requirement: Pager BTW collapsed side-question block
+
+BtwBlock SHALL retain the original question and Markdown response, default to collapsed, and render a bold /btw question header whose color is muted only when collapsed muted-tool appearance applies, otherwise accent_plan. Expanded output SHALL append a separator and Markdown body with every line selectable from column zero. The block has a bullet, no accent, no vertical padding or raw mode, and is both foldable and groupable.
+
+#### Scenario: Collapsed
+- **WHEN** the block renders in its default mode
+- **THEN** only the selectable bold question header is emitted.
+
+#### Scenario: Expanded
+- **WHEN** the block renders expanded
+- **THEN** a separator and selectable Markdown response lines follow the header.
+
+#### Scenario: Capabilities
+- **WHEN** layout queries the block
+- **THEN** it reports bullet, fold and group support with no accent, vpad or raw mode.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/btw.rs`。
+
+### Requirement: Pager accented rendering wrapper
+
+Accented SHALL reserve one column from requested width when computing inner desired height, return without painting a zero-width or zero-height area, paint the configured accent glyph and style through every row of the first column, and render inner content only when remaining width is nonzero. Constructors SHALL accept a full style or construct a foreground-only style. Three unit tests verify width delegation, two-row placement and empty-area safety.
+
+#### Scenario: Height
+- **WHEN** desired height is requested
+- **THEN** the inner renderer receives width minus one with saturating subtraction.
+
+#### Scenario: Paint
+- **WHEN** a nonempty area is rendered
+- **THEN** the accent fills column zero and inner content begins in column one.
+
+#### Scenario: Empty
+- **WHEN** width or height is zero
+- **THEN** nothing is rendered and the inner renderer is not invoked.
+
+证据：`crates/codegen/pager/src/scrollback/wrappers/accented.rs`、`crates/codegen/pager/src/scrollback/wrappers/accented.rs`、`crates/codegen/pager/src/scrollback/wrappers/accented.rs`、`crates/codegen/pager/src/scrollback/wrappers/accented.rs`。
+
+### Requirement: Pager scrollback turn navigation and layout metadata types
+
+Scrollback state types SHALL define Running as the default TurnStatus, Down as the default NavDirection and AllTurns as the default ViewMode. Turn range SHALL be prompt_index..end_index, len SHALL subtract those public indices and is_empty SHALL compare the result to zero. ViewportSnapshot SHALL carry scroll/follow/viewport/selection/current-turn/view-mode and total-height fields at crate scope. EntryLayoutInfo SHALL hold height, gap and group flags, and is_group_header SHALL be true when group_header_count is positive or group_collapse_header is set; verb_group_header alone is descriptive and does not satisfy that gate.
+
+#### Scenario: Defaults
+- **WHEN** turn, navigation or view enums are default constructed
+- **THEN** they become Running, Down and AllTurns respectively.
+
+#### Scenario: Turn bounds
+- **WHEN** a Turn reports range or length
+- **THEN** the public prompt and exclusive end indices are used directly.
+
+#### Scenario: Group header
+- **WHEN** layout metadata is queried
+- **THEN** positive count or collapse flag returns true; otherwise false even if the verb marker alone is set.
+
+#### Scenario: Viewport record
+- **WHEN** state captures a viewport
+- **THEN** the declared navigation and layout fields are carried for later restoration logic.
+
+证据：`crates/codegen/pager/src/scrollback/state/types.rs`。
+
+### Requirement: Pager standalone lifecycle hook block
+
+LifecycleEventBlock SHALL retain its event name and render exactly one bold line containing that name. In collapsed mode it SHALL use the muted style only when the appearance gate permits; otherwise it uses the primary style. It SHALL default collapsed, be foldable and groupable, and report no vertical padding or accent so it remains distinct from real tool calls.
+
+#### Scenario: Output
+- **WHEN** a lifecycle event renders
+- **THEN** one bold name line uses muted-collapsed or primary style according to context.
+
+#### Scenario: Block traits
+- **WHEN** the renderer queries lifecycle layout
+- **THEN** the block is collapsed, foldable and groupable with no vpad or accent.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/lifecycle.rs`。
+
+### Requirement: Pager agent contextual shortcuts and prompt status projection
+
+The pager agent renderer SHALL derive context-sensitive shortcut hints in overlay-priority order for block viewers, permission requests, plan approval, plan line viewing, questions, cancellation and normal panes. Normal-pane hints SHALL reflect the selected pane entry, copy/fullscreen/kill eligibility, fold and search state, running-turn cancellation ownership, queue visibility and terminal Shift+Enter support. The prompt status SHALL always lead with effective behavior, refine plan with its phase, append comment/workflow-run state, then permission mode, and identify the active model, effort or queued-edit position. Dashboard-overlay rendering SHALL prepend dashboard, agent-navigation and stop hints. This file does not prove that the advertised key actions are registered, enabled or handled correctly outside the renderer.
+
+#### Scenario: Default prompt status
+- **WHEN** a normal agent frame is rendered
+- **THEN** the prompt information includes normal behavior and ask permission state.
+
+#### Scenario: Plan phase
+- **WHEN** effective behavior is plan with an executing phase
+- **THEN** the behavior flag reads plan · executing.
+
+#### Scenario: Overlay-owned shortcuts
+- **WHEN** a permission, question, plan approval, viewer or cancellation surface owns input
+- **THEN** its contextual hint set replaces normal-pane hints.
+
+#### Scenario: Normal-pane eligibility
+- **WHEN** no higher-priority surface owns input
+- **THEN** hints are derived from pane selection, current turn, queue and configured terminal capabilities.
+
+证据：`crates/codegen/pager/src/app/agent_view/render.rs`。
+
+### Requirement: Pager agent frame layout and stateful pane projection
+
+Each agent frame SHALL begin a scrollback frame, reset per-frame media/loading, occlusion and selection projections, sample one FrameStamp, refresh prompt suggestion eligibility and note terminal size. It SHALL compute mutually exclusive permission, question, rewind, jump, cancel, goal-interrupt or ordinary prompt height; synchronize task, catalog, todo and queue panes; fall back to scrollback when an active optional pane becomes invisible; reserve independent status, timeline, banner, CTA and follow-up regions; and project the resulting pane areas and interaction hit rectangles. Pending kill presentation SHALL time out from the sampled frame time for background tasks and subagents. This file does not prove the correctness of child layout/renderers, data synchronization sources, input hit handling, timing under a live event loop or visual output on a real terminal.
+
+#### Scenario: Frame-local reset
+- **WHEN** draw begins
+- **THEN** stale selection companions, occluders and loading visibility are cleared before new frame output is recorded.
+
+#### Scenario: Overlay height priority
+- **WHEN** multiple prompt-slot surfaces are present
+- **THEN** permission and question take precedence, followed by rewind/jump/cancel/goal surfaces and finally the ordinary prompt.
+
+#### Scenario: Hidden optional pane
+- **WHEN** tasks, catalog or queue is active but becomes invisible after synchronization
+- **THEN** active pane falls back to scrollback.
+
+#### Scenario: Kill presentation timeout
+- **WHEN** a task or subagent kill request exceeds the session timeout at the sampled frame time
+- **THEN** its pending-kill marker and request timestamp are cleared.
+
+证据：`crates/codegen/pager/src/app/agent_view/render.rs`。
+
+### Requirement: Pager scrollback timeline status and link presentation
+
+The pager agent renderer SHALL prepare scrollback layout using the session cwd and pending-input marks, optionally reserve a search bar, render the empty or populated pane, persist the selection model and boundaries from that exact render, and then layer inline editing, search feedback, link highlights, entry hover, drag or persistent selection, selection actions, scrollbar or timeline rail. Timeline hover preview SHALL be cached by turn index and cleared when the rail disappears or an overlay blocks it. The status region SHALL project highlighted URL, running work, plan, goal, MCP, context, queue and todo information; the cwd header SHALL include lazy Git/worktree/sandbox context subject to available width. This file does not prove scrollback layout correctness, regex behavior, Git discovery, link target safety, context accounting or downstream mouse actions.
+
+#### Scenario: Search reservation
+- **WHEN** scrollback search is active
+- **THEN** rows are reserved from scrollback and the bar reports match position, bad pattern, no matches or an empty counter.
+
+#### Scenario: Timeline unavailable
+- **WHEN** the timeline cannot be computed or is disabled
+- **THEN** rail and hover state are cleared and layout is recomputed without timeline width.
+
+#### Scenario: Selection overlay
+- **WHEN** text/block drag or persistent text selection exists
+- **THEN** only the applicable selection overlay is painted from the current frame model.
+
+#### Scenario: Link map generation
+- **WHEN** scrollback generation changes
+- **THEN** visible citation and overlay links are rebuilt; otherwise the map is truncated to the prior scrollback-visible boundary before BTW links append.
+
+证据：`crates/codegen/pager/src/app/agent_view/render.rs`。
+
+### Requirement: Pager prompt panels dropdowns banners and viewer overlay precedence
+
+The pager agent renderer SHALL render one prompt-slot interaction surface according to its computed priority, including permission follow-up input, question navigation/freeform/footer, rewind, jump, cancel, goal interrupt or the ordinary prompt. File, slash-command and completion dropdowns SHALL be mutually gated by behavior-switch and competing dropdown state, while history search SHALL render its own bounded eight-row panel. Mode-switch banners SHALL replace announcement/tip content and fade from the shared frame time; otherwise announcement ownership suppresses tips in the same slot. Active modal, plan/file line viewer, image viewer, gboom, block viewer, agents modal and extensions modal SHALL render above the base frame and return early with their own cursor, shortcuts and post-flush policy. This file does not prove the reducers that open these surfaces, picker matching, permission/question submission, viewer content correctness or user-visible terminal compositing.
+
+#### Scenario: Question freeform
+- **WHEN** a question is in input mode
+- **THEN** an inline prompt, option marker, footer navigation and question scrollbar are rendered in the reserved prompt region.
+
+#### Scenario: Competing dropdowns
+- **WHEN** file search, slash completion, general completion or behavior switching competes
+- **THEN** only the eligible dropdown records an item area and occludes underlying frame links.
+
+#### Scenario: Active modal
+- **WHEN** an active modal exists
+- **THEN** it is drawn after dropdown construction, pane areas are recorded and the frame returns no cursor with a deferred overlay clear.
+
+#### Scenario: Viewer early return
+- **WHEN** a line, image, game, block, agents or extensions viewer is active
+- **THEN** that viewer owns the overlay and shortcut area and ordinary post-viewer decorations are skipped.
+
+证据：`crates/codegen/pager/src/app/agent_view/render.rs`。
+
+### Requirement: Pager subagent fullscreen and child pending-input presentation
+
+Opening a known child fullscreen view SHALL mark it as a subagent view, ensure lazy replay of its durable updates and set it active; an unknown child id SHALL leave fullscreen state unchanged. When no parent permission request masks it, fullscreen SHALL replace the whole parent frame with a bordered child view, status icon/color, type, truncated description, model, context badge, running activity, elapsed time and close hit area, and SHALL propagate the child post-flush result. In the ordinary parent turn status, a pending-input diamond SHALL include a child question only when that child is unfinished and the question source session matches the child id; residual finished-child and child-local questions SHALL not light it. This file does not prove replay fidelity, subagent lifecycle data, cancellation routing, child input handling or terminal rendering beyond in-memory buffer and overlay-state tests.
+
+#### Scenario: Known child open
+- **WHEN** open_subagent_fullscreen receives an existing child id
+- **THEN** the child is marked, replay is ensured and the child becomes active.
+
+#### Scenario: Unknown child open
+- **WHEN** the child view does not exist
+- **THEN** the method returns without changing active_subagent.
+
+#### Scenario: Fullscreen post-flush
+- **WHEN** the child draw returns a deferred image clear
+- **THEN** the parent returns that PostFlush without committing it during draw.
+
+#### Scenario: Pending child question
+- **WHEN** an unfinished child holds an ACP question sourced from its own session
+- **THEN** the parent turn status shows the pending-input diamond; finished, local or absent questions do not.
+
+证据：`crates/codegen/pager/src/app/agent_view/render.rs`。
+
+### Requirement: Pager inline media overlay and hyperlink emission lifecycle
+
+The pager agent renderer SHALL suppress inline media behind incompatible modals/viewers or active dropdowns, request missing media, show loading or unavailable placeholders, accumulate image protocol escapes into one deferred PostFlush, expose visible open/copy hit areas, and clear image ids that disappear or when media deactivates. Image and gboom viewers SHALL return a protocol clear when no replacement image escape is emitted under Kitty. Diagram affordances SHALL be painted only without a dropdown. OSC 8 link spans SHALL omit frame-occluded ranges, resolve presentation-aware targets, optionally include ids and append promotional links; OSC 22 pointer shape changes SHALL be deferred only when hover-on-link changes. This file does not prove image decoding/loading, protocol detection, terminal escape support, URL resolution policy, writer success or that returned PostFlush is eventually emitted.
+
+#### Scenario: Dropdown suppression
+- **WHEN** any supported dropdown is active
+- **THEN** scrollback image placements and diagram affordances are omitted for that frame.
+
+#### Scenario: Placement disappears
+- **WHEN** a previously placed Kitty image id is absent from the current frame
+- **THEN** its delete escape is appended and its cached id bookkeeping is removed.
+
+#### Scenario: No image escape
+- **WHEN** a graphics protocol exists but the frame has no active image and no existing post-flush payload
+- **THEN** a deferred clear payload is returned.
+
+#### Scenario: Occluded OSC 8 link
+- **WHEN** a rendered link overlaps any frame occluder rectangle
+- **THEN** it is excluded from emitted LinkSpan output.
+
+证据：`crates/codegen/pager/src/app/agent_view/render.rs`。
+
+### Requirement: Pager toast fitting and empty scrollback logo tiers
+
+Toast text SHALL reserve two visible padding characters, return no text when fewer than one message character fits, preserve a short message, and truncate a long message by character count with a trailing ellipsis. Empty scrollback SHALL render the largest centered bare logo that fits with two columns/rows of padding: big at no less than 84×39, small at no less than 54×26, and no logo below the small threshold; any scrollback entry SHALL suppress the logo. This file does not prove display-column correctness for wide or combining toast characters, logo animation timing, theme contrast or rendering on a physical terminal.
+
+#### Scenario: Short toast
+- **WHEN** the message fits the available character budget
+- **THEN** it is returned unchanged between one leading and one trailing space.
+
+#### Scenario: Long toast
+- **WHEN** the message exceeds the budget
+- **THEN** its suffix is replaced with an ellipsis while retaining outer padding.
+
+#### Scenario: Empty logo tiers
+- **WHEN** scrollback is empty
+- **THEN** big, small or no logo is selected solely from the padded width and height thresholds.
+
+#### Scenario: Populated scrollback
+- **WHEN** even one entry exists
+- **THEN** neither empty-state logo is rendered.
+
+证据：`crates/codegen/pager/src/app/agent_view/render.rs`。
+
+### Requirement: Pager agent session business state and lifecycle projections
+
+The pager AgentSession SHALL initialize one ACP session's business state with explicit idle, empty, unset, permission, model, replay, timeline, goal, workflow, task, prompt and context facts; SHALL expose mutually exclusive turn/command state predicates and transition helpers; SHALL keep MCP startup visibility for real server counts or a fresh zero-server seed only; SHALL bound background-task output while preserving UTF-8 and truncation/line-count facts; SHALL parse only recognized Goal statuses and tick active Goal and Workflow elapsed projections monotonically; and SHALL infer bootstrap Workflow availability from unknown discovery, the workflow tool or runtime commands, or known runs until structured availability exists. Session updates SHALL delegate to the ACP tracker with the session cwd, while replay, turn, compaction, retry, command, permission/input, metadata, context, interjection and extension-fetch helpers update only their owned state. This file does not prove ACP transport delivery, tracker rendering internals, shell notification decoding, background-process execution, configuration parsing, workflow runtime correctness, or caller adherence to the documented field invariants.
+
+#### Scenario: Session initialization
+- **WHEN** AgentSession::new creates a session
+- **THEN** every owned lifecycle, queue, replay, control, context, task and presentation fact starts from its explicit default without starting a turn or command.
+
+#### Scenario: Lifecycle projection
+- **WHEN** turn, cancellation, compaction, retry, command, context, metadata, input or replay helpers are applied
+- **THEN** the mutually exclusive state and the corresponding owned facts change without treating presentation rendering as business authority.
+
+#### Scenario: Bounded task and elapsed facts
+- **WHEN** background output or active Goal/Workflow elapsed state is projected
+- **THEN** output remains valid UTF-8 within the fixed cap with refreshed count/truncation facts, and active elapsed values advance without moving below their floor.
+
+#### Scenario: Bootstrap capability and MCP visibility
+- **WHEN** structured discovery is absent or startup progress changes
+- **THEN** Workflow visibility follows the documented bootstrap signals and MCP progress remains visible only for actual servers or an unexpired seed.
+
+证据：`crates/codegen/pager/src/app/session/mod.rs`。
+
+### Requirement: Pager local prompt queue identity payload and combination semantics
+
+The pager local prompt queue SHALL assign monotonically increasing session-local ids, preserve FIFO order across prompt, slash-command and direct-bash kinds, support bounded neighbour swaps by stable id, and preserve wire payload, images, chip elements, review and skill-display facts while moving or requeueing rows. A raw text payload SHALL be interjectable only when it equals display text; client-expanded or multi-block payloads SHALL remain separate. Combined dequeue SHALL merge only the eligible leading run of plain review-free prompts, stop before commands, bash rows, expanded payloads, image-bearing followers or the row under edit, join display segments with the canonical separator, rebase chip ranges, clear per-segment skill token ranges and leave excluded rows queued. Optimistic server-queue echoes and parked send-now requests SHALL settle only from raw authoritative queued/running facts. This file does not prove server queue versioning, prompt dispatch, image placeholder renumbering, editor mutation behavior, or prompt_queue::combine_prefix_len and join_texts beyond their use here.
+
+#### Scenario: Stable queue identity
+- **WHEN** entries of any supported kind are enqueued, moved or drained
+- **THEN** ids never reuse, relative FIFO order changes only through explicit neighbour swaps, and lookups track the stable id.
+
+#### Scenario: Payload preservation
+- **WHEN** plain, skill, image or rewound prompts are queued and reordered
+- **THEN** their display text, kind, wire payload, images and chip metadata remain attached to the row.
+
+#### Scenario: Eligible prefix combination
+- **WHEN** combined dequeue sees consecutive eligible prompts
+- **THEN** it merges only that prefix, records each display segment, rebases chips and leaves every boundary row in the queue.
+
+#### Scenario: Optimistic echo settlement
+- **WHEN** send-now waits for a server queue echo
+- **THEN** only an authoritative queued row yields its id/version, a running row clears the park, and retirement clears the matching optimistic state.
+
+证据：`crates/codegen/pager/src/app/session/mod.rs`。
+
+### Requirement: Pager Shell control epoch revision and status projection
+
+The pager SHALL accept Shell control state only when current and desired targets match the declared domain and the packet belongs to an authoritative epoch. An unknown epoch SHALL be established or rotated only by an explicit snapshot or the bounded replay reset path; receipt-only packets SHALL never establish authority and retired epochs SHALL never reactivate. Within an epoch, revisions and phases SHALL advance monotonically; a durable terminal message SHALL seal its revision, while a replayed terminal may precede and then be reset by a fresh actor snapshot only during load. The retained projection SHALL keep Sampling, Agent and Behavior current/desired state separate from committed model state, expose pending/applying status with the 300ms applying threshold, preserve provider qualification when short model names collide, distinguish effort-only changes, hide terminal states, combine keyed live feedback, and collapse text by display width. This file does not prove notification authenticity, redraw timing, Unicode terminal rendering, shell revision generation, durable-event ordering, or callers passing allow_snapshot_reset only during a bounded load.
+
+#### Scenario: Epoch authority
+- **WHEN** control state arrives from a new or retired actor epoch
+- **THEN** only a permitted snapshot/replay reset establishes a fresh epoch and a retired epoch stays rejected.
+
+#### Scenario: Monotonic revision
+- **WHEN** packets repeat, regress or advance within an epoch
+- **THEN** lower revisions and phase regressions are rejected and a durable terminal seals its revision.
+
+#### Scenario: Replay actor reset
+- **WHEN** durable replay precedes a replacement actor snapshot during load
+- **THEN** the explicit fresh snapshot may reset the actor-local revision without allowing delayed old-epoch packets later.
+
+#### Scenario: Pending status projection
+- **WHEN** one or more domains are pending or applying
+- **THEN** status describes their desired transitions without committing them and collapses to a count when width is insufficient; terminal domains disappear.
+
+证据：`crates/codegen/pager/src/app/session/mod.rs`。
+
+### Requirement: Pager prompt draft ownership and context state
+
+PromptWidget SHALL initialize a reusable prompt around a TextArea with system clipboard, appearance tab width, cwd-scoped file search, built-in slash commands plus the main-session agent catalog, independent suggestion/history/image state and contextual-tip gates off. Text, cursor, scroll, compact mode, shared slash metadata and crash-recovery chip metadata SHALL be exposed or synchronized through their owned helpers. Stashing SHALL move text, cursor, chip metadata, live images, undo-image payloads and the image-number high-water mark out of the widget; restoring SHALL rebuild text and chip elements before rebinding images, preserve the larger counter and cursor, and dropping an unconsumed stash SHALL clean both image collections. A transformed stash SHALL retain and rebase chips only when the new text is a suffix occurrence of the old text, clean images outside the retained slice, and otherwise discard all chip/image ownership. Wholesale text replacement SHALL invalidate suggestion state; an empty replacement SHALL also cancel slash preview and clear slash/image state, while a nonempty replacement without a canonical image placeholder SHALL release orphan image state. Unchanged preserving writes and end-appends SHALL avoid those wholesale-reset effects. This file does not prove durable recovery of temporary image files, correctness of shared slash registries, clipboard availability, or caller discipline around the public TextArea and image vector.
+
+#### Scenario: Fresh prompt state
+- **WHEN** a PromptWidget is constructed for a cwd
+- **THEN** editor, search, slash, history, suggestion, image and contextual-tip state start from their documented defaults and the main-session command catalog is installed.
+
+#### Scenario: Stash ownership transfer
+- **WHEN** a draft is stashed, restored, transformed, submitted or abandoned
+- **THEN** text/chip/image ownership and cleanup follow the snapshot lifecycle without silently treating temporary image paths as durable recovery data.
+
+#### Scenario: Whole-draft replacement
+- **WHEN** set_text, set_text_preserving or append_text changes the draft
+- **THEN** only a real wholesale replacement invalidates draft-bound suggestions and applies the documented slash/image reset rules.
+
+#### Scenario: Shared prompt configuration
+- **WHEN** appearance, compact, screen-mode, MRU, command tags, recap or auto-mode availability changes
+- **THEN** the widget forwards the corresponding setting to its owned editor or slash controller.
+
+证据：`crates/codegen/pager/src/views/prompt_widget/mod.rs`。
+
+### Requirement: Pager prompt editing, enter routing and contextual edit signals
+
+PromptWidget SHALL reset its per-key one-shot signals, route visible file-search keys first, intercept file-reference viewer chords, insert modified-Enter newlines, clear nonempty drafts on Ctrl-C, route standard and inline clipboard paste separately, enable Super-A selection only for Ghostty, map Ctrl-R directly to redo, and otherwise delegate editing to TextArea while recording before/after cursor, length, selection and change facts. A changed edit SHALL reconcile image ownership and refresh file-search context; an ineffective deletion on nonempty text SHALL emit the structured diagnostic. Undo-tip observation SHALL count Unicode scalar values, skip accepted file completions, require a restorable TextArea undo and no lost image payload; plan-nudge observation SHALL fire only on a typed rising edge into a planning keyword outside paste chords, slash commands and bash commands. Enter routing SHALL preserve an open file-search dropdown, rescue Apple Terminal physical newline modifiers, translate a preceding backslash into a newline, submit only bare Enter and otherwise pass through. try_send SHALL reject whitespace and continuations without clearing a successful draft; can_send SHALL mirror those gates at the current cursor. This file does not prove terminal event normalization, CoreGraphics polling, clipboard contents, action-registry dispatch, diagnostic persistence, or that callers consume either one-shot signal.
+
+#### Scenario: Key priority
+- **WHEN** a key reaches the prompt
+- **THEN** dropdown, file-viewer, newline, clear, clipboard and Ghostty-select-all intercepts run before generic TextArea editing.
+
+#### Scenario: Generic edit projection
+- **WHEN** TextArea changes text or cursor
+- **THEN** the event is Edited, input deltas are recorded, image ownership and file-search context are reconciled; otherwise the event is Ignored and an ineffective deletion may be diagnosed.
+
+#### Scenario: Contextual edit edges
+- **WHEN** enabled user edits wipe a substantial restorable draft or newly type a planning keyword
+- **THEN** the corresponding signal fires once only under its image, completion, paste and command exclusions.
+
+#### Scenario: Submit routing
+- **WHEN** an Enter-family key or send attempt is evaluated
+- **THEN** file-search, modifier-newline, backslash-continuation, whitespace and bare-submit cases remain distinct.
+
+证据：`crates/codegen/pager/src/views/prompt_widget/mod.rs`。
+
+### Requirement: Pager prompt shell and predicted suggestion mediation
+
+PromptWidget SHALL mediate shell ghost text, completion dropdown state and predicted-next-prompt suggestions without making the underlying providers authoritative. Shell ghost acceptance SHALL require the cursor at draft end, append the accepted full or word portion and refresh file context; progressive matching and explicit clearing SHALL delegate to the suggestion controller. A predicted prompt SHALL be visible only when its per-frame gate is active, a suggestion exists, shell/file/history/slash completion owns no competing surface, and the cursor is at text end; acceptance SHALL insert only the controller-provided remainder. Completion dropdown open, move, scroll, hover and select operations SHALL follow available-item bounds. Accepted completion or fill edits SHALL refuse any byte range overlapping an atomic prompt element, replace only a valid non-stale range, place the cursor after inserted UTF-8 bytes and refresh file context; probing for clipping SHALL not consume the selection. This file does not prove completion fetching, generation/request anchoring inside the controller, ranking, provider availability, or network behavior.
+
+#### Scenario: Shell ghost
+- **WHEN** a shell ghost is set, progressively matched, accepted or cleared
+- **THEN** it is mediated by the suggestion controller and acceptance writes only at the end of the draft.
+
+#### Scenario: Predicted prompt visibility
+- **WHEN** a predicted suggestion competes with shell, file, history or slash UI
+- **THEN** it renders and accepts only when all ownership and cursor gates permit it.
+
+#### Scenario: Dropdown navigation
+- **WHEN** completion items are opened, moved, scrolled, hovered or selected
+- **THEN** selection state respects the controller list and invalid hover indices become absent.
+
+#### Scenario: Atomic splice refusal
+- **WHEN** a completion edit or fill overlaps a paste, file or image element
+- **THEN** the write is declined without replacing the atomic element; a nonoverlapping fresh edit lands the cursor after its replacement.
+
+证据：`crates/codegen/pager/src/views/prompt_widget/mod.rs`。
+
+### Requirement: Pager prompt slash completion and preview projection
+
+PromptWidget SHALL derive slash completion from a clean draft with every atomic element removed, then remap command, argument, recognized-token and inline-ghost byte ranges back to the raw buffer. Refresh SHALL enter, update or cancel argument preview according to the resulting snapshot. ACP command/tool synchronization SHALL rebuild registry state before refreshing, with an unknown toolset retaining tool-gated visibility. Slash open/close, wrapped movement, clamped scrolling, hover and hover-selection SHALL delegate to the owned snapshot/controller. Completion acceptance SHALL validate current raw byte ranges and character boundaries, replace command or argument text, absorb one existing plain separator only when it is not element data, record command MRU only for command-name acceptance, and refresh afterward. Preview SHALL resolve the current invocation and preview-capable command, capture its original state once, apply the highlighted argument, revert it on cancel or forget it on commit. This file does not prove command execution, registry implementation, preview side effects, ACP discovery delivery, model validity, or that arbitrary TextArea element ranges satisfy the assumed sorted nonoverlap invariant.
+
+#### Scenario: Element-free parse
+- **WHEN** slash state is refreshed around atomic chips
+- **THEN** the controller parses chip-free text and every returned byte range is mapped back to the raw draft.
+
+#### Scenario: Registry synchronization
+- **WHEN** ACP commands or tools change
+- **THEN** registry mutation precedes snapshot refresh and unknown tool availability remains distinguishable from an empty toolset.
+
+#### Scenario: Slash acceptance
+- **WHEN** a selected command or argument row has a valid current range
+- **THEN** only that raw range is replaced, separator and MRU rules are applied, and invalid or stale ranges leave the draft unchanged.
+
+#### Scenario: Preview lifecycle
+- **WHEN** a preview-capable argument selection changes, is cancelled or is committed
+- **THEN** the original value is captured once, previewed, reverted or released through the command contract.
+
+证据：`crates/codegen/pager/src/views/prompt_widget/mod.rs`。
+
+### Requirement: Pager prompt file reference search and viewer routing
+
+PromptWidget SHALL surface cwd-scoped @-file search, clear its editable context while the cursor is on an atomic file reference, and expose valid cursor-boundary references for shortcuts. Visible search SHALL map Up/Down, Ctrl-P/N/K/J, page keys, Tab/Enter, Right, colon/Ctrl-L and Escape to navigation, acceptance, drill-down, viewer or dismissal outcomes, while invalid selections and modified keys fall through. File acceptance SHALL preserve a hidden-mode marker when replacing only the path query; directory drill-down SHALL remain editable without a trailing space and anchor whitespace paths, directory-mode descent SHALL append its controller replacement, and file acceptance SHALL create one undo-grouped atomic @ reference plus a trailing space. Viewer acceptance SHALL begin an undo group, create the file element without the trailing space and publish a pending path; colon or Ctrl-L on an existing element SHALL carry an optional parsed 1-based exclusive-end line range. Line ranges SHALL accept positive N or ordered N-M only. This file does not prove filesystem search results, ignore/sort rules, path existence, viewer opening, line loading, caller completion of the deliberately open undo group, or platform path semantics.
+
+#### Scenario: Search key routing
+- **WHEN** the @-file dropdown is visible
+- **THEN** navigation, page movement, acceptance, viewer and dismissal keys are distinguished and invalid selections pass through.
+
+#### Scenario: Directory drill-down
+- **WHEN** a directory result is accepted by Right or in directory mode
+- **THEN** only the query path is replaced, continuation context remains anchored and a single undo can revert the change.
+
+#### Scenario: File reference acceptance
+- **WHEN** a file result is accepted
+- **THEN** the query becomes an atomic normalized @ reference, ordinary acceptance adds a separator, and viewer acceptance publishes the pending path.
+
+#### Scenario: Existing reference viewer
+- **WHEN** Ctrl-L or colon targets a file element boundary
+- **THEN** the viewer request contains its path and any valid positive line or line-range suffix.
+
+证据：`crates/codegen/pager/src/views/prompt_widget/mod.rs`。
+
+### Requirement: Pager prompt paste chip and element interaction lifecycle
+
+PromptWidget SHALL normalize bare carriage returns in pasted text while preserving CRLF, ignore empty input, and insert short pastes inline. A paste at or above four lines, two lines in compact mode, or above 10,000 bytes SHALL become an atomic paste element whose badge favors decimal byte size for the large-paste case; replacing a selection SHALL be one undo group. Re-pasting byte-identical normalized and tab-expanded content next to the same paste chip SHALL inline that chip instead of duplicating it. Mouse events SHALL be forwarded with the last rendered textarea area, update image hover facts from element events, refresh file-search context after cursor/selection/scroll activity, and report redraw ownership even when TextArea returns Nothing. Enter on a paste or file element SHALL inline it, Enter on an image SHALL request preview, and other positions or keys SHALL not interact. Paste preview SHALL target a chip on or immediately right of the cursor, while direct Enter expansion remains strictly on-chip. This file does not prove host clipboard delivery, tab-expansion implementation, terminal mouse protocol, live preview geometry, undo correctness inside TextArea, or downstream handling of ImagePreview.
+
+#### Scenario: Paste representation
+- **WHEN** normalized paste content crosses line or byte thresholds
+- **THEN** it becomes one atomic chip with the corresponding line or decimal-size badge; smaller content remains inline.
+
+#### Scenario: Repaste expansion
+- **WHEN** identical paste content is inserted on or immediately after its chip without a selection
+- **THEN** the existing chip is expanded as one editable step.
+
+#### Scenario: Mouse forwarding
+- **WHEN** mouse input or element hover events reach the prompt
+- **THEN** TextArea owns cursor/selection/scroll behavior and prompt-owned hover and search context are refreshed.
+
+#### Scenario: Element Enter
+- **WHEN** bare Enter targets an atomic element
+- **THEN** paste and file refs inline, images request preview, and adjacency alone does not expand a chip.
+
+证据：`crates/codegen/pager/src/views/prompt_widget/mod.rs`。
+
+### Requirement: Pager prompt image chip ownership and preview lifecycle
+
+PromptWidget SHALL accept at most ten live images and reject a decodable preview whose width or height is below eight pixels. Each accepted image SHALL receive a monotonically increasing display number, an undo-grouped atomic chip plus separator, a live element binding and a fresh-insertion preview anchor. Reconciliation after text edits SHALL match live records by ElementId, recover redo records by display number, retain removed images in an undo stash capped at twenty with oldest display numbers evicted and cleaned, clear stale hover/preview anchors, and never lower the high-water counter within a prompt lifetime. Cursor, hover and insertion preview lookup SHALL honor atomic-element ownership and dismiss after cursor movement. Submission drain SHALL reconcile against live element ids; text-only extraction SHALL remove only image element ranges. Restoring images SHALL cap input, bind records to the first live chip with the same display number, warn on duplicate or missing identities and advance the counter; chip restore SHALL use captured byte ranges. Explicit resets and abandoned stashes SHALL own temporary-file cleanup. This file does not prove image decoding or encoding, renderer/protocol support, tempfile cleanup success, backend upload, PastedImage Drop behavior for truncated or duplicate inputs, or correctness of externally supplied chip ranges.
+
+#### Scenario: Insertion admission
+- **WHEN** an image is too small, exceeds the live cap or is accepted
+- **THEN** it is rejected with a user message or receives one monotonic numbered atomic chip and preview anchor.
+
+#### Scenario: Edit reconciliation
+- **WHEN** chip elements are deleted, undone or redone
+- **THEN** live images follow ElementId, redo uses display-number identity, removed payloads remain bounded and stale preview facts are cleared.
+
+#### Scenario: Submission projection
+- **WHEN** callers drain images or need text-only feedback
+- **THEN** only live chip-bound image records leave the prompt and only image placeholder ranges are removed from text.
+
+#### Scenario: Restore binding
+- **WHEN** chip metadata and image records are restored
+- **THEN** captured elements are registered first, records bind by display number within the cap and the counter does not regress.
+
+证据：`crates/codegen/pager/src/views/prompt_widget/mod.rs`。
+
+### Requirement: Pager prompt geometry, chrome and overlay rendering
+
+PromptWidget SHALL compute desired height from effective content width, prefix, TextArea wrapping, top padding and optional info divider, freeze history-browse text height at one row and clamp to the provided maximum. Drawing SHALL no-op below usable dimensions, fill the selected prompt surface, derive focus or override colors, lay out optional accent/chrome/borders/title/prefix, render TextArea with persistent scroll state, repaint baked chip backgrounds for panel surfaces, and project slash command highlights and argument/inline ghosts using TextArea screen spans. Shell and predicted ghosts SHALL paint only at the eligible cursor with slash ownership taking priority. Empty unfocused prompts SHALL show the caller placeholder. The bottom caption SHALL right-align usage warning, agent, model, styled flags and multiline state within available width; unfocused default surfaces SHALL dim their interior. Paste preview SHALL use the supplied overlay and position-sensitive hint; image preview SHALL return post-flush terminal escapes, and a frame that paints no image SHALL return the overlay-clear escape. Cursor coordinates SHALL be returned only while focused. This file does not prove ratatui or Unicode terminal fidelity, actual image/OSC flush success, overlay ownership across widgets, downstream dropdown rendering, theme accuracy, or live terminal resize behavior.
+
+#### Scenario: Height request
+- **WHEN** width, wrapping, browse mode, chrome, info or maximum height changes
+- **THEN** the requested height uses effective text width, freezes browse mode and remains within the supplied bounds.
+
+#### Scenario: Prompt chrome
+- **WHEN** a usable area is drawn
+- **THEN** configured surface, accent, borders, title, prefix, textarea, placeholder and focused dimming are projected without writing outside the area.
+
+#### Scenario: Completion overlays
+- **WHEN** slash, shell or predicted completion facts are eligible
+- **THEN** raw token spans and ghost suffixes are painted with slash ownership suppressing competing ghost text.
+
+#### Scenario: Info and media overlays
+- **WHEN** metadata, paste preview or image preview is present
+- **THEN** bounded captions and preview surfaces render, cursor visibility follows focus and image protocol escapes are returned or explicitly cleared.
+
+证据：`crates/codegen/pager/src/views/prompt_widget/mod.rs`。
+
+### Requirement: Pager modal keyboard and paste routing
+
+The pager AgentView modal router SHALL give an active modal exclusive control of keyboard and paste input, route shared close, tab, shortcut and focus behavior through ModalWindow before modal content, and return an explicit changed, unchanged or action outcome. Picker modals SHALL clear only the query where their policy allows before closing or restoring a saved command palette; remember-note review SHALL save, toggle available raw/enhanced content and scroll with bounded subtraction; usage, shortcuts, memory and settings SHALL delegate their owned submodes; reset confirmation SHALL treat Esc, F2, Ctrl/Super-comma and explicit negative choices as cancel and SHALL accept a reset only from an unmodified matching key; and paste SHALL reach only the active picker or focused shortcuts, memory or settings filter rather than the hidden prompt. This router does not prove ModalWindow, picker, memory, settings, shortcuts or usage helper correctness, action dispatch, note persistence, terminal event decoding or clipboard behavior.
+
+#### Scenario: Modal-exclusive keyboard routing
+- **WHEN** a key arrives while an ActiveModal variant is open
+- **THEN** shared chrome receives it first where applicable and the surviving event is delegated only to that modal’s content handler.
+
+#### Scenario: Layered close and restoration
+- **WHEN** Esc or a close request occurs in a searchable picker, nested documentation view or saved-palette flow
+- **THEN** the query, inner view or modal closes at the documented layer and a saved palette is restored when present.
+
+#### Scenario: Confirmation and review controls
+- **WHEN** reset confirmation or remember-note review receives its supported keys
+- **THEN** cancel/reset/save/toggle/scroll outcomes are emitted without modifier ambiguity or underflow.
+
+#### Scenario: Focused paste routing
+- **WHEN** bracketed paste arrives while a modal is active
+- **THEN** only a picker query or an eligible focused modal filter consumes the text and other active modals consume it without mutating the prompt.
+
+证据：`crates/codegen/pager/src/app/agent_view/modal_routing.rs`。
+
+### Requirement: Pager command argument session and documentation picker transitions
+
+The pager picker router SHALL filter command-palette rows without selecting section headers, translate palette choices into their corresponding actions, preserve the draft when forwarding slash commands or external editing, and preserve a palette snapshot while entering How-to, resume-session or argument pickers. Argument pickers SHALL choose search/navigation profile from command and phase, filter catalog fields case-insensitively, enter a verified second phase only when suggested rows have effort-style insertion text, step back from that phase before closing, and emit the catalog insertion id trimmed only at the end. Session pickers SHALL build one grouped input map from the effective server-stamped query, support direct and worktree selection, deep search, expand/collapse, copy, guarded deletion and fetch invalidation on close, and keep deletion armed across mouse movement but cancel it on other keys or selection movement. Documentation pickers SHALL filter title or description, open a viewer, scroll it and shuttle the palette snapshot through list/view back navigation. This file does not prove registry suggestion correctness, session search/fetch ordering, session deletion, loading results, worktree creation, document content accuracy or execution of emitted actions.
+
+#### Scenario: Palette command selection
+- **WHEN** a selectable command-palette row is chosen
+- **THEN** the modal closes or opens the requested nested picker and emits the matching application action while retaining any required palette snapshot.
+
+#### Scenario: Argument phase and filtering
+- **WHEN** an argument picker query, selection or close event occurs
+- **THEN** rows filter by matching fields, validated chained phases replace the list, close steps back before dismissal, and a terminal choice emits one slash command with its catalog id.
+
+#### Scenario: Session selection and guarded deletion
+- **WHEN** session-picker navigation, search, expand, worktree, copy, delete or close input occurs
+- **THEN** the grouped row map resolves the intended session and close invalidates any fetch whose landing surface disappeared.
+
+#### Scenario: Documentation navigation
+- **WHEN** a guide is filtered, selected, scrolled or closed
+- **THEN** the matching viewer/list transition occurs and the original palette can be restored.
+
+证据：`crates/codegen/pager/src/app/agent_view/modal_routing.rs`。
+
+### Requirement: Pager modal mouse routing and action projection
+
+The pager modal mouse router SHALL route chrome hit-testing before modal content, mirror layered close/restoration semantics for picker, documentation and session modals, emit SessionPickerClosed when a mouse close removes that fetch landing surface, and step an argument picker back from a chained phase before dismissing it. It SHALL delegate wheel, row, tab, filter, section and settings interactions to the active modal, map usage-row clicks to copy actions, map reset-confirm shortcuts or close to explicit choices, and use recorded standard-confirm button rectangles for click and hover projection. This file does not prove hit rectangles before a render pass, terminal mouse coordinate translation, downstream mouse helpers, clipboard writes, deletion or setting reset execution.
+
+#### Scenario: Chrome-first mouse handling
+- **WHEN** a modal mouse event hits close, tabs, shortcuts, outside chrome or content
+- **THEN** ModalWindow resolves chrome first and only unhandled content events reach the active modal helper.
+
+#### Scenario: Nested modal close
+- **WHEN** a picker or document modal closes by mouse
+- **THEN** an effort phase steps back, a saved palette or guide list is restored where applicable, and session fetch invalidation is emitted.
+
+#### Scenario: Specialized rows and controls
+- **WHEN** memory, settings, shortcuts, usage or reset content is clicked or scrolled
+- **THEN** the owned helper/state produces the corresponding changed or application action outcome.
+
+#### Scenario: Standard confirmation hit state
+- **WHEN** pointer movement or a left click intersects a recorded modal button
+- **THEN** hover changes only on key changes and a click is routed as that button’s unmodified key.
+
+证据：`crates/codegen/pager/src/app/agent_view/modal_routing.rs`。
+
+### Requirement: Pager active modal render dispatch and picker geometry
+
+The pager active-modal renderer SHALL render exactly the currently active supported modal into the supplied viewport, reuse the same dispatch for full and minimal hosts, and derive argument-picker focus, sizing, visible-row budget and rich-description wrapping from one profile policy. Command, argument and session pickers SHALL build rows and non-selectable flags consistent with input mapping; session rendering SHALL use the same effective query for local rows, content rows and loading header, record search and item hit areas, and show guarded-delete or normal shortcuts. Documentation, remember-note, shortcuts, memory, settings/reset and usage variants SHALL delegate to their owned renderers; remember-note markdown SHALL cache by width, clamp scroll and select raw or enhanced content. The renderer does not prove terminal cell-width fidelity, markdown parsing, animation timing, theme contrast, downstream renderer correctness, accessibility or equality between render/input maps under concurrent data mutation.
+
+#### Scenario: Profile geometry
+- **WHEN** an argument command and phase select a profile
+- **THEN** search policy, focus, width, chrome, visible rows and rich summaries follow that profile within the viewport.
+
+#### Scenario: Picker row projection
+- **WHEN** command, argument or session picker state is drawn
+- **THEN** visible rows, selection, non-selectable flags, search/loading state and hit areas are derived from the same current state used by input routing.
+
+#### Scenario: Session query consistency
+- **WHEN** server-stamped results or content-search rows are present
+- **THEN** effective query gates filtering, headers and row indices consistently for that frame.
+
+#### Scenario: Delegated modal rendering
+- **WHEN** a documentation, note, shortcuts, memory, settings/reset or usage modal is active
+- **THEN** its owned renderer receives the current state, geometry, theme and compact policy.
+
+证据：`crates/codegen/pager/src/app/agent_view/modal_routing.rs`。
+
+### Requirement: Pager root host lifecycle project discovery and Trajectory execution effects
+
+The pager root effect executor SHALL synchronously project quit, process working-directory changes and best-effort active-session registration, and SHALL spawn project-recents, dashboard-location, card-detail and Trajectory work as TaskResult-producing tasks. Trajectory launch SHALL run the current executable with trajectory <session> --no-open, detach it with null stdin/stdout and piped stderr, accept only a readiness line whose parsed URL starts with http://, fail readiness after ten seconds, retain at most eight startup diagnostic lines and report a later runtime termination through a separate task. This file does not prove process-global cwd safety, source collectors, persisted card data, child cleanup after every abort path or browser/debugger reachability.
+
+#### Scenario: Quit effect
+- **WHEN** Effect::Quit is executed
+- **THEN** the executor logs the quit and returns true without spawning a task.
+
+#### Scenario: Best-effort host mutation
+- **WHEN** active-session registration or process cwd mutation fails
+- **THEN** the failure is warned and execute still returns its normal non-quit result.
+
+#### Scenario: Trajectory becomes ready
+- **WHEN** stderr emits a Trajectory readiness line with an http:// URL before ten seconds
+- **THEN** TrajectoryLaunched carries that URL and later termination is monitored independently.
+
+#### Scenario: Trajectory readiness fails
+- **WHEN** the child exits, stderr fails, the channel closes or ten seconds elapse before readiness
+- **THEN** TrajectoryLaunched carries a sanitized failure.
+
+#### Scenario: Discovery task fails internally
+- **WHEN** worktree indexing or card-detail blocking work cannot join
+- **THEN** the effect returns default empty worktree/detail data rather than a distinct failure TaskResult.
+
+证据：`crates/codegen/pager/src/app/root/effects/mod.rs`。
+
+### Requirement: Pager attachment image diagnostics and changelog effects
+
+Clipboard attachment probing SHALL run in blocking work, discard a stale change-count or non-clipboard bracketed payload, probe raster and file URLs, prepare raster preview and optionally persist agent-prompt images, and fail after the configured timeout. Prompt preview and image-viewer loading SHALL run blocking work and project failure states. Doctor planning SHALL list automatic fixes, select an automatic plan or return a local command, and doctor application SHALL report join and apply errors. Changelog fetch failure SHALL return an empty changelog after warning. This file does not prove platform clipboard trust, image safety, persistence atomicity, diagnostic fix correctness, terminal compatibility or network changelog freshness.
+
+#### Scenario: Stale clipboard
+- **WHEN** the current clipboard change count differs from the captured count
+- **THEN** the probe returns ProbeDropped without accepting attachments.
+
+#### Scenario: Prompt image persistence
+- **WHEN** raster data targets an agent prompt with an images directory
+- **THEN** persistence success returns Image and failure returns PersistFailed.
+
+#### Scenario: Probe timeout
+- **WHEN** blocking clipboard work exceeds the configured timeout
+- **THEN** ClipboardAttachmentProbed carries ProbeFailed and no file URLs.
+
+#### Scenario: Doctor selection
+- **WHEN** a fix id has an automatic plan, only a human command or a selection error
+- **THEN** DoctorFixPlanned distinguishes Plan, RunLocally and Err.
+
+#### Scenario: Changelog failure
+- **WHEN** blocking fetch cannot join
+- **THEN** ChangelogFetched has no markdown and an empty entries vector.
+
+证据：`crates/codegen/pager/src/app/root/effects/mod.rs`。
+
+### Requirement: Pager deep session search and prompt suggestion effects
+
+Deep session search SHALL call grow/session/search with content enabled and retry while the response reports bootstrapping, bounded by a nominal thirty-second deadline with three-second retry intervals. Prompt and plugin CTA debounce effects SHALL wait 50 and 300 milliseconds respectively. Shell suggestions SHALL pass text, cursor, cwd, AI options, session, limit, generation and tokenOnly to grow/suggest and return a result only when the response parser succeeds; prompt suggestion SHALL query grow/suggestPrompt and extract result.suggestion. Suggestion ACP or parse failures SHALL collapse to CancelComplete or None rather than an error-bearing result. This file does not prove ranking quality, privacy of indexed content, hard thirty-second wall-clock completion, cancellation of stale generations, cursor validity, model availability or reducer-side generation filtering.
+
+#### Scenario: Search bootstrapping
+- **WHEN** search reports bootstrapping true before the deadline
+- **THEN** the executor sleeps three seconds and retries, retaining the most recently parsed results.
+
+#### Scenario: Search terminal response
+- **WHEN** bootstrapping is false
+- **THEN** DeepSearchResults is returned immediately with the parsed hits and original sequence.
+
+#### Scenario: Shell suggestion unavailable
+- **WHEN** ACP fails or the parser rejects the response
+- **THEN** the task returns CancelComplete without a diagnostic payload.
+
+#### Scenario: Prompt suggestion missing
+- **WHEN** response JSON, result or suggestion is missing
+- **THEN** PromptSuggestionLoaded carries None with agent and generation.
+
+#### Scenario: Debounce expiry
+- **WHEN** the fixed timer elapses
+- **THEN** the matching generation is returned for stale-result handling elsewhere.
+
+证据：`crates/codegen/pager/src/app/root/effects/mod.rs`。
+
+### Requirement: Pager resolved selection hit testing and drag edge mechanics
+
+The pager selection geometry layer SHALL group consecutively rendered lines by entry and range identity, preserve stable block-line coordinates across viewport changes, distinguish exact text hits from same-row nearest-column hits, and constrain drag-head snapping to the anchor range. Gap-row ties SHALL prefer the candidate farther from the anchor, an absent range SHALL yield no new head, and hit testing SHALL ignore zero-width spans. Text and block drags SHALL cross their threshold after any one-cell movement. Edge autoscroll SHALL return no state for a zero-height or comfortably interior viewport, select Up or Down within the two-row edge zones or beyond them, and ramp speed through 1, 2, 3 and 5 rows per tick. Block overlay SHALL highlight only visible blocks in the inclusive entry interval. This layer does not schedule ticks, mutate scroll offsets, choose input ownership, copy blocks or prove terminal rendering.
+
+#### Scenario: Selectable range hit
+- **WHEN** a pointer is on a rendered selectable row
+- **THEN** nearest hit testing returns the exact or closest clamped column, while exact testing can be applied separately for chrome fallthrough.
+
+#### Scenario: Anchor-range head snapping
+- **WHEN** a drag pointer crosses gap rows, other ranges or the last visible line
+- **THEN** the nearest visible line of the anchor range is selected, full ties extend away from the anchor, and an absent anchor range returns no hit.
+
+#### Scenario: Edge autoscroll
+- **WHEN** the pointer is near or outside a nonempty content viewport
+- **THEN** direction follows the relevant edge and speed increases by distance; an interior pointer or empty viewport produces no state.
+
+#### Scenario: Block interval overlay
+- **WHEN** an active block drag spans visible entry indices
+- **THEN** every buffer cell in each included visible block area receives the selection highlight.
+
+证据：`crates/codegen/pager/src/scrollback/text_selection.rs`。
+
+### Requirement: Pager linear selection reconstruction and boundary restoration
+
+Pager linear text reconstruction SHALL normalize forward and reversed endpoints by stable block-line index, include both endpoint columns, select the remainder of the first line, all middle lines and the prefix of the last line, and clamp every column to each line’s selectable display width. Visible-model reconstruction SHALL include only present lines in the anchor range; full reconstruction SHALL traverse complete block output and include only lines with the anchor range id. Both paths SHALL preserve each line’s explicit joiner or use a newline fallback, slice by display columns, and apply registered hidden prefix or suffix boundaries only when the selected slice reaches the corresponding path edge. No selected line SHALL return None, while a selected empty slice may return an empty string. This layer does not load full output, validate boundary registration or deliver clipboard content.
+
+#### Scenario: Single-line and reversed endpoints
+- **WHEN** both endpoints are on one line in either order
+- **THEN** the inclusive min-to-max display-column slice is returned after width clamping.
+
+#### Scenario: Multi-line sweep
+- **WHEN** endpoints span multiple stable block lines
+- **THEN** the first tail, full middle lines and last inclusive prefix are joined in block order.
+
+#### Scenario: Visible versus full reconstruction
+- **WHEN** some selected lines are outside the current model
+- **THEN** visible reconstruction returns only present selected lines, while full reconstruction can include matching complete-output lines.
+
+#### Scenario: Hidden edit boundaries
+- **WHEN** a selected slice reaches a registered path edge
+- **THEN** its prefix or suffix is restored exactly there and omitted from partial interior slices.
+
+证据：`crates/codegen/pager/src/scrollback/text_selection.rs`。
+
+### Requirement: Pager active and persistent selection overlay projection
+
+Pager text-selection painting SHALL map stable selection endpoints back through the current frame model and highlight only selected display cells. Linear active and persistent selections with identical endpoints SHALL paint the same cells; single-line selections are inclusive, multi-line selections paint the first tail, middle widths and last prefix, and missing entry/range geometry is a no-op. Exact text hit testing SHALL succeed only inside selectable columns on the matching row, leaving accent bars, borders, padding, gaps and other rows available to higher-level handlers. Selection highlighting SHALL use one uniform theme band, remove an earlier reverse modifier, and fall back to reverse video for colorless themes. This layer does not manage selection lifetime, table side-car validity, render ordering, terminal mouse decoding or clipboard delivery.
+
+#### Scenario: Active and persistent parity
+- **WHEN** active and persisted linear selections carry the same endpoints
+- **THEN** they paint the same current-frame cells.
+
+#### Scenario: Stable endpoint projection
+- **WHEN** a persisted selection is rendered after viewport geometry changes
+- **THEN** stable block-line indices are resolved to the current screen positions and only the selected columns are painted.
+
+#### Scenario: Missing geometry
+- **WHEN** the selected entry and range are absent from the frame model
+- **THEN** the buffer is left unchanged.
+
+#### Scenario: Exact text hit
+- **WHEN** a pointer is tested for text ownership
+- **THEN** only a cell inside a nonempty selectable span returns a hit; surrounding chrome and gaps return None.
+
+证据：`crates/codegen/pager/src/scrollback/text_selection.rs`。
+
+### Requirement: Pager configurable display-column word boundaries
+
+Pager word-boundary recognition SHALL operate in terminal display columns over Unicode grapheme clusters and partition nonzero-width graphemes into Word, Whitespace and configured Separator classes. A selection SHALL expand across the maximal contiguous run of the target class; an empty string returns 0..0 and a column past the text clamps to the final segment. The default separator set SHALL match printable ASCII punctuation except underscore, while configuration loading SHALL read ui.word_separators once per process and fall back to that default on load failure, absence or non-string data. Wide CJK graphemes and combining sequences SHALL preserve display-column bounds. This layer does not reload changed configuration, implement click counting or prove parity with every tmux Unicode behavior.
+
+#### Scenario: Three-class expansion
+- **WHEN** a display column lands in a word, whitespace or separator run
+- **THEN** the result covers the complete contiguous run of that same class.
+
+#### Scenario: Unicode display columns
+- **WHEN** text contains wide CJK or combining graphemes
+- **THEN** returned bounds use terminal display width rather than UTF-8 bytes or scalar count.
+
+#### Scenario: Default punctuation policy
+- **WHEN** default separators are used
+- **THEN** printable ASCII punctuation separates words, underscore and digits remain word characters, and whitespace has its own class.
+
+#### Scenario: Custom separators and bounds
+- **WHEN** separators are narrowed, empty or the column lies beyond text
+- **THEN** classification follows the provided set and an out-of-range column selects the last segment.
+
+证据：`crates/codegen/pager/src/scrollback/text_selection.rs`。
+
+### Requirement: Pager display-column URL span recognition
+
+Pager URL span recognition SHALL scan case-insensitively for http, https, ftp and file scheme text, compute match bounds in Unicode display columns, and return only the matched URL containing the requested column. It SHALL retain query strings, fragments, ports and balanced closing brackets, strip trailing prose punctuation and unbalanced closing brackets, reject a match reduced to scheme-only text, and return None for unsupported schemes, outside columns, empty text or non-URL prose. Multiple matches SHALL remain independently addressable. This is permissive text recognition; it does not parse or validate URLs, resolve destinations, check safety, handle every URI scheme or open links.
+
+#### Scenario: Supported scheme span
+- **WHEN** the requested display column lies within an http(s), ftp or file match
+- **THEN** the exact display-column range of that match is returned case-insensitively.
+
+#### Scenario: Trailing prose punctuation
+- **WHEN** regex capture ends in punctuation or an unmatched closing bracket
+- **THEN** prose punctuation is removed while balanced brackets inside the URL remain.
+
+#### Scenario: Multiple and rich URLs
+- **WHEN** text contains multiple URLs, ports, queries or fragments
+- **THEN** each supported match retains its URL content and only the one spanning the requested column is returned.
+
+#### Scenario: No valid span
+- **WHEN** text is empty, the scheme is unsupported or degenerate, or the column is outside a retained match
+- **THEN** no URL range is returned so callers may use word selection.
+
+证据：`crates/codegen/pager/src/scrollback/text_selection.rs`。
+
+### Requirement: Pager table-shaped selection resolution copy and paint
+
+Pager table-shaped selection SHALL resolve an anchor inside detected table cell content to TableCell and escalate to a carried rectangular TableGrid only when the latched head reaches another cell’s content. Border anchors or missing geometry SHALL remain Linear; divider, border and adjacent padding dead zones SHALL preserve the held cell or grid to prevent mode flicker, and returning to anchor content SHALL de-escalate to TableCell. Cell copy SHALL clamp endpoints into the anchor cell band, trim and space nonblank wrapped fragments; grid copy SHALL serialize the carried cell rectangle as TSV. Table overlays SHALL paint clipped nonblank cell-content bands, excluding border rows, junction columns, padding, blank fragments and unselected cells; a table-shaped selection without geometry SHALL paint nothing. This layer does not detect tables itself, validate stale geometry against live output, deliver clipboard text or define the whole-table gesture.
+
+#### Scenario: Cell and grid resolution
+- **WHEN** a drag begins in cell content and its head moves within or beyond that cell
+- **THEN** it resolves to TableCell or a carried TableGrid with dead-zone hysteresis; border anchors remain Linear.
+
+#### Scenario: Cell copy
+- **WHEN** a TableCell spans one or more wrapped fragments
+- **THEN** endpoints clamp to the cell band and trimmed nonblank fragments join with spaces in either endpoint order.
+
+#### Scenario: Grid copy
+- **WHEN** a carried TableGrid spans rows and columns
+- **THEN** whole cell values serialize in row order with tab-separated columns and newline-separated rows.
+
+#### Scenario: Table paint parity
+- **WHEN** a table-shaped selection is rendered with matching geometry
+- **THEN** only selected content glyph bands are highlighted; without geometry, no misleading linear overlay is painted.
+
+证据：`crates/codegen/pager/src/scrollback/text_selection.rs`。
+
+### Requirement: Pager task pane shell highlighting and finished-row dimming
+
+highlight_bash_command SHALL 在 Windows 首选 powershell grammar、其他平台首选 bash，并在首选失败时回退 bash；输入先附加换行供 syntect 解析，输出逐段删除尾部 CR/LF 并跳过空段。grammar 不存在、高亮报错或没有非空段时 SHALL 返回完整原命令和当前主题 command 前景色。dim_spans SHALL 将每个已有前景色向主题背景混合，缺少前景色时使用 gray；该转换只重建前景样式，不保留原 span 的其他 modifier。
+
+#### Scenario: Grammar fallback
+- **WHEN** 首选 grammar 不可用但 bash 可用
+- **THEN** 使用 bash；两者都不可用则单 span 原文回退。
+
+#### Scenario: Empty highlighted output
+- **WHEN** syntect 成功但所有段删除换行后为空
+- **THEN** 返回原命令而不是空行。
+
+#### Scenario: Finished command dimming
+- **WHEN** 无 description 的后台命令已结束
+- **THEN** 缓存的高亮前景向背景混合后展示。
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs`。
+
+### Requirement: Pager background task row normalization and badge formatting
+
+后台任务行 SHALL 优先采用 trim 后非空 description：普通任务将换行替为空格并加可搜索的 `Task ` 前缀，monitor 使用 `Monitor ` 标签且不执行 shell 高亮；description 缺失或空白时使用 trim 后 command，含换行时只保留首行并加省略号。行数 badge 对零返回空串，按 <1k、<10k、<1M、<10M、其余区间截断为原数、一位 k、整数 k、一位 M、整数 M，truncated 在右括号前加 `+`。后台稳定 id 由 task_id 的 DefaultHasher 结果生成。
+
+#### Scenario: Description priority
+- **WHEN** 普通任务同时有非空 description 和 command
+- **THEN** 展示 `Task <单行description>`，command 留给其他查看面。
+
+#### Scenario: Monitor row
+- **WHEN** monitor description 含换行
+- **THEN** 展示蓝色 Monitor 标签和折叠换行后的说明，不把说明当 shell。
+
+#### Scenario: Truncated output
+- **WHEN** 缓存行数为 1234 且 truncated 为真
+- **THEN** badge 为 `(1.2k+)`，不四舍五入。
+
+#### Scenario: Blank description
+- **WHEN** description trim 后为空
+- **THEN** 回退 command 标签路径。
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs`。
+
+### Requirement: Pager subagent row state, search and activity projection
+
+子 Agent 行 SHALL 通过 format_subagent_label 得到类型和说明，以 pending-kill、running、completed、其他终态选择标签颜色并将终态颜色向背景混合。trim 后非空 model SHALL 只进入完整可搜索 label 和右侧 overlay，不进入主体 styled spans。仅 running 且 activity_label 非空时追加灰色活动后缀，并将主体说明截到最多 40 显示宽度；活动文本不进入可搜索 label，终态不得展示残留活动。Agent 稳定 id SHALL 以 `agent:` 和 child_session_id 共同哈希，选择访问器分别暴露 subagent_id 与 child_session_id。
+
+#### Scenario: Live activity
+- **WHEN** 运行中 Agent 有活动说明
+- **THEN** 主体说明截宽并追加活动，搜索仍匹配完整原说明和 model。
+
+#### Scenario: Finished activity
+- **WHEN** finished 为真但 activity_label 尚在
+- **THEN** 不渲染活动后缀。
+
+#### Scenario: Model metadata
+- **WHEN** model trim 后非空
+- **THEN** 可搜索 label 包含 model，主体标签不内联 model。
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs`。
+
+### Requirement: Pager workflow row status and roster projection
+
+workflow 行 SHALL 使用 run_id 的 `workflow:` 哈希作为稳定 id，以 name 作为显示与控制标识；active 行显示运行色、当前非空 phase 和实际 state 等于 `running` 的 roster 数量，零 roster 且无 phase 时显示 running。非 active 行显示下划线替为空格的 status，并按 complete、其他 terminal、非 terminal paused 类状态着色。started_at SHALL 由 frame now 减 live_elapsed_ms_at 重建，stoppable SHALL 复制 can_stop，而 running SHALL 复制 is_active。
+
+#### Scenario: Active roster
+- **WHEN** active workflow 有一个 running 和一个 done roster row
+- **THEN** 后缀只显示 1 agent。
+
+#### Scenario: Paused workflow
+- **WHEN** 状态 paused 且 can_stop 为真
+- **THEN** 行 running 为假而 stoppable 为真。
+
+#### Scenario: Elapsed reconstruction
+- **WHEN** live elapsed 大于当前可减范围
+- **THEN** checked_sub 失败时 started_at 回退当前 frame instant。
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs`。
+
+### Requirement: Pager scheduled watcher label and countdown projection
+
+scheduled 行 SHALL 将 prompt 按 Unicode char 计数限制为 60，超出时取前 57 chars 加三个 ASCII 点；状态后缀优先级为已链接且运行中的子 Agent `(running)`、provisional id `(starting)`、合法 RFC3339 next_fire_at 的未来/到期判断、最后按 human_schedule 与 created_at 的 interval 近似。非法 RFC3339 SHALL 进入 interval 回退，无法解析 schedule 时无时间后缀。tag 首字符大写，schedule 与 prompt 使用中性颜色；Scheduled 始终属于 Watchers、视为 running，稳定 id 由 `sched:` 与 task_id 哈希。
+
+#### Scenario: Linked run
+- **WHEN** last_subagent_id 能匹配运行中子 Agent
+- **THEN** 显示 running，压过 provisional 或 countdown。
+
+#### Scenario: Bad next time
+- **WHEN** next_fire_at 非 RFC3339 且 schedule 可解析
+- **THEN** 按 created_at 加 interval 展示 next in 或 due now。
+
+#### Scenario: Unicode preview
+- **WHEN** prompt 超过 60 个多字节字符
+- **THEN** 在 char 边界截断，不因字节切片 panic。
+
+#### Scenario: Unknown schedule
+- **WHEN** 无 next time 且 human schedule 不可解析
+- **THEN** 不追加运行/排队/倒计时后缀。
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs`。
+
+### Requirement: Pager task pane filtering, ordering, grouping and automatic visibility
+
+TasksPane::sync_at SHALL 在主题切换时重建 list style 并清空 shell 高亮缓存，然后收集可见实体：默认只取 running 后台任务/独立子 Agent、所有 scheduled 和非 terminal workflow，show_done 时包含终态；workflow_run_id 非空的子 Agent 独立行始终排除。排序 SHALL 依次为 workflows、subagents、普通 tasks、monitors、scheduled；组内 running 优先，Agent 再按 type_label 升序及 started_at 降序，其他同类型按开始时间降序，最后按 stable_id。显示列表 SHALL 插入 Workflows/Subagents/Tasks/Watchers header，monitor 与 scheduled 共用 Watchers 且 monitor 在前；折叠组只保留 header，组清空时遗忘折叠状态。自动显隐计数 SHALL 排除 replay-restored running 后台项和 workflow child；从零变正时自动打开，从正变零时只在此前自动打开、未聚焦且未 show_done 时关闭。公开 running_count 则包含 replay-restored running 后台项。
+
+#### Scenario: Default filtering
+- **WHEN** 存在 running 和 done 后台项
+- **THEN** 默认只收 running，show_done 后收两者。
+
+#### Scenario: Workflow ownership
+- **WHEN** 子 Agent 带 workflow_run_id 且对应 workflow active
+- **THEN** 只显示 workflow 行，running_count 计一次。
+
+#### Scenario: Watcher grouping
+- **WHEN** 同时有 monitor 和 scheduled
+- **THEN** 一个 Watchers header 计数二，monitor 在 scheduled 前。
+
+#### Scenario: Replay restore
+- **WHEN** 唯一 running 后台项来自 replay
+- **THEN** 行仍可收集，但不触发自动打开。
+
+#### Scenario: Group repopulation
+- **WHEN** 用户折叠的组清空后再次出现
+- **THEN** 旧折叠状态已删除，新行展开显示。
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs`。
+
+### Requirement: Pager task pane sizing and delegated input
+
+任务 pane SHALL 使用 NoWrap ListPane，开启搜索、复制和过滤，关闭 follow、wrap toggle、visual select 与 goto-line；`h` 仅在没有输入模式时切换 show_done，其余键、粘贴与鼠标交由 ListPaneState，空 entries 时键盘和鼠标返回 false。滚动幅度 SHALL 在 viewport 高度 0..5 时最多一行、6..10 时最多两行、更高时不额外限制。overlay 隐藏或总视图低于 12 行时 desired_height 为零；可见且空时为一行，非空基础高度至多 min(8, floor(视图高度*0.15))，输入栏或 matcher 存在时再加一行。on_state_change SHALL 在隐藏时关闭输入栏并清除自动打开归因。
+
+#### Scenario: Short terminal
+- **WHEN** overlay visible 但 view_height 为 11
+- **THEN** desired_height 返回 0。
+
+#### Scenario: Search height
+- **WHEN** 非空 pane 打开搜索输入
+- **THEN** 在基础高度上增加一行，可能达到 9 行。
+
+#### Scenario: Small viewport scroll
+- **WHEN** viewport 高度为 5 且请求滚动 20 行
+- **THEN** 只向相同方向滚动一行。
+
+#### Scenario: History toggle while searching
+- **WHEN** 输入模式已打开并收到 h
+- **THEN** 不切换 show_done，由 ListPane 处理。
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs`。
+
+### Requirement: Pager task pane overlay rendering and action hit regions
+
+render SHALL 在 block padding 内绘制列表：空列表按 show_done 区分 `No tasks or agents.` 与运行为空提示；溢出且高度至少三行时仅为实际需要的居中上下箭头保留行，最终 viewport 只准备一次。列表真正溢出且右侧尚有空间时 SHALL 扩一列放 scrollbar；overlay 高度 SHALL 排除搜索/matcher bottom bar，header 占行但不生成按钮。覆盖层 SHALL 清空右端并在被清区域起点原有非空 cell 时于左邻 cell 放省略号；后台和 Agent 均始终有 view，running 时有 kill，scheduled 始终有 kill且仅 linked_subagent 存在时有 view，workflow 仅 is_active 时有 kill。后台右侧显示状态时间和非零 stdout badge；Agent 显示状态时间、model 与 context badge；scheduled 显示 spinner；按钮矩形和 hover id 使用各实体控制标识。
+
+#### Scenario: Search bar
+- **WHEN** bottom bar 占用最后一行
+- **THEN** overlay 不在该行画 spinner 或按钮。
+
+#### Scenario: Non-scrollable long loop
+- **WHEN** 长 scheduled label 接近右侧 kill 按钮
+- **THEN** label 在按钮前截断且按钮右侧不泄漏文本。
+
+#### Scenario: Bottom of overflow
+- **WHEN** scroll offset 已夹到末尾
+- **THEN** 显示上箭头且不显示下箭头。
+
+#### Scenario: Running background kill
+- **WHEN** 后台状态 Running 且 pending_kill 已设置
+- **THEN** 仍保留 kill 按钮以允许重试，并显示 killing 状态。
+
+#### Scenario: Scheduled linkage
+- **WHEN** scheduled 没有关联子 Agent
+- **THEN** 只登记 kill hit region，不登记 view region。
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs`。
+
+### Requirement: Pager permission overlay state sizing and render projection
+
+The pager permission view SHALL represent one queued ACP permission request with independent option focus, optional inline follow-up input, optional bash or MCP scope, planned arguments, subagent provenance and layout cache facts. Scope adjustment SHALL be available only for a multi-token bash selection or an MCP tool with a server prefix. Height calculation SHALL count provenance, title, wrapped command or MCP name, the shared planned-argument row budget, an optional scope hint, options and padding; collapsed planned arguments SHALL use a five-row budget with the last row as a Ctrl-F expansion indicator, while expanded content may grow only to screen height. Rendering SHALL tolerate empty and squeezed areas, reserve option visibility while clipping command/argument rows with an ellipsis, render only the RejectOnce row as an inline prompt in follow-up mode, expose that prompt geometry to its caller, and visually recede the full overlay when unfocused. This layer renders state but does not queue requests, route keys or mouse events, send permission responses, persist rules, or execute tools.
+
+#### Scenario: Squeezed overlay
+- **WHEN** the permission area has zero width or height, sits at the buffer bottom, or cannot fit all chrome
+- **THEN** rendering returns safely or clips chrome before the reserved scope, gap and option rows without writing below the area.
+
+#### Scenario: Collapsed planned arguments
+- **WHEN** wrapped MCP arguments exceed five visible rows and args_expanded is false
+- **THEN** four content rows and the Ctrl-F indicator consume the shared five-row budget while option rows remain reserved.
+
+#### Scenario: Expanded planned arguments
+- **WHEN** args_expanded is true
+- **THEN** the 50-percent collapsed cap is lifted, total height is limited by screen height, and area overflow is clipped with an ellipsis rather than hiding the reserved options.
+
+#### Scenario: Inline rejection feedback
+- **WHEN** focus is FollowupInput and a RejectOnce option is visible
+- **THEN** the static reject row is replaced by its numbered selected prefix and an InlinePromptArea whose width matches inline_text_width arithmetic.
+
+#### Scenario: Adjustable scope
+- **WHEN** bash has at least two highlighted words or MCP has a server prefix
+- **THEN** the chrome includes the left/right scope hint; plain prompts and unqualified MCP tools do not expose it.
+
+证据：`crates/codegen/pager/src/views/permission_view.rs`。
+
+### Requirement: Pager permission option labels and scoped decision presentation
+
+Permission option rows SHALL use one-based shortcuts for the first nine rows, cursor and hover backgrounds, selected and unselected radio markers, and a RejectOnce placeholder or first-line feedback preview. AllowAlways and RejectAlways options with recognized BashCommandPermission metadata SHALL rebuild their visible suffix from the currently selected command words. Recognized MCP metadata SHALL render tool scope as the pretty qualified tool name and server scope as “all tools from <Server>”; an inconsistent server selection without a prefix SHALL fall back to the tool display name. The plain option_label_for_selection projection SHALL use the same dynamic label source as the styled overlay. Unknown, malformed, unscoped or non-always metadata SHALL keep the ACP option name. This file does not prove that the displayed selection is the metadata ultimately returned or persisted by input-routing code.
+
+#### Scenario: Bash always decision
+- **WHEN** an always-allow or always-reject option has valid bash metadata and selected words
+- **THEN** the metadata prompt prefix is followed by exactly those selected words, with bash syntax styling in the overlay.
+
+#### Scenario: MCP tool scope
+- **WHEN** valid MCP metadata is paired with Tool scope
+- **THEN** the suffix uses the pretty “(Server) Action” display name without bash tokenization.
+
+#### Scenario: MCP server scope
+- **WHEN** valid MCP metadata is paired with Server scope and a prefix
+- **THEN** the suffix says all tools from the title-cased server; a missing prefix falls back to the tool label.
+
+#### Scenario: Reject-once feedback
+- **WHEN** the RejectOnce row receives blank or nonblank follow-up text
+- **THEN** it shows the rejection placeholder when blank and a truncated first-line preview with prompt arrow when nonblank.
+
+#### Scenario: Unrecognized dynamic metadata
+- **WHEN** an option is not an always kind or its metadata cannot be decoded for the active scope
+- **THEN** the static ACP option name remains the label.
+
+证据：`crates/codegen/pager/src/views/permission_view.rs`。
+
+### Requirement: Pager permission bash source display wrapping and selection dimming
+
+Bash permission rendering SHALL prefer a nonempty raw command over reconstructed highlight tokens, normalize CRLF and lone CR to LF, trim trailing whitespace per physical line, preserve interior newlines and backslash continuations, and remove trailing blank rows. Raw display SHALL parse the whole script for real shell operator break points and heredoc payload ranges, preserve heredoc body lines, retain operators on the preceding row, skip leading continuation whitespace, and otherwise wrap only at whitespace outside simple single- and double-quoted spans; an unbreakable span may exceed the panel width. Partial selections SHALL map prefix, highlighted and suffix tokens in order across whitespace, continuations and unrepresented shell operators, accept bare or simply quoted tokens only at shell boundaries, and dim unselected regions while reusing the raw wrapping decisions. Mapping failure SHALL reconstruct from highlight tokens and retain dimming instead of presenting the raw command as fully selected. This renderer does not parse or authorize commands, choose the safe scope count, guarantee fit for an unbreakable row, or prove complete shell quoting semantics beyond the tree-sitter helpers and local quote-aware wrapper used here.
+
+#### Scenario: Raw source available
+- **WHEN** raw command preparation yields nonempty text
+- **THEN** original spacing, physical lines and continuations are displayed instead of a space-joined token reconstruction.
+
+#### Scenario: Structured soft wrapping
+- **WHEN** an overlong physical line has real list or pipeline operators outside quotes and heredoc bodies
+- **THEN** rows prefer those parser-derived boundaries, keep the operator on the previous row and strip continuation whitespace.
+
+#### Scenario: Free-form shell payload
+- **WHEN** content is inside a heredoc payload or one quoted unbreakable span
+- **THEN** the physical payload line or quoted span stays intact even when wider than the view.
+
+#### Scenario: Partial scope mapping
+- **WHEN** highlight tokens match the raw source in order across operators or continuations
+- **THEN** only the selected highlighted prefix remains bright and all other mapped or following regions are dimmed with identical row boundaries to raw rendering.
+
+#### Scenario: Mapping mismatch
+- **WHEN** a highlight token does not match the next shell position
+- **THEN** the renderer fails closed to reconstructed tokens and still dims the unselected portion.
+
+证据：`crates/codegen/pager/src/views/permission_view.rs`。
+
+### Requirement: Pager scrollback view-range and selectable-entry navigation
+
+ScrollbackState selection SHALL expose AllTurns as the entire entry range and SingleTurn as the current turn prompt_index..end_index；SingleTurn 没有 current_turn 时优先显示首个 prompt 之前的 pre-turn，若不存在 pre-turn 则显示首个 turn，无 turns 时回退全部 entries。set_selected SHALL 只做长度边界过滤并在成功时同步 current_turn，不验证 block 可选性或隐藏高度。select_next/select_prev SHALL 限于当前可见 range，跳过 layout 判定隐藏或 block 不可选的条目；向下越过末项且 follow_by_overscroll 开启时立即进入 follow 并 goto_bottom，向上越界保持原选择。激活 pane SHALL 选择 range 内最后一个 block-level selectable 条目；selection_box 提供借用、替换和 take 接口。
+
+#### Scenario: Single-turn prelude
+- **WHEN** 没有 current_turn 且首个 prompt_index 大于零
+- **THEN** 可见 range 为 0..first_prompt_index。
+
+#### Scenario: Forward navigation
+- **WHEN** 当前项后只有隐藏或不可选项
+- **THEN** 若 overscroll follow 启用则进入 follow 并跳底。
+
+#### Scenario: Programmatic selection
+- **WHEN** set_selected 指向范围内但隐藏或不可选项
+- **THEN** 仍保存该 index；可见性修复属于其他路径。
+
+#### Scenario: Selection box ownership
+- **WHEN** 调用 take_selection_box
+- **THEN** 返回原值并将 state 中字段清空。
+
+证据：`crates/codegen/pager/src/scrollback/state/selection.rs`。
+
+### Requirement: Pager scrollback entry fold mutation and viewport anchor restoration
+
+选中项 collapse SHALL 仅在 foldable 且尚未处于 block.collapse_mode(is_running) 时生效；expand 仅将 foldable 非 Expanded 项设为 Expanded；toggle 使用 entry.toggle_fold。每次有效单项 fold SHALL 捕获选中项旧 virtual_y、scroll、follow 与 preserve，执行变更并按 Collapsed<Truncated<Expanded 判断是否增长；respect_manual_folds 开启时标记 display_mode_pinned，随后迁移 verb group expansion key、全量重建 layout、按需精测 anchor 周边、清空 dirty heights、恢复锚点并推进 generation。增长且原先 following 时 SHALL 在 respect_manual_folds 下丢弃 follow/preserve；preserve pin 因增长出现可滚动溢出时也丢弃 follow，后续内容不得移动阅读位置。anchor_on_fold 关闭时 SHALL 改用 ensure_selected_visible，且不得把已经关闭的 follow 重新打开。
+
+#### Scenario: Manual expansion
+- **WHEN** foldable 条目由低 display rank 变高且正在 follow
+- **THEN** 开启 respect_manual_folds 时固定 display mode 并退出 follow/preserve。
+
+#### Scenario: Anchored shrink
+- **WHEN** 条目缩小且 anchor_on_fold 开启
+- **THEN** 以 virtual_y 差调整 scroll，保留原 follow 状态。
+
+#### Scenario: Preserve overflow
+- **WHEN** page-flip preserve pin 下展开后 max_offset 越过 pin
+- **THEN** scroll 保持 pin，follow 与 preserve 关闭。
+
+#### Scenario: No cached anchor
+- **WHEN** fold 前 layout_cache 没有该项 virtual_y
+- **THEN** 仍重建布局，但不执行 virtual_y delta 调整。
+
+证据：`crates/codegen/pager/src/scrollback/state/selection.rs`。
+
+### Requirement: Pager scrollback raw and global fold controls
+
+raw toggle SHALL 在选择为普通 group header 时不操作；其他情况下若 index 有效则调用 entry.toggle_raw 并标脏，随后无论是否实际命中条目都重建 layout 并推进 generation。collapse_all/expand_all SHALL 清除所有 entry 的 display_mode_pinned，对 foldable 项分别直接设 Collapsed/Expanded并失效缓存，清空 expanded_groups、标记 gaps dirty 并推进 generation。toggle_expand_all SHALL 仅以是否存在 display_mode 精确为 Collapsed 的 foldable 项决定 expand-all，否则 collapse-all。thinking 全局 toggle SHALL 只处理 foldable Thinking：任一精确 Collapsed 时全部 Expanded，否则全部 Collapsed，同时更新 thinking_display_mode 并清 pins；展开时迁移 verb key 并展开超过 group_max_visible+1 的未 claimed dense groups，收起时清空全部 expanded_groups。thinking_fold_label 使用同一精确 Collapsed 判定。
+
+#### Scenario: Group header raw
+- **WHEN** 选中被 layout 标记的普通 group header
+- **THEN** 不切换原 entry raw，也不重建。
+
+#### Scenario: Global expansion
+- **WHEN** 任一 foldable 项精确 Collapsed
+- **THEN** expand_all 将所有 foldable 项 Expanded 并清全部 pins/group expansions。
+
+#### Scenario: Thinking expansion
+- **WHEN** 存在 collapsed thinking 且有 N-more dense run
+- **THEN** thinking 全部展开，并为足够长的 dense group 登记首项 id 使成员显现。
+
+#### Scenario: No truncation threshold
+- **WHEN** group_max_visible 为零
+- **THEN** expand_all_groups 不登记任何 group id。
+
+证据：`crates/codegen/pager/src/scrollback/state/selection.rs`。
+
+### Requirement: Pager scrollback rendered group-header action semantics
+
+group-header 查询 SHALL 读取当前 layout_cache。is_selected_group_header 对 group_header_count>0 或 group_collapse_header 的槽返回 true，但 expanded verb slot 同时具有 verb_group_header 与 group_collapse_header 时 SHALL 视作 member zero 而返回 false；fold label 对普通 collapse header 返回 collapse、正 count header 返回 expand、expanded verb slot 返回 None。toggle_group_expansion SHALL 只处理当前 layout 认定的 header，按首项 EntryId 增删 expanded_groups并用同一 fold anchor 重建；普通 N-more 展开后清除选择，verb header 展开后保留选择，expanded verb slot 拒绝再次 toggle 以把 Enter/fold 交给 member zero。collapse_group_if_expanded SHALL 通过 group_range_of(selected,true) 找首项 id，移除 expansion、锚定重建并把落入隐藏成员的选择修复到 header。clear_group_expansion SHALL 无条件清空共享 expansion set。
+
+#### Scenario: N-more expand
+- **WHEN** 选中普通 count header
+- **THEN** 加入首项 id、锚定重建并清除选择。
+
+#### Scenario: Verb expand
+- **WHEN** 选中 folded verb header
+- **THEN** 加入首项 id、保留 header 选择。
+
+#### Scenario: Expanded verb slot
+- **WHEN** slot 同时是 verb header 和 collapse header
+- **THEN** header 查询/再次 toggle 让位给 member zero；Left collapse 仍通过 collapse_group_if_expanded。
+
+#### Scenario: Non-header
+- **WHEN** 选中普通可见成员且不在展开组 collapse 路径
+- **THEN** toggle 返回 false，不修改 expansion。
+
+证据：`crates/codegen/pager/src/scrollback/state/selection.rs`。
+
+### Requirement: Pager verb-group expansion-key reanchoring
+
+当 group_tool_verbs 开启且单个成员 display mode 变化时，verb expansion key SHALL 尝试迁移到变化后 run 的当前首项。若变化项不在直接 run 中，扫描 SHALL 穿过 transparent entry，遇 Break 或越界停止；当前首项已有 key 时不变，否则在变化项或当前 run 内部查找一个 stale expanded id，删除旧 key 并插入 current first_id。该迁移只维护当前可识别的一个 stale key，不验证 expanded_groups 中其他孤儿或重复来源。
+
+#### Scenario: Head opens
+- **WHEN** expanded verb run 的首成员打开后成为 transparent
+- **THEN** key 从旧首项迁移到下一个当前 run anchor。
+
+#### Scenario: Head recloses
+- **WHEN** 原首成员重新加入 run
+- **THEN** 内部 stale key 迁回原首项。
+
+#### Scenario: Break boundary
+- **WHEN** 变化项后首先遇到 Break
+- **THEN** 停止，不把 key 迁到下一独立 run。
+
+#### Scenario: Grouping disabled
+- **WHEN** group_tool_verbs 关闭
+- **THEN** 不扫描、不修改 expanded_groups。
+
+证据：`crates/codegen/pager/src/scrollback/state/selection.rs`。
+
+### Requirement: Pager agent catalog modal input bridge
+
+AgentView SHALL delegate agent-catalog key, paste and mouse events only while an agents modal exists. A close outcome SHALL remove the modal. A keyboard ViewAgent outcome SHALL open markdown from its source path when present, otherwise from supplied content, apply the requested title override, and leave the agents modal underneath; absent or unreadable content SHALL leave the line viewer unchanged while still reporting Changed. EditInEditor SHALL emit SuspendForEditor with the path and tab to refresh. Mouse ViewAgent and EditInEditor outcomes SHALL be ignored, while Changed and Unchanged outcomes retain their meaning. This bridge does not load the catalog, render it, launch the editor, validate paths, or prove line-viewer parsing.
+
+#### Scenario: No agents modal
+- **WHEN** a key, paste or mouse event reaches the bridge without modal state
+- **THEN** the event returns Unchanged and no action is emitted.
+
+#### Scenario: View definition
+- **WHEN** keyboard handling returns a source path or inline markdown content
+- **THEN** a successfully constructed line viewer is layered above the still-open modal and receives the requested title.
+
+#### Scenario: Edit definition
+- **WHEN** keyboard handling returns EditInEditor
+- **THEN** SuspendForEditor carries the selected path and refresh tab.
+
+#### Scenario: Mouse activation
+- **WHEN** mouse handling reports view or edit
+- **THEN** the bridge consumes no view/edit action and returns Unchanged.
+
+证据：`crates/codegen/pager/src/app/agent_view/modals.rs`。
+
+### Requirement: Pager extensions modal input focus folding and diagnostics routing
+
+AgentView extensions input SHALL give modal messages precedence over the in-flight guard: lowercase y confirms a captured Confirmation, while every other key dismisses the message and clears pending badges. Without a message, a pending action SHALL consume every key and only Escape closes the modal. MCP setup and generic input forms SHALL own keys and emit their validated actions on submit; paste SHALL enter only an active form or active search and SHALL be rejected while a message or action is pending. Browse-mode keyboard and mouse SHALL route shared modal chrome before picker navigation, maintain tab focus, search/query, status filters and fold state, and log resolved tab/action/target/enabled diagnostics when available. Group folds SHALL update tab-specific sets, marketplace error-row details, or MCP section/tool state; leaf folds SHALL update expanded rows and clear scroll offsets. Non-selectable masks SHALL reuse same-length render caches or conservatively derive MCP section headers. The mouse path SHALL dismiss a message on any button-down to prevent click-through. This file does not render hit rectangles, decode terminal input, persist fold/filter/search state, or guarantee diagnostic delivery.
+
+#### Scenario: Modal message
+- **WHEN** a confirmation receives lowercase y or any other key
+- **THEN** y dispatches its captured action; another key dismisses it and clears pending state.
+
+#### Scenario: Action in flight
+- **WHEN** pending_action exists without a message
+- **THEN** Escape closes the UI while background work continues; every other key is consumed as Changed.
+
+#### Scenario: Form ownership
+- **WHEN** MCP setup or generic input is active
+- **THEN** its handler owns keys, cancel clears the form, invalid MCP submit records Select an option, and valid submit emits the resolved action with an appropriate pending state.
+
+#### Scenario: Browse and tabs
+- **WHEN** chrome or picker returns close, tab, filter, search, fold or action outcomes
+- **THEN** modal state follows that outcome, tab switches clean browse state, and actionable keys are resolved for the active tab.
+
+#### Scenario: Fold cache mismatch
+- **WHEN** the render-provided non-selectable masks do not match entry count
+- **THEN** only rows whose group keys begin with mcp-section are synthesized as non-selectable and clickable.
+
+证据：`crates/codegen/pager/src/app/agent_view/modals.rs`。
+
+### Requirement: Pager extension action target dispatch pending state and confirmation
+
+The extensions action layer SHALL resolve diagnostic targets from the currently loaded plugin, hook, skill, MCP or marketplace selection and SHALL return no target for loading or stale indices. Executing an action SHALL clear an old result notice, translate the selected entity and desired next state into the corresponding root Action, and stamp tab-level loading or row-level pending labels according to operation scope. Reloads SHALL mark every registry they rebuild as Loading; MCP tool selection SHALL never fall through to a server toggle when its tool indices are stale; managed MCP servers SHALL show a local removal error. Hook group toggles SHALL disable the source when any hook is enabled and enable it otherwise. Destructive MCP, hook, plugin, marketplace-plugin and marketplace-source operations SHALL first store a Confirmation with both target payload and selected-row snapshot, clear prior pending state and link band, and dispatch only on later confirmation; the confirmed pending row SHALL remain the captured row even if selection moves. Plugin uninstall SHALL still send confirmed=false so the server can gate multi-plugin cascades. Missing, unloaded or stale selections SHALL return Changed without dispatch. This layer does not execute actions, verify backend success, refresh result data, enforce server-side confirmation, or reconcile out-of-order completion.
+
+#### Scenario: Registry-wide refresh
+- **WHEN** hooks/plugins reload or marketplace refresh is executed
+- **THEN** affected tab data becomes Loading and no selected row is decorated.
+
+#### Scenario: Entity action
+- **WHEN** a loaded plugin, hook, skill, MCP server/tool or marketplace plugin is selected
+- **THEN** the action carries stable entity identifiers and pending state describes the operation on the selected row when that row already exists.
+
+#### Scenario: Stale MCP tool
+- **WHEN** selected_mcp_tool returns indices absent from loaded server/tool arrays
+- **THEN** no server toggle fallback is emitted.
+
+#### Scenario: Destructive request
+- **WHEN** remove or uninstall targets a valid removable entity
+- **THEN** the first call stores its exact action and row in a confirmation and emits no backend action.
+
+#### Scenario: Confirmation after movement
+- **WHEN** selection changes before lowercase y confirms
+- **THEN** the captured entity is dispatched and pending_entry_index is restored to the captured row.
+
+证据：`crates/codegen/pager/src/app/agent_view/modals.rs`。
+
+### Requirement: Pager startup warning banner selection and diagnostic action construction
+
+Terminal diagnostics SHALL construct ordered, data-only TerminalWarning values for startup and explicit diagnostic paths: tmux, Byobu, Apple Terminal over SSH, WezTerm keyboard, Wayland clipboard, sandbox conflicts, tmux extended keys, and clipboard route preflight are represented by category-specific messages and optional fix metadata. SSH-only welcome summarization admits only DCS passthrough or tmux extended-keys warnings; startup assembly inserts WezTerm, Wayland, and sandbox actionable warnings ahead of the summarized list in that priority order.
+
+#### Scenario: Unavailable tmux evidence
+- **WHEN** tmux option probes return unavailable or error results
+- **THEN** clipboard and DCS warnings are omitted while independent control-mode evidence may still produce its warning.
+
+#### Scenario: Startup assembly
+- **WHEN** WezTerm, Wayland, or sandbox warnings are present
+- **THEN** the corresponding actionable startup warnings are inserted in WezTerm, Wayland, sandbox order before the supplied summaries.
+
+#### Scenario: Clipboard preflight
+- **WHEN** a route/environment is supplied to format_clipboard_diagnostics
+- **THEN** the output reports native, tmux, OSC 52, wrap, optional Wayland data-control, and a confirmed/unverified/unavailable status without claiming that a copy occurred.
+
+证据：`crates/codegen/pager/src/diagnostics/mod.rs`。
+
+### Requirement: Pager small screen and SSH startup tip evaluation
+
+ssh_wrap_hint SHALL return one SshWithoutWrap TerminalWarning only when the session is SSH, no OSC 52 sink is active, and the terminal is not an official VS Code remote; the warning carries the `grow wrap ssh <host>` one-off command and a note directing the user to run it locally.
+
+#### Scenario: Plain SSH
+- **WHEN** is_ssh is true, the sink is inactive, and the terminal is not an official VS Code remote
+- **THEN** an SshWithoutWrap warning with the wrap command and local-computer guidance is returned.
+
+#### Scenario: Already wrapped or VS Code remote
+- **WHEN** the sink is active, or the terminal is an official VS Code remote, or the session is not SSH
+- **THEN** no warning is returned.
+
+证据：`crates/codegen/pager/src/diagnostics/mod.rs`。
+
+### Requirement: Pager doctor human report fact grouping probe suppression and remediation wording
+
+color_support_warning SHALL omit a warning for truecolor; for None, Apple Terminal, tmux-backed limited color, and other limited color levels it returns a LimitedColorSupport warning with the corresponding message, optional command/config fix, and explanatory note. The warning is an explicit diagnostic result and is not included in collect_startup_warnings.
+
+#### Scenario: Truecolor
+- **WHEN** the color level has truecolor support
+- **THEN** no color warning is returned.
+
+#### Scenario: Limited color
+- **WHEN** the level is None, Apple Terminal reports Ansi256, or a limited level is observed under tmux or another terminal
+- **THEN** a LimitedColorSupport warning is returned with branch-specific remediation metadata.
+
+#### Scenario: Startup collection
+- **WHEN** limited color is present during startup warning collection
+- **THEN** the color warning is not added by collect_startup_warnings.
+
+证据：`crates/codegen/pager/src/diagnostics/mod.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/activity.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/activity.rs SHALL 维护 agent bootstrap, model, and session control 的入口 FLUSH_POLL, SESSION_FLUSH_GRACE, SessionActivityEntry, is_live, is_busy, ActivityInner, AgentActivity, register_session, subagent_gauge, session_count, flush_all_sessions, lock_live_sessions, register_for_test, register_raw, spawn_actor, idle_by_default, running_turn_marks_busy, pending_interaction_marks_busy (plus 8 additional private symbols)。实现显示该边界包含 async task lifecycle and cancellation、channel or acknowledgement flow、child process lifecycle、platform or feature-gated branches、timeout/deadline or timing decisions、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Async lifecycle
+- **WHEN** FLUSH_POLL, SESSION_FLUSH_GRACE, SessionActivityEntry, is_live, is_busy, ActivityInner, AgentActivity, register_session, subagent_gauge, session_count, flush_all_sessions, lock_live_sessions, register_for_test, register_raw, spawn_actor, idle_by_default, running_turn_marks_busy, pending_interaction_marks_busy (plus 8 additional private symbols) 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/activity.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/auth_method.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/auth_method.rs SHALL 维护 agent bootstrap, model, and session control 的入口 SharedAuthMethodId, new_shared_auth_method_id, GROW_API_KEY_ENV_VAR, read_provider_api_key_env, has_provider_api_key_env, should_advertise_provider_api_key, BuiltAuthMethods, build_auth_methods, AuthMethodKind, from_id, is_api_key, auth_error_message, str, ModelByok, as_str, AUTH_ERROR_API_KEY, PREFERRED_API_KEY_UNAVAILABLE, PROVIDER_API_KEY_METHOD_ID (plus 2 additional private symbols)。实现显示该边界包含 explicit error/result paths、platform or feature-gated branches；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** SharedAuthMethodId, new_shared_auth_method_id, GROW_API_KEY_ENV_VAR, read_provider_api_key_env, has_provider_api_key_env, should_advertise_provider_api_key, BuiltAuthMethods, build_auth_methods, AuthMethodKind, from_id, is_api_key, auth_error_message, str, ModelByok, as_str, AUTH_ERROR_API_KEY, PREFERRED_API_KEY_UNAVAILABLE, PROVIDER_API_KEY_METHOD_ID (plus 2 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/auth_method.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/config_model_override_parse.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/config_model_override_parse.rs SHALL 维护 agent bootstrap, model, and session control 的入口 ConfigWarningKind, WarningTarget, label, field, ConfigWarning, model, auth_provider, auth_provider_section, provider, config_key, log_config_warnings, LAST_LOGGED, parse_model_override_table, deserialize_with_unknown_fields, unknown_field_warnings, prune_invalid_fields, field_parse_error, parse_cfg (plus 10 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、platform or feature-gated branches、timeout/deadline or timing decisions、session/timeline state projection、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ConfigWarningKind, WarningTarget, label, field, ConfigWarning, model, auth_provider, auth_provider_section, provider, config_key, log_config_warnings, LAST_LOGGED, parse_model_override_table, deserialize_with_unknown_fields, unknown_field_warnings, prune_invalid_fields, field_parse_error, parse_cfg (plus 10 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/config_model_override_parse.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/ext_parsers.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/ext_parsers.rs SHALL 维护 agent bootstrap, model, and session control 的入口 parse_queue_edit_command, parse_queue_edit_command_maps_each_method。实现显示该边界包含 serde-backed wire/config types、channel or acknowledgement flow、child process lifecycle、platform or feature-gated branches、session/timeline state projection、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Async lifecycle
+- **WHEN** parse_queue_edit_command, parse_queue_edit_command_maps_each_method 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/ext_parsers.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/folder_trust.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/folder_trust.rs SHALL 维护 agent bootstrap, model, and session control 的入口 DecisionKey, resolve, is_currently_trusted, still_names_same_entity, DECISIONS, revoke_folder_trust, project_scope_allowed, agent_inline_hooks_allowed, record, record_for_test, resolve_and_record, resolve_launch_dir_trust, resolve_and_record_inner, compute, compute_from_inputs, silently, project_scoped_mcp_names, filter_untrusted_project_mcp (plus 9 additional private symbols)。实现显示该边界包含 filesystem or durable record I/O、explicit error/result paths、platform or feature-gated branches、session/timeline state projection、MCP integration boundary、hook dispatch or hook source boundary；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** DecisionKey, resolve, is_currently_trusted, still_names_same_entity, DECISIONS, revoke_folder_trust, project_scope_allowed, agent_inline_hooks_allowed, record, record_for_test, resolve_and_record, resolve_launch_dir_trust, resolve_and_record_inner, compute, compute_from_inputs, silently, project_scoped_mcp_names, filter_untrusted_project_mcp (plus 9 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** DecisionKey, resolve, is_currently_trusted, still_names_same_entity, DECISIONS, revoke_folder_trust, project_scope_allowed, agent_inline_hooks_allowed, record, record_for_test, resolve_and_record, resolve_launch_dir_trust, resolve_and_record_inner, compute, compute_from_inputs, silently, project_scoped_mcp_names, filter_untrusted_project_mcp (plus 9 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/folder_trust.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/handlers/mod.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/handlers/mod.rs SHALL 维护 agent bootstrap, model, and session control 的入口 the file module entrypoint。实现显示该边界包含 session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Primary module path
+- **WHEN** 调用 the file module entrypoint 的主入口
+- **THEN** 按源码声明的转换或调度路径返回结果。
+
+证据：`crates/codegen/shell/src/agent/handlers/mod.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/handlers/model_switch.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/handlers/model_switch.rs SHALL 维护 agent bootstrap, model, and session control 的入口 ModelSwitchRequest, new, meta, EnqueuedModelSwitch, enqueue, finish。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ModelSwitchRequest, new, meta, EnqueuedModelSwitch, enqueue, finish 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** ModelSwitchRequest, new, meta, EnqueuedModelSwitch, enqueue, finish 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/agent/handlers/model_switch.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/handlers/session.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/handlers/session.rs SHALL 维护 agent bootstrap, model, and session control 的入口 handle, SetSessionAgentRequest, handle_set_session_agent, handle_roster_list, SessionInfoRequest, handle_session_info, handle_session_close, CloseRequest, handle_session_list。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、session/timeline state projection、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** handle, SetSessionAgentRequest, handle_set_session_agent, handle_roster_list, SessionInfoRequest, handle_session_info, handle_session_close, CloseRequest, handle_session_list 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** handle, SetSessionAgentRequest, handle_set_session_agent, handle_roster_list, SessionInfoRequest, handle_session_info, handle_session_close, CloseRequest, handle_session_list 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/agent/handlers/session.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/mod.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/mod.rs SHALL 维护 agent bootstrap, model, and session control 的入口 the file module entrypoint。实现显示该边界包含 session/timeline state projection、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Primary module path
+- **WHEN** 调用 the file module entrypoint 的主入口
+- **THEN** 按源码声明的转换或调度路径返回结果。
+
+证据：`crates/codegen/shell/src/agent/mod.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/mvp_agent/code_nav.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/mvp_agent/code_nav.rs SHALL 维护 agent bootstrap, model, and session control 的入口 parse_code_nav_capability, start_codebase_index_for_code_nav, code_nav_eligibility_inner, not, code_nav_eligibility_for_request, code_nav_eligibility, resolve_codebase_index, indexed_roots_for, get_or_create_codebase_index, get_codebase_index。实现显示该边界包含 explicit error/result paths、child process lifecycle、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** parse_code_nav_capability, start_codebase_index_for_code_nav, code_nav_eligibility_inner, not, code_nav_eligibility_for_request, code_nav_eligibility, resolve_codebase_index, indexed_roots_for, get_or_create_codebase_index, get_codebase_index 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+证据：`crates/codegen/shell/src/agent/mvp_agent/code_nav.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/mvp_agent/coordination.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/mvp_agent/coordination.rs SHALL 维护 agent bootstrap, model, and session control 的入口 ensure_coordination_started, start_coordination_publisher, publish_coordination_snapshot, active_subagent_count, list_coordination_sessions, validate_coordination_source, ask_coordination_session, get_coordination_inquiry, cancel_coordination_session, coordination_backend_resource, coordination_backend, require_coordination_source, SessionCoordinationBackend, list_active_sessions, ask_with_id, cancel_session, ask_session, get_inquiry (plus 7 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、async task lifecycle and cancellation、channel or acknowledgement flow、child process lifecycle、timeout/deadline or timing decisions；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ensure_coordination_started, start_coordination_publisher, publish_coordination_snapshot, active_subagent_count, list_coordination_sessions, validate_coordination_source, ask_coordination_session, get_coordination_inquiry, cancel_coordination_session, coordination_backend_resource, coordination_backend, require_coordination_source, SessionCoordinationBackend, list_active_sessions, ask_with_id, cancel_session, ask_session, get_inquiry (plus 7 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** ensure_coordination_started, start_coordination_publisher, publish_coordination_snapshot, active_subagent_count, list_coordination_sessions, validate_coordination_source, ask_coordination_session, get_coordination_inquiry, cancel_coordination_session, coordination_backend_resource, coordination_backend, require_coordination_source, SessionCoordinationBackend, list_active_sessions, ask_with_id, cancel_session, ask_session, get_inquiry (plus 7 additional private symbols) 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/agent/mvp_agent/coordination.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/mvp_agent/session_lifecycle.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/mvp_agent/session_lifecycle.rs SHALL 维护 agent bootstrap, model, and session control 的入口 SessionThreadExit, from_join, lock_session_lifecycle, has_live_or_draining_session, request_session_shutdown, evict_catalog_diverged_session, teardown_live_session_before_delete, take_session, remove_session, dispatch_lock, close_session_explicit, set_session_live_state, session_live_state_for, record_roster_delta, push_roster_delta_upserted, push_roster_activity_delta, emit_roster_changed, resident_activity (plus 10 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、async task lifecycle and cancellation、channel or acknowledgement flow、child process lifecycle、platform or feature-gated branches；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** SessionThreadExit, from_join, lock_session_lifecycle, has_live_or_draining_session, request_session_shutdown, evict_catalog_diverged_session, teardown_live_session_before_delete, take_session, remove_session, dispatch_lock, close_session_explicit, set_session_live_state, session_live_state_for, record_roster_delta, push_roster_delta_upserted, push_roster_activity_delta, emit_roster_changed, resident_activity (plus 10 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** SessionThreadExit, from_join, lock_session_lifecycle, has_live_or_draining_session, request_session_shutdown, evict_catalog_diverged_session, teardown_live_session_before_delete, take_session, remove_session, dispatch_lock, close_session_explicit, set_session_live_state, session_live_state_for, record_roster_delta, push_roster_delta_upserted, push_roster_activity_delta, emit_roster_changed, resident_activity (plus 10 additional private symbols) 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/mvp_agent/session_lifecycle.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/mvp_agent/subagent_coordinator.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/mvp_agent/subagent_coordinator.rs SHALL 维护 agent bootstrap, model, and session control 的入口 ShellChildRunner, Control, CompletionData, RunFuture, ValidateFuture, run, validate_type, on_completed, running_count_changed, persisted_output_ref, terminal_committed, load_persisted_output, missing_delegation_parent_output, start_subagent_coordinator, build_subagent_validation_context, build_subagent_spawn_context, try_build_subagent_spawn_context, apply_immediate_delegation_context。实现显示该边界包含 filesystem or durable record I/O、explicit error/result paths、child process lifecycle、platform or feature-gated branches、timeout/deadline or timing decisions、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ShellChildRunner, Control, CompletionData, RunFuture, ValidateFuture, run, validate_type, on_completed, running_count_changed, persisted_output_ref, terminal_committed, load_persisted_output, missing_delegation_parent_output, start_subagent_coordinator, build_subagent_validation_context, build_subagent_spawn_context, try_build_subagent_spawn_context, apply_immediate_delegation_context 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** ShellChildRunner, Control, CompletionData, RunFuture, ValidateFuture, run, validate_type, on_completed, running_count_changed, persisted_output_ref, terminal_committed, load_persisted_output, missing_delegation_parent_output, start_subagent_coordinator, build_subagent_validation_context, build_subagent_spawn_context, try_build_subagent_spawn_context, apply_immediate_delegation_context 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/mvp_agent/subagent_coordinator.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/restore_code.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/restore_code.rs SHALL 维护 agent bootstrap, model, and session control 的入口 build_code_restore_meta, outcome, checkout_failed_emits_restored_false_meta。实现显示该边界包含 serde-backed wire/config types、platform or feature-gated branches、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/restore_code.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/roster.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/roster.rs SHALL 维护 agent bootstrap, model, and session control 的入口 RosterActivity, RosterOrigin, RosterEntry, RosterListResponse, RosterChanged, SESSIONS_LIST_METHOD, SESSIONS_CHANGED_METHOD, merge_roster, summary, resident, idle_resident_adopts_persisted_title_and_last_active, working_resident_keeps_now_but_adopts_title, new_resident_without_summary_stays_titleless_now, blank_persisted_title_leaves_row_untitled, dormant_sessions_are_emitted_and_sorted_after_residents, duplicate_summaries_are_deduped, hidden_summaries_are_excluded, dormant_row_carries_persisted_reasoning_effort (plus 2 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、channel or acknowledgement flow、platform or feature-gated branches、session/timeline state projection、git/worktree context、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Async lifecycle
+- **WHEN** RosterActivity, RosterOrigin, RosterEntry, RosterListResponse, RosterChanged, SESSIONS_LIST_METHOD, SESSIONS_CHANGED_METHOD, merge_roster, summary, resident, idle_resident_adopts_persisted_title_and_last_active, working_resident_keeps_now_but_adopts_title, new_resident_without_summary_stays_titleless_now, blank_persisted_title_leaves_row_untitled, dormant_sessions_are_emitted_and_sorted_after_residents, duplicate_summaries_are_deduped, hidden_summaries_are_excluded, dormant_row_carries_persisted_reasoning_effort (plus 2 additional private symbols) 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/roster.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/server.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/server.rs SHALL 维护 agent bootstrap, model, and session control 的入口 ConnectionDest, MAX_BUFFER_SIZE, KEEPALIVE_INTERVAL_SECS, ServerConfig, ServerState, NewConnectionChannels, WsQueryParams, validate_auth, ws_handler, handle_connection, run_persistent_agent, setup_acp_connection, run_agent_server。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、async task lifecycle and cancellation、channel or acknowledgement flow、timeout/deadline or timing decisions；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ConnectionDest, MAX_BUFFER_SIZE, KEEPALIVE_INTERVAL_SECS, ServerConfig, ServerState, NewConnectionChannels, WsQueryParams, validate_auth, ws_handler, handle_connection, run_persistent_agent, setup_acp_connection, run_agent_server 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** ConnectionDest, MAX_BUFFER_SIZE, KEEPALIVE_INTERVAL_SECS, ServerConfig, ServerState, NewConnectionChannels, WsQueryParams, validate_auth, ws_handler, handle_connection, run_persistent_agent, setup_acp_connection, run_agent_server 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Async lifecycle
+- **WHEN** ConnectionDest, MAX_BUFFER_SIZE, KEEPALIVE_INTERVAL_SECS, ServerConfig, ServerState, NewConnectionChannels, WsQueryParams, validate_auth, ws_handler, handle_connection, run_persistent_agent, setup_acp_connection, run_agent_server 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/agent/server.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/session_config.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/session_config.rs SHALL 维护 agent bootstrap, model, and session control 的入口 MODEL_CONFIG_ID, REASONING_EFFORT_CONFIG_ID, GrowSessionDetail, build, build_session_config_options, model, str, efforts, builds_stable_model_and_reasoning_selectors, omits_reasoning_selector_without_a_current_effort, model_label_falls_back_to_id, grow_session_detail_serializes_camel_case。实现显示该边界包含 serde-backed wire/config types、platform or feature-gated branches、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/session_config.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/session_metrics.rs agent bootstrap, model, and session control contract
+
+crates/codegen/shell/src/agent/session_metrics.rs SHALL 维护 agent bootstrap, model, and session control 的入口 the file module entrypoint。实现显示该边界包含 session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Primary module path
+- **WHEN** 调用 the file module entrypoint 的主入口
+- **THEN** 按源码声明的转换或调度路径返回结果。
+
+证据：`crates/codegen/shell/src/agent/session_metrics.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/subagent/handle_request.rs subagent resolution and execution contract
+
+crates/codegen/shell/src/agent/subagent/handle_request.rs SHALL 维护 subagent resolution and execution 的入口 ActiveChildRegistration, install, drop, WorktreeMaterialization, canonical_total_tokens, child_task_prompt_identity, usage_is_incomplete, record_subagent_usage, task_model_override_error, validate_goal_context, resolve_workflow_sampler, model_state_for_catalog, frozen_workflow_agent_definition, catch_up_child_catalog_generation, run_shell_child, MAX_LINES, MAX_BYTES。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、async task lifecycle and cancellation、channel or acknowledgement flow、child process lifecycle；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ActiveChildRegistration, install, drop, WorktreeMaterialization, canonical_total_tokens, child_task_prompt_identity, usage_is_incomplete, record_subagent_usage, task_model_override_error, validate_goal_context, resolve_workflow_sampler, model_state_for_catalog, frozen_workflow_agent_definition, catch_up_child_catalog_generation, run_shell_child, MAX_LINES, MAX_BYTES 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** ActiveChildRegistration, install, drop, WorktreeMaterialization, canonical_total_tokens, child_task_prompt_identity, usage_is_incomplete, record_subagent_usage, task_model_override_error, validate_goal_context, resolve_workflow_sampler, model_state_for_catalog, frozen_workflow_agent_definition, catch_up_child_catalog_generation, run_shell_child, MAX_LINES, MAX_BYTES 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Async lifecycle
+- **WHEN** ActiveChildRegistration, install, drop, WorktreeMaterialization, canonical_total_tokens, child_task_prompt_identity, usage_is_incomplete, record_subagent_usage, task_model_override_error, validate_goal_context, resolve_workflow_sampler, model_state_for_catalog, frozen_workflow_agent_definition, catch_up_child_catalog_generation, run_shell_child, MAX_LINES, MAX_BYTES 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/agent/subagent/handle_request.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/subagent/mod.rs subagent resolution and execution contract
+
+crates/codegen/shell/src/agent/subagent/mod.rs SHALL 维护 subagent resolution and execution 的入口 InitialContextSource, AutoCompactThresholdTiers, capture, SubagentSpawnContext, ActiveChildSessions, resolve_inference_idle_timeout_secs, resolve_auto_compact_threshold_percent, apply_session_cli_overrides, resolve_compaction_verbatim_input, resolve_compaction_pre_prune, resolve_compaction_pre_prune_token_budget, resolve_subagent_worktree_snapshot_enabled, resolve_tool_params_json, ShellChildRuntime, ProgressFuture, SecurityContext, security_context, progress (plus 117 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、async task lifecycle and cancellation、channel or acknowledgement flow、child process lifecycle；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** InitialContextSource, AutoCompactThresholdTiers, capture, SubagentSpawnContext, ActiveChildSessions, resolve_inference_idle_timeout_secs, resolve_auto_compact_threshold_percent, apply_session_cli_overrides, resolve_compaction_verbatim_input, resolve_compaction_pre_prune, resolve_compaction_pre_prune_token_budget, resolve_subagent_worktree_snapshot_enabled, resolve_tool_params_json, ShellChildRuntime, ProgressFuture, SecurityContext, security_context, progress (plus 117 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** InitialContextSource, AutoCompactThresholdTiers, capture, SubagentSpawnContext, ActiveChildSessions, resolve_inference_idle_timeout_secs, resolve_auto_compact_threshold_percent, apply_session_cli_overrides, resolve_compaction_verbatim_input, resolve_compaction_pre_prune, resolve_compaction_pre_prune_token_budget, resolve_subagent_worktree_snapshot_enabled, resolve_tool_params_json, ShellChildRuntime, ProgressFuture, SecurityContext, security_context, progress (plus 117 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Async lifecycle
+- **WHEN** InitialContextSource, AutoCompactThresholdTiers, capture, SubagentSpawnContext, ActiveChildSessions, resolve_inference_idle_timeout_secs, resolve_auto_compact_threshold_percent, apply_session_cli_overrides, resolve_compaction_verbatim_input, resolve_compaction_pre_prune, resolve_compaction_pre_prune_token_budget, resolve_subagent_worktree_snapshot_enabled, resolve_tool_params_json, ShellChildRuntime, ProgressFuture, SecurityContext, security_context, progress (plus 117 additional private symbols) 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/agent/subagent/mod.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/subagent/resolution/context.rs subagent resolution and execution contract
+
+crates/codegen/shell/src/agent/subagent/resolution/context.rs SHALL 维护 subagent resolution and execution 的入口 MAX_VERBATIM_TURNS, FORK_NOISE_TAGS, normalize_forked_context, strip_fork_noise, strip_xml_block, strip_skill_instructions, collapse_blank_lines, trim_string_in_place, render_item_to_background, render_summary, truncate_str, user_item, assistant_item, assistant_with_tool_calls, tool_result, system_item, reasoning_item, extract_background_text (plus 45 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、child process lifecycle、platform or feature-gated branches、session/timeline state projection、git/worktree context、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/subagent/resolution/context.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/subagent/resolution/definition.rs subagent resolution and execution contract
+
+crates/codegen/shell/src/agent/subagent/resolution/definition.rs SHALL 维护 subagent resolution and execution 的入口 DefinitionResolutionContext, when, DefinitionValidationContext, HarnessToolsetContext, subagent_harness_flavor_is_representable, apply_harness_toolset, discover_agent_definition, available_agent_names, capture_agent_definitions, gate_agent_definition, validate_agent_name, resolve_agent_definition, authored_eligibility, apply_child_tool_policy, apply_goal_object_tool_policy, apply_child_profile_policy, resolve_runtime_config, context (plus 7 additional private symbols)。实现显示该边界包含 filesystem or durable record I/O、explicit error/result paths、child process lifecycle、platform or feature-gated branches、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** DefinitionResolutionContext, when, DefinitionValidationContext, HarnessToolsetContext, subagent_harness_flavor_is_representable, apply_harness_toolset, discover_agent_definition, available_agent_names, capture_agent_definitions, gate_agent_definition, validate_agent_name, resolve_agent_definition, authored_eligibility, apply_child_tool_policy, apply_goal_object_tool_policy, apply_child_profile_policy, resolve_runtime_config, context (plus 7 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** DefinitionResolutionContext, when, DefinitionValidationContext, HarnessToolsetContext, subagent_harness_flavor_is_representable, apply_harness_toolset, discover_agent_definition, available_agent_names, capture_agent_definitions, gate_agent_definition, validate_agent_name, resolve_agent_definition, authored_eligibility, apply_child_tool_policy, apply_goal_object_tool_policy, apply_child_profile_policy, resolve_runtime_config, context (plus 7 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/subagent/resolution/definition.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/subagent/resolution/mod.rs subagent resolution and execution contract
+
+crates/codegen/shell/src/agent/subagent/resolution/mod.rs SHALL 维护 subagent resolution and execution 的入口 the file module entrypoint。实现显示该边界包含 explicit error/result paths、child process lifecycle、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** the file module entrypoint 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+证据：`crates/codegen/shell/src/agent/subagent/resolution/mod.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/subagent/resolution/resume.rs subagent resolution and execution contract
+
+crates/codegen/shell/src/agent/subagent/resolution/resume.rs SHALL 维护 subagent resolution and execution 的入口 is, ResumeValidationError, as, validate_resume_identity, source, matching_type_is_valid, mismatched_type_is_rejected, mismatch。实现显示该边界包含 explicit error/result paths、child process lifecycle、platform or feature-gated branches、session/timeline state projection、git/worktree context、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** is, ResumeValidationError, as, validate_resume_identity, source, matching_type_is_valid, mismatched_type_is_rejected, mismatch 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/subagent/resolution/resume.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/agent/subagent/resolution/types.rs subagent resolution and execution contract
+
+crates/codegen/shell/src/agent/subagent/resolution/types.rs SHALL 维护 subagent resolution and execution 的入口 EffectiveRuntimeConfig, to, ResumeSourceData, match, ResolutionError, effective_runtime_config_default_values。实现显示该边界包含 explicit error/result paths、child process lifecycle、platform or feature-gated branches、session/timeline state projection、git/worktree context、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** EffectiveRuntimeConfig, to, ResumeSourceData, match, ResolutionError, effective_runtime_config_default_values 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/agent/subagent/resolution/types.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/bin/test-sampling-server.rs standalone CLI/test entrypoint contract
+
+crates/codegen/shell/src/bin/test-sampling-server.rs SHALL 维护 standalone CLI/test entrypoint 的入口 Cli, main, handler。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、async task lifecycle and cancellation、channel or acknowledgement flow、timeout/deadline or timing decisions、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** Cli, main, handler 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** Cli, main, handler 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/bin/test-sampling-server.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/bin/trace_classify.rs standalone CLI/test entrypoint contract
+
+crates/codegen/shell/src/bin/trace_classify.rs SHALL 维护 standalone CLI/test entrypoint 的入口 Cli, main, required_args, str, cli_parses_minimal_args, cli_include_reasoning_override_parses, cli_requires_trace, cli_defaults_match_documented_values, cli_min_confidence_override_parses, cli_min_confidence_rejects_bad_values。实现显示该边界包含 filesystem or durable record I/O、explicit error/result paths、platform or feature-gated branches、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** Cli, main, required_args, str, cli_parses_minimal_args, cli_include_reasoning_override_parses, cli_requires_trace, cli_defaults_match_documented_values, cli_min_confidence_override_parses, cli_min_confidence_rejects_bad_values 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** Cli, main, required_args, str, cli_parses_minimal_args, cli_include_reasoning_override_parses, cli_requires_trace, cli_defaults_match_documented_values, cli_min_confidence_override_parses, cli_min_confidence_rejects_bad_values 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/bin/trace_classify.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/code_nav.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/code_nav.rs SHALL 维护 extension method and user-facing command boundary 的入口 log_code_nav_diagnostics, ExtResult, GotoRequest, FindSymbolRequest, StatusRequest, CodeNavResponse, SymbolLocation, IndexStatusReason, is, StatusResponse, handle, to_code_nav_ext_response, ensure_eligible_and_started, resolve_cwd, eligibility_error。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、timeout/deadline or timing decisions、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** log_code_nav_diagnostics, ExtResult, GotoRequest, FindSymbolRequest, StatusRequest, CodeNavResponse, SymbolLocation, IndexStatusReason, is, StatusResponse, handle, to_code_nav_ext_response, ensure_eligible_and_started, resolve_cwd, eligibility_error 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+证据：`crates/codegen/shell/src/extensions/code_nav.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/coordination.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/coordination.rs SHALL 维护 extension method and user-facing command boundary 的入口 ListRequest, ListResponse, AskRequest, CancelRequest, GetRequest, CancelResponse, handle, coordination_error。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、async task lifecycle and cancellation、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ListRequest, ListResponse, AskRequest, CancelRequest, GetRequest, CancelResponse, handle, coordination_error 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** ListRequest, ListResponse, AskRequest, CancelRequest, GetRequest, CancelResponse, handle, coordination_error 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/extensions/coordination.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/debug.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/debug.rs SHALL 维护 extension method and user-facing command boundary 的入口 handle, handle_agent, handle_arm_auto_compact。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** handle, handle_agent, handle_arm_auto_compact 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+证据：`crates/codegen/shell/src/extensions/debug.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/feedback.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/feedback.rs SHALL 维护 extension method and user-facing command boundary 的入口 handle, handle_btw, BtwRequest, handle_review, raw_response。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、session/timeline state projection、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** handle, handle_btw, BtwRequest, handle_review, raw_response 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** handle, handle_btw, BtwRequest, handle_review, raw_response 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/extensions/feedback.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/fs.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/fs.rs SHALL 维护 extension method and user-facing command boundary 的入口 default_depth, default_limit, default_follow_symlinks, default_respect_git_ignore, default_max_bytes, default_create_dirs, default_include_hidden, FsListRequest, to_params, FsExistsRequest, FsReadFileRequest, FsWriteFileRequest, FsDeleteFileRequest, resolve_path, confine_local, is_fs_method, handle。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、session/timeline state projection、sandbox/trust boundary、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** default_depth, default_limit, default_follow_symlinks, default_respect_git_ignore, default_max_bytes, default_create_dirs, default_include_hidden, FsListRequest, to_params, FsExistsRequest, FsReadFileRequest, FsWriteFileRequest, FsDeleteFileRequest, resolve_path, confine_local, is_fs_method, handle 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** default_depth, default_limit, default_follow_symlinks, default_respect_git_ignore, default_max_bytes, default_create_dirs, default_include_hidden, FsListRequest, to_params, FsExistsRequest, FsReadFileRequest, FsWriteFileRequest, FsDeleteFileRequest, resolve_path, confine_local, is_fs_method, handle 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+证据：`crates/codegen/shell/src/extensions/fs.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/git.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/git.rs SHALL 维护 extension method and user-facing command boundary 的入口 GIT_STATUS_CACHE, GitStatusCacheEntry, is_valid, invalidate_status_cache, default_head, default_working, GitStatusRequest, GitFilesRequest, GitDiffsRequest, GitStageRequest, GitStageContentRequest, GitUnstageRequest, GitDiscardScope, from, GitDiscardRequest, GitCommitRequest, GitStashRequest, GitCheckoutRequest (plus 9 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、timeout/deadline or timing decisions、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** GIT_STATUS_CACHE, GitStatusCacheEntry, is_valid, invalidate_status_cache, default_head, default_working, GitStatusRequest, GitFilesRequest, GitDiffsRequest, GitStageRequest, GitStageContentRequest, GitUnstageRequest, GitDiscardScope, from, GitDiscardRequest, GitCommitRequest, GitStashRequest, GitCheckoutRequest (plus 9 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** GIT_STATUS_CACHE, GitStatusCacheEntry, is_valid, invalidate_status_cache, default_head, default_working, GitStatusRequest, GitFilesRequest, GitDiffsRequest, GitStageRequest, GitStageContentRequest, GitUnstageRequest, GitDiscardScope, from, GitDiscardRequest, GitCommitRequest, GitStashRequest, GitCheckoutRequest (plus 9 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+证据：`crates/codegen/shell/src/extensions/git.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/hunk_tracker.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/hunk_tracker.rs SHALL 维护 extension method and user-facing command boundary 的入口 GetHunksRequest, GetFilesRequest, HunkActionRequest, FileActionRequest, TurnActionRequest, AllActionRequest, GetSummaryRequest, GetHunksResponse, FileSummary, GetFilesResponse, GetAllFileContentsResponse, ActionResponse, back, while, file_content_entry_from_wire, file_content_view_from_wire, file_content_status_from_wire, HunkTrackerContext (plus 24 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、platform or feature-gated branches、session/timeline state projection、git/worktree context、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** GetHunksRequest, GetFilesRequest, HunkActionRequest, FileActionRequest, TurnActionRequest, AllActionRequest, GetSummaryRequest, GetHunksResponse, FileSummary, GetFilesResponse, GetAllFileContentsResponse, ActionResponse, back, while, file_content_entry_from_wire, file_content_view_from_wire, file_content_status_from_wire, HunkTrackerContext (plus 24 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/hunk_tracker.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/interject.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/interject.rs SHALL 维护 extension method and user-facing command boundary 的入口 InterjectRequest, split_content, str, handle, removed_text_only_wire_shape_is_rejected, parse_with_content_extracts_images_and_prefers_block_text, parse_with_garbage_content_is_an_error。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、platform or feature-gated branches、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** InterjectRequest, split_content, str, handle, removed_text_only_wire_shape_is_rejected, parse_with_content_extracts_images_and_prefers_block_text, parse_with_garbage_content_is_an_error 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** InterjectRequest, split_content, str, handle, removed_text_only_wire_shape_is_rejected, parse_with_content_extracts_images_and_prefers_block_text, parse_with_garbage_content_is_an_error 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/interject.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/jj.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/jj.rs SHALL 维护 extension method and user-facing command boundary 的入口 try_handle, Req。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** try_handle, Req 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+证据：`crates/codegen/shell/src/extensions/jj.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/marketplace.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/marketplace.rs SHALL 维护 extension method and user-facing command boundary 的入口 ExtResult, load_marketplace_sources, handle, handle_list, handle_action, refresh_sources, handle_update, handle_install, handle_uninstall, scan_source, to_plugin_entry, handle_add_source, add_marketplace_source, handle_remove_source, remove_source_locked, acquire_init_lock, to_plugin_entry_carries_homepage_and_keywords。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、platform or feature-gated branches、timeout/deadline or timing decisions、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ExtResult, load_marketplace_sources, handle, handle_list, handle_action, refresh_sources, handle_update, handle_install, handle_uninstall, scan_source, to_plugin_entry, handle_add_source, add_marketplace_source, handle_remove_source, remove_source_locked, acquire_init_lock, to_plugin_entry_carries_homepage_and_keywords 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** ExtResult, load_marketplace_sources, handle, handle_list, handle_action, refresh_sources, handle_update, handle_install, handle_uninstall, scan_source, to_plugin_entry, handle_add_source, add_marketplace_source, handle_remove_source, remove_source_locked, acquire_init_lock, to_plugin_entry_carries_homepage_and_keywords 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/marketplace.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/memory.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/memory.rs SHALL 维护 extension method and user-facing command boundary 的入口 handle, handle_compact, handle_flush, MemoryFlushRequest, handle_rewrite, RewriteRequest。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** handle, handle_compact, handle_flush, MemoryFlushRequest, handle_rewrite, RewriteRequest 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** handle, handle_compact, handle_flush, MemoryFlushRequest, handle_rewrite, RewriteRequest 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/extensions/memory.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/mod.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/mod.rs SHALL 维护 extension method and user-facing command boundary 的入口 ExtResult, parse_params, parse_params_str, parse_session_id, to_ext_response, to_raw_response, to_ext_response_partial, Empty。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、session/timeline state projection、MCP integration boundary、hook dispatch or hook source boundary、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ExtResult, parse_params, parse_params_str, parse_session_id, to_ext_response, to_raw_response, to_ext_response_partial, Empty 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+证据：`crates/codegen/shell/src/extensions/mod.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/plugins.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/plugins.rs SHALL 维护 extension method and user-facing command boundary 的入口 ExtResult, ListRequest, loaded_plugin_to_info, origin_to_dto, handle, NotifyUpdatesRequest, make_loaded_plugin, info_carries_marketplace_origin, direct_git_install_carries_url_in_origin, direct_local_install_carries_empty_marketplace_origin。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、channel or acknowledgement flow、platform or feature-gated branches、session/timeline state projection、MCP integration boundary；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ExtResult, ListRequest, loaded_plugin_to_info, origin_to_dto, handle, NotifyUpdatesRequest, make_loaded_plugin, info_carries_marketplace_origin, direct_git_install_carries_url_in_origin, direct_local_install_carries_empty_marketplace_origin 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** ExtResult, ListRequest, loaded_plugin_to_info, origin_to_dto, handle, NotifyUpdatesRequest, make_loaded_plugin, info_carries_marketplace_origin, direct_git_install_carries_url_in_origin, direct_local_install_carries_empty_marketplace_origin 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/plugins.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/pr.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/pr.rs SHALL 维护 extension method and user-facing command boundary 的入口 PrStatusRequest, PrStatusResponse, PrData, GhPrViewResponse, GhGraphqlResponse, GhGraphqlData, GhGraphqlPullRequest, handle, handle_pr_status, gh_pr_view_by_branch, gh_pr_is_in_merge_queue, QUERY, parse_is_in_merge_queue, strip_ansi_csi, gh_pr_view_json_parses_after_stripping_forced_color, parse_is_in_merge_queue_true, parse_is_in_merge_queue_false, parse_is_in_merge_queue_missing_resource (plus 4 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、child process lifecycle、platform or feature-gated branches、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** PrStatusRequest, PrStatusResponse, PrData, GhPrViewResponse, GhGraphqlResponse, GhGraphqlData, GhGraphqlPullRequest, handle, handle_pr_status, gh_pr_view_by_branch, gh_pr_is_in_merge_queue, QUERY, parse_is_in_merge_queue, strip_ansi_csi, gh_pr_view_json_parses_after_stripping_forced_color, parse_is_in_merge_queue_true, parse_is_in_merge_queue_false, parse_is_in_merge_queue_missing_resource (plus 4 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/pr.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/recap.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/recap.rs SHALL 维护 extension method and user-facing command boundary 的入口 handle, RecapRequest。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、child process lifecycle、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** handle, RecapRequest 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+证据：`crates/codegen/shell/src/extensions/recap.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/repair.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/repair.rs SHALL 维护 extension method and user-facing command boundary 的入口 RepairSessionRequest, RepairSessionResponse, new, handle, handle_session_repair, repair_on_disk, SESSION_ID, seed_session, corrupted_history, parse, disk_repair_strips_orphaned_result_and_rewrites_file, disk_repair_dry_run_reports_without_writing, disk_repair_noop_on_valid_history, disk_repair_unknown_session_is_resource_not_found。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、platform or feature-gated branches；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** RepairSessionRequest, RepairSessionResponse, new, handle, handle_session_repair, repair_on_disk, SESSION_ID, seed_session, corrupted_history, parse, disk_repair_strips_orphaned_result_and_rewrites_file, disk_repair_dry_run_reports_without_writing, disk_repair_noop_on_valid_history, disk_repair_unknown_session_is_resource_not_found 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** RepairSessionRequest, RepairSessionResponse, new, handle, handle_session_repair, repair_on_disk, SESSION_ID, seed_session, corrupted_history, parse, disk_repair_strips_orphaned_result_and_rewrites_file, disk_repair_dry_run_reports_without_writing, disk_repair_noop_on_valid_history, disk_repair_unknown_session_is_resource_not_found 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Async lifecycle
+- **WHEN** RepairSessionRequest, RepairSessionResponse, new, handle, handle_session_repair, repair_on_disk, SESSION_ID, seed_session, corrupted_history, parse, disk_repair_strips_orphaned_result_and_rewrites_file, disk_repair_dry_run_reports_without_writing, disk_repair_noop_on_valid_history, disk_repair_unknown_session_is_resource_not_found 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/extensions/repair.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/rewind.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/rewind.rs SHALL 维护 extension method and user-facing command boundary 的入口 handle, RewindSessionRequest, prompt_index_for_local, RewindPointsRequest, lookup_session, handle_execute, handle_points, response_id_from_req。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、session/timeline state projection、hook dispatch or hook source boundary；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** handle, RewindSessionRequest, prompt_index_for_local, RewindPointsRequest, lookup_session, handle_execute, handle_points, response_id_from_req 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** handle, RewindSessionRequest, prompt_index_for_local, RewindPointsRequest, lookup_session, handle_execute, handle_points, response_id_from_req 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/extensions/rewind.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/routing.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/routing.rs SHALL 维护 extension method and user-facing command boundary 的入口 RequestMeta, via, NotificationMeta, inject_routing_meta, send_routed_notification, target_client_id_serialization, request_meta_deserialization, notification_meta_serialization, inject_routing_meta_inserts_into_empty_params, inject_routing_meta_merges_with_existing_meta, inject_routing_meta_skips_when_none。实现显示该边界包含 serde-backed wire/config types、platform or feature-gated branches、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/routing.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/search.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/search.rs SHALL 维护 extension method and user-facing command boundary 的入口 ExtResult, FuzzyOpenResponse, FuzzyChangeResponse, FuzzyCloseResponse, parse, resolve_cwd, FuzzyOpenRequest, FuzzyChangeRequest, FuzzyCloseRequest, ContentSearchRequest, handle, test_fuzzy_open_request_with_cwd, test_fuzzy_open_request_with_session_id, test_fuzzy_open_request_with_both_cwd_and_session_id, test_fuzzy_open_request_with_root, test_fuzzy_change_request, test_fuzzy_close_request, test_fuzzy_open_request_defaults (plus 2 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、platform or feature-gated branches、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ExtResult, FuzzyOpenResponse, FuzzyChangeResponse, FuzzyCloseResponse, parse, resolve_cwd, FuzzyOpenRequest, FuzzyChangeRequest, FuzzyCloseRequest, ContentSearchRequest, handle, test_fuzzy_open_request_with_cwd, test_fuzzy_open_request_with_session_id, test_fuzzy_open_request_with_both_cwd_and_session_id, test_fuzzy_open_request_with_root, test_fuzzy_change_request, test_fuzzy_close_request, test_fuzzy_open_request_defaults (plus 2 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/search.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/session_admin.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/session_admin.rs SHALL 维护 extension method and user-facing command boundary 的入口 ExecuteCommandRequest, handle, handle_prompt_status, PromptStatusRequest, handle_reload_announcements, ReloadAnnouncements, handle_session_rename, RenameRequest, handle_session_delete, DeleteRequest, handle_update_mcp_servers, Params, handle_reload_skills, handle_reload_workflows, handle_reload_mcp_catalog, cwd_matches, handle_reload_models, handle_plugins_reload (plus 3 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、platform or feature-gated branches；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ExecuteCommandRequest, handle, handle_prompt_status, PromptStatusRequest, handle_reload_announcements, ReloadAnnouncements, handle_session_rename, RenameRequest, handle_session_delete, DeleteRequest, handle_update_mcp_servers, Params, handle_reload_skills, handle_reload_workflows, handle_reload_mcp_catalog, cwd_matches, handle_reload_models, handle_plugins_reload (plus 3 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** ExecuteCommandRequest, handle, handle_prompt_status, PromptStatusRequest, handle_reload_announcements, ReloadAnnouncements, handle_session_rename, RenameRequest, handle_session_delete, DeleteRequest, handle_update_mcp_servers, Params, handle_reload_skills, handle_reload_workflows, handle_reload_mcp_catalog, cwd_matches, handle_reload_models, handle_plugins_reload (plus 3 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Async lifecycle
+- **WHEN** ExecuteCommandRequest, handle, handle_prompt_status, PromptStatusRequest, handle_reload_announcements, ReloadAnnouncements, handle_session_rename, RenameRequest, handle_session_delete, DeleteRequest, handle_update_mcp_servers, Params, handle_reload_skills, handle_reload_workflows, handle_reload_mcp_catalog, cwd_matches, handle_reload_models, handle_plugins_reload (plus 3 additional private symbols) 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/extensions/session_admin.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/session_search.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/session_search.rs SHALL 维护 extension method and user-facing command boundary 的入口 SearchSessionsRequest, default_limit, SearchSessionsResponse, SearchSessionHit, handle, to_response。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、platform or feature-gated branches、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** SearchSessionsRequest, default_limit, SearchSessionsResponse, SearchSessionHit, handle, to_response 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** SearchSessionsRequest, default_limit, SearchSessionsResponse, SearchSessionHit, handle, to_response 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/session_search.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/session_state.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/session_state.rs SHALL 维护 extension method and user-facing command boundary 的入口 SUMMARY_COLUMN, TIMELINE_COLUMN, SIDEBANDS_COLUMN, BLOBS_COLUMN, UPDATES_COLUMN, MAX_SESSION_STATE_BYTES, ImmutableBlobs, StateRequest, validate_session_uuid, handle_state, read_entity_state, validate_state_size, ImportRequest, handle_import, validate_import_state_columns, validate_updates_column, validate_timeline_column, validate_sidebands_column (plus 24 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、platform or feature-gated branches、session/timeline state projection、sandbox/trust boundary；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** SUMMARY_COLUMN, TIMELINE_COLUMN, SIDEBANDS_COLUMN, BLOBS_COLUMN, UPDATES_COLUMN, MAX_SESSION_STATE_BYTES, ImmutableBlobs, StateRequest, validate_session_uuid, handle_state, read_entity_state, validate_state_size, ImportRequest, handle_import, validate_import_state_columns, validate_updates_column, validate_timeline_column, validate_sidebands_column (plus 24 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** SUMMARY_COLUMN, TIMELINE_COLUMN, SIDEBANDS_COLUMN, BLOBS_COLUMN, UPDATES_COLUMN, MAX_SESSION_STATE_BYTES, ImmutableBlobs, StateRequest, validate_session_uuid, handle_state, read_entity_state, validate_state_size, ImportRequest, handle_import, validate_import_state_columns, validate_updates_column, validate_timeline_column, validate_sidebands_column (plus 24 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/session_state.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/session_updates.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/session_updates.rs SHALL 维护 extension method and user-facing command boundary 的入口 Request, DEFAULT_CHUNK_SIZE, PageBounds, TailPage, page_bounds, is_user_message_chunk, compute_prompt_starts, try_stream_tail_page, open_updates_reader, response_from_page, extract_last_event_id, send_streamed_chunks, handle, handle_with_storage, append_prompt_starts, streamed_metadata_response, empty_response, parse_response (plus 21 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、platform or feature-gated branches；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** Request, DEFAULT_CHUNK_SIZE, PageBounds, TailPage, page_bounds, is_user_message_chunk, compute_prompt_starts, try_stream_tail_page, open_updates_reader, response_from_page, extract_last_event_id, send_streamed_chunks, handle, handle_with_storage, append_prompt_starts, streamed_metadata_response, empty_response, parse_response (plus 21 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** Request, DEFAULT_CHUNK_SIZE, PageBounds, TailPage, page_bounds, is_user_message_chunk, compute_prompt_starts, try_stream_tail_page, open_updates_reader, response_from_page, extract_last_event_id, send_streamed_chunks, handle, handle_with_storage, append_prompt_starts, streamed_metadata_response, empty_response, parse_response (plus 21 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Async lifecycle
+- **WHEN** Request, DEFAULT_CHUNK_SIZE, PageBounds, TailPage, page_bounds, is_user_message_chunk, compute_prompt_starts, try_stream_tail_page, open_updates_reader, response_from_page, extract_last_event_id, send_streamed_chunks, handle, handle_with_storage, append_prompt_starts, streamed_metadata_response, empty_response, parse_response (plus 21 additional private symbols) 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/extensions/session_updates.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/suggest/ai_provider.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/suggest/ai_provider.rs SHALL 维护 extension method and user-facing command boundary 的入口 AI_TIMEOUT, AI_PRIORITY, suggest, build_suggestion, build_suggestion_with_prefix_continuation, build_suggestion_prepends_prefix_when_missing, build_suggestion_exact_match_returns_empty, build_suggestion_whitespace_only_returns_empty, build_suggestion_empty_returns_empty, build_suggestion_no_separator_concatenates_directly, build_suggestion_raw_starts_with_prefix_preserves_internal_whitespace, build_suggestion_trims_surrounding_whitespace, empty_prefix_skips_channel, closed_channel_returns_empty, successful_response, none_response_returns_empty, slow_responder_times_out, sends_correct_fields_to_session。实现显示该边界包含 explicit error/result paths、async task lifecycle and cancellation、channel or acknowledgement flow、child process lifecycle、platform or feature-gated branches、timeout/deadline or timing decisions；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** AI_TIMEOUT, AI_PRIORITY, suggest, build_suggestion, build_suggestion_with_prefix_continuation, build_suggestion_prepends_prefix_when_missing, build_suggestion_exact_match_returns_empty, build_suggestion_whitespace_only_returns_empty, build_suggestion_empty_returns_empty, build_suggestion_no_separator_concatenates_directly, build_suggestion_raw_starts_with_prefix_preserves_internal_whitespace, build_suggestion_trims_surrounding_whitespace, empty_prefix_skips_channel, closed_channel_returns_empty, successful_response, none_response_returns_empty, slow_responder_times_out, sends_correct_fields_to_session 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** AI_TIMEOUT, AI_PRIORITY, suggest, build_suggestion, build_suggestion_with_prefix_continuation, build_suggestion_prepends_prefix_when_missing, build_suggestion_exact_match_returns_empty, build_suggestion_whitespace_only_returns_empty, build_suggestion_empty_returns_empty, build_suggestion_no_separator_concatenates_directly, build_suggestion_raw_starts_with_prefix_preserves_internal_whitespace, build_suggestion_trims_surrounding_whitespace, empty_prefix_skips_channel, closed_channel_returns_empty, successful_response, none_response_returns_empty, slow_responder_times_out, sends_correct_fields_to_session 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/suggest/ai_provider.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/suggest/file_provider.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/suggest/file_provider.rs SHALL 维护 extension method and user-facing command boundary 的入口 MAX_RESULTS, SCAN_CAP, SYMLINK_STAT_BUDGET, FILE_COMMANDS, FILE_CMD_BOOST, FilePathProvider, suggest, extract_file_context, is_path_like, SplitToken, split_token, expand_for_listing, expand_vars, ScoredEntry, list_ranked_entries, file_command_boost, ci_starts_with, context_file_cmd_with_arg (plus 56 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、platform or feature-gated branches、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** MAX_RESULTS, SCAN_CAP, SYMLINK_STAT_BUDGET, FILE_COMMANDS, FILE_CMD_BOOST, FilePathProvider, suggest, extract_file_context, is_path_like, SplitToken, split_token, expand_for_listing, expand_vars, ScoredEntry, list_ranked_entries, file_command_boost, ci_starts_with, context_file_cmd_with_arg (plus 56 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** MAX_RESULTS, SCAN_CAP, SYMLINK_STAT_BUDGET, FILE_COMMANDS, FILE_CMD_BOOST, FilePathProvider, suggest, extract_file_context, is_path_like, SplitToken, split_token, expand_for_listing, expand_vars, ScoredEntry, list_ranked_entries, file_command_boost, ci_starts_with, context_file_cmd_with_arg (plus 56 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/suggest/file_provider.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/suggest/history_provider.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/suggest/history_provider.rs SHALL 维护 extension method and user-facing command boundary 的入口 CACHE_TTL, MAX_LOCAL_SESSIONS, MAX_LOCAL_ENTRIES, MAX_CROSS_CWD_ENTRIES, MAX_CROSS_CWD_SESSIONS, MAX_SHELL_HISTORY_ENTRIES, MAX_RESULTS, HistoryProvider, suggest, rank_history_matches, CrossCwdCache, CROSS_CWD_CACHE, CROSS_CWD_REFRESHING, get_or_refresh_cross_cwd_cache, ShellHistoryCache, SHELL_HISTORY_CACHE_TTL, SHELL_HISTORY_CACHE, SHELL_HISTORY_REFRESHING (plus 42 additional private symbols)。实现显示该边界包含 filesystem or durable record I/O、explicit error/result paths、platform or feature-gated branches、timeout/deadline or timing decisions、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** CACHE_TTL, MAX_LOCAL_SESSIONS, MAX_LOCAL_ENTRIES, MAX_CROSS_CWD_ENTRIES, MAX_CROSS_CWD_SESSIONS, MAX_SHELL_HISTORY_ENTRIES, MAX_RESULTS, HistoryProvider, suggest, rank_history_matches, CrossCwdCache, CROSS_CWD_CACHE, CROSS_CWD_REFRESHING, get_or_refresh_cross_cwd_cache, ShellHistoryCache, SHELL_HISTORY_CACHE_TTL, SHELL_HISTORY_CACHE, SHELL_HISTORY_REFRESHING (plus 42 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** CACHE_TTL, MAX_LOCAL_SESSIONS, MAX_LOCAL_ENTRIES, MAX_CROSS_CWD_ENTRIES, MAX_CROSS_CWD_SESSIONS, MAX_SHELL_HISTORY_ENTRIES, MAX_RESULTS, HistoryProvider, suggest, rank_history_matches, CrossCwdCache, CROSS_CWD_CACHE, CROSS_CWD_REFRESHING, get_or_refresh_cross_cwd_cache, ShellHistoryCache, SHELL_HISTORY_CACHE_TTL, SHELL_HISTORY_CACHE, SHELL_HISTORY_REFRESHING (plus 42 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/suggest/history_provider.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/suggest/mod.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/suggest/mod.rs SHALL 维护 extension method and user-facing command boundary 的入口 SuggestRequest, SuggestResponse, GhostSuggestion, CompletionItem, SuggestContext, new, prefix, RankedSuggestion, SuggestionSource, as_str, str, from, stamp_whole_line_range, handle, SuggestPromptRequest, SuggestPromptResponse, SUGGEST_PROMPT_TIMEOUT, handle_suggest_prompt (plus 27 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、platform or feature-gated branches、timeout/deadline or timing decisions；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** SuggestRequest, SuggestResponse, GhostSuggestion, CompletionItem, SuggestContext, new, prefix, RankedSuggestion, SuggestionSource, as_str, str, from, stamp_whole_line_range, handle, SuggestPromptRequest, SuggestPromptResponse, SUGGEST_PROMPT_TIMEOUT, handle_suggest_prompt (plus 27 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Async lifecycle
+- **WHEN** SuggestRequest, SuggestResponse, GhostSuggestion, CompletionItem, SuggestContext, new, prefix, RankedSuggestion, SuggestionSource, as_str, str, from, stamp_whole_line_range, handle, SuggestPromptRequest, SuggestPromptResponse, SUGGEST_PROMPT_TIMEOUT, handle_suggest_prompt (plus 27 additional private symbols) 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/suggest/mod.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/suggest/path_provider.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/suggest/path_provider.rs SHALL 维护 extension method and user-facing command boundary 的入口 CACHE_TTL, MAX_RESULTS, PathProvider, suggest, extract_command_token, filter_executables, PathCacheInner, PATH_CACHE, PATH_REFRESHING, get_or_refresh_path_cache, scan_path_dirs, scan_path_from, cmd, prefix_at_start_of_line, no_prefix_at_argument_position, prefix_after_separators, none_when_empty_after_separator, none_for_empty_or_whitespace_input (plus 15 additional private symbols)。实现显示该边界包含 filesystem or durable record I/O、explicit error/result paths、platform or feature-gated branches、timeout/deadline or timing decisions、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** CACHE_TTL, MAX_RESULTS, PathProvider, suggest, extract_command_token, filter_executables, PathCacheInner, PATH_CACHE, PATH_REFRESHING, get_or_refresh_path_cache, scan_path_dirs, scan_path_from, cmd, prefix_at_start_of_line, no_prefix_at_argument_position, prefix_after_separators, none_when_empty_after_separator, none_for_empty_or_whitespace_input (plus 15 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** CACHE_TTL, MAX_RESULTS, PathProvider, suggest, extract_command_token, filter_executables, PathCacheInner, PATH_CACHE, PATH_REFRESHING, get_or_refresh_path_cache, scan_path_dirs, scan_path_from, cmd, prefix_at_start_of_line, no_prefix_at_argument_position, prefix_after_separators, none_when_empty_after_separator, none_for_empty_or_whitespace_input (plus 15 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/suggest/path_provider.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/suggest/shell_token.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/suggest/shell_token.rs SHALL 维护 extension method and user-facing command boundary 的入口 QuoteStyle, CurrentToken, TokenBuild, push, ensure_token, finish_token, parse_current_token, build_insert_token, needs_backslash, escape_unquoted, escape_double_quoted, escape_single_quoted, parse_after_pipe_and_semicolon, parse_after_double_ampersand, parse_quoted_pipe_is_one_token, parse_open_double_quote_token, parse_backslash_escaped_space_token, parse_open_single_quote_token (plus 19 additional private symbols)。实现显示该边界包含 platform or feature-gated branches、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/suggest/shell_token.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/task.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/task.rs SHALL 维护 extension method and user-facing command boundary 的入口 ExtResult, the, KillTaskRequest, KillTaskResponse, ListTasksRequest, ListTasksResponse, CancelSubagentRequest, SubagentCancelOutcomeDto, from, CancelSubagentResponse, ListRunningSubagentsRequest, ListRunningSubagentsResponse, SubagentLiveSnapshotDto, GetSubagentRequest, GetSubagentResponse, SubagentSnapshotDto, from_snapshot, parse (plus 26 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、child process lifecycle、platform or feature-gated branches、timeout/deadline or timing decisions、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ExtResult, the, KillTaskRequest, KillTaskResponse, ListTasksRequest, ListTasksResponse, CancelSubagentRequest, SubagentCancelOutcomeDto, from, CancelSubagentResponse, ListRunningSubagentsRequest, ListRunningSubagentsResponse, SubagentLiveSnapshotDto, GetSubagentRequest, GetSubagentResponse, SubagentSnapshotDto, from_snapshot, parse (plus 26 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/task.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/terminal.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/terminal.rs SHALL 维护 extension method and user-facing command boundary 的入口 ExtResult, EnvVar, CreateTerminalRequest, TerminalIdRequest, CreateTerminalResponse, PtyCreateRequest, PtyLoadRequest, KillTerminalRequest, PtyResizeRequest, PtyInputNotification, TerminalListResponse, ExitStatusResponse, TerminalOutputResponse, KillOutcomeResponse, KillTerminalResponse, ReleaseTerminalResponse, parse, respond (plus 5 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ExtResult, EnvVar, CreateTerminalRequest, TerminalIdRequest, CreateTerminalResponse, PtyCreateRequest, PtyLoadRequest, KillTerminalRequest, PtyResizeRequest, PtyInputNotification, TerminalListResponse, ExitStatusResponse, TerminalOutputResponse, KillOutcomeResponse, KillTerminalResponse, ReleaseTerminalResponse, parse, respond (plus 5 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+证据：`crates/codegen/shell/src/extensions/terminal.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/usage.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/usage.rs SHALL 维护 extension method and user-facing command boundary 的入口 SessionUsageRequest, SessionUsageResponse, handle, handle_session_usage, usage, response_serializes_ledger_as_prompt_usage_wire_shape, response_scrubs_partial_costs。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、platform or feature-gated branches、session/timeline state projection、prompt/subagent/goal context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** SessionUsageRequest, SessionUsageResponse, handle, handle_session_usage, usage, response_serializes_ledger_as_prompt_usage_wire_shape, response_scrubs_partial_costs 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/usage.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/extensions/worktree.rs extension method and user-facing command boundary contract
+
+crates/codegen/shell/src/extensions/worktree.rs SHALL 维护 extension method and user-facing command boundary 的入口 ExtResult, WORKTREE_EXT_LOG, GatewayWorktreeNotifier, send_worktree_status, to_response, extract_creating_path, ListWorktreeRequest, ShowWorktreeRequest, GcWorktreeRequest, WorktreeDbPathResponse, ResolveLocalForWorktreeResumeRequest, ResolveLocalForWorktreeResumeResponse, parse_duration, log_effective_worktree_type, handle, list_request_all_defaults, list_request_with_filters, show_request_deserializes (plus 10 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、explicit error/result paths、platform or feature-gated branches、timeout/deadline or timing decisions、session/timeline state projection、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** ExtResult, WORKTREE_EXT_LOG, GatewayWorktreeNotifier, send_worktree_status, to_response, extract_creating_path, ListWorktreeRequest, ShowWorktreeRequest, GcWorktreeRequest, WorktreeDbPathResponse, ResolveLocalForWorktreeResumeRequest, ResolveLocalForWorktreeResumeResponse, parse_duration, log_effective_worktree_type, handle, list_request_all_defaults, list_request_with_filters, show_request_deserializes (plus 10 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/extensions/worktree.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/inspect/mod.rs shell module boundary contract
+
+crates/codegen/shell/src/inspect/mod.rs SHALL 维护 shell module boundary 的入口 TREE, Scope, fmt, InspectReport, InstructionFile, PermissionsReport, SkippedRule, HookEntry, SkillEntry, AgentEntry, PluginEntry, PluginProvides, MarketplaceSourceEntry, McpServerEntry, LspServerEntry, ConfigSources, ConfigLayer, inspect (plus 34 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、platform or feature-gated branches、session/timeline state projection、MCP integration boundary；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** TREE, Scope, fmt, InspectReport, InstructionFile, PermissionsReport, SkippedRule, HookEntry, SkillEntry, AgentEntry, PluginEntry, PluginProvides, MarketplaceSourceEntry, McpServerEntry, LspServerEntry, ConfigSources, ConfigLayer, inspect (plus 34 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** TREE, Scope, fmt, InspectReport, InstructionFile, PermissionsReport, SkippedRule, HookEntry, SkillEntry, AgentEntry, PluginEntry, PluginProvides, MarketplaceSourceEntry, McpServerEntry, LspServerEntry, ConfigSources, ConfigLayer, inspect (plus 34 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Platform branch
+- **WHEN** 编译条件选择对应平台/feature实现
+- **THEN** 只执行该条件下的源码分支；其他平台行为须由对应构建验证。
+
+证据：`crates/codegen/shell/src/inspect/mod.rs`。
+
+### Requirement: Shell crate root module registration and re-export contract
+
+shell::lib SHALL register the public module tree for active_sessions, agent, auth, builtin, bundle, cli_models, config, coordination, extensions, heap_profile, inspect, instrumentation, leader, local_ipc, mcp_doctor, plugin, remote, sampling, session, terminal, tools, trace_classifier, and util, while re-exporting tracing macros, unified_log, CPU/env helpers, and grow_http as http. The test_support module remains cfg(test)-only.
+
+#### Scenario: Public module tree
+- **WHEN** a shell consumer imports one of the declared public modules
+- **THEN** the module is registered by lib.rs and resolved through the crate root.
+
+#### Scenario: Test-only support
+- **WHEN** a test build enables cfg(test)
+- **THEN** test_support is available only in that build condition.
+
+证据：`crates/codegen/shell/src/lib.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/remote/mod.rs shell module boundary contract
+
+crates/codegen/shell/src/remote/mod.rs SHALL 维护 shell module boundary 的入口 the file module entrypoint。实现显示该边界包含 explicit error/result paths；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** the file module entrypoint 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+证据：`crates/codegen/shell/src/remote/mod.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/test_support/lsp_runtime.rs test support runtime contract
+
+crates/codegen/shell/src/test_support/lsp_runtime.rs SHALL 维护 test support runtime 的入口 GatewayOut, test_gateway, test_gateway_with_receiver, ctx_with_toggle, DummyLspDispatch, ensure_started_background, ensure_ready, is_ready, dispatch, drain_diagnostics, notify_file_changed, read_diagnostics。实现显示该边界包含 filesystem or durable record I/O、explicit error/result paths、channel or acknowledgement flow、child process lifecycle、timeout/deadline or timing decisions、session/timeline state projection；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** GatewayOut, test_gateway, test_gateway_with_receiver, ctx_with_toggle, DummyLspDispatch, ensure_started_background, ensure_ready, is_ready, dispatch, drain_diagnostics, notify_file_changed, read_diagnostics 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** GatewayOut, test_gateway, test_gateway_with_receiver, ctx_with_toggle, DummyLspDispatch, ensure_started_background, ensure_ready, is_ready, dispatch, drain_diagnostics, notify_file_changed, read_diagnostics 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Async lifecycle
+- **WHEN** GatewayOut, test_gateway, test_gateway_with_receiver, ctx_with_toggle, DummyLspDispatch, ensure_started_background, ensure_ready, is_ready, dispatch, drain_diagnostics, notify_file_changed, read_diagnostics 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/test_support/lsp_runtime.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/test_support/mod.rs test support runtime contract
+
+crates/codegen/shell/src/test_support/mod.rs SHALL 维护 test support runtime 的入口 TEST_MODEL, redirect_unified_log_for_tests, install_rustls_provider, binary, ensure_hermetic_git_on_path, INIT。实现显示该边界包含 child process lifecycle、sandbox/trust boundary、git/worktree context；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Primary module path
+- **WHEN** 调用 TEST_MODEL, redirect_unified_log_for_tests, install_rustls_provider, binary, ensure_hermetic_git_on_path, INIT 的主入口
+- **THEN** 按源码声明的转换或调度路径返回结果。
+
+证据：`crates/codegen/shell/src/test_support/mod.rs`。
+
+### Requirement: Shell crates/codegen/shell/src/trace_classifier/mod.rs shell module boundary contract
+
+crates/codegen/shell/src/trace_classifier/mod.rs SHALL 维护 shell module boundary 的入口 TurnRecord, TurnTrace, TurnMetadata, ParsedClassifierOut, str, LazinessOut, LazinessDecisionKind, AbortReasonKind, TurnLine, Summary, render, BackgroundDispatchKind, background_kind, BackingCounts, count_outstanding_dispatches, ClassifierClient, run, SamplerClassifierClient (plus 67 additional private symbols)。实现显示该边界包含 serde-backed wire/config types、filesystem or durable record I/O、explicit error/result paths、async task lifecycle and cancellation、platform or feature-gated branches、timeout/deadline or timing decisions；函数按源码显式的返回值、错误分支和状态转换交付结果，未在本条之外推断调用方契约。
+
+#### Scenario: Error result
+- **WHEN** TurnRecord, TurnTrace, TurnMetadata, ParsedClassifierOut, str, LazinessOut, LazinessDecisionKind, AbortReasonKind, TurnLine, Summary, render, BackgroundDispatchKind, background_kind, BackingCounts, count_outstanding_dispatches, ClassifierClient, run, SamplerClassifierClient (plus 67 additional private symbols) 中的输入触发显式错误分支
+- **THEN** 返回或传播源码声明的错误结果，并保留已完成的前置状态变化。
+
+#### Scenario: Durable boundary
+- **WHEN** TurnRecord, TurnTrace, TurnMetadata, ParsedClassifierOut, str, LazinessOut, LazinessDecisionKind, AbortReasonKind, TurnLine, Summary, render, BackgroundDispatchKind, background_kind, BackingCounts, count_outstanding_dispatches, ClassifierClient, run, SamplerClassifierClient (plus 67 additional private symbols) 执行文件或持久记录读写
+- **THEN** 沿实现的读写、解析、发布和失败路径返回，不把内存状态当作已落盘。
+
+#### Scenario: Async lifecycle
+- **WHEN** TurnRecord, TurnTrace, TurnMetadata, ParsedClassifierOut, str, LazinessOut, LazinessDecisionKind, AbortReasonKind, TurnLine, Summary, render, BackgroundDispatchKind, background_kind, BackingCounts, count_outstanding_dispatches, ClassifierClient, run, SamplerClassifierClient (plus 67 additional private symbols) 启动异步任务或等待通道结果
+- **THEN** 按源码的完成、关闭、取消或回执分支结束；没有额外推定硬超时。
+
+证据：`crates/codegen/shell/src/trace_classifier/mod.rs`。
+
+### Requirement: Pager follow up response acceptance and pending turn buffer
+
+The pager follow-up projection SHALL establish these facts. AgentView stores displayed follow-up response and suggestion labels separately from shown prompt identity; it also stores an acceptance generation map, a prompt-keyed pending map with FIFO order, and rendered chip rectangles. MAX_PENDING_FOLLOW_UPS is 16. Embedded checks exercise replacement, idempotence, empty retraction, seen-id suppression, current-turn replay, pre-adoption buffering, FIFO eviction, reload preservation and chip hit mapping.
+
+#### Scenario: Displayed follow-up state
+- **WHEN** a response has suggestions displayed
+- **THEN** response identity, suggestion text, shown prompt identity and chip hit rectangles remain separate state.
+
+#### Scenario: Pending adoption race
+- **WHEN** a stamped follow-up belongs to a prompt that is not yet current
+- **THEN** the test path buffers it by prompt id and flushes it after adoption.
+
+#### Scenario: Bounded pending map
+- **WHEN** more than 16 distinct non-current prompt ids are buffered
+- **THEN** the oldest pending key is evicted while newer keys remain.
+
+#### Scenario: Chip hit mapping
+- **WHEN** a rendered chip is clicked inside its rectangle
+- **THEN** the hit index maps to the full suggestion string and a gap misses.
+
+证据：`crates/codegen/pager/src/app/agent_view/mod.rs`。
+
+### Requirement: Pager action registry exact routing and presentation
+
+The pager action registry SHALL establish these facts. active_contexts_for_pane returns Prompt-focused, Scrollback-focused or agent-level/Always context lists according to the pane. resolve_action maps the pane-safe ActionId subset to InputOutcome::Action and returns none for root-global, modal, queue, dashboard, cancel, quit and other higher-layer actions. Kitty base-key detection recognizes shifted 1 as bang and shifted 3 as hash; remember_mode_enabled reads features.remember_mode and defaults false when unavailable.
+
+#### Scenario: Pane context projection
+- **WHEN** the active pane is Prompt, Scrollback or another pane
+- **THEN** the returned context order starts with the pane-specific context where applicable and ends with AgentScreen/Always as defined.
+
+#### Scenario: Safe action subset
+- **WHEN** resolve_action receives a navigation or view ActionId
+- **THEN** it returns the corresponding AgentView action; root-global or modal-owned ids return None.
+
+#### Scenario: Kitty symbol input
+- **WHEN** a key event uses shifted base 1 or 3
+- **THEN** the bang or hash detector accepts it alongside the literal punctuation form.
+
+#### Scenario: Remember feature lookup
+- **WHEN** config.toml is absent, malformed or has a boolean features.remember_mode
+- **THEN** the helper returns false for unavailable values and the stored boolean when present.
+
+证据：`crates/codegen/pager/src/app/agent_view/mod.rs`。
+
+### Requirement: Pager simple input mode reconciliation and contextual hint overrides
+
+The pager input-mode projection SHALL establish these facts. PromptInputMode has mutually exclusive Normal, Bash and Remember variants. Normal has no style, prefix, placeholder or prompt-info override and maps send_action to SendPrompt; Bash uses command styling, ! prefix, Run shell command info and SendBashCommand; Remember uses remember styling, # prefix, mode-dependent memory placeholder, Save memory note info and SendRememberNote. Normal never treats an event as an exit key, while Bash and Remember exit on Backspace, Escape, Ctrl-W, Ctrl-U or Ctrl-C.
+
+#### Scenario: Mode styling
+- **WHEN** each PromptInputMode requests accent, prefix, placeholder or prompt-info data
+- **THEN** Normal returns no override, Bash returns command styling and Remember returns remember styling and the matching multiline placeholder.
+
+#### Scenario: Submit action
+- **WHEN** send_action receives prompt text
+- **THEN** the variant selects SendPrompt, SendBashCommand or SendRememberNote while preserving text.
+
+#### Scenario: Exit-key policy
+- **WHEN** Normal, Bash or Remember receives the tested key set
+- **THEN** Normal reports no exit keys; Bash and Remember accept the five exit inputs and reject ordinary Enter and letters.
+
+证据：`crates/codegen/pager/src/app/agent_view/mod.rs`。
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/monitor/event.rs background monitor and event rate limiting contract
+crates/codegen/tools/src/implementations/grow_build/monitor/event.rs SHALL implement the background monitor and event rate limiting boundary through buffer and sanitize event lines, apply token-bucket suppression, and emit monitor task progress/completion. Its source symbols LineProcessor, new, push, flush, truncate_line, batch_lines, sanitize_monitor_description, wrap_monitor_event, wrap_sanitizes_description, push_single_line, push_multiple_lines, partial_line_buffered, empty_lines_skipped, long_line_truncated, buffer_cap_enforced, flush_returns_partial, flush_empty_returns_none, batch_lines_joins (additional symbols omitted from the title but included in source evidence) follow explicit markers explicit error classification、platform/feature conditional、session, prompt, goal, or subagent context; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/implementations/grow_build/monitor/event.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `LineProcessor`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `new`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `push`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `flush`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `truncate_line`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `batch_lines`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `sanitize_monitor_description`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `wrap_monitor_event`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `wrap_sanitizes_description`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `push_single_line`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `push_multiple_lines`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `partial_line_buffered`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `empty_lines_skipped`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `long_line_truncated`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `buffer_cap_enforced`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `flush_returns_partial`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `flush_empty_returns_none`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `batch_lines_joins`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `batch_lines_truncates_at_limit`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `truncate_line_multibyte_no_panic`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `truncate_line_emoji_no_panic`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `batch_lines_multibyte_no_panic`；`crates/codegen/tools/src/implementations/grow_build/monitor/event.rs` — `xml_wrapping`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/monitor/mod.rs background monitor and event rate limiting contract
+crates/codegen/tools/src/implementations/grow_build/monitor/mod.rs SHALL implement the background monitor and event rate limiting boundary through buffer and sanitize event lines, apply token-bucket suppression, and emit monitor task progress/completion. Its source symbols mod follow explicit markers tool definition, schema, or registry projection; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Primary path
+- **WHEN** the main entrypoint in crates/codegen/tools/src/implementations/grow_build/monitor/mod.rs is called
+- **THEN** typed output is produced according to its explicit conversion or dispatch path.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/monitor/mod.rs` — `mod`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs background monitor and event rate limiting contract
+crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs SHALL implement the background monitor and event rate limiting boundary through buffer and sanitize event lines, apply token-bucket suppression, and emit monitor task progress/completion. Its source symbols TokenBucket, new, try_consume, SuppressionTracker, RateLimitOutcome, with_kill_tool_name, process, MonitorRateLimiter, process_event, is_killed, bucket_starts_full, bucket_refills_after_interval, bucket_does_not_exceed_capacity, suppression_tracker_counts, catch_up_notice_on_recovery, no_catch_up_when_no_suppression, killed_discards_events, combined_rate_limiter follow explicit markers timeout, budget, or rate limit、platform/feature conditional、tool definition, schema, or registry projection、session, prompt, goal, or subagent context; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Budget boundary
+- **WHEN** a timeout, size, rate, or token budget is reached
+- **THEN** the source applies its configured cap or timeout path and reports the corresponding result.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `TokenBucket`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `new`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `try_consume`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `SuppressionTracker`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `RateLimitOutcome`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `with_kill_tool_name`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `process`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `MonitorRateLimiter`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `process_event`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `is_killed`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `bucket_starts_full`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `bucket_refills_after_interval`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `bucket_does_not_exceed_capacity`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `suppression_tracker_counts`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `catch_up_notice_on_recovery`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `no_catch_up_when_no_suppression`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `killed_discards_events`；`crates/codegen/tools/src/implementations/grow_build/monitor/rate_limiter.rs` — `combined_rate_limiter`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs background monitor and event rate limiting contract
+crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs SHALL implement the background monitor and event rate limiting boundary through buffer and sanitize event lines, apply token-bucket suppression, and emit monitor task progress/completion. Its source symbols MonitorTool, kind, tool_namespace, description_template, emitted_notifications, str, requires_expr, Args, Output, id, description, capabilities, run, run_monitor_pipeline, read_new_bytes, process_event, persistent_monitor_released_when_session_drops_backend, monitor_exit_does_not_emit_terminal_ended_event (additional symbols omitted from the title but included in source evidence) follow explicit markers filesystem or durable persistence、explicit error classification、async task and cancellation lifecycle、channel, fanout, or acknowledgement flow、child process execution、timeout, budget, or rate limit、platform/feature conditional; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Resource boundary
+- **WHEN** crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs performs its filesystem or process operation
+- **THEN** the operation follows the implementation’s bounded, cleanup, and failure paths; no stronger durability is inferred.
+
+#### Scenario: Budget boundary
+- **WHEN** a timeout, size, rate, or token budget is reached
+- **THEN** the source applies its configured cap or timeout path and reports the corresponding result.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `MonitorTool`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `kind`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `tool_namespace`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `description_template`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `emitted_notifications`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `str`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `requires_expr`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `Args`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `Output`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `id`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `description`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `capabilities`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `run`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `run_monitor_pipeline`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `read_new_bytes`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `process_event`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `persistent_monitor_released_when_session_drops_backend`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `monitor_exit_does_not_emit_terminal_ended_event`；`crates/codegen/tools/src/implementations/grow_build/monitor/tool.rs` — `reparented_monitor_emits_events_with_parent_owner`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/monitor/types.rs background monitor and event rate limiting contract
+crates/codegen/tools/src/implementations/grow_build/monitor/types.rs SHALL implement the background monitor and event rate limiting boundary through buffer and sanitize event lines, apply token-bucket suppression, and emit monitor task progress/completion. Its source symbols LINE_TRUNCATION_LIMIT, BATCH_TRUNCATION_LIMIT, BUFFER_CAP_BYTES, DEBOUNCE_MS, RATE_LIMIT_CAPACITY, RATE_LIMIT_REFILL_MS, AUTO_KILL_THRESHOLD_MS, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, MAX_RESULT_SIZE_CHARS, default_timeout_ms, MonitorInput, MonitorOutput, MonitorError, validate, resolved_timeout_ms, MonitorEventNotification, default_timeout_is_10h (additional symbols omitted from the title but included in source evidence) follow explicit markers serde/json wire or configuration、explicit error classification、timeout, budget, or rate limit、platform/feature conditional、tool definition, schema, or registry projection、session, prompt, goal, or subagent context; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/implementations/grow_build/monitor/types.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Wire/config projection
+- **WHEN** a typed input or output crosses the crates/codegen/tools/src/implementations/grow_build/monitor/types.rs boundary
+- **THEN** serde/json field names, defaults, and unknown-field behavior follow the source declarations.
+
+#### Scenario: Budget boundary
+- **WHEN** a timeout, size, rate, or token budget is reached
+- **THEN** the source applies its configured cap or timeout path and reports the corresponding result.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `LINE_TRUNCATION_LIMIT`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `BATCH_TRUNCATION_LIMIT`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `BUFFER_CAP_BYTES`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `DEBOUNCE_MS`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `RATE_LIMIT_CAPACITY`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `RATE_LIMIT_REFILL_MS`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `AUTO_KILL_THRESHOLD_MS`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `DEFAULT_TIMEOUT_MS`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `MAX_TIMEOUT_MS`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `MAX_RESULT_SIZE_CHARS`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `default_timeout_ms`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `MonitorInput`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `MonitorOutput`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `MonitorError`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `validate`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `resolved_timeout_ms`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `MonitorEventNotification`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `default_timeout_is_10h`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `persistent_has_zero_timeout`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `explicit_timeout_within_max`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `timeout_exceeds_max_without_persistent_fails`；`crates/codegen/tools/src/implementations/grow_build/monitor/types.rs` — `timeout_exceeds_max_with_persistent_ok`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs web fetch, cache, artifact, and SSRF boundary contract
+crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs SHALL implement the web fetch, cache, artifact, and SSRF boundary boundary through validate URL/domain and SSRF policy, fetch bounded HTTP content, cache or materialize artifacts, and classify overflow/errors. Its source symbols ARTIFACT_DIR, ALLOCATION_FILE, COUNTER_WIDTH, MAX_TOTAL_BYTES, WebFetchArtifactWriter, save, save_locked, reserve_number, read_reserved_number, scan_artifacts, allocation_recovers_malformed_state_and_failed_reservation, concurrent_writes_same_session_have_distinct_intact_files follow explicit markers filesystem or durable persistence、explicit error classification、platform/feature conditional、session, prompt, goal, or subagent context; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Resource boundary
+- **WHEN** crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs performs its filesystem or process operation
+- **THEN** the operation follows the implementation’s bounded, cleanup, and failure paths; no stronger durability is inferred.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `ARTIFACT_DIR`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `ALLOCATION_FILE`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `COUNTER_WIDTH`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `MAX_TOTAL_BYTES`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `WebFetchArtifactWriter`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `save`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `save_locked`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `reserve_number`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `read_reserved_number`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `scan_artifacts`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `allocation_recovers_malformed_state_and_failed_reservation`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/artifact.rs` — `concurrent_writes_same_session_have_distinct_intact_files`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/web_fetch/cache.rs web fetch, cache, artifact, and SSRF boundary contract
+crates/codegen/tools/src/implementations/grow_build/web_fetch/cache.rs SHALL implement the web fetch, cache, artifact, and SSRF boundary boundary through validate URL/domain and SSRF policy, fetch bounded HTTP content, cache or materialize artifacts, and classify overflow/errors. Its source symbols CachedPage, FetchCache, new, get, insert_text, output, truncated_artifact_output_is_never_cached follow explicit markers timeout, budget, or rate limit、platform/feature conditional、session, prompt, goal, or subagent context; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Budget boundary
+- **WHEN** a timeout, size, rate, or token budget is reached
+- **THEN** the source applies its configured cap or timeout path and reports the corresponding result.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/web_fetch/cache.rs` — `CachedPage`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/cache.rs` — `FetchCache`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/cache.rs` — `new`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/cache.rs` — `get`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/cache.rs` — `insert_text`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/cache.rs` — `output`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/cache.rs` — `truncated_artifact_output_is_never_cached`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs web fetch, cache, artifact, and SSRF boundary contract
+crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs SHALL implement the web fetch, cache, artifact, and SSRF boundary boundary through validate URL/domain and SSRF policy, fetch bounded HTTP content, cache or materialize artifacts, and classify overflow/errors. Its source symbols DEFAULT_DOWNLOAD_DIR, WebFetchClient, ProcessedText, new, set_context_window_tokens, fetch, process_text_content, validate_url, upgrade_to_https, FetchResult, fetch_url, is_same_host, require_media_session_folder, is_html, is_pdf, is_image, is_video, validate_media_magic_bytes (additional symbols omitted from the title but included in source evidence) follow explicit markers serde/json wire or configuration、filesystem or durable persistence、explicit error classification、child process execution、platform/feature conditional、sandbox, trust, or allow/deny policy、tool definition, schema, or registry projection; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Wire/config projection
+- **WHEN** a typed input or output crosses the crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs boundary
+- **THEN** serde/json field names, defaults, and unknown-field behavior follow the source declarations.
+
+#### Scenario: Resource boundary
+- **WHEN** crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs performs its filesystem or process operation
+- **THEN** the operation follows the implementation’s bounded, cleanup, and failure paths; no stronger durability is inferred.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `DEFAULT_DOWNLOAD_DIR`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `WebFetchClient`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `ProcessedText`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `new`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `set_context_window_tokens`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `fetch`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `process_text_content`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `validate_url`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `upgrade_to_https`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `FetchResult`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `fetch_url`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `is_same_host`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `require_media_session_folder`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `is_html`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `is_pdf`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `is_image`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `is_video`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `validate_media_magic_bytes`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `media_extension`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `str`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `is_binary_content_type`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `save_pdf`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `save_image`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `save_video`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `html_to_markdown`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `clean_html`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `strip_base64_data_uris`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs` — `MIN_BASE64_PAYLOAD`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs web fetch, cache, artifact, and SSRF boundary contract
+crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs SHALL implement the web fetch, cache, artifact, and SSRF boundary boundary through validate URL/domain and SSRF policy, fetch bounded HTTP content, cache or materialize artifacts, and classify overflow/errors. Its source symbols MAX_URL_LENGTH, MAX_REDIRECTS, USER_AGENT_STRING, WebFetchParams, cache_ttl_secs, max_cache_entries, timeout_secs, max_content_length, max_markdown_length, context_window_tokens, allow_local, allowed_domains, DEFAULT_ALLOWED_DOMAINS follow explicit markers serde/json wire or configuration、filesystem or durable persistence、timeout, budget, or rate limit、sandbox, trust, or allow/deny policy、tool definition, schema, or registry projection、repository/worktree scope; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Wire/config projection
+- **WHEN** a typed input or output crosses the crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs boundary
+- **THEN** serde/json field names, defaults, and unknown-field behavior follow the source declarations.
+
+#### Scenario: Resource boundary
+- **WHEN** crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs performs its filesystem or process operation
+- **THEN** the operation follows the implementation’s bounded, cleanup, and failure paths; no stronger durability is inferred.
+
+#### Scenario: Budget boundary
+- **WHEN** a timeout, size, rate, or token budget is reached
+- **THEN** the source applies its configured cap or timeout path and reports the corresponding result.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `MAX_URL_LENGTH`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `MAX_REDIRECTS`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `USER_AGENT_STRING`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `WebFetchParams`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `cache_ttl_secs`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `max_cache_entries`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `timeout_secs`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `max_content_length`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `max_markdown_length`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `context_window_tokens`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `allow_local`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `allowed_domains`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/config.rs` — `DEFAULT_ALLOWED_DOMAINS`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs web fetch, cache, artifact, and SSRF boundary contract
+crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs SHALL implement the web fetch, cache, artifact, and SSRF boundary boundary through validate URL/domain and SSRF policy, fetch bounded HTTP content, cache or materialize artifacts, and classify overflow/errors. Its source symbols normalize_domain, HostEntry, DomainMatcher, new, check, domain_from_url, url, normalize_strips_www_and_trailing_dot, normalize_trims_whitespace, allows_listed_domain, case_insensitive_host, rejects_unlisted_domain, blocks_all_when_empty, www_prefix_stripped, trailing_dot_stripped, path_scoped_allows_matching_path, path_scoped_blocks_non_matching_path, path_scoped_blocks_wrong_host (additional symbols omitted from the title but included in source evidence) follow explicit markers child process execution、platform/feature conditional、sandbox, trust, or allow/deny policy、session, prompt, goal, or subagent context、repository/worktree scope; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Resource boundary
+- **WHEN** crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs performs its filesystem or process operation
+- **THEN** the operation follows the implementation’s bounded, cleanup, and failure paths; no stronger durability is inferred.
+
+#### Scenario: Policy boundary
+- **WHEN** input crosses an allow/deny or sandbox check
+- **THEN** the explicit policy branch controls admission before execution.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `normalize_domain`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `HostEntry`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `DomainMatcher`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `new`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `check`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `domain_from_url`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `url`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `normalize_strips_www_and_trailing_dot`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `normalize_trims_whitespace`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `allows_listed_domain`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `case_insensitive_host`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `rejects_unlisted_domain`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `blocks_all_when_empty`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `www_prefix_stripped`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `trailing_dot_stripped`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `path_scoped_allows_matching_path`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `path_scoped_blocks_non_matching_path`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `path_scoped_blocks_wrong_host`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `path_scoped_rejects_sibling_prefix`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `path_scoped_case_insensitive`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `root_path_entry_allows_any_path`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `multiple_path_prefixes_per_host`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `host_only_overrides_path_prefixes`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `model_url_variants`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `domain_from_url_extracts_and_normalizes`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/domain.rs` — `domain_from_url_returns_none_for_garbage`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs web fetch, cache, artifact, and SSRF boundary contract
+crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs SHALL implement the web fetch, cache, artifact, and SSRF boundary boundary through validate URL/domain and SSRF policy, fetch bounded HTTP content, cache or materialize artifacts, and classify overflow/errors. Its source symbols WebFetchError, ssrf_recovery_hint, str, is_github_host, gh_available, github_host_detection, which_detects_gh_in_dir, ssrf_non_github_host_never_hints, ssrf_github_host_hint_follows_gh_availability follow explicit markers filesystem or durable persistence、explicit error classification、platform/feature conditional、sandbox, trust, or allow/deny policy、tool definition, schema, or registry projection、session, prompt, goal, or subagent context、repository/worktree scope; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Resource boundary
+- **WHEN** crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs performs its filesystem or process operation
+- **THEN** the operation follows the implementation’s bounded, cleanup, and failure paths; no stronger durability is inferred.
+
+#### Scenario: Policy boundary
+- **WHEN** input crosses an allow/deny or sandbox check
+- **THEN** the explicit policy branch controls admission before execution.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs` — `WebFetchError`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs` — `ssrf_recovery_hint`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs` — `str`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs` — `is_github_host`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs` — `gh_available`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs` — `github_host_detection`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs` — `which_detects_gh_in_dir`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs` — `ssrf_non_github_host_never_hints`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/error.rs` — `ssrf_github_host_hint_follows_gh_availability`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs web fetch, cache, artifact, and SSRF boundary contract
+crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs SHALL implement the web fetch, cache, artifact, and SSRF boundary boundary through validate URL/domain and SSRF policy, fetch bounded HTTP content, cache or materialize artifacts, and classify overflow/errors. Its source symbols HttpClient, new, get_or_rebuild, invalidate, build, install_rustls_provider, get_or_rebuild_returns_client, invalidate_forces_rebuild, build_with_proxy_endpoint, build_without_proxy_is_default, build_with_invalid_proxy_endpoint follow explicit markers explicit error classification、timeout, budget, or rate limit、platform/feature conditional、sandbox, trust, or allow/deny policy、session, prompt, goal, or subagent context、LSP/diagnostic lifecycle; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Budget boundary
+- **WHEN** a timeout, size, rate, or token budget is reached
+- **THEN** the source applies its configured cap or timeout path and reports the corresponding result.
+
+#### Scenario: Policy boundary
+- **WHEN** input crosses an allow/deny or sandbox check
+- **THEN** the explicit policy branch controls admission before execution.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `HttpClient`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `new`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `get_or_rebuild`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `invalidate`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `build`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `install_rustls_provider`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `get_or_rebuild_returns_client`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `invalidate_forces_rebuild`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `build_with_proxy_endpoint`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `build_without_proxy_is_default`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/http.rs` — `build_with_invalid_proxy_endpoint`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs web fetch, cache, artifact, and SSRF boundary contract
+crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs SHALL implement the web fetch, cache, artifact, and SSRF boundary boundary through validate URL/domain and SSRF policy, fetch bounded HTTP content, cache or materialize artifacts, and classify overflow/errors. Its source symbols WebFetchConfig, is_enabled, with_context_window_tokens, WebFetchInput, WebFetchTool, kind, tool_namespace, description_template, finalized_definition, requires_expr, Args, Output, id, description, capabilities, run, tool_name_and_description, errors_when_client_not_in_resources follow explicit markers serde/json wire or configuration、explicit error classification、timeout, budget, or rate limit、platform/feature conditional、sandbox, trust, or allow/deny policy、tool definition, schema, or registry projection、session, prompt, goal, or subagent context; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Wire/config projection
+- **WHEN** a typed input or output crosses the crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs boundary
+- **THEN** serde/json field names, defaults, and unknown-field behavior follow the source declarations.
+
+#### Scenario: Budget boundary
+- **WHEN** a timeout, size, rate, or token budget is reached
+- **THEN** the source applies its configured cap or timeout path and reports the corresponding result.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `WebFetchConfig`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `is_enabled`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `with_context_window_tokens`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `WebFetchInput`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `WebFetchTool`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `kind`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `tool_namespace`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `description_template`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `finalized_definition`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `requires_expr`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `Args`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `Output`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `id`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `description`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `capabilities`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `run`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `tool_name_and_description`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/mod.rs` — `errors_when_client_not_in_resources`。
+
+### Requirement: Tools crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs web fetch, cache, artifact, and SSRF boundary contract
+crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs SHALL implement the web fetch, cache, artifact, and SSRF boundary boundary through validate URL/domain and SSRF policy, fetch bounded HTTP content, cache or materialize artifacts, and classify overflow/errors. Its source symbols WEB_FETCH_CONTEXT_PERCENT, RECOVERY_FOOTER_PREFIX, LONG_LINE_BYTES, PayloadFormat, extension, str, PayloadClassification, classify, OverflowHandler, RecoveryTools, OverflowResult, InlineBudget, new, process, inline_budget, recovery_footer, bounded_output, render_with_hint (additional symbols omitted from the title but included in source evidence) follow explicit markers serde/json wire or configuration、filesystem or durable persistence、explicit error classification、platform/feature conditional、tool definition, schema, or registry projection、session, prompt, goal, or subagent context; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Wire/config projection
+- **WHEN** a typed input or output crosses the crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs boundary
+- **THEN** serde/json field names, defaults, and unknown-field behavior follow the source declarations.
+
+#### Scenario: Resource boundary
+- **WHEN** crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs performs its filesystem or process operation
+- **THEN** the operation follows the implementation’s bounded, cleanup, and failure paths; no stronger durability is inferred.
+
+证据：`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `WEB_FETCH_CONTEXT_PERCENT`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `RECOVERY_FOOTER_PREFIX`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `LONG_LINE_BYTES`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `PayloadFormat`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `extension`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `str`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `PayloadClassification`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `classify`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `OverflowHandler`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `RecoveryTools`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `OverflowResult`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `InlineBudget`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `new`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `process`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `inline_budget`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `recovery_footer`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `bounded_output`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `render_with_hint`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `bounded_generic_marker`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `read_steer`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `web_fetch_steer`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `all_query_tools`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `tools`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `budget`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `oversized_markdown_persists_exact_content_and_omitted_tail`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `exact_limit_stays_inline_and_one_over_is_recoverable`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `utf8_preview_uses_one_safe_byte_boundary`；`crates/codegen/tools/src/implementations/grow_build/web_fetch/overflow.rs` — `classification_uses_mime_and_keeps_layout_independent`。
+
+### Requirement: Tools crates/codegen/tools/src/util/base64_images.rs tool utility and boundary validation contract
+crates/codegen/tools/src/util/base64_images.rs SHALL implement the tool utility and boundary validation boundary through provide bounded path, environment, hashing, image, truncation, encoding, or process helper semantics. Its source symbols ExtractedImage, ExtractionResult, MIN_PAYLOAD_LEN, MAX_PAYLOAD_LEN, MAX_IMAGES, IMAGE_PREFIX_RE, PDF_PREFIX_RE, next_prefix_after, is_base64_byte, scan_payload_end, strip_b64_whitespace, GROSS_PAYLOAD_PRE_CAP, collect_prefix_positions, strip_pdf_data_uris, scan_and_extract, extract_base64_images, try_extract_base64_images, payload (additional symbols omitted from the title but included in source evidence) follow explicit markers serde/json wire or configuration、platform/feature conditional、tool definition, schema, or registry projection、session, prompt, goal, or subagent context、image/PDF/media processing; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Wire/config projection
+- **WHEN** a typed input or output crosses the crates/codegen/tools/src/util/base64_images.rs boundary
+- **THEN** serde/json field names, defaults, and unknown-field behavior follow the source declarations.
+
+证据：`crates/codegen/tools/src/util/base64_images.rs` — `ExtractedImage`；`crates/codegen/tools/src/util/base64_images.rs` — `ExtractionResult`；`crates/codegen/tools/src/util/base64_images.rs` — `MIN_PAYLOAD_LEN`；`crates/codegen/tools/src/util/base64_images.rs` — `MAX_PAYLOAD_LEN`；`crates/codegen/tools/src/util/base64_images.rs` — `MAX_IMAGES`；`crates/codegen/tools/src/util/base64_images.rs` — `IMAGE_PREFIX_RE`；`crates/codegen/tools/src/util/base64_images.rs` — `PDF_PREFIX_RE`；`crates/codegen/tools/src/util/base64_images.rs` — `next_prefix_after`；`crates/codegen/tools/src/util/base64_images.rs` — `is_base64_byte`；`crates/codegen/tools/src/util/base64_images.rs` — `scan_payload_end`；`crates/codegen/tools/src/util/base64_images.rs` — `strip_b64_whitespace`；`crates/codegen/tools/src/util/base64_images.rs` — `GROSS_PAYLOAD_PRE_CAP`；`crates/codegen/tools/src/util/base64_images.rs` — `collect_prefix_positions`；`crates/codegen/tools/src/util/base64_images.rs` — `strip_pdf_data_uris`；`crates/codegen/tools/src/util/base64_images.rs` — `scan_and_extract`；`crates/codegen/tools/src/util/base64_images.rs` — `extract_base64_images`；`crates/codegen/tools/src/util/base64_images.rs` — `try_extract_base64_images`；`crates/codegen/tools/src/util/base64_images.rs` — `payload`；`crates/codegen/tools/src/util/base64_images.rs` — `no_images_returns_text_unchanged`；`crates/codegen/tools/src/util/base64_images.rs` — `no_data_uri_prefix_returns_unchanged`；`crates/codegen/tools/src/util/base64_images.rs` — `single_image_extracted`；`crates/codegen/tools/src/util/base64_images.rs` — `multiple_images_extracted`；`crates/codegen/tools/src/util/base64_images.rs` — `non_image_mime_not_extracted`；`crates/codegen/tools/src/util/base64_images.rs` — `application_pdf_stripped_not_extracted`；`crates/codegen/tools/src/util/base64_images.rs` — `below_threshold_not_extracted`；`crates/codegen/tools/src/util/base64_images.rs` — `max_images_cap`；`crates/codegen/tools/src/util/base64_images.rs` — `oversized_payload_stripped_but_not_extracted`；`crates/codegen/tools/src/util/base64_images.rs` — `word_internal_data_prefix_ignored`。
+
+### Requirement: Tools crates/codegen/tools/src/util/fs.rs tool utility and boundary validation contract
+crates/codegen/tools/src/util/fs.rs SHALL implement the tool utility and boundary validation boundary through provide bounded path, environment, hashing, image, truncation, encoding, or process helper semantics. Its source symbols FS_SYSCALL_TIMEOUT, canonicalize_with_timeout, try_canonicalize, FILENAME_SPECIAL_CHARACTER_MAP, normalize_filename, UnicodePathMatch, try_resolve_unicode_filename, try_resolve_unicode_filename_inner, canonicalize_falls_back_on_nonexistent_path, unicode_fallback_resolves_nnbsp_filename, unicode_fallback_resolves_nbsp_filename, unicode_fallback_returns_none_for_exact_match, unicode_fallback_returns_none_for_no_match, unicode_fallback_returns_none_for_ambiguous, unicode_fallback_returns_none_for_nonexistent_parent follow explicit markers filesystem or durable persistence、explicit error classification、timeout, budget, or rate limit、platform/feature conditional、tool definition, schema, or registry projection、session, prompt, goal, or subagent context、repository/worktree scope; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/util/fs.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Resource boundary
+- **WHEN** crates/codegen/tools/src/util/fs.rs performs its filesystem or process operation
+- **THEN** the operation follows the implementation’s bounded, cleanup, and failure paths; no stronger durability is inferred.
+
+#### Scenario: Budget boundary
+- **WHEN** a timeout, size, rate, or token budget is reached
+- **THEN** the source applies its configured cap or timeout path and reports the corresponding result.
+
+证据：`crates/codegen/tools/src/util/fs.rs` — `FS_SYSCALL_TIMEOUT`；`crates/codegen/tools/src/util/fs.rs` — `canonicalize_with_timeout`；`crates/codegen/tools/src/util/fs.rs` — `try_canonicalize`；`crates/codegen/tools/src/util/fs.rs` — `FILENAME_SPECIAL_CHARACTER_MAP`；`crates/codegen/tools/src/util/fs.rs` — `normalize_filename`；`crates/codegen/tools/src/util/fs.rs` — `UnicodePathMatch`；`crates/codegen/tools/src/util/fs.rs` — `try_resolve_unicode_filename`；`crates/codegen/tools/src/util/fs.rs` — `try_resolve_unicode_filename_inner`；`crates/codegen/tools/src/util/fs.rs` — `canonicalize_falls_back_on_nonexistent_path`；`crates/codegen/tools/src/util/fs.rs` — `unicode_fallback_resolves_nnbsp_filename`；`crates/codegen/tools/src/util/fs.rs` — `unicode_fallback_resolves_nbsp_filename`；`crates/codegen/tools/src/util/fs.rs` — `unicode_fallback_returns_none_for_exact_match`；`crates/codegen/tools/src/util/fs.rs` — `unicode_fallback_returns_none_for_no_match`；`crates/codegen/tools/src/util/fs.rs` — `unicode_fallback_returns_none_for_ambiguous`；`crates/codegen/tools/src/util/fs.rs` — `unicode_fallback_returns_none_for_nonexistent_parent`。
+
+### Requirement: Tools crates/codegen/tools/src/util/git_detect.rs tool utility and boundary validation contract
+crates/codegen/tools/src/util/git_detect.rs SHALL implement the tool utility and boundary validation boundary through provide bounded path, environment, hashing, image, truncation, encoding, or process helper semantics. Its source symbols DetectedGitOps, PrRef, find_in, strip_invocation_prefixes, detect_git_ops, commit_and_pr_create_with_url, pr_create_web_has_no_url, pr_merge_detected, statement_anchoring_rejects_lookalikes, multi_statement_split, invocation_prefixes_are_stripped, prefix_stripping_does_not_overreach, pr_ref_find_in_takes_last_url_and_trims_punctuation, pr_ref_find_in_handles_json_embedded_url, pr_ref_find_in_handles_repo_named_pull, pr_ref_find_in_rejects_non_pr_text follow explicit markers platform/feature conditional、tool definition, schema, or registry projection、session, prompt, goal, or subagent context、repository/worktree scope; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Primary path
+- **WHEN** the main entrypoint in crates/codegen/tools/src/util/git_detect.rs is called
+- **THEN** typed output is produced according to its explicit conversion or dispatch path.
+
+证据：`crates/codegen/tools/src/util/git_detect.rs` — `DetectedGitOps`；`crates/codegen/tools/src/util/git_detect.rs` — `PrRef`；`crates/codegen/tools/src/util/git_detect.rs` — `find_in`；`crates/codegen/tools/src/util/git_detect.rs` — `strip_invocation_prefixes`；`crates/codegen/tools/src/util/git_detect.rs` — `detect_git_ops`；`crates/codegen/tools/src/util/git_detect.rs` — `commit_and_pr_create_with_url`；`crates/codegen/tools/src/util/git_detect.rs` — `pr_create_web_has_no_url`；`crates/codegen/tools/src/util/git_detect.rs` — `pr_merge_detected`；`crates/codegen/tools/src/util/git_detect.rs` — `statement_anchoring_rejects_lookalikes`；`crates/codegen/tools/src/util/git_detect.rs` — `multi_statement_split`；`crates/codegen/tools/src/util/git_detect.rs` — `invocation_prefixes_are_stripped`；`crates/codegen/tools/src/util/git_detect.rs` — `prefix_stripping_does_not_overreach`；`crates/codegen/tools/src/util/git_detect.rs` — `pr_ref_find_in_takes_last_url_and_trims_punctuation`；`crates/codegen/tools/src/util/git_detect.rs` — `pr_ref_find_in_handles_json_embedded_url`；`crates/codegen/tools/src/util/git_detect.rs` — `pr_ref_find_in_handles_repo_named_pull`；`crates/codegen/tools/src/util/git_detect.rs` — `pr_ref_find_in_rejects_non_pr_text`。
+
+### Requirement: Tools crates/codegen/tools/src/util/image_compress.rs tool utility and boundary validation contract
+crates/codegen/tools/src/util/image_compress.rs SHALL implement the tool utility and boundary validation boundary through provide bounded path, environment, hashing, image, truncation, encoding, or process helper semantics. Its source symbols ReEncodeParams, exceeds_dimension_caps, ReEncodeError, re_encode_under_limit, str, area_capped_side, predicted_resize_area, noise, params, does_not_upscale_images_smaller_than_the_side_cap, downscales_images_larger_than_the_side_cap, shrinks_dimensions_only_when_bytes_force_it, area_cap_bounds_total_pixels_for_wide_images, image_under_area_cap_is_not_resized, area_cap_exact_fit_across_aspect_ratios follow explicit markers explicit error classification、platform/feature conditional、tool definition, schema, or registry projection、session, prompt, goal, or subagent context、image/PDF/media processing; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/util/image_compress.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+证据：`crates/codegen/tools/src/util/image_compress.rs` — `ReEncodeParams`；`crates/codegen/tools/src/util/image_compress.rs` — `exceeds_dimension_caps`；`crates/codegen/tools/src/util/image_compress.rs` — `ReEncodeError`；`crates/codegen/tools/src/util/image_compress.rs` — `re_encode_under_limit`；`crates/codegen/tools/src/util/image_compress.rs` — `str`；`crates/codegen/tools/src/util/image_compress.rs` — `area_capped_side`；`crates/codegen/tools/src/util/image_compress.rs` — `predicted_resize_area`；`crates/codegen/tools/src/util/image_compress.rs` — `noise`；`crates/codegen/tools/src/util/image_compress.rs` — `params`；`crates/codegen/tools/src/util/image_compress.rs` — `does_not_upscale_images_smaller_than_the_side_cap`；`crates/codegen/tools/src/util/image_compress.rs` — `downscales_images_larger_than_the_side_cap`；`crates/codegen/tools/src/util/image_compress.rs` — `shrinks_dimensions_only_when_bytes_force_it`；`crates/codegen/tools/src/util/image_compress.rs` — `area_cap_bounds_total_pixels_for_wide_images`；`crates/codegen/tools/src/util/image_compress.rs` — `image_under_area_cap_is_not_resized`；`crates/codegen/tools/src/util/image_compress.rs` — `area_cap_exact_fit_across_aspect_ratios`。
+
+### Requirement: Tools crates/codegen/tools/src/util/image_validate.rs tool utility and boundary validation contract
+crates/codegen/tools/src/util/image_validate.rs SHALL implement the tool utility and boundary validation boundary through provide bounded path, environment, hashing, image, truncation, encoding, or process helper semantics. Its source symbols TRUNCATED_NEEDLES, ImageValidateError, validate_inner, allowlist_mime, str, validate_image_bytes_with, validate_image_bytes, validate_image_bytes_unrestricted, jpeg_reaches_eoi, skip_segment, png_structurally_valid, PNG_SIG, webp_riff_complete, format_structurally_complete, image_structurally_complete, MAX_TRANSCODE_DECODE_PIXELS, TRANSCODE_MIN_UPSCALE_SIDE, is_client_transcode_format (additional symbols omitted from the title but included in source evidence) follow explicit markers explicit error classification、platform/feature conditional、sandbox, trust, or allow/deny policy、tool definition, schema, or registry projection、session, prompt, goal, or subagent context、image/PDF/media processing; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/util/image_validate.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Policy boundary
+- **WHEN** input crosses an allow/deny or sandbox check
+- **THEN** the explicit policy branch controls admission before execution.
+
+证据：`crates/codegen/tools/src/util/image_validate.rs` — `TRUNCATED_NEEDLES`；`crates/codegen/tools/src/util/image_validate.rs` — `ImageValidateError`；`crates/codegen/tools/src/util/image_validate.rs` — `validate_inner`；`crates/codegen/tools/src/util/image_validate.rs` — `allowlist_mime`；`crates/codegen/tools/src/util/image_validate.rs` — `str`；`crates/codegen/tools/src/util/image_validate.rs` — `validate_image_bytes_with`；`crates/codegen/tools/src/util/image_validate.rs` — `validate_image_bytes`；`crates/codegen/tools/src/util/image_validate.rs` — `validate_image_bytes_unrestricted`；`crates/codegen/tools/src/util/image_validate.rs` — `jpeg_reaches_eoi`；`crates/codegen/tools/src/util/image_validate.rs` — `skip_segment`；`crates/codegen/tools/src/util/image_validate.rs` — `png_structurally_valid`；`crates/codegen/tools/src/util/image_validate.rs` — `PNG_SIG`；`crates/codegen/tools/src/util/image_validate.rs` — `webp_riff_complete`；`crates/codegen/tools/src/util/image_validate.rs` — `format_structurally_complete`；`crates/codegen/tools/src/util/image_validate.rs` — `image_structurally_complete`；`crates/codegen/tools/src/util/image_validate.rs` — `MAX_TRANSCODE_DECODE_PIXELS`；`crates/codegen/tools/src/util/image_validate.rs` — `TRANSCODE_MIN_UPSCALE_SIDE`；`crates/codegen/tools/src/util/image_validate.rs` — `is_client_transcode_format`；`crates/codegen/tools/src/util/image_validate.rs` — `needs_endpoint_transcode`；`crates/codegen/tools/src/util/image_validate.rs` — `transcode_to_endpoint_png`；`crates/codegen/tools/src/util/image_validate.rs` — `decode_to_png`；`crates/codegen/tools/src/util/image_validate.rs` — `classify_image_error`；`crates/codegen/tools/src/util/image_validate.rs` — `classify_io_kind`；`crates/codegen/tools/src/util/image_validate.rs` — `png_bytes`；`crates/codegen/tools/src/util/image_validate.rs` — `jpeg_bytes`；`crates/codegen/tools/src/util/image_validate.rs` — `bmp_bytes`；`crates/codegen/tools/src/util/image_validate.rs` — `gif_bytes`；`crates/codegen/tools/src/util/image_validate.rs` — `valid_png_round_trips`。
+
+### Requirement: Tools crates/codegen/tools/src/util/path_suggestions.rs tool utility and boundary validation contract
+crates/codegen/tools/src/util/path_suggestions.rs SHALL implement the tool utility and boundary validation boundary through provide bounded path, environment, hashing, image, truncation, encoding, or process helper semantics. Its source symbols HINT_TIMEOUT, MAX_SIMILAR, MIN_LEAF_LEN, MIN_REVERSE_STEM_LEN, PathNotFoundHint, fmt, path_not_found_hint, format_not_found_error, collect_hints, try_suggest_under_cwd, find_similar_entries, cwd_note_always_present, dropped_repo_folder_detected, dropped_repo_folder_not_triggered_for_path_under_cwd, dropped_repo_folder_not_triggered_for_existing_sibling, suggestion_takes_priority_over_similar_scan, similar_name_multi_match, similar_name_cap_at_max (additional symbols omitted from the title but included in source evidence) follow explicit markers filesystem or durable persistence、explicit error classification、timeout, budget, or rate limit、platform/feature conditional、tool definition, schema, or registry projection、session, prompt, goal, or subagent context、repository/worktree scope; errors, cancellation, persistence, and platform branches are only those visible in the implementation.
+
+#### Scenario: Error classification
+- **WHEN** an input reaches an explicit error/result branch in crates/codegen/tools/src/util/path_suggestions.rs
+- **THEN** the implementation returns or propagates its declared error without turning failure into a successful tool result.
+
+#### Scenario: Resource boundary
+- **WHEN** crates/codegen/tools/src/util/path_suggestions.rs performs its filesystem or process operation
+- **THEN** the operation follows the implementation’s bounded, cleanup, and failure paths; no stronger durability is inferred.
+
+#### Scenario: Budget boundary
+- **WHEN** a timeout, size, rate, or token budget is reached
+- **THEN** the source applies its configured cap or timeout path and reports the corresponding result.
+
+证据：`crates/codegen/tools/src/util/path_suggestions.rs` — `HINT_TIMEOUT`；`crates/codegen/tools/src/util/path_suggestions.rs` — `MAX_SIMILAR`；`crates/codegen/tools/src/util/path_suggestions.rs` — `MIN_LEAF_LEN`；`crates/codegen/tools/src/util/path_suggestions.rs` — `MIN_REVERSE_STEM_LEN`；`crates/codegen/tools/src/util/path_suggestions.rs` — `PathNotFoundHint`；`crates/codegen/tools/src/util/path_suggestions.rs` — `fmt`；`crates/codegen/tools/src/util/path_suggestions.rs` — `path_not_found_hint`；`crates/codegen/tools/src/util/path_suggestions.rs` — `format_not_found_error`；`crates/codegen/tools/src/util/path_suggestions.rs` — `collect_hints`；`crates/codegen/tools/src/util/path_suggestions.rs` — `try_suggest_under_cwd`；`crates/codegen/tools/src/util/path_suggestions.rs` — `find_similar_entries`；`crates/codegen/tools/src/util/path_suggestions.rs` — `cwd_note_always_present`；`crates/codegen/tools/src/util/path_suggestions.rs` — `dropped_repo_folder_detected`；`crates/codegen/tools/src/util/path_suggestions.rs` — `dropped_repo_folder_not_triggered_for_path_under_cwd`；`crates/codegen/tools/src/util/path_suggestions.rs` — `dropped_repo_folder_not_triggered_for_existing_sibling`；`crates/codegen/tools/src/util/path_suggestions.rs` — `suggestion_takes_priority_over_similar_scan`；`crates/codegen/tools/src/util/path_suggestions.rs` — `similar_name_multi_match`；`crates/codegen/tools/src/util/path_suggestions.rs` — `similar_name_cap_at_max`；`crates/codegen/tools/src/util/path_suggestions.rs` — `similar_name_short_entry_not_matched`；`crates/codegen/tools/src/util/path_suggestions.rs` — `display_with_suggestion`；`crates/codegen/tools/src/util/path_suggestions.rs` — `display_with_similar`；`crates/codegen/tools/src/util/path_suggestions.rs` — `display_empty`。
+### Requirement: Pager task-result test: child_slash_rejection_is_rendered_in_the_child_view
+A rejected slash command correlated to a child session SHALL render an error Notice in that child view while leaving the root scrollback unchanged.
+
+#### Scenario: Child command rejection
+- **WHEN** a child-session slash command completes with an error
+- **THEN** only the matching child view receives a Command/Error notice.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `child_slash_rejection_is_rendered_in_the_child_view`。
+
+### Requirement: Pager task-result test: trajectory_post_ready_failure_is_visible
+A post-ready trajectory runtime termination SHALL surface its message as an agent toast while producing no dispatch effect.
+
+#### Scenario: Trajectory runtime failure
+- **WHEN** the trajectory exits with a nonzero status after readiness
+- **THEN** the exact termination message is visible in the agent toast.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `trajectory_post_ready_failure_is_visible`。
+
+### Requirement: Pager task-result test: doctor_planning_promotes_initial_session_binding
+Doctor planning SHALL bind the initial target identity to the current session binding when the target was captured before the session became bound.
+
+#### Scenario: Doctor initial binding
+- **WHEN** planning completes after the session is first bound
+- **THEN** the doctor question target carries the newly bound session id.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `doctor_planning_promotes_initial_session_binding`。
+
+### Requirement: Pager task-result test: doctor_planning_rejects_bind_replace_and_unbind_rebind
+Doctor planning SHALL reject a target whose session identity was replaced or unbound and rebound after capture.
+
+#### Scenario: Doctor stale binding
+- **WHEN** the captured target sees a replacement or rebinding before plan completion
+- **THEN** no doctor modal opens and a session-changed system message is rendered.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `doctor_planning_rejects_bind_replace_and_unbind_rebind`。
+
+### Requirement: Pager task-result test: doctor_planning_opens_refuses_remote_and_rejects_stale_identity
+Doctor planning SHALL open a local confirmation modal without copying the draft into scrollback, render a local-run instruction for remote execution, and reject later stale identities.
+
+#### Scenario: Doctor planning modes
+- **WHEN** a local plan, remote-run outcome, or stale target is delivered
+- **THEN** the modal or instruction is rendered in the matching surface and stale planning is refused.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `doctor_planning_opens_refuses_remote_and_rejects_stale_identity`。
+
+### Requirement: Pager task-result test: doctor_apply_completion_prefers_initiator_then_active_and_welcome_fallback
+Doctor apply failures SHALL target the initiating agent, then the active agent when the initiator disappeared, and finally the welcome startup warning when no agent remains.
+
+#### Scenario: Doctor failure routing
+- **WHEN** the apply result fails under each available target surface
+- **THEN** the error is surfaced exactly by the highest-priority remaining surface.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `doctor_apply_completion_prefers_initiator_then_active_and_welcome_fallback`。
+
+### Requirement: Pager task-result test: doctor_apply_progress_is_live_only_and_terminal_result_is_typed
+Doctor apply progress SHALL remain live-only; its terminal failure SHALL clear live status and append a typed Command/Error notice.
+
+#### Scenario: Doctor apply terminal
+- **WHEN** a doctor fix is confirmed and then fails
+- **THEN** the transient Applying status never enters history and the typed terminal notice contains the failure.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `doctor_apply_progress_is_live_only_and_terminal_result_is_typed`。
+
+### Requirement: Pager task-result test: doctor_apply_reload_success_does_not_claim_live_finding_disappeared
+A doctor fix requiring reload SHALL render resolution instructions and request a later doctor verification without claiming that the finding disappeared.
+
+#### Scenario: Doctor reload resolution
+- **WHEN** a tmux clipboard fix applies but requires reload
+- **THEN** the message includes reload and rerun guidance and omits a zero-issues claim.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `doctor_apply_reload_success_does_not_claim_live_finding_disappeared`。
+
+### Requirement: Pager task-result test: doctor_apply_success_only_renders_resolution_instructions
+A satisfied-now doctor fix SHALL render only its resolution instructions, including any shell restart guidance, without replaying diagnostic headings.
+
+#### Scenario: Doctor satisfied resolution
+- **WHEN** an SSH-wrap fix is applied immediately
+- **THEN** the agent receives setup and restart instructions without Environment or Findings sections.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `doctor_apply_success_only_renders_resolution_instructions`。
+
+### Requirement: Pager task-result test: x11_primary_hint_requires_canonical_full_miss_outcome
+The X11 primary-selection hint SHALL require the canonical FullMiss outcome on X11; handled, dropped, attachment-error, and non-X11 outcomes SHALL not show it.
+
+#### Scenario: X11 primary hint eligibility
+- **WHEN** clipboard paste completes with a non-full-miss or non-X11 outcome
+- **THEN** no X11 toast is shown.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `x11_primary_hint_requires_canonical_full_miss_outcome`。
+
+### Requirement: Pager task-result test: wrap_host_image_request_eligible_covers_full_miss_and_attachment_error_only
+Host image wrapping SHALL be eligible only for FullMiss and AttachmentRead failures; all other clipboard outcomes SHALL remain terminal local failures.
+
+#### Scenario: Host image fallback eligibility
+- **WHEN** a clipboard completion is classified
+- **THEN** only the two eligible classes route to the host-image request.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `wrap_host_image_request_eligible_covers_full_miss_and_attachment_error_only`。
+
+### Requirement: Pager task-result test: x11_primary_hint_routes_to_originating_agent
+X11 primary guidance SHALL route to the originating agent target rather than whichever agent is active.
+
+#### Scenario: Originating agent hint
+- **WHEN** the originating agent differs from the active agent
+- **THEN** only the origin agent receives the hint toast.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `x11_primary_hint_routes_to_originating_agent`。
+
+### Requirement: Pager task-result test: x11_primary_hint_routes_to_originating_dashboard
+X11 primary guidance for dashboard dispatch SHALL route to dashboard feedback rather than an unrelated active agent toast.
+
+#### Scenario: Originating dashboard hint
+- **WHEN** a dashboard paste is a full miss on X11
+- **THEN** dashboard feedback contains the hint and the agent toast remains empty.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `x11_primary_hint_routes_to_originating_dashboard`。
+
+### Requirement: Pager task-result test: clipboard_failure_routes_to_originating_agent_without_duplicate
+Clipboard failures SHALL route to the originating agent and an AlreadyReported failure SHALL preserve the existing toast without duplication.
+
+#### Scenario: Originating clipboard failure
+- **WHEN** an agent prompt paste fails
+- **THEN** the origin receives the typed error and a previously reported toast is retained.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `clipboard_failure_routes_to_originating_agent_without_duplicate`。
+
+### Requirement: Pager task-result test: clipboard_failure_routes_to_originating_dashboard
+Clipboard attachment failures for dashboard dispatch SHALL render dashboard feedback and never an unrelated agent toast.
+
+#### Scenario: Dashboard clipboard failure
+- **WHEN** dashboard paste attachment reading fails
+- **THEN** dashboard feedback contains the failure.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs` — `clipboard_failure_routes_to_originating_dashboard`。
+### Requirement: Pager edit diff rendering SHALL expose single-hunk and multi-hunk highlighted projections. DiffRenderConfig defaults to an indented single new-line-number gutter, content-only backgrounds, ellipsis separators, and no dual columns; equal/delete/insert lines use independent old/new syntax highlighters, trim only CR/LF terminators, and fall back to plain themed spans when syntax highlighting is unavailable.
+render_diff_hunk_highlighted and render_diff_hunks_highlighted SHALL share one walker so syntax, gutters, backgrounds, separators, wrapping metadata, and content_text have the same behavior. Delete and insert sides SHALL advance separate highlighter state; equal lines SHALL render on the new side while advancing the old side.
+
+#### Scenario: Default diff projection
+- **WHEN** a DiffHunk is rendered with DiffRenderConfig::default()
+- **THEN** the output has an indented single new-line-number gutter, themed content spans, and no dual-number column.
+
+#### Scenario: Independent diff sides
+- **WHEN** a deleted multiline opener is followed by an inserted code line
+- **THEN** the inserted line is highlighted from its own highlighter and does not inherit the deleted side state.
+
+#### Scenario: Syntax fallback
+- **WHEN** the file extension has no syntax or syntect returns no ranges
+- **THEN** the line content remains visible with the corresponding plain equal/change style.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `DiffRenderConfig / impl Default for DiffRenderConfig`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `render_diff_hunk_highlighted`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `render_diff_hunks_highlighted`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `render_diff_hunks_core`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `render_content_spans`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `syntax_highlight_splits_keyword_and_string_fg`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `delete_side_multiline_string_does_not_leak_into_insert`。
+
+### Requirement: Pager edit diff rendering SHALL insert configured separator rows between non-empty hunks. When surrounding new-file line numbers prove a positive monotonic gap, the separator SHALL state the singular or plural unchanged-line count; adjacent, non-monotonic, pure-deletion, or otherwise uncomputable gaps SHALL use the bare separator without inventing a count.
+hunk_gap_lines SHALL ignore deleted rows when locating the previous and next new-file lines, use checked subtraction, and return a count only when it is positive. Separator rows SHALL have no background, no selection content, no joiner, and is_separator=true.
+
+#### Scenario: Countable gap
+- **WHEN** the next hunk begins eight hidden new-file lines after the previous hunk
+- **THEN** the separator reads the configured marker plus “8 unchanged lines”.
+
+#### Scenario: Singular gap
+- **WHEN** exactly one new-file line is hidden
+- **THEN** the separator uses “1 unchanged line”.
+
+#### Scenario: Unsafe gap
+- **WHEN** hunks are adjacent, non-monotonic, or the later hunk has no new-file line
+- **THEN** the separator remains bare and does not render a negative or guessed count.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `hunk_gap_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `render_diff_hunks_core`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_diff_hunk_separator`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `hunk_separator_singular_gap`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `hunk_separator_bare_for_non_monotonic_or_adjacent`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `snapshot_diff_merged_hunks_gap_markers`。
+
+### Requirement: Pager edit diff rows SHALL support single and dual line-number gutters with widths derived from the largest old/new line number in each hunk. Delete and insert gutter numbers use their change colors; equal numbers use the gutter color. Background start SHALL follow gutter_bg and indent_bg, allowing content-only, full-gutter, or indent-excluded coverage.
+gutter_layout SHALL keep at least one digit of width even for zero/empty numbers. In dual mode deleted rows blank the new column and inserted rows blank the old column; in single mode each row shows its relevant line number. content_start_col SHALL identify the configured background start.
+
+#### Scenario: Single-number gutter
+- **WHEN** dual_line_numbers is false
+- **THEN** equal rows show new line numbers and changed rows show the applicable old/new number in one column.
+
+#### Scenario: Dual-number gutter
+- **WHEN** dual_line_numbers is true
+- **THEN** equal rows show both columns while delete/insert rows blank the opposite side.
+
+#### Scenario: Gutter background
+- **WHEN** gutter_bg is enabled and indent_bg is varied
+- **THEN** content_start_col reflects whether the indent is included while the row retains its semantic change background.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `gutter_layout`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `render_gutter`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `compute_bg_start`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_gutter_layout_single`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_gutter_layout_dual`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_diff_line_exact_layout`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_diff_line_exact_layout_two_digit`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_diff_gutter_bg_flag`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `snapshot_diff_basic_dual`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `snapshot_diff_three_digit_lines_dual`。
+
+### Requirement: Pager edit rows SHALL expand tabs using the global appearance tab width before highlighting and expose the expanded content through both rendered spans and content_text. Lines wider than the available content area SHALL wrap into continuation rows with padded gutters, continuation joiners, preserved semantic backgrounds, and change foregrounds even on bandless themes.
+expand_tabs SHALL return borrowed text when no expansion is needed and replace tabs when the configured width is nonzero. assemble_diff_line_outputs SHALL preserve raw content across wrapped rows, set joiner=None for the first row and an empty continuation joiner thereafter, and avoid dropping empty content from a painted background band.
+
+#### Scenario: Tab expansion
+- **WHEN** an inserted Go line contains a tab and the global tab width is four
+- **THEN** the row and content_text contain four spaces and no tab byte.
+
+#### Scenario: Long equal line
+- **WHEN** content width is narrower than an equal line
+- **THEN** the output has a first row with the real gutter and continuation rows with padded gutters.
+
+#### Scenario: Bandless changed wrap
+- **WHEN** a delete or insert line wraps under a line-foreground theme
+- **THEN** every wrapped content segment keeps the delete or insert foreground and background.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `expand_tabs`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `wrap_text`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `assemble_diff_line_outputs`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `tabs_expanded_in_diff_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_diff_reflow_wrapping`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_diff_reflow_keeps_change_fg_for_bandless_theme`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_diff_reflow_preserves_background`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `tabs_expanded_in_file_scoped_paint`。
+
+### Requirement: Edit full-file syntax highlighting SHALL be an optional bounded upgrade from hunk-only paint. The worker gate SHALL reject post-edit text over 2 MiB or 50,000 logical lines, and the style computation SHALL refuse to upgrade when any Equal/Insert hunk line does not exactly match the expanded corresponding disk line or when required lines are missing.
+file_text_within_hl_caps SHALL count an empty file as zero lines and a non-newline-terminated final line as one line. compute_file_scoped_styles SHALL walk the file only through the largest requested new-file line, preserve only requested Equal/Insert line styles keyed by one-based line number, and return None on syntax unavailability, text drift, or incomplete coverage.
+
+#### Scenario: Oversized file
+- **WHEN** file text exceeds either the byte or line cap
+- **THEN** the file-scoped worker remains eligible for HunkOnly and returns false from the cap predicate.
+
+#### Scenario: Matching disk content
+- **WHEN** requested hunk text matches expanded file lines
+- **THEN** the worker returns styles whose segments correspond to the full-file highlighter state.
+
+#### Scenario: Disk drift
+- **WHEN** a requested hunk line differs from the disk line
+- **THEN** compute_file_scoped_styles returns None and does not authorize content replacement.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EDIT_HL_MAX_BYTES / EDIT_HL_MAX_LINES`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `file_text_within_hl_caps`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `hunk_new_line_texts`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `compute_file_scoped_styles`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `file_scoped_matches_full_file_on_field_line`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `compute_file_scoped_rejects_disk_hunk_mismatch`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `file_text_caps_reject_huge_input`。
+
+### Requirement: EditHighlightPhase SHALL distinguish HunkOnly, in-flight Pending, and theme-tagged FileScoped maps. FileScoped rendering SHALL override Equal rows and, only for banded themes, Insert rows; Delete rows SHALL retain the hunk-only paint. A map baked under a different current theme SHALL be ignored so the whole block falls back to hunk-only rendering.
+render_diff_lines SHALL dispatch FileScoped styles only when its baked ThemeKind equals the current theme kind. map_spans_for_line SHALL validate line text before applying a map and SHALL never override Delete rows; wrapped lines use the common cold wrapping path.
+
+#### Scenario: Pending upgrade
+- **WHEN** a worker has assigned a job id but no map yet
+- **THEN** the block continues to render with HunkOnly paint.
+
+#### Scenario: Fresh scoped map
+- **WHEN** the map theme equals the current theme and line text matches
+- **THEN** Equal/eligible Insert spans use the file-scoped foreground segmentation.
+
+#### Scenario: Stale theme
+- **WHEN** the same map is tagged with a different theme
+- **THEN** render_diff_lines produces output identical to HunkOnly.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditHighlightPhase`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `render_diff_hunks_with_styles`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `map_spans_for_line`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::render_diff_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `file_scoped_stale_theme_falls_back_to_hunk_only`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `triple_quote_hunk_only_differs_from_full_file_today`。
+
+### Requirement: EditToolCallBlock SHALL retain the source path, ordered diff hunks, edit count, error state, timing fields, display prefix, optional workflow display name, summary trust, cached insertion/deletion counts, and highlight phase. Construction and set_hunks SHALL recompute counts from ChangeTag rows and clamp an empty hunk list to an edit count of at least one.
+new SHALL initialize successful HunkOnly state with no timing and compute counts eagerly; set_hunks SHALL replace hunks, reset edit_count to hunks.len().max(1), and invalidate the cached counts. Equal rows contribute neither insertion nor deletion.
+
+#### Scenario: Initial block
+- **WHEN** a new edit block is created from hunks
+- **THEN** the block starts successful, HunkOnly, untimed, and with cached counts matching its rows.
+
+#### Scenario: Hunk replacement
+- **WHEN** set_hunks receives a different hunk set
+- **THEN** the visible hunk set, edit count, and diffstat counts all reflect the replacement.
+
+#### Scenario: Empty edit call
+- **WHEN** new receives no hunks
+- **THEN** edit_count remains one and the block can still render its header.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::new`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::set_hunks`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::compute_changes`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_edit_block_header`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_edit_block_output_line_count`。
+
+### Requirement: EditToolCallBlock SHALL represent success by an absent error, calculate elapsed milliseconds from started_at when an error is set or finish is called, and expose a live elapsed value before finalization. Timing finalization SHALL be idempotent and pre-completed blocks without started_at SHALL remain untimed.
+set_error SHALL finalize elapsed_ms only when it has not already been set and then replace the error option. finish SHALL leave an existing elapsed_ms unchanged; elapsed_ms() SHALL prefer the stored value and otherwise compute from started_at.
+
+#### Scenario: Running failure
+- **WHEN** started_at exists and set_error receives Some(error)
+- **THEN** elapsed_ms is captured once and error makes is_success false.
+
+#### Scenario: Pre-completed block
+- **WHEN** started_at is None
+- **THEN** finish is a no-op and elapsed_ms remains None.
+
+#### Scenario: Repeated finish
+- **WHEN** elapsed_ms was already finalized
+- **THEN** a later finish does not overwrite the captured duration.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::with_error`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::is_success`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::set_error`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::finish`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::elapsed_ms`。
+
+### Requirement: Edits of a `.rhai` file located below a `workflows` path component SHALL display the workflow stem instead of the path, use an “Editing workflow ” prefix by default, and translate a “Creating ” prefix into “Creating workflow ”. Other `.rhai` paths SHALL remain ordinary Edit blocks while their file link still targets the real path.
+workflow_script_name SHALL require the rhai extension and an ancestor named workflows, skipping the file itself; the display stem is derived from file_stem. The workflow display name affects header text only, not path_link_target.
+
+#### Scenario: Workflow edit
+- **WHEN** path is .grow/workflows/cc-deep-research.rhai
+- **THEN** the header displays “Editing workflow cc-deep-research”.
+
+#### Scenario: Workflow creation
+- **WHEN** a workflow block receives with_prefix("Creating ")
+- **THEN** the header displays “Creating workflow <stem>”.
+
+#### Scenario: Ordinary script
+- **WHEN** a .rhai path is outside workflows
+- **THEN** the block keeps the “Edit ” prefix and has no workflow display name.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `workflow_script_name`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::new`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::with_prefix`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `workflow_script_header_hides_rhai_path`。
+
+### Requirement: Edit headers SHALL present the path according to Collapsed, Expanded, or Fullscreen tool-path surfaces. The collapsed one-line header MAY append a colored insertion/deletion diffstat when the summary is trusted and line_summary is enabled; otherwise a multi-edit block MAY show “(N edits)”. Expanded and fullscreen headers SHALL remain bare because their bodies show hunks.
+header_line SHALL reserve suffix width before path abbreviation, keep the path in span 1 for collapsed selection/link invariants, suppress all diffstat counts for summary_untrusted blocks, and use diff insert/delete colors for count spans even when the header is muted.
+
+#### Scenario: Trusted collapsed summary
+- **WHEN** line_summary is enabled and hunks contain changes
+- **THEN** the collapsed header shows “+insertions/-deletions” in diff colors.
+
+#### Scenario: Untrusted summary
+- **WHEN** summary_untrusted is true
+- **THEN** diffstat is suppressed; with edit_count greater than one the fallback is “(N edits)”.
+
+#### Scenario: Expanded surface
+- **WHEN** the block is Expanded or Fullscreen
+- **THEN** the header has no diffstat or edit-count suffix and the body owns the detailed diff.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::header_line`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::count_changes`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::with_untrusted_summary`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `header_diffstat_spans_use_diff_colors`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `untrusted_summary_suppresses_diffstat`。
+
+### Requirement: Expanded edit headers SHALL wrap through the shared word-wrap helper while preserving which spans belong to the path, reconstructing selection text across soft and mid-word joins, and emitting selection boundaries for path fragments that cross rows. Every row containing path text SHALL carry the same resolved file link target; collapsed selection SHALL match the painted basename.
+wrap_edit_header SHALL retain path span ranges after prefix decoration and distinguish path joiner text from non-path joiner text. path_link_target SHALL resolve the original path relative to cwd through the shared OSC8 file target helper, while the displayed path may be abbreviated per surface.
+
+#### Scenario: Wrapped path
+- **WHEN** an expanded path exceeds the width, including a mid-word split
+- **THEN** reassembled selection text equals the original path and non-path rows remain non-selectable.
+
+#### Scenario: Collapsed basename
+- **WHEN** an absolute path is rendered Collapsed
+- **THEN** the painted selectable span and derived selection text are the basename.
+
+#### Scenario: Shared file link
+- **WHEN** the same absolute path is rendered on all surfaces
+- **THEN** each path-bearing row links to the absolute file URI target.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `split_joiner_by_path`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `wrap_edit_header`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::path_link_target`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `wrapped_header_path_provenance_survives_all_wrap_shapes`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `collapsed_selection_matches_painted_basename`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `header_link_target_is_absolute_file_for_all_surfaces`。
+
+### Requirement: EditToolCallBlock SHALL render a collapsed header-only surface and expanded/truncated surfaces containing a wrapped header, optional non-selectable error lines, an empty separator, and selectable diff content. Diff rows SHALL exclude gutters from selection, carry per-hunk selection ranges, preserve semantic insert/delete backgrounds, and honor max_lines truncation while retaining only valid selection-boundary entries.
+rendered_output SHALL convert appearance edit settings into DiffRenderConfig, attach link targets only to path-bearing rows, increment diff range IDs across separator rows, and keep error decoration non-selectable. Collapsed output selects only the path span and has TOOL_HEADER_RANGE.
+
+#### Scenario: Collapsed block
+- **WHEN** DisplayMode::Collapsed is requested
+- **THEN** exactly one header line is emitted and no diff body is present.
+
+#### Scenario: Expanded successful block
+- **WHEN** the block has hunks and no error
+- **THEN** header, blank separator, diff rows, selectable content spans, and semantic change backgrounds are emitted.
+
+#### Scenario: Error and truncation
+- **WHEN** the block has an error or max_lines is set
+- **THEN** error lines are decoration, and truncation removes rows plus stale boundary entries beyond the retained range.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::rendered_output`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::output`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_edit_block_output_line_count`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_edit_block_backgrounds`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `collapsed_mode_renders_header_only`。
+
+### Requirement: EditToolCallBlock SHALL integrate with BlockContent using configured edit accent/background/vpad settings, a red error bullet, no raw mode, and foldability whenever hunks or an error exist. Its context-free default display mode is Collapsed, successful completion preserves the current mode, failed completion requests Collapsed, and folding toggles between Collapsed and Expanded.
+accent and accent_background SHALL read the edit appearance configuration; bullet SHALL use the current error accent only when error is Some. has_raw_mode SHALL be false, preamble SHALL render the Fullscreen header, and background/vpad SHALL delegate to edit configuration.
+
+#### Scenario: Successful edit
+- **WHEN** error is None
+- **THEN** the block has no error bullet, remains foldable only when hunks exist, and finished_display_mode is None.
+
+#### Scenario: Failed edit
+- **WHEN** error is Some
+- **THEN** a red bullet is returned, the block is foldable, and finished_display_mode requests Collapsed.
+
+#### Scenario: Fold toggle
+- **WHEN** next_fold_mode receives Collapsed or another mode
+- **THEN** Collapsed transitions to Expanded and any other mode transitions to Collapsed.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `impl BlockContent for EditToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::bullet`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::accent_background`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::background`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::finished_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `EditToolCallBlock::preamble`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `test_edit_block_no_accent`。
+
+### Requirement: The edit renderer SHALL preserve the layout and style contracts pinned by its inline regression tests and snapshots: line-number width changes, long-line reflow, merged-hunk markers, dual-number projections, tab expansion, and syntax scopes that cross hunk boundaries. These tests are source-level evidence for the rendering behavior and do not prove terminal integration.
+The snapshot and focused tests SHALL distinguish cold hunk-only state from full-file state, verify raw syntect RGB differences under the theme lock, and ensure a mid-file closing triple quote corrects subsequent Equal-line styles without replacing displayed hunk text.
+
+#### Scenario: Layout snapshot
+- **WHEN** a basic, three-digit, reflowed, merged, or dual-number hunk is rendered
+- **THEN** the corresponding snapshot shape remains stable.
+
+#### Scenario: Syntax spill regression
+- **WHEN** a hunk starts at a closing Python triple quote after the opener is outside the hunk
+- **THEN** file-scoped styles match a full-file walk while hunk-only styles retain the demonstrated cold-start mismatch.
+
+#### Scenario: Theme lock
+- **WHEN** highlight tests run while GrowNight is pinned
+- **THEN** raw RGB assertions remain meaningful instead of collapsing under color quantization.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `snapshot_diff_basic / snapshot_diff_three_digit_lines / snapshot_diff_reflow / snapshot_diff_multiple_hunks`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `snapshot_diff_merged_hunks_gap_markers`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `snapshot_diff_basic_dual / snapshot_diff_three_digit_lines_dual / snapshot_diff_reflow_dual / snapshot_diff_multiple_hunks_dual`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `pin_grownight_syntect`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `file_scoped_matches_full_file_on_field_line`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `file_scoped_stale_theme_falls_back_to_hunk_only`；`crates/codegen/pager/src/scrollback/blocks/tool/edit.rs` — `triple_quote_hunk_only_differs_from_full_file_today`。
+### Requirement: Agent input behavior-confirmation capture contract
+Behavior-switch confirmation SHALL consume the deciding Enter or cancellation event before composer, overlay, or global shortcuts; confirmation selects the target mode, cancellation selects the current mode, and both clear the banner without editing the draft.
+
+#### Scenario: Confirmation event
+- **WHEN** a behavior switch banner is active and a key, paste, or mouse event arrives
+- **THEN** the event is converted to SetBehaviorMode or Unchanged according to the documented selection boundary.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `handle_behavior_switch_confirmation`。
+
+### Requirement: Agent leader-key timeout and continuation contract
+The Ctrl-X leader SHALL expire after LEADER_KEY_TIMEOUT and maintain_leader_key SHALL clear an expired start marker while leaving an unexpired marker active.
+
+#### Scenario: Leader timeout
+- **WHEN** the leader deadline is reached
+- **THEN** the marker is cleared and the event is consumed for that expired sequence.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `leader_key_deadline`。
+
+### Requirement: Agent goal-detail overlay navigation contract
+Goal detail SHALL open only when goal state exists, reset navigation on visibility changes, and clear close-hit state when hidden; toggling SHALL use the same transition.
+
+#### Scenario: Goal detail transition
+- **WHEN** goal state is absent, added, or the overlay is toggled
+- **THEN** visibility and renderer navigation follow the guarded transition.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `set_goal_detail_visible`。
+
+### Requirement: Agent external prompt editor ownership contract
+External prompt editing SHALL report Ready only for a normal focused empty composer, Attachments when text or images exist, PastePending while paste probing/deferred send is active, and OwnedElsewhere for any overlay, mode, subagent, viewer, search, queue, or dropdown that owns input.
+
+#### Scenario: Editor ownership
+- **WHEN** an external editor request arrives under a layered AgentView state
+- **THEN** the access enum identifies the highest-priority owner.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `external_prompt_editor_access`。
+
+### Requirement: Agent pane and Esc ownership predicates contract
+is_bare_scrollback, no_input_overlay_pending, is_empty_focused_prompt, no_esc_consumer_pending, overlay_esc_backs_out_from_prompt, overlay_esc_backs_out, plan_overlay_at_back_out_top, and overlay_left_backs_out SHALL gate overlay detachment only when all higher-priority consumers are absent.
+
+#### Scenario: Overlay back-out gating
+- **WHEN** Esc or Left is evaluated while an agent overlay is active
+- **THEN** the predicate stays false while search, selection, viewers, modes, prompts, or input overlays still own the event.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `is_bare_scrollback`。
+
+### Requirement: Agent Esc cancel hint contract
+The Esc cancel hint SHALL be true only when the app-level owner, Vim/minimal policy, pane, composer mode, viewers, dropdowns, searches, edits, subagent view, and input overlays all permit Esc to cancel the running turn.
+
+#### Scenario: Esc hint ownership
+- **WHEN** the hint bar asks whether bare Esc cancels
+- **THEN** the result is conservative and leaves Ctrl-C as fallback whenever another consumer can take Esc.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `esc_would_cancel_turn`。
+
+### Requirement: Agent minimal btw ownership and scroll contract
+Minimal `/btw` input SHALL dismiss on bare Esc, own arrows/page keys only when focused, done, geometrically paintable, and scrollable, and otherwise delegate while preserving/restoring the suspended lifecycle.
+
+#### Scenario: Minimal btw routing
+- **WHEN** a minimal agent receives Esc, scroll keys, or an occluding surface
+- **THEN** the btw panel consumes only eligible events and restores hidden state after delegation.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `handle_minimal_btw_input`。
+
+### Requirement: Agent layered input routing precedence contract
+AgentView SHALL route input through subagent, confirmation, image/gboom/workflow/goal/btw/viewer/modal/permission/plan/rewind/edit/jump/question layers before pane handlers and global registry actions; consumed events return Changed/Action and unconsumed events bubble Unchanged.
+
+#### Scenario: Layer precedence
+- **WHEN** an event arrives while one or more overlays or panes are active
+- **THEN** the first owning layer handles it and lower-priority composer/global actions do not see the event.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `handle_input`；`crates/codegen/pager/src/app/agent_view/input.rs` — `handle_input_inner`。
+
+### Requirement: Agent command picker and selection-context contract
+Command picker opening SHALL use workflow run snapshots for child-agent choices, live catalogs otherwise, pass command-specific suggestions and picker profile state, and show a toast when no options exist; selection context SHALL reflect agent, behavior, goal, and permission state.
+
+#### Scenario: Command picker context
+- **WHEN** a model/agent/behavior/permission selector is requested
+- **THEN** the picker receives the permitted catalog and current context, or a no-options notice is shown.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `open_command_picker`；`crates/codegen/pager/src/app/agent_view/input.rs` — `sync_command_selection_context`。
+
+### Requirement: Agent shortcuts-help registry contract
+Shortcuts help SHALL build entries from the live action registry and active pane/dashboard contexts, preserve Vim mode, and open a browsable modal with collapsed sections and no speculative action execution.
+
+#### Scenario: Shortcuts help
+- **WHEN** the help action is invoked from a pane or dashboard overlay
+- **THEN** the modal reflects the live context-specific registry.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `open_shortcuts_help`。
+
+### Requirement: Agent pane and Vim propagation contract
+Pane changes SHALL clear incompatible search/overlay focus and honor queued-edit lifecycle effects; Vim mode SHALL move an empty prompt to Scrollback and propagate recursively to nested subagent views.
+
+#### Scenario: Pane or mode transition
+- **WHEN** focus or Vim/input mode changes
+- **THEN** incompatible local state is cleared and nested views receive the same Vim policy.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `force_active_pane`；`crates/codegen/pager/src/app/agent_view/input.rs` — `set_active_pane`；`crates/codegen/pager/src/app/agent_view/input.rs` — `set_input_mode`；`crates/codegen/pager/src/app/agent_view/input.rs` — `set_vim_mode_recursive`。
+
+### Requirement: Pager agent input test: ctrl_b_preempts_history_browse_and_search_without_mutating_them
+Ctrl-B demotion SHALL preempt active history browse/search without changing its query, selection, mode, draft, or cursor.
+
+#### Scenario: History search preservation
+- **WHEN** a running execute tool exists while history browse or search is active
+- **THEN** demotion occurs and history state is unchanged.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `ctrl_b_preempts_history_browse_and_search_without_mutating_them`。
+
+### Requirement: Pager agent input test: ctrl_b_preempts_file_search_without_mutating_it
+Ctrl-B demotion SHALL preempt an active @ file-search dropdown without changing context, selection, draft, or cursor.
+
+#### Scenario: File search preservation
+- **WHEN** a running execute tool exists while file search is open
+- **THEN** the tool is demoted and file-search state remains intact.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `ctrl_b_preempts_file_search_without_mutating_it`。
+
+### Requirement: Pager agent input test: ctrl_b_preempts_tasks_search_and_filter_without_mutating_them
+Ctrl-B demotion SHALL preempt Tasks pane search/filter without changing pane focus, visibility, input mode, or query text.
+
+#### Scenario: Tasks search preservation
+- **WHEN** a running execute tool exists while Tasks search or filter is active
+- **THEN** demotion occurs and task filtering state remains unchanged.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `ctrl_b_preempts_tasks_search_and_filter_without_mutating_them`。
+
+### Requirement: Pager agent input test: ctrl_g_toggles_tasks_and_never_demotes
+Ctrl-G SHALL toggle the Tasks pane and never demote a running tool, preserving the prompt draft and cursor on open and returning focus to Scrollback on close.
+
+#### Scenario: Tasks shortcut
+- **WHEN** Ctrl-G is pressed with a running execute tool
+- **THEN** the Tasks overlay toggles and no demotion action is returned.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `ctrl_g_toggles_tasks_and_never_demotes`。
+
+### Requirement: Pager agent input test: command_palette_opens_in_input_mode
+Command palette opening SHALL initialize its picker in type-to-find/search-active mode so the next character filters immediately.
+
+#### Scenario: Command palette input mode
+- **WHEN** the command-palette action is invoked
+- **THEN** the CommandPalette modal opens with search_active true.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `command_palette_opens_in_input_mode`。
+
+### Requirement: Pager agent input test: leader_continuations_are_case_insensitive
+Leader continuations SHALL accept case-insensitive letters, including shifted uppercase input.
+
+#### Scenario: Leader case policy
+- **WHEN** an uppercase continuation is entered
+- **THEN** the corresponding selector action is opened.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `leader_continuations_are_case_insensitive`。
+
+### Requirement: Pager agent input test: unknown_leader_continuation_is_consumed
+An unknown leader continuation SHALL be consumed, clear the leader state, and never leak its character into the composer or open a modal.
+
+#### Scenario: Unknown leader key
+- **WHEN** Ctrl-X is followed by an unsupported character
+- **THEN** the draft is unchanged and the leader marker is cleared.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `unknown_leader_continuation_is_consumed`。
+
+### Requirement: Pager agent input test: focused_panel_scrolls_with_arrows
+A focused scrollable `/btw` panel SHALL consume Up/Down and move its body offset while retaining focus.
+
+#### Scenario: Btw arrow scrolling
+- **WHEN** the panel is focused and its answer is scrollable
+- **THEN** arrow events return Changed and adjust the panel offset.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `focused_panel_scrolls_with_arrows`。
+
+### Requirement: Pager agent input test: focused_panel_owns_page_keys_before_prompt_paging
+A focused scrollable `/btw` panel SHALL own PageUp/PageDown before prompt conversation paging.
+
+#### Scenario: Btw page scrolling
+- **WHEN** prompt paging is enabled while the panel is focused
+- **THEN** page keys change panel offset and do not emit prompt paging.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `focused_panel_owns_page_keys_before_prompt_paging`。
+
+### Requirement: Pager agent input test: visible_unfocused_panel_allows_prompt_paging
+A visible but unfocused `/btw` panel SHALL decline PageDown so prompt paging can handle it.
+
+#### Scenario: Btw paging delegation
+- **WHEN** the panel is visible but focus is on the prompt
+- **THEN** PageDown returns the prompt PageDown action and panel offset is unchanged.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `visible_unfocused_panel_allows_prompt_paging`。
+
+### Requirement: Pager agent input test: typing_returns_focus_to_prompt
+Typing while `/btw` has focus SHALL return focus to the prompt and insert the character without scrolling the panel.
+
+#### Scenario: Btw typing handoff
+- **WHEN** a character is entered while the panel is focused
+- **THEN** prompt text receives it and btw focus clears.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `typing_returns_focus_to_prompt`。
+
+### Requirement: Pager agent input test: arrows_move_prompt_cursor_when_prompt_focused
+When the prompt is focused, arrow keys SHALL move the prompt cursor and leave the `/btw` panel offset unchanged.
+
+#### Scenario: Prompt arrow ownership
+- **WHEN** the prompt has multiline text and btw is unfocused
+- **THEN** the cursor moves and the panel does not scroll.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `arrows_move_prompt_cursor_when_prompt_focused`。
+
+### Requirement: Pager agent input test: nonscrollable_answer_never_captures_arrows
+A non-scrollable `/btw` answer SHALL release arrow ownership back to the prompt.
+
+#### Scenario: Btw non-scrollable answer
+- **WHEN** the panel is focused but its content fits
+- **THEN** focus returns to prompt and panel offset remains zero.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `nonscrollable_answer_never_captures_arrows`。
+
+### Requirement: Pager agent input test: scrollback_pane_does_not_capture_arrows
+A `/btw` panel SHALL not capture arrows while Scrollback is the active pane.
+
+#### Scenario: Btw scrollback boundary
+- **WHEN** btw is focused but Scrollback is active
+- **THEN** the panel offset remains unchanged.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `scrollback_pane_does_not_capture_arrows`。
+
+### Requirement: Pager agent input test: esc_dismisses_panel_and_clears_focus
+Bare Esc SHALL dismiss `/btw` and clear its focus.
+
+#### Scenario: Btw dismissal
+- **WHEN** the panel is open and focused
+- **THEN** btw state is removed and focus is false.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `esc_dismisses_panel_and_clears_focus`。
+
+### Requirement: Pager agent input test: minimal_permission_owns_esc_over_hidden_btw
+In minimal mode, a pending permission overlay SHALL own Esc over a latent `/btw` panel and preserve the permission queue.
+
+#### Scenario: Minimal permission precedence
+- **WHEN** permission and hidden btw both exist
+- **THEN** permission focus changes while btw lifecycle remains active.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `minimal_permission_owns_esc_over_hidden_btw`。
+
+### Requirement: Pager agent input test: minimal_modal_and_viewers_own_esc_over_hidden_btw
+Minimal agents modal, block viewer, and goal detail SHALL each consume Esc before a hidden `/btw` panel.
+
+#### Scenario: Minimal shared overlay precedence
+- **WHEN** each modal/viewer is active over latent btw
+- **THEN** the front surface closes while btw remains active.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `minimal_modal_and_viewers_own_esc_over_hidden_btw`。
+
+### Requirement: Pager agent input test: minimal_btw_surface_owner_covers_shared_modal_cascade
+The minimal btw surface SHALL be unavailable when image viewer, gboom, or block viewer owns the shared modal cascade.
+
+#### Scenario: Minimal btw availability
+- **WHEN** each shared modal surface is opened
+- **THEN** minimal_btw_surface_available returns false.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `minimal_btw_surface_owner_covers_shared_modal_cascade`。
+
+### Requirement: Pager agent input test: fullscreen_keeps_btw_first_esc_precedence
+Fullscreen routing SHALL let the open `/btw` panel consume the first Esc even when a permission is pending.
+
+#### Scenario: Fullscreen btw precedence
+- **WHEN** btw and permission coexist
+- **THEN** btw closes while permission remains pending.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `fullscreen_keeps_btw_first_esc_precedence`。
+
+### Requirement: Pager agent input test: minimal_does_not_scroll_unpainted_btw_geometry
+Minimal btw scrolling SHALL require paintable geometry; a default/unpainted area cannot change the offset.
+
+#### Scenario: Btw geometry guard
+- **WHEN** scroll input arrives before btw is painted
+- **THEN** offset remains zero.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `minimal_does_not_scroll_unpainted_btw_geometry`。
+
+### Requirement: Pager agent input test: esc_over_shadowed_jump_picker_spares_btw_panel
+When `/jump` is shadowed by `/btw`, the first Esc SHALL dismiss only the picker and the second SHALL dismiss btw.
+
+#### Scenario: Shadowed picker Esc
+- **WHEN** jump and btw are both open
+- **THEN** Esc consumption is graduated across the two surfaces.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `esc_over_shadowed_jump_picker_spares_btw_panel`。
+
+### Requirement: Pager agent input test: clicking_panel_refocuses_it
+Clicking the rendered btw panel SHALL switch to Prompt, refocus the panel, and allow subsequent arrows to scroll it.
+
+#### Scenario: Btw mouse focus
+- **WHEN** a panel click lands inside the rendered area
+- **THEN** btw focus and prompt pane become active and scrolling works.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `clicking_panel_refocuses_it`。
+
+### Requirement: Pager agent input test: pasting_into_prompt_returns_focus
+Pasting into the prompt SHALL return focus from btw to the prompt even for large text.
+
+#### Scenario: Btw paste handoff
+- **WHEN** a paste event arrives while btw is focused
+- **THEN** btw focus clears.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `pasting_into_prompt_returns_focus`。
+
+### Requirement: Pager agent input test: gate_non_vim_true_vim_false_minimal_overrides_vim
+Esc cancel hint SHALL be true for non-Vim fullscreen running turns, false for Vim fullscreen, and true for Vim minimal mode.
+
+#### Scenario: Esc policy mode gate
+- **WHEN** the same running prompt is tested across Vim/fullscreen and Vim/minimal
+- **THEN** the hint follows screen-mode policy.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `gate_non_vim_true_vim_false_minimal_overrides_vim`。
+
+### Requirement: Pager agent input test: app_level_esc_owner_suppresses_esc_hint
+An app-level Esc owner SHALL suppress the agent-level Esc-cancel hint.
+
+#### Scenario: App Esc owner
+- **WHEN** the app reports an earlier Esc consumer
+- **THEN** the hint is false.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `app_level_esc_owner_suppresses_esc_hint`。
+
+### Requirement: Pager agent input test: queued_edit_and_inline_edit_steal_esc
+Queued-prompt editing and inline prompt editing SHALL own Esc for discard/dismissal instead of canceling the turn.
+
+#### Scenario: Edit Esc ownership
+- **WHEN** either edit state is active during a running turn
+- **THEN** the hint is false.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `queued_edit_and_inline_edit_steal_esc`。
+
+### Requirement: Pager agent input test: agents_modal_steals_esc
+An open Agents modal SHALL own Esc for closure rather than turn cancellation.
+
+#### Scenario: Agents modal Esc ownership
+- **WHEN** the modal is active during a running turn
+- **THEN** the hint is false.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `agents_modal_steals_esc`。
+
+### Requirement: Pager agent input test: bare_scrollback_true_but_open_search_steals_esc
+Bare Scrollback may advertise Esc cancellation, but an open Scrollback search SHALL suppress it.
+
+#### Scenario: Scrollback search Esc ownership
+- **WHEN** Scrollback is bare, then search opens
+- **THEN** the hint changes from true to false.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `bare_scrollback_true_but_open_search_steals_esc`。
+
+### Requirement: Pager agent input test: open_slash_dropdown_steals_esc
+An open slash dropdown SHALL own Esc and suppress the running-turn Esc-cancel hint.
+
+#### Scenario: Slash dropdown Esc ownership
+- **WHEN** slash suggestions are visible during a running turn
+- **THEN** the hint is false.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `open_slash_dropdown_steals_esc`。
+
+### Requirement: Pager agent input test: latent_composer_mode_and_other_panes_keep_ctrl_c
+A latent Bash composer mode or non-Prompt pane SHALL keep Ctrl-C as the advertised cancel key instead of Esc.
+
+#### Scenario: Composer/pane Esc policy
+- **WHEN** Bash mode or Queue pane is active
+- **THEN** the Esc cancel hint is false.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `latent_composer_mode_and_other_panes_keep_ctrl_c`。
+
+### Requirement: Pager agent input test: jump_picker_is_an_esc_consumer
+An open `/jump` picker SHALL count as an Esc consumer for overlay back-out predicates.
+
+#### Scenario: Jump Esc ownership
+- **WHEN** jump picker is opened
+- **THEN** no_esc_consumer_pending becomes false.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `jump_picker_is_an_esc_consumer`。
+
+### Requirement: Pager agent input test: jump_picker_defeats_empty_focused_prompt
+An open `/jump` picker SHALL defeat the empty-focused-prompt back-out guard so its own Esc/Left handling runs.
+
+#### Scenario: Jump prompt guard
+- **WHEN** an empty Prompt is focused and jump opens
+- **THEN** is_empty_focused_prompt becomes false.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `jump_picker_defeats_empty_focused_prompt`。
+
+### Requirement: Pager agent input test: inline_edit_receives_raw_multiline_paste_without_touching_prompt
+Inline edit SHALL receive raw multiline paste at its textarea cursor while the ordinary prompt remains unchanged.
+
+#### Scenario: Inline edit paste ownership
+- **WHEN** a multiline paste arrives with inline edit active
+- **THEN** the edit text contains the inserted lines and hidden prompt text is unchanged.
+
+证据：`crates/codegen/pager/src/app/agent_view/input.rs` — `inline_edit_receives_raw_multiline_paste_without_touching_prompt`。
+### Requirement: AgentView SHALL clear ephemeral permission, question, Plan approval, cancel-turn, and descendant interaction state when a transport is replayed or a terminal child session disappears. Permissions removed during cleanup SHALL receive a cancelled response, centralized queue transitions SHALL be resolved when the front changes, question/approval prompts SHALL be restored, and Plan approval viewer/comment state SHALL be dropped.
+clear_transport_interactions_for_replay SHALL cancel every queued permission and recurse into subagent views. clear_transport_interactions_for_session SHALL filter only matching session ids, preserve unrelated FIFO entries, return whether any state changed, recurse into descendants, and clear question/approval state only when its source session matches.
+
+#### Scenario: Replay cleanup
+- **WHEN** a transport generation is replayed with pending permissions or reverse-request views
+- **THEN** all ephemeral interaction views are removed, permission senders receive Cancelled, and descendant views are cleaned recursively.
+
+#### Scenario: Child session cleanup
+- **WHEN** a terminal child session id is supplied while unrelated permissions remain queued
+- **THEN** matching permissions/questions/approvals are removed and unrelated queue entries stay in order.
+
+#### Scenario: Front permission removal
+- **WHEN** the removed permission was the queue front
+- **THEN** resolve_permission_queue_transition is invoked so the next permission becomes the visible transition.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::clear_transport_interactions_for_replay`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::clear_transport_interactions_for_session`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::take_permission_queue`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::take_question_view`。
+
+### Requirement: AgentView SHALL keep runtime session facts synchronized with ephemeral presentation containers. Permission queue mutations SHALL update pending_permission_count, question replacement/take SHALL update question_pending, and replacement paths SHALL derive facts from the complete resulting queue/view rather than incremental assumptions.
+push_permission, pop_permission_front, remove_permission, take_permission_queue, and replace_permission_queue SHALL preserve the queue/count invariant. replace_question_view SHALL return the old view while setting question_pending to whether the new view exists; take_question_view SHALL clear it through that path.
+
+#### Scenario: Permission enqueue/dequeue
+- **WHEN** a permission is pushed, popped, removed by index, or the whole queue is taken
+- **THEN** pending_permission_count equals the resulting queue length.
+
+#### Scenario: Filtered replacement
+- **WHEN** a queue is replaced after session filtering
+- **THEN** the runtime fact is recomputed from the replacement queue.
+
+#### Scenario: Question modal replacement
+- **WHEN** a question view is opened, replaced, or taken
+- **THEN** question_pending reflects presence of the current view and the previous value is returned on replacement.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::push_permission`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::pop_permission_front`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::remove_permission`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::take_permission_queue`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::replace_permission_queue`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::replace_question_view`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::take_question_view`。
+
+### Requirement: When a ProjectSelect question is open, AgentView SHALL temporarily restore the stashed composer prompt and forward the event to the normal input router so project-picker backing input edits the composer rather than the picker path field. The question view SHALL be restashed after routing; non-project questions SHALL be restored unchanged and return no outcome.
+handle_project_picker_backing_prompt_input SHALL take the question view, guard local_kind=ProjectSelect, restore its stashed prompt, call handle_input, stash the resulting prompt, replace the question view, and return the routed InputOutcome.
+
+#### Scenario: Project picker backing input
+- **WHEN** the active local question is ProjectSelect
+- **THEN** the event is handled by the composer with the question view restored afterward.
+
+#### Scenario: Other question
+- **WHEN** the active question is not ProjectSelect
+- **THEN** the original question view is put back and the helper returns None without routing.
+
+#### Scenario: No question
+- **WHEN** no question view is active
+- **THEN** the helper returns None and does not mutate the prompt.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::handle_project_picker_backing_prompt_input`。
+
+### Requirement: Cancel-turn and Goal interrupt panels SHALL consume their own keyboard and mouse input. Cancel-turn supports navigation, numeric/Enter choice submission, Ctrl-C cancel, Tab to scrollback, and Esc ContinueToRun while refreshing rewind suppression. Goal interrupt supports navigation, numeric/Enter choice submission, Tab/focus controls and an Esc dismiss-only path that closes the panel without cancelling the turn or Goal.
+handle_cancel_turn_key and handle_goal_interrupt_key SHALL return Action only for explicit choices/cancel requests, Changed for consumed navigation/dismissal, and Unchanged for unrelated keys. Mouse handlers SHALL update active rows on hit-test movement and dispatch only left-button clicks inside valid choice rectangles.
+
+#### Scenario: Cancel choice
+- **WHEN** Enter, 1-4, or Ctrl-C is pressed in the cancel panel
+- **THEN** the matching CancelTurnChoice or CancelTurn action is returned.
+
+#### Scenario: Goal dismiss
+- **WHEN** Esc is pressed in the Goal panel
+- **THEN** the panel closes, rewind suppression is refreshed, the turn remains running, and no action is emitted.
+
+#### Scenario: Mouse choice
+- **WHEN** a left click lands inside a choice rect
+- **THEN** the corresponding modal action is returned and the active index follows the clicked row.
+
+#### Scenario: Outside/closed panel
+- **WHEN** a mouse event lands outside rows or the panel is absent
+- **THEN** the handler returns Unchanged without changing modal state.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::handle_cancel_turn_key`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::handle_goal_interrupt_key`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::handle_cancel_turn_mouse`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::handle_goal_interrupt_mouse`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `cancel_turn_mouse_tests::esc_confirm_refreshes_expired_rewind_grace`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `cancel_turn_mouse_tests::goal_panel_esc_dismisses_without_any_action`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `cancel_turn_mouse_tests::goal_panel_mouse_click_submits_choice`。
+
+### Requirement: The question modal SHALL expose Navigation, InputMode, and PlanAction focus modes. Navigation SHALL support bounded cursor movement, page/half jumps, option toggles/selections, option-key shortcuts, freeform activation, question tab cycling, clipboard copy of option text, fullscreen, cancellation/skip and pane transfer. InputMode SHALL route prompt editing and Enter/newline, save per-question freeform state on exit, and advance or submit. PlanAction SHALL select ChatAboutThis or SkipInterview explicitly with arrows/Enter and return to navigation on Esc.
+handle_question_key SHALL preserve per-question freeform text and selection flags across focus changes, clear a single-choice selection when nonblank freeform is selected, call ensure_question_cursor_visible after navigation, and swap/load the freeform slot when changing active tabs. Dismiss/skip shortcuts SHALL route through the dedicated submission helpers.
+
+#### Scenario: Option navigation
+- **WHEN** Navigation receives j/k, page, g/G, space, Enter, or an option key
+- **THEN** the cursor/selection changes within bounds and Enter or the final option submits.
+
+#### Scenario: Freeform entry
+- **WHEN** the cursor is on a freeform row and a printable key, z, Space, Enter, or its sticky row is activated
+- **THEN** the prompt enters InputMode with the tab’s saved text.
+
+#### Scenario: Input submit
+- **WHEN** InputMode receives Enter or a prompt newline event
+- **THEN** the current text is saved, the next question is loaded or the full answer is submitted.
+
+#### Scenario: Plan action
+- **WHEN** PlanAction receives arrows, Enter, Esc, Tab, or Shift-X
+- **THEN** the explicit action changes, submits partial answers, returns to navigation, or transfers focus as defined.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::handle_question_key`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::swap_question_freeform`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::load_question_freeform`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::ensure_question_cursor_visible`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_plan_action_tests::tab_arrows_and_escape_traverse_plan_actions`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_plan_action_tests::enter_on_chat_about_this_sends_partial_answers`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_plan_action_tests::enter_on_skip_interview_sends_current_freeform_as_other`。
+
+### Requirement: Question mouse handling SHALL prioritize navigation buttons, scrollbar, prompt textarea, sticky freeform, and option rows according to the active focus and rendered geometry. Movement SHALL update hover state, scroll events SHALL route to the inline prompt or question list, single clicks SHALL select/toggle, and a second click on the same option within MULTI_CLICK_TIMEOUT_MS SHALL submit or advance.
+handle_question_mouse SHALL clear stale scrollback/click tracking on modal clicks, use question_view row helpers with current width/scroll/preview state, keep no_freeform phantom rows inert, and forward drag/up events to the scrollbar or prompt as applicable.
+
+#### Scenario: Option click
+- **WHEN** a click hits an option row
+- **THEN** the cursor and selection update; a same-row second click within the timeout submits/advances.
+
+#### Scenario: Sticky freeform click
+- **WHEN** freeform is enabled and the click hits its reserved row
+- **THEN** the current tab enters InputMode with its saved text; clicking again can clear the freeform selection.
+
+#### Scenario: Textarea click
+- **WHEN** InputMode is active and the click lands in the textarea
+- **THEN** prompt mouse handling receives the event and a double click may expand a paste chip.
+
+#### Scenario: Hover/scroll
+- **WHEN** the pointer moves or scrolls over question content
+- **THEN** hover state or per-question scroll changes and unrelated regions are consumed without option changes.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::handle_question_mouse`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::question_item_at`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_no_freeform_tests::click_last_option_row_toggles_option_when_no_freeform`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_no_freeform_tests::freeform_modal_click_and_z_still_enter_input_mode`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_freeform_chip_tests::double_click_expands_chip_in_question_input`。
+
+### Requirement: Question scrolling SHALL use the same measured option geometry as rendering. apply_question_scroll SHALL compute visible height from prompt area, focus, preview, phantom freeform and Plan rows, then apply bounded item-delta scrolling. Scrollbar click/drag SHALL map the thumb position back to a clamped content offset, and cursor visibility SHALL be re-established after navigation.
+apply_question_scrollbar_click SHALL no-op without a scrollbar rect, use scrollbar_click_to_offset with total and visible heights, and clamp offsets to max_scroll. question_item_at SHALL map screen rows through scroll offsets and exclude chrome, footer, and hidden freeform rows.
+
+#### Scenario: Wheel scroll
+- **WHEN** the question list receives a positive or negative delta
+- **THEN** the active tab’s scroll offset changes within the measured content bounds.
+
+#### Scenario: Scrollbar drag
+- **WHEN** a valid scrollbar rect receives a click/drag
+- **THEN** the offset becomes top, bottom, or the inverse-mapped clamped position.
+
+#### Scenario: Cursor visibility
+- **WHEN** keyboard navigation moves the cursor beyond the viewport
+- **THEN** ensure_question_cursor_visible updates the active tab scroll to reveal it.
+
+#### Scenario: Chrome hit
+- **WHEN** a row falls outside the scroll region or in footer/chrome
+- **THEN** question_item_at returns None rather than selecting an option.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::apply_question_scroll`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::apply_question_scrollbar_click`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::ensure_question_cursor_visible`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::question_item_at`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `crate::render::scrollbar::scrollbar_click_to_offset`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `permission_mouse_tests::permission_item_at_tracks_args_rows_collapsed_and_expanded`。
+
+### Requirement: Question freeform drafts SHALL be isolated per question tab and synchronized with the prompt widget only when entering/leaving InputMode. Leaving InputMode SHALL preserve nonblank text and selection, clear blank text, reset click timing, and re-entry SHALL retain folded paste chips when the stored slot still matches the live draft. A rewritten slot SHALL replace stale prompt content.
+swap_question_freeform SHALL save the current prompt before active_tab changes; load_question_freeform SHALL restore the new tab’s slot with set_text_preserving. InputMode mouse/key transitions SHALL use the existing prompt buffer when unchanged and only perform wholesale replacement when a slot was rewritten.
+
+#### Scenario: Tab isolation
+- **WHEN** the active question changes
+- **THEN** the previous prompt text is saved under its tab and the next tab’s freeform text is loaded.
+
+#### Scenario: Blank exit
+- **WHEN** InputMode is exited with only whitespace
+- **THEN** freeform selection is false and the slot is cleared.
+
+#### Scenario: Paste chip round trip
+- **WHEN** a multiline paste is folded into a chip, then input is exited and re-entered
+- **THEN** the chip remains folded while the full text remains available for submission.
+
+#### Scenario: Rewritten slot
+- **WHEN** another surface changes the stored freeform slot while the prompt has an old chip draft
+- **THEN** re-entry shows the rewritten text and removes the stale chip.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::swap_question_freeform`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::load_question_freeform`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `handle_question_key InputMode branch`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_freeform_chip_tests::paste_chip_survives_input_mode_round_trip`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_freeform_chip_tests::rewritten_slot_replaces_stale_draft`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_freeform_chip_tests::click_before_exit_does_not_pair_with_click_after_reentry`。
+
+### Requirement: Question submission SHALL distinguish Plan actions, external AskUserQuestion answers, and local ProjectSelect/DoctorFix questions. External accepted/cancelled responses SHALL restore the stashed prompt, clear question visual state, pause-duration accounting and emit the appropriate diagnostics. Plan actions SHALL send ChatAboutThis or SkipInterview with partial answers; local project selection SHALL transfer the complete composer snapshot to pending project creation; DoctorFix skip SHALL emit DoctorFixCancelled.
+submit_question_answers SHALL consume the question view before branching, save the active freeform slot, handle local_kind without sending an ACP ext response, call translate_local_submit except for DoctorFix cancellation, and avoid synthesizing user input. submit_plan_question_action SHALL build/send the selected ext response, restore/cleanup, and log interview_chat or interview_skip.
+
+#### Scenario: Accepted external answer
+- **WHEN** the final external question is submitted without skip
+- **THEN** an accepted ext response is sent, the prompt is restored, state is cleaned, and interview_submit is logged.
+
+#### Scenario: Skipped external answer
+- **WHEN** Ctrl-C/Shift-X or a skip path submits an external question
+- **THEN** Cancelled is sent and interview_cancel is logged.
+
+#### Scenario: Plan chat/skip
+- **WHEN** PlanAction selects ChatAboutThis or SkipInterview
+- **THEN** the corresponding partial-answer ext response is sent and question state closes.
+
+#### Scenario: Local question
+- **WHEN** ProjectSelect or DoctorFix is submitted/skipped
+- **THEN** the project prompt snapshot transfers or DoctorFixCancelled is returned through the local translation path.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::submit_plan_question_action`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::submit_question_answers`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::dismiss_question_view`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_plan_action_tests::enter_on_chat_about_this_sends_partial_answers`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_plan_action_tests::enter_on_skip_interview_sends_current_freeform_as_other`。
+
+### Requirement: dashboard_answer_question SHALL answer only the active external question. A valid option index selects that option; a nonempty freeform string selects Other and clears a single-choice option; empty Other input, missing question view, or local questions SHALL be NoOp. Nonfinal answers advance the active tab, while the final answer sends the accepted response, restores the stashed prompt, clears question state, and returns Submitted.
+The helper SHALL take and restore the question view around NoOp cases, preserve the active per-question vectors, pause turn duration on final submission, and never route local ProjectSelect/DoctorFix through the external response sender.
+
+#### Scenario: Advance peek answer
+- **WHEN** a valid option or nonempty freeform answers a nonfinal question
+- **THEN** the selection is stored and PeekAnswerOutcome::Advanced is returned.
+
+#### Scenario: Submit peek answer
+- **WHEN** the active answer is for the last external question
+- **THEN** the accepted ext response is sent, prompt/state are restored/cleaned, and Submitted is returned.
+
+#### Scenario: Invalid peek answer
+- **WHEN** the question is local, missing, or freeform is blank
+- **THEN** the question view is preserved and NoOp is returned.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::dashboard_answer_question`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `PeekAnswerOutcome`。
+
+### Requirement: When another client resolves an interaction, AgentView SHALL dismiss only the matching question, Plan approval, or permission identified by source session and tool call. Question dismissal restores the prompt and cleans view state; Plan approval sends stale cancel, restores prompt, resets comment/viewer state; removing the front permission resolves the queue transition. Nonmatching or absent interactions SHALL be a silent false result.
+dismiss_resolved_interaction SHALL check question, Plan approval, then permission queue identity; it SHALL return true only when a matching modal is removed. Permission identity comparison SHALL use both session_id and tool_call_id, and removing a non-front permission SHALL not transition the queue.
+
+#### Scenario: Question resolution
+- **WHEN** matching session/tool ids identify the question view
+- **THEN** the question is dismissed and true is returned.
+
+#### Scenario: Plan resolution
+- **WHEN** matching ids identify plan approval
+- **THEN** stale cancel is sent, prompt/viewer/comment state is cleared, and true is returned.
+
+#### Scenario: Permission resolution
+- **WHEN** matching permission is queued
+- **THEN** the item is removed; a front removal resolves transition while a non-front removal leaves FIFO display unchanged.
+
+#### Scenario: Stale resolution
+- **WHEN** ids do not match any visible interaction
+- **THEN** false is returned and no modal state changes.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::dismiss_resolved_interaction`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::dismiss_question_view`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::remove_permission`。
+
+### Requirement: Question interactions SHALL treat no_freeform modals as fixed-choice surfaces. Hidden freeform rows SHALL not be hit-testable, hoverable, keyboard-addressable by z, or selectable below the final option; the final visible option row SHALL still toggle/select normally. Regular questions with freeform SHALL retain sticky-row click and z activation.
+handle_question_mouse, question_item_at, and handle_question_key SHALL jointly apply the no_freeform gate so phantom freeform rows cannot receive cursor, selection, hover, or InputMode state while ordinary freeform questions continue to support the same entry routes.
+
+#### Scenario: No-freeform gap
+- **WHEN** a click or hover lands below the final option
+- **THEN** the event is inert and no freeform or option selection changes.
+
+#### Scenario: No-freeform final option
+- **WHEN** the click lands on the final visible option row
+- **THEN** that option is selected/toggled and focus remains Navigation.
+
+#### Scenario: No-freeform z
+- **WHEN** z is pressed in Navigation
+- **THEN** the cursor and focus remain unchanged.
+
+#### Scenario: Regular freeform
+- **WHEN** a normal question receives sticky-row click or z
+- **THEN** freeform is selected and InputMode opens.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::handle_question_key`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::handle_question_mouse`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::question_item_at`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_no_freeform_tests::click_below_last_option_is_inert_when_no_freeform`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_no_freeform_tests::click_last_option_row_toggles_option_when_no_freeform`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_no_freeform_tests::hover_below_last_option_is_inert_when_no_freeform`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_no_freeform_tests::z_key_is_inert_when_no_freeform`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_no_freeform_tests::freeform_modal_click_and_z_still_enter_input_mode`。
+
+### Requirement: Permission option hit-testing SHALL derive the option start row from permission chrome height and return only valid option indices. Permission clicks SHALL select the row on first click and submit only on a same-row second click within MULTI_CLICK_TIMEOUT_MS; clicks on chrome, another row, or after the timeout SHALL reset the pairing without submitting. Ctrl-F and scope arrows SHALL work across option/followup focus as covered by the inline checks.
+permission_item_at SHALL use the front permission and shared permission_chrome_height_pub, ignoring columns and rejecting zero prompt areas/out-of-range rows. Mouse routing through handle_input SHALL clear last_permission_click when the intervening click is not the same option row.
+
+#### Scenario: Chrome-aware hit
+- **WHEN** permission args are collapsed or expanded
+- **THEN** the first option row moves with chrome height and rows map to the expected option indices.
+
+#### Scenario: Same-row double click
+- **WHEN** the same option is clicked twice inside the timeout
+- **THEN** the second click emits PermissionSelect for that option.
+
+#### Scenario: Different/slow click
+- **WHEN** the second click targets another row or occurs after timeout
+- **THEN** the option is selected but no submission action is emitted.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::permission_item_at`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `permission_mouse_tests::permission_item_at_tracks_args_rows_collapsed_and_expanded`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `permission_mouse_tests::double_click_on_permission_row_submits_that_row`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `permission_mouse_tests::clicks_on_two_different_rows_select_but_do_not_submit`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `permission_mouse_tests::slow_second_click_on_same_row_does_not_submit`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `permission_mouse_tests::click_on_chrome_between_row_clicks_does_not_submit`。
+
+### Requirement: The interaction module SHALL preserve the focused regression behaviors pinned by its 30 inline tests: Plan action traversal and partial answers, cancel/Goal mouse-key semantics, permission chrome and scope behavior, fixed-choice no-freeform gating, and paste-chip round trips. These tests are source evidence for interaction state transitions and do not establish compiled, terminal, ACP transport, or downstream action execution behavior.
+The inline tests SHALL exercise AgentView state with synthetic panels/frames and direct handler calls, asserting InputOutcome, focus, selection, queue, prompt, and modal state. Dynamic execution, real terminal input, and response receiver delivery remain outside this static audit.
+
+#### Scenario: Synthetic modal frame
+- **WHEN** tests construct AgentView state and synthetic Rect/Buffer geometry
+- **THEN** handler outputs and state transitions are asserted without a live terminal.
+
+#### Scenario: Question chip round trip
+- **WHEN** tests paste, exit, re-enter, and double-click a question prompt
+- **THEN** chip folding, stale draft replacement, and click timer reset remain explicit.
+
+#### Scenario: Plan response evidence
+- **WHEN** tests drive PlanAction Enter through a oneshot receiver
+- **THEN** ChatAboutThis/SkipInterview response shapes and absence of synthetic user input are asserted.
+
+证据：`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_plan_action_tests`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `cancel_turn_mouse_tests`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `permission_mouse_tests`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `permission_scope_key_tests`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_no_freeform_tests`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `question_freeform_chip_tests`。
+### Requirement: Pager prompt text insertion and deferred send contract
+Prompt text insertion SHALL reject absent/whitespace-only payloads, optionally activate Bash for an initial `! ` command, pass accepted text through the prompt widget and suggestion/plugin refresh, and rederive SendPrompt or SteerPrompt actions only after all attachment probes drain. Shared queued edits SHALL reject image attachments with cleanup and a user-facing notice.
+
+#### Scenario: Text insertion
+- **WHEN** a nonempty clipboard payload is accepted
+- **THEN** the prompt is edited, slash/suggestion state is refreshed, and insertion metadata reports Inserted.
+
+#### Scenario: Deferred send
+- **WHEN** attachment probes remain in flight or a send stash exists
+- **THEN** no action is reissued until probes drain; reissued payload is rebuilt from current prompt/image state.
+
+#### Scenario: Queued shared prompt
+- **WHEN** an image is completed while editing a server-backed queued prompt
+- **THEN** the temporary image is cleaned up and attachment is reported as AlreadyReported.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `insert_prompt_text`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `take_deferred_send_after_paste`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `build_deferred_send_action`。
+
+### Requirement: Pager clipboard attachment probe scheduling contract
+Cmd/Ctrl-V SHALL classify dropped paths synchronously, otherwise enqueue an off-event-loop attachment probe with an AgentPrompt target, session image directory, source metadata, and change count; plain text with a raster-free snapshot remains synchronous.
+
+#### Scenario: Path precedence
+- **WHEN** clipboard text resolves as drop paths
+- **THEN** decoded paths/images are handled synchronously and no rival probe is queued.
+
+#### Scenario: Raster probe
+- **WHEN** the clipboard snapshot indicates a raster or empty text needs probing
+- **THEN** a ProbeClipboardAttachment effect is queued and no heavy read occurs inline.
+
+#### Scenario: Plain text
+- **WHEN** the snapshot is supported and raster-free
+- **THEN** text is inserted synchronously with no probe effect.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `enqueue_clipboard_attachment_probe`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `handle_paste_key_deferred`。
+
+### Requirement: Pager deferred clipboard completion and image/text precedence contract
+Deferred attachment completion SHALL decrement in-flight probes, attach a decoded image before any caption, insert carried text only for a no-raster/drop/failure path, classify PersistFailed/ProbeDropped/ProbeFailed distinctly, and rebase late prompt changes onto the project-picker snapshot.
+
+#### Scenario: Image wins
+- **WHEN** the probe returns Image with caption text
+- **THEN** one image chip is inserted, preview preparation may be queued, and caption text is suppressed.
+
+#### Scenario: No raster
+- **WHEN** the probe returns NoRaster with nonblank text or file URLs
+- **THEN** decoded path/text is inserted and completion is Handled.
+
+#### Scenario: Project picker
+- **WHEN** the visible composer belongs to a ProjectSelect question when completion arrives
+- **THEN** the late prompt/image is restored into the stashed picker prompt rather than hidden live state.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `complete_clipboard_attachment_paste`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `restash_project_picker_prompt_after_deferred_paste`。
+
+### Requirement: Pager wrap-host image paste contract
+The wrap-host magic paste protocol SHALL consume valid encoded images into prompt image state and refresh slash context, consume the explicit no-image sentinel as handled-without-text, and leave malformed/nonprotocol text to normal routing.
+
+#### Scenario: No image sentinel
+- **WHEN** MAGIC_NONE is pasted
+- **THEN** the event is consumed without inserting text.
+
+#### Scenario: Malformed payload
+- **WHEN** a malformed GROW_WRAP_IMG payload is pasted
+- **THEN** the payload is consumed without inserting text or image state.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `try_handle_wrap_host_image_paste`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `wrap_host_image_none_paste_not_inserted_as_text`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `wrap_host_image_malformed_paste_not_inserted_as_text`。
+
+### Requirement: Pager dropped path classifier and image-cap contract
+Drop-style file URLs SHALL be classified before clipboard raster probing, process entries in source-token order, insert images as chips and non-images as canonical path text with trailing spaces, group edits for undo, refresh slash once, notify text changes only for non-images, and enforce the image cap without blocking later non-image paths.
+
+#### Scenario: Mixed drop
+- **WHEN** image and non-image paths are pasted
+- **THEN** both are handled in source order, only images create chips, and path text is decoded.
+
+#### Scenario: Cap reached
+- **WHEN** additional images exceed IMAGE_CAP
+- **THEN** one cap toast is shown, accepted images stop at the cap, and subsequent non-image text still inserts.
+
+#### Scenario: Classifier bound
+- **WHEN** the session is SSH or payload is at least 10 MiB
+- **THEN** the drop classifier declines and normal text/probe routing remains available.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `try_handle_dropped_paths_paste`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `handle_image_paste_from_data`。
+
+### Requirement: Pager popup paste ownership contract
+Plan feedback, permission follow-up, plan approval prompt, and question input paste SHALL share the canonical drop classifier and otherwise insert plain text into the shared prompt; plan preview SHALL decline paste and leave hidden prompt text unchanged.
+
+#### Scenario: Popup path
+- **WHEN** a non-image file URL reaches a popup input owner
+- **THEN** the canonical classifier inserts decoded path text without a chip or file:// fragment.
+
+#### Scenario: Plan preview
+- **WHEN** paste reaches preview focus
+- **THEN** the event is Unchanged and hidden prompt state is preserved.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `route_popup_paste`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `event_paste_non_image_file_url_inserts_decoded_path_not_chip`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `event_paste_plan_feedback_non_image_file_url_decoded_into_prompt`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `event_paste_permission_followup_non_image_file_url_decoded_into_prompt`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `event_paste_plan_approval_non_image_file_url_decoded_into_prompt`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `event_paste_plan_preview_does_not_mutate_hidden_prompt`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `event_paste_question_view_input_mode_non_image_file_url_decoded_into_prompt`。
+
+### Requirement: Pager basic clipboard text normalization contract
+Clipboard text paste SHALL preserve ordinary text, append to existing prompt text, normalize CR to LF, expand tabs to spaces, represent multiline paste as one paste element, and consume empty clipboard keys without adding text.
+
+#### Scenario: Plain text
+- **WHEN** nonempty text is pasted
+- **THEN** the prompt contains the text and returns Changed.
+
+#### Scenario: Whitespace
+- **WHEN** empty, whitespace-only, or single-newline text is pasted
+- **THEN** no text is inserted while the paste path remains consumed/no-op.
+
+#### Scenario: Normalization
+- **WHEN** CR or tab characters occur
+- **THEN** the prompt stores LF and expanded spaces.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `insert_prompt_text`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `handle_paste_key_deferred`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_text_inserts_into_prompt`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_multiline_text_creates_element`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_empty_clipboard_consumes_key`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_whitespace_only_text_with_no_image_or_urls_is_noop`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_appends_to_existing_text`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_single_newline_text_is_noop`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_cr_normalized_to_lf`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_tabs_expanded_to_spaces`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_empty_string_text_no_image_is_noop`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `canonical_text_insertion_handles_same_text_replacement`。
+
+### Requirement: Pager path and file URL paste precedence contract
+Image paths SHALL create persisted image chips and preview effects; non-image paths and percent-encoded file URLs SHALL become canonical decoded path text; file-url recovery SHALL handle None/empty clipboard text, multiple files, trailing newlines, unreadable paths, and SHALL not double-insert when synchronous text already classified.
+
+#### Scenario: Image path
+- **WHEN** a valid PNG path is pasted
+- **THEN** one image chip and preview preparation are recorded.
+
+#### Scenario: Non-image URL
+- **WHEN** a text file URL or percent-encoded path is pasted
+- **THEN** canonical path text plus trailing space is inserted with no image chip.
+
+#### Scenario: Deferred file URLs
+- **WHEN** text is None/empty or multiple file URLs arrive at completion
+- **THEN** the URL payload is recovered, mixed entries preserve order, and the synchronous classifier prevents duplicate insertion.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `try_handle_dropped_paths_paste`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `complete_clipboard_attachment_paste`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_image_path_detected_as_image`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_tiny_image_path_cannot_insert_or_send_immediately`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_image_preferred_over_text`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_image_when_no_text`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_image_when_text_is_empty_string`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_image_when_text_is_whitespace`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_image_with_existing_text_in_prompt`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_non_image_path_pasted_as_text`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_non_image_file_url_with_clipboard_icon_uses_path_not_icon`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_file_urls_probe_recovers_when_text_is_none`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_file_urls_probe_recovers_when_text_is_empty_string`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_file_urls_probe_handles_multi_file_payload`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_file_urls_probe_not_double_inserted_when_text_classifies`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_non_image_file_url_percent_encoded_space_round_trips`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_multi_file_drop_image_plus_non_image_handles_both`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_image_path_with_trailing_newline_still_attaches`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `event_paste_non_image_file_url_inserts_decoded_path_not_chip`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_key_cap_reached_does_not_block_non_image_insert`。
+
+### Requirement: Pager contextual tip and undo routing contract
+Paste SHALL retire the clipboard-image tip and image acceptance SHALL preserve its contextual acceptance path; substantial Ctrl-C draft wipes SHALL offer ShowUndoTip, Ctrl-Z SHALL restore only when the active tip is the undo tip, and plan-nudge SHALL fire only for idle Normal-mode planning keywords.
+
+#### Scenario: Clipboard tip
+- **WHEN** text, image, or bracketed paste occurs while the image tip is shown
+- **THEN** the tip is retired and an image attaches when applicable.
+
+#### Scenario: Undo tip
+- **WHEN** a substantial draft is wiped then Ctrl-Z is pressed
+- **THEN** the draft is restored and the undo tip retires; unrelated tips remain.
+
+#### Scenario: Plan nudge
+- **WHEN** a planning keyword is typed in eligible state
+- **THEN** ShowPlanNudge is signaled only outside Plan, busy, Bash, feedback, or Remember modes.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `insert_prompt_text`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `handle_paste_key_deferred`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `main_prompt_substantial_wipe_routes_show_undo_tip`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `ctrl_z_accepts_and_retires_undo_tip`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `ctrl_z_leaves_a_non_undo_tip_untouched`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `typed_planning_keyword_routes_show_plan_nudge`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `plan_nudge_suppressed_by_state_gates`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paste_clears_clipboard_image_tip`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `image_paste_accepts_clipboard_tip_and_attaches`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `bracketed_paste_clears_clipboard_image_tip`。
+
+### Requirement: Pager ephemeral tip paintability and terminal-size gate contract
+Ephemeral tips SHALL refuse to show, consume seen counts, or start TTL while terminal size is unknown/too short, a resize is awaiting redraw, or any listed overlay/subagent/dropdown occludes the banner; a valid remeasure permits one counted show and size changes invalidate Kitty media ids.
+
+#### Scenario: Unrenderable surface
+- **WHEN** an occluding view or insufficient size exists
+- **THEN** show returns false, no count burns, and no tip activates.
+
+#### Scenario: Resize staleness
+- **WHEN** a resize is noted before draw remeasurement
+- **THEN** show remains gated until note_terminal_size runs again.
+
+#### Scenario: Size change
+- **WHEN** a measured size changes
+- **THEN** inline media ids are cleared and terminal staleness ends.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `handle_paste_key_deferred`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `ephemeral_tip_show_refused_while_unrenderable`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `ephemeral_tip_show_gate_refuses_between_resize_and_redraw`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `note_terminal_size_invalidates_kitty_ids_only_on_change`。
+
+### Requirement: Pager Mermaid affordance routing and dropdown geometry contract
+Mermaid affordance clicks SHALL copy source without rendering, route Open/CopyPath through lazy render, paint a dim label and ordered buttons with hover styling and clipped hit rectangles, while dropdown chrome SHALL anchor above/below the prompt and become flush-left in embedded mode.
+
+#### Scenario: Copy source
+- **WHEN** the source button is clicked
+- **THEN** clipboard feedback is shown and no Mermaid render is started.
+
+#### Scenario: Lazy render
+- **WHEN** Open or CopyPath is clicked without a cached session directory
+- **THEN** the request reaches lazy rendering and reports not ready.
+
+#### Scenario: Affordance layout
+- **WHEN** a row is wide, hovered, or narrow
+- **THEN** buttons and hit rectangles match layout, hover only affects the hovered button, and clipped buttons are omitted.
+
+#### Scenario: Dropdown geometry
+- **WHEN** full or embedded chrome is rendered above/below
+- **THEN** items occupy the requested side and embedded layout is flush-left.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `handle_image_paste_from_data`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `mermaid_copy_source_click_copies_without_render`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `mermaid_open_click_routes_to_lazy_render`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paints_affordance_row_with_label_and_registers_all_buttons`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paints_affordance_row_highlights_only_the_hovered_button`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `paints_affordance_row_clips_segments_to_row_width`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `dropdown_chrome_anchors_above_or_below_the_prompt`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `dropdown_chrome_embedded_is_flush_left`。
+
+### Requirement: Pager Kitty inline media transmission and cleanup contract
+Inline Kitty media SHALL transmit bytes and place on the first frame, place without retransmission on later frames, and emit deletion escapes that drain own and nested subagent placements according to takeover ownership.
+
+#### Scenario: First frame
+- **WHEN** a cached tool image is first placed
+- **THEN** the escape contains transmit and place operations.
+
+#### Scenario: Repeat frame
+- **WHEN** the same image is placed again
+- **THEN** the escape places without retransmitting bytes.
+
+#### Scenario: Takeover cleanup
+- **WHEN** a parent or child view is closed/taken over
+- **THEN** the appropriate placements are deleted and tracking resets without deleting an active child’s own placements.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `handle_image_paste_from_data`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `tool_media_first_frame_transmits_then_places_only`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `take_inline_media_clear_escapes_drains_placements`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `take_inline_media_clear_escapes_none_when_no_placements`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `take_own_inline_media_clear_escapes_leaves_children`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `subagent_fullscreen_draw_clears_parent_inline_media`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `draw_after_subagent_close_clears_child_inline_media`。
+
+### Requirement: Pager clipboard probe context and deferral boundary contract
+Cmd-V with raster/empty/failed text SHALL enqueue a probe without inline heavy work, preserve ClipboardKey versus BracketedInserted provenance and synchronous insertion metadata, and carry text-read failure into the deferred context.
+
+#### Scenario: No raster snapshot
+- **WHEN** supported snapshot says no raster
+- **THEN** paste stays synchronous and no probe call/effect occurs.
+
+#### Scenario: Raster snapshot
+- **WHEN** snapshot contains an image
+- **THEN** an AgentPrompt probe effect is queued and caption is not inserted yet.
+
+#### Scenario: Source provenance
+- **WHEN** Cmd-V, bracketed paste, or failed text read is used
+- **THEN** the deferred context preserves source kind, text, insertion result, and read failure.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `enqueue_clipboard_attachment_probe`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `handle_paste_key_deferred`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_paste_snapshot_no_raster_stays_synchronous`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_paste_snapshot_has_image_defers_probe`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_cmd_v_probe_ctx_not_bracketed`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_bracketed_paste_stamps_ctx_bracketed`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_empty_paste_key_defers_probe`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `failed_clipboard_text_read_is_carried_into_deferred_context`。
+
+### Requirement: Pager deferred completion classification contract
+Deferred completion SHALL attach images, suppress captions when image wins, insert captions on no-raster miss, preserve captions on dropped/failed probes where source semantics require, reject failed text reads as TextRead rather than FullMiss, decode unreadable file URLs as text, and distinguish Dropped/AttachmentRead/AlreadyReported failures.
+
+#### Scenario: Image completion
+- **WHEN** a decoded image is returned with a caption
+- **THEN** image attaches and caption is absent.
+
+#### Scenario: Miss completion
+- **WHEN** NoRaster returns with caption
+- **THEN** caption inserts and completion is Handled.
+
+#### Scenario: Failure classification
+- **WHEN** probe is dropped, fails, persists unsuccessfully, or text read failed
+- **THEN** the corresponding typed ClipboardPasteCompletion is returned without conflating outcomes.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `complete_clipboard_attachment_paste`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_completion_attaches_image_to_prompt`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_cmd_v_image_wins_no_double_insert`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_cmd_v_caption_inserted_on_no_image_miss`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_deferred_caption_survives_failed_or_dropped_probe`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `empty_and_whitespace_bracketed_completion_are_not_handled`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `bracketed_probe_failure_or_drop_wins_over_synchronous_text`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `failed_clipboard_text_read_cannot_become_full_miss`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_completion_inserts_unreadable_file_url_as_path_text`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_completion_distinguishes_dropped_and_failed_probes`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `agent_cmd_v_tip_accept_emitted_on_deferred_image`。
+
+### Requirement: Pager prompt modal layout safety contract
+Question modal layout SHALL clamp reserved chrome so prompt rows never exceed the terminal area, including a fullscreen question input configuration.
+
+#### Scenario: Question layout
+- **WHEN** reserved rows exceed the available area
+- **THEN** prompt height is clamped and its bottom remains within the terminal.
+
+证据：`crates/codegen/pager/src/app/agent_view/paste.rs` — `handle_image_paste_from_data`；`crates/codegen/pager/src/app/agent_view/paste.rs` — `regression_question_modal_fullscreen_overcommit`。
+### Requirement: Peek panel state refresh preserves draft ownership and invalidates stale interaction
+PeekPanelState SHALL keep row identity, live display fields, pending question/permission metadata, focus, option selection, model/mode badge fields, and the dashboard-owned reply outside the panel. new SHALL initialize fields from PeekFields and focus non-vim panels; apply_fields SHALL preserve focus/draft on same-row refreshes, clear selection when request_id or question_id changes, clear vim focus on row change, drop out-of-range selections, and return whether row or concrete interaction identity changed.
+
+#### Scenario: Same-row live refresh
+- **WHEN** the selected row remains the same and only status text changes
+- **THEN** display fields update while focus, selected option, and the dashboard reply draft remain available and apply_fields returns false.
+
+#### Scenario: Interaction rotation
+- **WHEN** the row stays the same but request_id or question_id changes
+- **THEN** selected_option resets and apply_fields returns true so the dashboard can clear the stale draft.
+
+#### Scenario: Vim row change
+- **WHEN** a vim-mode peek moves to another dashboard row
+- **THEN** focus is cleared and apply_fields returns true.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `PeekFields`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `PeekPanelState`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `PeekPanelState::new`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `PeekPanelState::apply_fields`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `apply_fields_reports_row_change`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `apply_fields_reports_same_row_question_replacement`。
+
+### Requirement: Peek pending permission and AskUserQuestion projection
+pending_interaction_peek SHALL project the first matching permission for a session into sanitized question text, option ids/labels, request id, and RejectOnce index. When questions are enabled it SHALL project only supported single-select external AskUserQuestion state, append an Other option unless no_freeform, attach question_id, and prefix multi-question text with active/total position. Subagent peeks SHALL suppress child questions while retaining permissions.
+
+#### Scenario: Permission projection
+- **WHEN** a matching permission is present in the session queue
+- **THEN** sanitized title/description, scope-aware option labels, request id, and reject index are returned.
+
+#### Scenario: Root question
+- **WHEN** questions are enabled and the active question belongs to the root session
+- **THEN** the current single-select question and options are projected with its tool-call id.
+
+#### Scenario: Child question
+- **WHEN** a question belongs to a subagent row
+- **THEN** the subagent peek returns no question/options and falls back to reply, while the top-level root question remains visible.
+
+#### Scenario: Unsupported question
+- **WHEN** the question is local, empty, or multi-select
+- **THEN** no pending question projection is returned.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `pending_interaction_peek`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `subagent_peek_suppresses_questions_but_root_peek_keeps_them`。
+
+### Requirement: Dashboard peek field computation for top-level, subagent and roster rows
+compute_peek_fields SHALL derive a live PeekFields snapshot from the owning AgentView. TopLevel rows use the agent title, latest response type, latest user message, session activity time and root session id; Subagent rows use subagent metadata and child view state, with child response fallbacks and child activity time; Roster-only rows and vanished parents/children SHALL return None.
+
+#### Scenario: Top-level row
+- **WHEN** a live top-level AgentId exists
+- **THEN** label, status, user message, time-ago and root pending interaction fields are returned.
+
+#### Scenario: Subagent row
+- **WHEN** parent metadata and child session are present
+- **THEN** subagent label/status/activity and child permission fields are returned, with child questions suppressed.
+
+#### Scenario: Vanished row
+- **WHEN** the parent, child, or local agent cannot be found
+- **THEN** compute_peek_fields returns None so the caller can close the peek.
+
+#### Scenario: Roster row
+- **WHEN** the row is roster-only
+- **THEN** no local peek fields are produced.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `compute_peek_fields`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `extract_last_response_type`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `extract_last_user_message`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `subagent_peek_suppresses_questions_but_root_peek_keeps_them`。
+
+### Requirement: Peek live model, agent, permission and plan badge projection
+peek_model_and_mode SHALL source the current config badge live. TopLevel uses the agent name/model/effective permission mode/plan mode; Subagent prefers the loaded child model/name and permission mode, falls back to resolved subagent metadata or parent model/name, and never projects child plan mode; unknown or roster rows use Ask with no model/plan and no agent.
+
+#### Scenario: Top-level badge
+- **WHEN** a top-level AgentView exists
+- **THEN** the badge reflects its live model, agent name, permission mode and effective plan mode.
+
+#### Scenario: Loaded child badge
+- **WHEN** a subagent child view is loaded
+- **THEN** child model/name and child permission mode win over parent values.
+
+#### Scenario: Unloaded child badge
+- **WHEN** only subagent session metadata exists
+- **THEN** permission mode maps known always-approve/auto/ask strings and model/name fall back to parent.
+
+#### Scenario: Missing/roster badge
+- **WHEN** the row has no local agent
+- **THEN** default Ask/no model/no plan badge is returned.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `PeekModeBadge`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `peek_model_and_mode`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `PeekPanelState::plan_mode`。
+
+### Requirement: Peek box geometry and focus-aware rounded rendering
+render_peek_panel SHALL render a single rounded box only when the area is nonzero, at least three rows high and twenty columns wide. Focused panels use selection border/caret and preserve bright content; unfocused panels use prompt border, hide caret, retain draft text, show an empty reply placeholder, and blend the content. The result SHALL report caret and reply_rect when applicable.
+
+#### Scenario: Too-small area
+- **WHEN** the target area is empty, shorter than three rows, or narrower than twenty columns
+- **THEN** the buffer is left without a usable panel and PeekRenderResult is default.
+
+#### Scenario: Focused summary
+- **WHEN** a normal panel is focused
+- **THEN** rounded chrome, status/time header, reply prefix/input, and a caret are painted.
+
+#### Scenario: Unfocused summary
+- **WHEN** the panel is unfocused
+- **THEN** draft remains visible, empty reply shows the dim placeholder, caret is None, and content is dimmed when color blending supports it.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_panel`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `PeekRenderResult`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_paints_rounded_box_with_summary_and_reply_input`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_shows_typed_reply_and_caret`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_unfocused_hides_caret`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_unfocused_empty_reply_paints_placeholder`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_unfocused_simple_panel_dims_content`。
+
+### Requirement: Peek config badge precedence and bottom-border placement
+paint_peek_config_badge SHALL reuse PromptWidget::render_info_line on the bottom border inside rounded corners. It SHALL omit itself when too small or when no model/flag/multiline signal exists, and flag precedence SHALL be plan over always-approve over auto. The badge SHALL follow panel focus dimming and appear in both summary and pending-question modes.
+
+#### Scenario: Plan precedence
+- **WHEN** plan_mode is true while always-approve or auto is also true
+- **THEN** only the plan flag is shown.
+
+#### Scenario: Permission precedence
+- **WHEN** plan is false and auto_approve is true while auto is true
+- **THEN** always-approve is shown and auto is suppressed.
+
+#### Scenario: Auto mode
+- **WHEN** plan and always-approve are false but auto is true
+- **THEN** the auto flag uses the system accent.
+
+#### Scenario: No badge
+- **WHEN** the area is too small or model/flags are empty and not multiline
+- **THEN** no info line is painted.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `paint_peek_config_badge`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_shows_model_and_auto_approve_on_bottom_border`。
+
+### Requirement: Peek pending question and permission option rendering
+When question is present, render_peek_panel SHALL replace the normal status/body/reply layout with sanitized question text and up to nine numbered options. Focused selected options use the marker/style; unfocused panels show no selected marker. A selected RejectOnce/Other row SHALL render an inline PromptWidget feedback slot with the permission or Ask-specific placeholder, caret and reply_rect, and hide the normal reply row.
+
+#### Scenario: Permission options
+- **WHEN** a permission question has numbered options
+- **THEN** question text and option labels are painted and the normal reply row is hidden.
+
+#### Scenario: Selected option
+- **WHEN** the focused panel selects an option
+- **THEN** that option has the ▸ marker and accent style.
+
+#### Scenario: Unfocused question
+- **WHEN** the selected index exists but the panel is unfocused
+- **THEN** all options render unselected and content is dimmed.
+
+#### Scenario: Reject feedback
+- **WHEN** RejectOnce is selected with typed or empty feedback
+- **THEN** the inline field shows typed text or the reject hint and returns its caret/rect.
+
+#### Scenario: Ask Other
+- **WHEN** an AskUserQuestion Other row is selected
+- **THEN** the inline placeholder says Other (type your own answer), not the permission reject text.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_panel`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `PeekPanelState::is_ask_question`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_paints_permission_question_with_options`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_highlights_selected_option`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_unfocused_question_has_no_selected_option`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_reject_option_shows_inline_feedback`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_ask_other_uses_ask_placeholder`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_reject_option_shows_feedback_hint`。
+
+### Requirement: Peek live-tail middle layout and tight-height preservation
+live_tail_middle_bottom SHALL reserve one blank row above reply only when at least two middle rows remain; with only one possible row it SHALL expand through the blank so a live-tail pin/body is not starved. render_peek_panel SHALL paint either the current live tail, an empty hint, or a provided hint within the computed middle area while reply rows grow from the bottom.
+
+#### Scenario: Tight middle
+- **WHEN** reply growth would leave only one middle row after a blank
+- **THEN** the blank is consumed so both pin and current-turn body remain visible.
+
+#### Scenario: Generous middle
+- **WHEN** at least two middle rows remain with a blank
+- **THEN** the bottom excludes one breathing row above reply.
+
+#### Scenario: Empty live tail
+- **WHEN** live tail is provided but scrollback is empty
+- **THEN** the configured empty hint or No activity yet is painted when space exists.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `live_tail_middle_bottom`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_panel`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_tight_pin_shows_current_turn_body`。
+
+### Requirement: Peek reply height, multiline placement and paste overlay
+reply_row_count SHALL delegate to PromptWidget::desired_height with a chromeless style, return at least one row, and cap at MAX_REPLY_ROWS=6. render_peek_panel SHALL grow the reply box upward, report a rect spanning all reply rows, and route overlay_area to PromptWidget so folded paste chips and near-cursor raw previews render consistently with the dispatch prompt.
+
+#### Scenario: Empty reply
+- **WHEN** the widget has no text
+- **THEN** reply_row_count returns one row.
+
+#### Scenario: Multiline draft
+- **WHEN** the draft contains three lines
+- **THEN** the reply grows to at least three rows and every line is painted inside reply_rect.
+
+#### Scenario: Over-cap draft
+- **WHEN** the draft exceeds six rows
+- **THEN** reply_row_count saturates at six and the widget scrolls internally.
+
+#### Scenario: Paste overlay
+- **WHEN** a compact multiline paste has an overlay rect
+- **THEN** the chip remains visible and preview text is painted above the peek box.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `MAX_REPLY_ROWS`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `reply_row_count`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_panel`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_reply_folds_long_paste_into_chip`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_reply_paste_preview_uses_overlay`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_grows_reply_for_multiline_draft`。
+
+### Requirement: Peek response status extraction and sanitized recent text projection
+extract_last_response_type SHALL use live TurnActivity while running, returning Thinking/Response/Compacting/Retrying/Working or a current tool label, and SHALL scan newest-first scrollback when idle, stopping at the latest user prompt and mapping block kinds to stable labels. extract_last_user_message SHALL delegate to sanitized latest prompt extraction; extract_first_user_message and extract_recent_lines SHALL take first lines, strip ANSI, sanitize control characters, trim, and avoid Rust Debug projections.
+
+#### Scenario: Running activity
+- **WHEN** the session is running with a live activity
+- **THEN** the live activity is the status source; waiting/no activity returns Working and tool-running can recover a specific current tool label.
+
+#### Scenario: Idle scrollback
+- **WHEN** the session is idle
+- **THEN** the newest agent-produced block maps to Response/Thought/tool/subagent/workflow/task/etc. and user prompt forms a turn boundary.
+
+#### Scenario: Recent text
+- **WHEN** recent blocks include ANSI/control text or long bodies
+- **THEN** only first-line sanitized projections are returned in chronological order, with no Debug metadata or terminal escapes.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `extract_last_response_type`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `extract_last_user_message`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `extract_first_user_message`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `extract_recent_lines`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `block_short_text`。
+
+### Requirement: Peek numeric action routing with stale permission identity
+peek_number_key SHALL map valid 1-based keys only when a peek question and option exist. Ask questions emit DashboardQuestionAnswer with row/tool_call_id and either an option index or current reply text for Other; permissions emit DashboardPermissionSelect with row, captured request_id and option id. Zero, out-of-range, missing panel/question, or missing identity SHALL return None.
+
+#### Scenario: Permission option
+- **WHEN** n is one through options length and request_id exists
+- **THEN** DashboardPermissionSelect carries the snapshot request id and selected PermissionOptionId.
+
+#### Scenario: Ask option
+- **WHEN** the panel is an AskUserQuestion and a normal option is keyed
+- **THEN** DashboardQuestionAnswer carries option_idx and empty freeform.
+
+#### Scenario: Ask Other
+- **WHEN** the key targets reject_option
+- **THEN** DashboardQuestionAnswer carries option_idx=None and text_without_image_chips from peek_reply.
+
+#### Scenario: Invalid key
+- **WHEN** n is zero/out of range or panel/question is absent
+- **THEN** no action is produced.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `peek_number_key`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `peek_number_key_selects_option`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `peek_number_key_zero_is_none`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `peek_number_key_past_options_is_none`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `peek_number_key_no_question_is_none`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `peek_number_key_no_panel_is_none`。
+
+### Requirement: Peek render and state regression evidence boundary
+The module SHALL preserve the 28 inline regression behaviors for panel geometry, focus, badges, question projection, option selection, feedback placeholders, paste chips, multiline reply sizing and numeric routing. These tests are synthetic Buffer/AgentView evidence for this module; they do not prove a live dashboard event loop, terminal capability, ACP delivery, or PromptWidget implementation.
+
+#### Scenario: Synthetic render
+- **WHEN** tests render into Ratatui Buffer with synthetic panel/reply state
+- **THEN** rounded layout, text, colors, caret and rect invariants are asserted directly.
+
+#### Scenario: Subagent isolation
+- **WHEN** tests construct parent/child views with a pending child question
+- **THEN** child peek suppresses the question while top-level projection retains its own root question.
+
+#### Scenario: Action guard
+- **WHEN** tests exercise zero/missing/out-of-range numeric keys
+- **THEN** invalid dashboard actions are rejected without panics.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek.rs` — `tests module`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `subagent_peek_suppresses_questions_but_root_peek_keeps_them`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_shows_model_and_auto_approve_on_bottom_border`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `render_peek_reply_paste_preview_uses_overlay`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `peek_number_key_no_panel_is_none`。
+### Requirement: Pager ListMatcher matching and navigation contract
+ListMatcher SHALL retain raw query/mode/error state, rebuild physical match indices in item order, reset or clamp current_match when data changes, and wrap n/N navigation across matches. Filter mode hides nonmatches while Search mode preserves visibility for highlighting.
+
+#### Scenario: Matching
+- **WHEN** substring, regex, or invalid regex is compiled and rebuilt against ListItem::search_text
+- **THEN** matching physical indices and regex error state are exposed deterministically.
+
+#### Scenario: Navigation
+- **WHEN** next/previous match is requested from a physical index
+- **THEN** current_match advances with wrap-around or returns None when no match exists.
+
+#### Scenario: Mode
+- **WHEN** the matcher is used by filter or search layout
+- **THEN** filter mapping hides nonmatches while search retains all visible items.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListMatcher`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListMatcher::new`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `rebuild_matches`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `next_match_after`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `prev_match_before`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListMatcher::substring`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `matcher_substring_builds_match_indices`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `matcher_regex_builds_match_indices`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `matcher_bad_regex_matches_nothing`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `next_match_wraps_around`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `prev_match_wraps_around`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `search_mode_all_items_visible`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `next_match_selects_and_scrolls`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `next_match_with_filter_mode`。
+
+### Requirement: Pager ListPane input-bar modes and goto parser contract
+ListPane input modes SHALL expose stable prompts and map Search/Filter to their corresponding match modes; goto-line parsing SHALL accept clamped single numbers and ranges, treat an incomplete N- as a single jump, reject invalid text, and enforce start <= end.
+
+#### Scenario: Mode prompt
+- **WHEN** the input bar is rendered for Search, Filter, GotoLine, or Comment
+- **THEN** the documented prefix is returned and match mode is selected.
+
+#### Scenario: Goto line
+- **WHEN** user text is empty, numeric, ranged, incomplete, reversed, or out of bounds
+- **THEN** the parser returns Invalid, Single, or clamped Range according to the syntax.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `InputBarMode`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `pub fn prompt`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `match_mode`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `parse_goto_input`。
+
+### Requirement: Pager ListPane configuration and stable state boundary contract
+ListPaneState SHALL own scroll/selection/layout/matcher/input/clipboard state while borrowing items only during layout and actions; default config keeps follow/search/copy/visual/filter/goto disabled except wrap, while streaming enables follow/search/copy/visual/filter.
+
+#### Scenario: Default config
+- **WHEN** a static list constructs default configuration
+- **THEN** unsupported keys remain unconsumed and follow is forced off.
+
+#### Scenario: Streaming config
+- **WHEN** an append-only list uses streaming()
+- **THEN** follow and interactive list features are enabled.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneConfig`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneConfig::default`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneConfig::streaming`。
+
+### Requirement: Pager ListPane scroll and layout geometry contract
+ListPaneState SHALL clamp scrolling to content and viewport, support fixed-height NoWrap and variable-height Wrap layout, expose visible ranges/skip rows, keep empty or fitting lists at offset zero, center selected items with clamping, and preserve stable positions across append and prepare cycles.
+
+#### Scenario: Scroll bounds
+- **WHEN** scroll up/down, page, half-page, or empty/fitting content is processed
+- **THEN** offset remains within [0, max] and no-op cases remain stable.
+
+#### Scenario: Layout geometry
+- **WHEN** fixed, wrapped, or variable-height items are prepared
+- **THEN** total height and visible range reflect the selected wrap mode.
+
+#### Scenario: Centering
+- **WHEN** a selected item is centered near the viewport midpoint
+- **THEN** scroll is adjusted and clamped at the top/bottom.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_basics`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_half_page`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_empty_list`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_content_fits_viewport`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `visible_range_fixed_height`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `visible_range_variable_height`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `wrap_mode_variable_heights`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `nowrap_mode_all_height_one`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `center_selected_places_item_mid_viewport`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `center_selected_at_top_clamps`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `key_z_centers_selected`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_lines_small_list_stable`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_lines_noop_at_top_edge`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_lines_noop_at_bottom_edge`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `click_bottom_row_stable_after_append`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_lines_works_in_small_viewport`。
+
+### Requirement: Pager stable selection and selectable-item contract
+Selection SHALL be stored by stable item ID, resolve to the current physical/visible index after mutations, auto-select the first selectable item in NAV, skip separators/non-selectable rows, clear or replace removed selections, and select via visible index or y hit only when selectable.
+
+#### Scenario: Stable IDs
+- **WHEN** items are inserted, removed, or evicted around a selected row
+- **THEN** the same stable id resolves at its new index or selection is replaced when removed.
+
+#### Scenario: Selectable navigation
+- **WHEN** j/k or click crosses non-selectable items
+- **THEN** selection skips separators and select_at_y rejects non-selectable rows.
+
+#### Scenario: Filter selection
+- **WHEN** a visible mapping is active
+- **THEN** selection APIs operate on visible indices while stable id resolves to physical item.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_next_prev`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_skips_non_selectable`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_first_last`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `selection_survives_insert`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `selection_survives_removal_of_other`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `selection_clears_when_selected_removed`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_with_filter`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_at_y_selectable`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_at_y_non_selectable_returns_false`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_past_non_selectable_stays_in_viewport`。
+
+### Requirement: Pager keyboard navigation and screen-y preservation contract
+ListPane keyboard handling SHALL consume j/k, arrows, Ctrl-j/k, Ctrl-d/u, PageUp/PageDown, g/G, Home/End, z, and enabled w according to pane state; viewport scrolling pins the selected item screen row and carries leftover movement past clamped viewport edges to the nearest selectable cursor.
+
+#### Scenario: Navigation keys
+- **WHEN** a supported key is pressed
+- **THEN** selection or viewport changes and the event is consumed; unknown keys return false.
+
+#### Scenario: Screen-y pin
+- **WHEN** viewport scroll occurs with a selection
+- **THEN** selection follows the scroll at the same screen y when possible.
+
+#### Scenario: Clamped half-page
+- **WHEN** the viewport reaches top/bottom before the requested movement is exhausted
+- **THEN** the remaining movement advances the cursor and skips non-selectable boundaries.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `key_j_k_selects`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `key_arrow_selects`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `key_ctrl_j_k_scrolls_viewport`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `key_ctrl_d_u_half_page`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `key_page_up_down`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `key_g_and_shift_g`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `key_home_end`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `key_w_toggles_wrap_mode`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `unrecognized_key_returns_false`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_d_selection_stays_at_same_screen_y`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_u_selection_stays_at_same_screen_y`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_without_explicit_selection_uses_auto_selected`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_lines_from_mouse_wheel`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_j_k_selection_follows_at_screen_y`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_d_at_bottom_moves_cursor_past_viewport_clamp`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_u_at_top_moves_cursor_past_viewport_clamp`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_d_at_very_bottom_clamps_cursor_to_last_selectable`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_u_at_very_top_clamps_cursor_to_first_selectable`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_d_skips_non_selectable_at_end`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_u_skips_non_selectable_at_start`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_next_scrolls_in_small_viewport`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_next_with_prepare_layout_between_steps`。
+
+### Requirement: Pager layout dirty tracking and item eviction contract
+prepare_layout SHALL reuse a clean cache, extend heights incrementally on appends, rebuild on width/wrap/filter changes or shrink/eviction, refilter stale physical indices, and preserve stable selection through item mutations.
+
+#### Scenario: Clean cache
+- **WHEN** layout parameters and item count remain unchanged
+- **THEN** the existing cache remains valid.
+
+#### Scenario: Append/shrink
+- **WHEN** items are appended or evicted
+- **THEN** height cache and visible count update without stale indices.
+
+#### Scenario: Width/filter mutation
+- **WHEN** width or matcher changes
+- **THEN** layout is rebuilt and filtered mapping reflects current items.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `prepare_layout_skips_rebuild_when_clean`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `prepare_layout_incremental_append`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `prepare_layout_full_rebuild_on_width_change`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `prepare_layout_full_rebuild_on_filter_change`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `filter_reduces_visible_items`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `prepare_layout_handles_item_eviction`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `prepare_layout_refilters_when_items_shrink_under_active_filter`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `prepare_layout_eviction_with_wrap_mode`。
+
+### Requirement: Pager follow mode edge and append contract
+When enabled, follow mode SHALL hide selection and track the bottom; one-past j/Ctrl-d/PageDown or bottom wheel overscroll enters follow, upward/manual movement exits it, new items preserve edge state but can become selectable, and prepare_layout auto-scrolls follow to the new bottom.
+
+#### Scenario: One-past
+- **WHEN** a downward action reaches the bottom and repeats
+- **THEN** follow engages only on the subsequent edge action.
+
+#### Scenario: Follow lifecycle
+- **WHEN** follow is entered, scrolled upward, or toggled
+- **THEN** selection visibility and follow state transition as specified.
+
+#### Scenario: Streaming append
+- **WHEN** new items arrive while following or at edge
+- **THEN** follow scrolls to bottom or NAV moves into new items without spurious reset.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_mode_auto_scrolls`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `goto_top_bottom`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `j_one_past_engages_follow`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `j_one_past_resets_when_new_items_arrive`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_d_one_past_engages_follow`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `page_down_one_past_engages_follow`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `mouse_wheel_overscroll_engages_follow`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_up_resets_edge_state`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_down_not_at_bottom_stays_unfollowed`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_up_from_bottom_disengages_follow`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_and_center_to_bottom_engages_follow`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_mode_persists_through_prepare_layout`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_mode_auto_scrolls_on_new_items`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_mode_has_no_selection`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_mode_clears_selection_on_prepare_layout`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `j_in_follow_is_noop`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `k_in_follow_exits_to_nav_and_moves_up`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ctrl_u_in_follow_exits_and_scrolls_up`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `new_items_dont_reset_edge_state`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `g_in_follow_exits_to_nav`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `g_in_follow_already_is_noop`。
+
+### Requirement: Pager follow/wrap capability gating contract
+Disabled follow SHALL ignore constructor follow, G/End one-past, overscroll, and toggle requests while selecting the last item normally; disabled wrap SHALL leave w unconsumed.
+
+#### Scenario: Follow disabled
+- **WHEN** follow actions reach an edge or toggle is requested
+- **THEN** follow remains false and NAV selection/scrolling remains available.
+
+#### Scenario: Wrap disabled
+- **WHEN** w is pressed with wrap_toggle_enabled false
+- **THEN** the event is not consumed and wrap mode is unchanged.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneConfig`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_disabled_g_selects_last_item`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_disabled_constructor_ignores_follow_flag`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_disabled_j_at_bottom_no_one_past`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_disabled_ctrl_d_at_bottom_no_follow`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_disabled_mouse_wheel_at_bottom_no_follow`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `follow_disabled_toggle_follow_is_noop`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `wrap_toggle_disabled_w_not_consumed`。
+
+### Requirement: Pager explicit follow toggle contract
+toggle_follow SHALL enter bottom-follow with no selection when NAV is active and exit to a valid selection when follow is active; follow-disabled configurations make it a no-op.
+
+#### Scenario: Enter follow
+- **WHEN** NAV mode toggles follow
+- **THEN** offset reaches bottom and selection clears.
+
+#### Scenario: Exit follow
+- **WHEN** follow mode toggles again
+- **THEN** NAV resumes with a selection.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `toggle_follow_from_nav_engages`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `toggle_follow_from_follow_exits`。
+
+### Requirement: Pager clipboard copy and provider contract
+When copy is enabled, y/copy_selected SHALL copy the selected item or visual range through the injected ClipboardProvider and expose a copy toast window; no selection, follow mode, empty/filtered lists, or disabled copy SHALL be no-ops.
+
+#### Scenario: Single copy
+- **WHEN** a selectable item is selected and copy is enabled
+- **THEN** its content reaches the clipboard.
+
+#### Scenario: Provider injection
+- **WHEN** a custom provider is installed
+- **THEN** copy writes to that provider.
+
+#### Scenario: No-op boundary
+- **WHEN** selection is absent, follow/empty/filtered, or copy is disabled
+- **THEN** copy returns false and does not write.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `copy_selected_copies_content_to_clipboard`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `copy_selected_after_navigation`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `copy_noop_when_no_selection`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `copy_noop_when_disabled`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `copy_noop_in_follow_mode`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `copy_with_custom_clipboard_provider`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `y_key_copies_when_enabled`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `y_key_not_consumed_when_disabled`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `copy_noop_with_empty_list`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `copy_noop_after_filter_hides_all`。
+
+### Requirement: Pager visual selection and range copy contract
+When visual selection is enabled, v/Shift-j/Shift-k SHALL enter and extend an inclusive stable-ID range, Esc clears it, search clears it, and y copies the range in item order before leaving visual mode; disabled visual selection leaves v unconsumed.
+
+#### Scenario: Visual entry
+- **WHEN** v or Shift-j starts visual mode
+- **THEN** an anchor is captured and movement extends the range.
+
+#### Scenario: Visual cancel
+- **WHEN** Esc or search is invoked
+- **THEN** visual mode and resolved range clear.
+
+#### Scenario: Visual copy
+- **WHEN** y is pressed with a range
+- **THEN** newline-joined selected content is copied and visual mode exits.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `v_enters_visual_mode`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `v_toggles_visual_mode_off`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `visual_mode_range_extends_with_j`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `visual_mode_range_extends_with_k`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `shift_j_enters_visual_and_moves`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `esc_clears_visual_mode`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `y_copies_visual_range_then_clears`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `visual_mode_disabled_v_not_consumed`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `search_clears_visual_mode`。
+
+### Requirement: Pager stale-input robustness and comment paste contract
+Selection navigation SHALL not panic when the item slice is empty while layout metadata is stale, small viewports SHALL keep the selected item visible through repeated prepare cycles, and list input paste SHALL target only the active input bar, normalize CRLF for search, preserve comment newlines, and reject paste when closed.
+
+#### Scenario: Stale empty items
+- **WHEN** selection navigation receives an empty slice after a prior layout
+- **THEN** no panic occurs.
+
+#### Scenario: Small viewport
+- **WHEN** render preparation occurs between repeated selection/scroll steps
+- **THEN** selection remains visible and scroll advances.
+
+#### Scenario: Input paste
+- **WHEN** search/comment input is active, closed, or receives CRLF
+- **THEN** only the active bar changes, normalization follows mode, and closed bars reject paste.
+
+证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `handle_paste`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_next_prev_empty_items_no_panic`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_next_scrolls_in_small_viewport`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_next_with_prepare_layout_between_steps`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_lines_works_in_small_viewport`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `paste_targets_only_active_list_input_and_preserves_comment_newlines`。

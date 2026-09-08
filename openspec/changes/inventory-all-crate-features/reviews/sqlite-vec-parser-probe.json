@@ -1,0 +1,86 @@
+{
+  "sqlite": "3.53.4",
+  "build": "dynamic extension; default C macros, not Cargo SQLITE_CORE build",
+  "results": [
+    {
+      "function": "vec_f32",
+      "input": "[1,2]",
+      "result": "[1.000000,2.000000]"
+    },
+    {
+      "function": "vec_int8",
+      "input": "[1,2]",
+      "result": "[1,2]"
+    },
+    {
+      "function": "vec_f32",
+      "input": "[1 2]",
+      "result": "[1.000000,2.000000]"
+    },
+    {
+      "function": "vec_int8",
+      "input": "[1 2]",
+      "result": "[1,2]"
+    },
+    {
+      "function": "vec_f32",
+      "input": "[1,,2]",
+      "result": "[1.000000,2.000000]"
+    },
+    {
+      "function": "vec_int8",
+      "input": "[1,,2]",
+      "result": "[1,2]"
+    },
+    {
+      "function": "vec_f32",
+      "input": "[1,2",
+      "result": "[1.000000,2.000000]"
+    },
+    {
+      "function": "vec_int8",
+      "input": "[1,2",
+      "result": "[1,2]"
+    },
+    {
+      "function": "vec_f32",
+      "input": "[1,2]trailing",
+      "result": "[1.000000,2.000000]"
+    },
+    {
+      "function": "vec_int8",
+      "input": "[1,2]trailing",
+      "result": "[1,2]"
+    },
+    {
+      "function": "vec_f32",
+      "input": "[128]",
+      "result": "[128.000000]"
+    },
+    {
+      "function": "vec_int8",
+      "input": "[128]",
+      "error": "JSON parsing error: value out of range for int8"
+    },
+    {
+      "function": "vec_f32",
+      "input": "[]",
+      "error": "zero-length vectors are not supported."
+    },
+    {
+      "function": "vec_int8",
+      "input": "[]",
+      "error": "JSON parsing error"
+    },
+    {
+      "function": "vec_f32",
+      "input": "[NaN]",
+      "error": "invalid float32 vector: element 0 is NaN"
+    },
+    {
+      "function": "vec_int8",
+      "input": "[NaN]",
+      "error": "JSON parsing error"
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+[
+  {
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=2 and distance>100",
+    "rows": [
+      [
+        1,
+        2.8284270763397217
+      ],
+      [
+        2,
+        5.656854152679443
+      ]
+    ]
+  },
+  {
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=2 and rowid in (2,3)",
+    "rows": [
+      [
+        2,
+        5.656854152679443
+      ],
+      [
+        3,
+        8.485280990600586
+      ]
+    ]
+  },
+  {
+    "sql": "insert into t(t) values('oversample=129')",
+    "rows": []
+  },
+  {
+    "sql": "insert into t(t) values('oversample=1trailing')",
+    "rows": []
+  },
+  {
+    "sql": "insert into t(t) values('oversample=0')",
+    "error": "oversample must be >= 1"
+  },
+  {
+    "sql": "update t set v='[0,0,0,0,0,0,0,0]' where rowid=1",
+    "rows": []
+  },
+  {
+    "sql": "select hex(substr(vectors,1,1)) from t_rescore_chunks00",
+    "rows": [
+      [
+        "FF"
+      ]
+    ]
+  },
+  {
+    "sql": "select hex(vec_quantize_binary('[0,0,0,0,0,0,0,0]'))",
+    "rows": [
+      [
+        "00"
+      ]
+    ]
+  },
+  {
+    "sql": "delete from t",
+    "rows": []
+  },
+  {
+    "sql": "select count(*) from t_rescore_vectors00",
+    "rows": [
+      [
+        0
+      ]
+    ]
+  },
+  {
+    "sql": "select count(*) from t_rescore_chunks00",
+    "rows": [
+      [
+        0
+      ]
+    ]
+  }
+]

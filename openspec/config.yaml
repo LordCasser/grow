@@ -1,0 +1,22 @@
+schema: spec-driven
+
+context: |
+  Grow 是 Rust 2024 Cargo workspace，应用入口为 crates/codegen/cli/src/main.rs。
+  shell 编排 session；chat-state 持有 Timeline；sampler 管理模型请求；workspace 管理工作区与权限；pager 呈现交互。
+  使用中文，保留 OpenSpec 英文结构标题及 SHALL/MUST、WHEN/THEN 关键字。
+  openspec/specs 是已归档契约，openspec/changes 管理开发过程，docs 面向开发者。
+  按第一性原理理解代码、调用方和测试，不考虑后向兼容；如非必要勿增实体。
+  简单需求保持最小闭环，无关架构债务登记 openspec/backlog.md，不混入当前改动。
+  基线是迁移时实际工作树，含迁移前未提交代码；详见 baseline.md 的证据和限制。
+
+rules:
+  proposal:
+    - 明确问题、范围、非目标和受影响 capability；长期计划不等于实现授权。
+  specs:
+    - 每项 Requirement 使用 SHALL 或 MUST，至少包含一个四级 Scenario 及 WHEN/THEN。
+    - 只写已确认行为或本 change 明确引入的契约；区分当前事实与未来要求。
+    - 为要求列出仓库相对代码路径及符号或现有测试；未知行为明确保留边界。
+  design:
+    - 说明状态所有者、数据流、调用方、失败与恢复边界；复杂度与实际需求匹配。
+  tasks:
+    - 实现前列出验证方法；完成并验证后才能勾选，保留失败或未执行说明。

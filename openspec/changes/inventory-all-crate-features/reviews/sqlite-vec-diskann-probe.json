@@ -1,0 +1,69 @@
+[
+  {
+    "sql": "create virtual table t using vec0(v float[8] indexed by diskann(neighbor_quantizer=binary,buffer_threshold=2))",
+    "rows": []
+  },
+  {
+    "sql": "insert into t(rowid,v) values(1,'[1,1,1,1,1,1,1,1]')",
+    "rows": []
+  },
+  {
+    "sql": "select (select count(*) from t_diskann_nodes00),(select count(*) from t_diskann_buffer00)",
+    "rows": [
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "sql": "select rowid,distance from t where v match '[0,0,0,0,0,0,0,0]' and k=3",
+    "rows": [
+      [
+        1,
+        2.8284270763397217
+      ]
+    ]
+  },
+  {
+    "sql": "insert into t(rowid,v) values(2,'[2,2,2,2,2,2,2,2]')",
+    "rows": []
+  },
+  {
+    "sql": "select (select count(*) from t_diskann_nodes00),(select count(*) from t_diskann_buffer00)",
+    "rows": [
+      [
+        2,
+        0
+      ]
+    ]
+  },
+  {
+    "sql": "insert into t(t) values('search_list_size=10')",
+    "rows": []
+  },
+  {
+    "sql": "insert into t(t) values('search_list_size_search=10')",
+    "rows": []
+  },
+  {
+    "sql": "delete from t where rowid=1",
+    "rows": []
+  },
+  {
+    "sql": "select rowid from t",
+    "rows": [
+      [
+        2
+      ]
+    ]
+  },
+  {
+    "sql": "select value from t_info where key='diskann_medoid_00'",
+    "rows": [
+      [
+        2
+      ]
+    ]
+  }
+]

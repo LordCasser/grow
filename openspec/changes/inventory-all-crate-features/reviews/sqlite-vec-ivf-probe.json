@@ -1,0 +1,87 @@
+[
+  {
+    "sql": "create virtual table t using vec0(v float[2] indexed by ivf(nlist=2))",
+    "rows": []
+  },
+  {
+    "sql": "insert into t(rowid,v) values(1,'[1,1]'),(2,'[2,2]'),(3,'[3,3]')",
+    "rows": []
+  },
+  {
+    "sql": "select rowid,distance from t where v match '[0,0]' and k=2 and distance>100",
+    "rows": [
+      [
+        1,
+        1.4142135381698608
+      ],
+      [
+        2,
+        2.8284270763397217
+      ]
+    ]
+  },
+  {
+    "sql": "select rowid,distance from t where v match '[0,0]' and k=2 and rowid in (2,3)",
+    "rows": [
+      [
+        1,
+        1.4142135381698608
+      ],
+      [
+        2,
+        2.8284270763397217
+      ]
+    ]
+  },
+  {
+    "sql": "delete from t where rowid=1",
+    "rows": []
+  },
+  {
+    "sql": "insert into t(rowid,v) values(4,'[4,4]')",
+    "rows": []
+  },
+  {
+    "sql": "select rowid,vec_to_json(v) from t",
+    "rows": [
+      [
+        4,
+        "[4.000000,4.000000]"
+      ],
+      [
+        2,
+        "[2.000000,2.000000]"
+      ],
+      [
+        3,
+        "[4.000000,4.000000]"
+      ]
+    ]
+  },
+  {
+    "sql": "select rowid,distance from t where v match '[0,0]' and k=4",
+    "rows": [
+      [
+        2,
+        2.8284270763397217
+      ],
+      [
+        4,
+        5.656854152679443
+      ]
+    ]
+  },
+  {
+    "sql": "insert into t(t) values('compute-centroids')",
+    "rows": []
+  },
+  {
+    "sql": "select key,value from t_info where key like 'ivf%'",
+    "rows": [
+      [
+        "ivf_trained_0",
+        1
+      ]
+    ]
+  }
+]

@@ -211,6 +211,10 @@ allow/ask/deny 规则可以按工具、命令或路径细化策略；Hooks 可�
 
 ## 开发与许可证
 
+本项目开发遵循 [OpenSpec SDD](docs/development.md)。当前行为契约见
+[OpenSpec 能力索引](openspec/README.md)，源码阅读与架构解释见 [开发者文档](docs/README.md)。
+提案、设计、任务、审计和验证记录统一进入 `openspec/changes/`。
+
 ### Prerequisites
 
 - Git

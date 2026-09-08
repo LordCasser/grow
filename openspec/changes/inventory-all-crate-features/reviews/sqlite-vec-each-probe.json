@@ -1,0 +1,68 @@
+{
+  "sqlite": "3.53.4",
+  "build": "local dynamic extension, not Cargo SQLITE_CORE",
+  "results": [
+    {
+      "sql": "select rowid,value from vec_each(vec_bit(x'01'))",
+      "rows": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          4,
+          0
+        ],
+        [
+          5,
+          0
+        ],
+        [
+          6,
+          0
+        ],
+        [
+          7,
+          1
+        ]
+      ]
+    },
+    {
+      "sql": "select vec_to_json(vec_bit(x'01'))",
+      "rows": [
+        [
+          "[1,0,0,0,0,0,0,0]"
+        ]
+      ]
+    },
+    {
+      "sql": "select rowid,value from vec_each('[2,4]')",
+      "rows": [
+        [
+          0,
+          2.0
+        ],
+        [
+          1,
+          4.0
+        ]
+      ]
+    },
+    {
+      "sql": "select * from vec_each",
+      "error": "no query solution"
+    }
+  ]
+}
