@@ -880,3 +880,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Tests mutate process-level appearance and theme caches, so isolation relies on manual restoration and helper environment scoping rather than an injected settings/cache dependency.
 - Pager 审计债务：The always-approve contract is asserted through reducer effects and synthetic response channels; a clock/scheduler and shell contract harness would provide stronger integration evidence for queued transitions.
 - Pager 审计债务：Behavior confirmation tests arrange a warning directly on the agent, leaving the code path that creates and expires that warning covered elsewhere.
+- Pager 审计债务：SearchDaemon owns a detached JoinHandle and communicates through an unbounded channel; this avoids blocking input but leaves lifecycle and queue-growth policy implicit.
+- Pager 审计债务：ScrollbackSearchIndex rebuilds every searchable entry whenever content_generation changes; per-entry incremental indexing is deferred until profiling justifies added state.
+- Pager 审计债务：Stale-result rejection compares both generation and raw query, duplicating identity across editor, request and snapshot; a single typed request identity could make the contract easier to audit.
+- Pager 审计债务：The search state performs synchronous matcher compilation for immediate UI feedback and repeats matcher compilation on the daemon, trading responsiveness for duplicate work.
+- Pager 审计债务：Tests reach private daemon snapshots/channel messages directly, which provides precise regression coverage but couples the suite to implementation details of the coalescing protocol.

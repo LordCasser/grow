@@ -3671,7 +3671,23 @@
       "Breadth-first descendant state restoration",
       "Finished child finalization and deferred-open completion",
       "Subagent metadata, context badges, labels, and canonical title",
-      "Subagent activity status labels and bounded tool subjects"
+      "Subagent activity status labels and bounded tool subjects",
+      "The borderless welcome hero SHALL select a logo presentation tier from content width and height, degrading from big side-by-side to small side-by-side, stacked small, and text-only while never showing a logo that cannot fit the complete content block.",
+      "compute_hero SHALL produce vertically centered, borderless hero geometry with stable version, subtitle, info, menu, tip and error rectangles for side-by-side, stacked and text-only modes.",
+      "render_hero SHALL render the selected logo, inline version badge, optional subtitle, announcement info slot and menu without borders, and return menu, announcement and promo CTA hit geometry plus truncation state.",
+      "The welcome announcement renderer SHALL display optional title and message text within its area, cap collapsed messages to two wrapped rows, show an ellipsis when content overflows, and brighten only genuinely expandable or expanded content on hover.",
+      "The welcome hero SHALL keep announcement layout pre-pass row accounting identical to rendering, reserving a spacer and CTA row whenever a promo label is supplied and preventing message text from painting over the button.",
+      "The hero wrapping helpers SHALL split whitespace-delimited text by Unicode display width, preserve over-wide single words as clipped render lines, and provide shared row counts for layout and drawing.",
+      "Deferred model and reasoning-effort resolution",
+      "New session creation initialization and ready effects",
+      "Worktree session creation, cwd projection, and queued startup",
+      "Session and worktree creation failure cleanup",
+      "Trust gate persistence and deferred startup replay",
+      "Project picker gating, selection, prompt preservation, and cwd synchronization",
+      "Exit and delete session lifecycle effects",
+      "Sessionless input and permission/behavior control dispatch",
+      "Session identity and title fallback integration",
+      "Dashboard stop integration through lifecycle dispatch seam"
     ],
     "reviewed_files": [
       {
@@ -5701,6 +5717,18 @@
       {
         "path": "crates/codegen/pager/src/app/subagent.rs",
         "sha256": "b6269ad8526a4afc37dba723f05390d45d602b583d7bc8715cb985adcd67c3b9"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/search.rs",
+        "sha256": "2188150be06e6985ad639108f00cf97c549b7ddf013475ce26c785ce9c4f3280"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/welcome/hero.rs",
+        "sha256": "39733fe6294549cc9725e8a039020f3da8275728a53abfd68c683c4fe2d8d950"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "sha256": "ac37e6f0268ebd0c454a73fc87ae0b809d76f4595b03174cd117fb2b187351a5"
       }
     ],
     "review": "reviews/pager.md"

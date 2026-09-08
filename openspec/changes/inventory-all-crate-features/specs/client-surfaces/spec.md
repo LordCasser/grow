@@ -18303,3 +18303,395 @@ format_activity_label SHALL map tracker activity states to concise labels: Think
 - **THEN** the waiting-for-subject formatter takes precedence over the title.
 
 证据：`crates/codegen/pager/src/app/subagent.rs` — `format_activity_label`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::Thinking`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::Responding`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::AutoCompacting`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::Retrying`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::Waiting`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::ToolRunning`；`crates/codegen/pager/src/app/subagent.rs` — `format_waiting_for_subject`；`crates/codegen/pager/src/app/subagent.rs` — `MAX_ACTIVITY_SUBJECT_CHARS`；`crates/codegen/pager/src/app/subagent.rs` — `first_line`；`crates/codegen/pager/src/app/subagent.rs` — `truncated`。
+
+
+### Requirement: The borderless welcome hero SHALL select a logo presentation tier from content width and height, degrading from big side-by-side to small side-by-side, stacked small, and text-only while never showing a logo that cannot fit the complete content block.
+
+candidates SHALL use measured logo dimensions plus H_PAD, V_PAD and RIGHT_COL_MIN gates: big requires at least 143 columns and 39 rows, small side-by-side at least 113 columns and 26 rows, stacked small at least 54 columns and 26 rows, otherwise TextOnly. compute_hero SHALL try candidates in that order, account for menu, error, tip and announcement reservations, and fall back to TextOnly when fixed rows leave no fitting logo mode. HeroMode exposes SideBySide(LogoSize), Stacked(LogoSize), and TextOnly.
+
+#### Scenario: Big logo
+- **WHEN** the content area meets both big width and height gates
+- **THEN** SideBySide(Big) is selected.
+
+#### Scenario: Small fallback
+- **WHEN** one big dimension is short but the small side-by-side gates fit
+- **THEN** SideBySide(Small) is selected.
+
+#### Scenario: Stacked fallback
+- **WHEN** side-by-side does not fit but the small stacked gates fit
+- **THEN** Stacked(Small) is selected with the logo above the text group.
+
+#### Scenario: Text-only fallback
+- **WHEN** the area is too narrow/short or tip/error rows consume the available height
+- **THEN** TextOnly is selected and the logo rect has zero height.
+
+#### Scenario: Measured assets
+- **WHEN** logo resource dimensions or padding constants determine the thresholds
+- **THEN** the gates derive from active asset dimensions rather than hardcoded art assumptions.
+
+证据：`crates/codegen/pager/src/views/welcome/hero.rs` — `STACKED_TEXT_WIDTH`；`crates/codegen/pager/src/views/welcome/hero.rs` — `HeroMode`；`crates/codegen/pager/src/views/welcome/hero.rs` — `HeroLayoutInput`；`crates/codegen/pager/src/views/welcome/hero.rs` — `big_gate`；`crates/codegen/pager/src/views/welcome/hero.rs` — `small_gate`；`crates/codegen/pager/src/views/welcome/hero.rs` — `stacked_gate`；`crates/codegen/pager/src/views/welcome/hero.rs` — `candidates`；`crates/codegen/pager/src/views/welcome/hero.rs` — `compute_hero`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_tiers_by_width_and_height`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_falls_back_when_fixed_rows_steal_space`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_no_logo_when_too_small`。
+
+
+### Requirement: compute_hero SHALL produce vertically centered, borderless hero geometry with stable version, subtitle, info, menu, tip and error rectangles for side-by-side, stacked and text-only modes.
+
+fixed_below SHALL reserve tip_height plus one gap row only when a tip exists. The text group SHALL be capped at STACKED_TEXT_WIDTH after horizontal padding in stacked/text-only modes. Side-by-side SHALL allocate the left column as max(half content width, logo width plus horizontal padding), center the logo in it and vertically center the text group; stacked SHALL center the logo and use one separator row before text; text-only SHALL center only the text group. Rectangles with absent sections SHALL be zero, and section order SHALL be version, subtitle or info, then menu.
+
+#### Scenario: Side-by-side geometry
+- **WHEN** a wide/tall area selects a side-by-side mode
+- **THEN** the hero fills its slot, the logo is centered in the left column, and text begins at the column split.
+
+#### Scenario: Stacked geometry
+- **WHEN** a medium area selects stacked mode
+- **THEN** the small logo is horizontally centered and text begins one row below it at the stable width cap.
+
+#### Scenario: Text-only geometry
+- **WHEN** no logo fits
+- **THEN** the text group is centered and its width shrinks to available content after padding.
+
+#### Scenario: Section order
+- **WHEN** no announcement is present
+- **THEN** version, subtitle and menu have increasing rows and info is zero; with announcement, subtitle is hidden and info occupies that slot.
+
+#### Scenario: Fixed rows
+- **WHEN** tip or error height is nonzero
+- **THEN** the layout reserves their rows and centers the remaining hero without overflowing the content area.
+
+证据：`crates/codegen/pager/src/views/welcome/hero.rs` — `HeroLayout`；`crates/codegen/pager/src/views/welcome/hero.rs` — `fixed_below`；`crates/codegen/pager/src/views/welcome/hero.rs` — `text_group_width`；`crates/codegen/pager/src/views/welcome/hero.rs` — `mode_geometry`；`crates/codegen/pager/src/views/welcome/hero.rs` — `info_slot_height`；`crates/codegen/pager/src/views/welcome/hero.rs` — `compute_hero`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_side_by_side_geometry`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_stacked_geometry`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_no_logo_when_too_small`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_keeps_version_subtitle_menu_order`。
+
+
+### Requirement: render_hero SHALL render the selected logo, inline version badge, optional subtitle, announcement info slot and menu without borders, and return menu, announcement and promo CTA hit geometry plus truncation state.
+
+render_hero SHALL derive hover position only when interactive, render the logo only for nonzero logo geometry using the selected LogoSize art, use HeroInline version badge mode, draw the fixed subtitle when present, call announcement rendering only when info has height and an announcement exists, and render menu only when menu has height. HeroRects SHALL report menu_rects, announcement_truncated, optional announcement_rect and optional promo_cta_rect.
+
+#### Scenario: Borderless hero
+- **WHEN** a normal hero is rendered into a Buffer
+- **THEN** logo/text/menu content is drawn without border glyphs.
+
+#### Scenario: Interactive hover
+- **WHEN** interactive is false or true with a mouse position
+- **THEN** hover styling is suppressed or forwarded to menu/announcement painters accordingly.
+
+#### Scenario: Menu hit areas
+- **WHEN** menu rows are rendered
+- **THEN** one menu rectangle per row is returned in row order.
+
+#### Scenario: Announcement hit areas
+- **WHEN** announcement content fits or truncates
+- **THEN** the full text area and truncation flag are returned when shown.
+
+#### Scenario: Optional sections
+- **WHEN** logo, info or menu are absent
+- **THEN** their painters are skipped and the corresponding hit collections/rects are empty.
+
+证据：`crates/codegen/pager/src/views/welcome/hero.rs` — `HeroRects`；`crates/codegen/pager/src/views/welcome/hero.rs` — `render_hero`；`crates/codegen/pager/src/views/welcome/hero.rs` — `HERO_SUBTITLE`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_renders_no_border_glyphs`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_menu_rects_follow_rows`。
+
+
+### Requirement: The welcome announcement renderer SHALL display optional title and message text within its area, cap collapsed messages to two wrapped rows, show an ellipsis when content overflows, and brighten only genuinely expandable or expanded content on hover.
+
+render_announcement_block SHALL color critical titles with accent_error and other titles with warning, truncate title text to area width, wrap message by Unicode display width, use at most two message rows when collapsed and all available rows when expanded, return whether rows were omitted, and use hover_style only when expanded or the wrapped message exceeds max_lines. A short fitting announcement SHALL remain non-interactive-looking on hover. render_wrapped_text SHALL clip the final visible row to width minus one column before painting a styled ellipsis and SHALL never draw when max_lines or width is zero.
+
+#### Scenario: Collapsed overflow
+- **WHEN** a long announcement is collapsed
+- **THEN** title plus at most two message rows are shown, the final row has an ellipsis, and truncated is true.
+
+#### Scenario: Short message
+- **WHEN** the announcement fits within its rows
+- **THEN** no ellipsis is drawn, truncated is false, and hover does not brighten the message.
+
+#### Scenario: Expanded message
+- **WHEN** expanded is true and enough rows exist
+- **THEN** the full wrapped message is shown without an ellipsis or truncation.
+
+#### Scenario: Expanded clamp
+- **WHEN** expanded is true but the area is still too short
+- **THEN** the visible rows remain in bounds and the final row keeps the ellipsis.
+
+#### Scenario: Hover affordance
+- **WHEN** the mouse is over an overflowing or expanded message
+- **THEN** message and ellipsis use the bright hover style; a noninteractive short message stays gray.
+
+证据：`crates/codegen/pager/src/views/welcome/hero.rs` — `render_announcement_block`；`crates/codegen/pager/src/views/welcome/hero.rs` — `render_wrapped_text`；`crates/codegen/pager/src/views/welcome/hero.rs` — `wrapped_line_count`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::announcement_collapsed_long_shows_two_lines_and_ellipsis`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::announcement_short_no_ellipsis_no_rect`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::short_announcement_does_not_brighten_on_hover`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::overflowing_announcement_brightens_on_hover`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::announcement_expanded_shows_full_message`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::announcement_expanded_clamped_keeps_ellipsis`。
+
+
+### Requirement: The welcome hero SHALL keep announcement layout pre-pass row accounting identical to rendering, reserving a spacer and CTA row whenever a promo label is supplied and preventing message text from painting over the button.
+
+announcement_text_rows SHALL count an optional title plus wrapped message rows, capped at two unless expanded. announcement_desired_rows SHALL add ANNOUNCEMENT_CTA_ROWS (spacer plus button) only when has_promo_cta. info_slot_height SHALL clamp desired announcement rows to remaining slack after error, base hero and fixed-below rows and require one spacer row before info. render_announcement_with_cta SHALL shrink text_area by the reserved rows, place the CTA after drawn text plus a spacer only when it fits, return the text area/truncation/optional button rect, and show a caption only for non-dismissible announcements when a usable caption exists.
+
+#### Scenario: No CTA
+- **WHEN** an announcement has no promo label
+- **THEN** the full info area is available to text and no CTA rect is returned.
+
+#### Scenario: CTA reservation
+- **WHEN** a promo label is supplied
+- **THEN** two rows are reserved so text cannot overlap the spacer/button area.
+
+#### Scenario: Pinned caption
+- **WHEN** a non-dismissible announcement has a usable CTA caption
+- **THEN** the button row includes the dim caption and the returned rect covers only the button.
+
+#### Scenario: Dismissible promo
+- **WHEN** a dismissible announcement has a configured caption
+- **THEN** the button remains bare and the caption is omitted.
+
+#### Scenario: Insufficient space
+- **WHEN** the computed slack cannot hold the info slot
+- **THEN** info height is clamped or zero and the hero remains within the content area.
+
+证据：`crates/codegen/pager/src/views/welcome/hero.rs` — `ANNOUNCEMENT_CTA_ROWS`；`crates/codegen/pager/src/views/welcome/hero.rs` — `info_slot_height`；`crates/codegen/pager/src/views/welcome/hero.rs` — `announcement_text_rows`；`crates/codegen/pager/src/views/welcome/hero.rs` — `announcement_desired_rows`；`crates/codegen/pager/src/views/welcome/hero.rs` — `render_announcement_with_cta`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_announcement_clamped_to_fit`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::promo_cta_reserves_rows_and_returns_button_rect`。
+
+
+### Requirement: The hero wrapping helpers SHALL split whitespace-delimited text by Unicode display width, preserve over-wide single words as clipped render lines, and provide shared row counts for layout and drawing.
+
+wrap_lines SHALL return no rows for width zero or empty/whitespace-only input, join words with one space while the accumulated Unicode width fits, and emit an over-wide word as its own line for the renderer to clip. wrapped_line_count SHALL report the resulting row count as u16. render_wrapped_text SHALL use these rows, honor max_lines, and return whether omitted rows existed.
+
+#### Scenario: Single line
+- **WHEN** short text fits the width
+- **THEN** one row is drawn and remaining rows stay empty.
+
+#### Scenario: Multiple rows
+- **WHEN** words exceed the width
+- **THEN** words wrap into multiple nonempty rows without drawing beyond max_lines.
+
+#### Scenario: Empty input
+- **WHEN** text is empty or whitespace-only
+- **THEN** no rows are produced and no pixels are written.
+
+#### Scenario: Zero limits
+- **WHEN** width or max_lines is zero
+- **THEN** render_wrapped_text returns false without drawing.
+
+#### Scenario: Wide word
+- **WHEN** one token exceeds width
+- **THEN** it remains a single over-wide logical line and is clipped by the renderer before the ellipsis when truncated.
+
+证据：`crates/codegen/pager/src/views/welcome/hero.rs` — `wrap_lines`；`crates/codegen/pager/src/views/welcome/hero.rs` — `wrapped_line_count`；`crates/codegen/pager/src/views/welcome/hero.rs` — `render_wrapped_text`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::wrap_short_text_single_line`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::wrap_long_text_two_lines`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::wrap_empty_text`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::wrap_zero_max_lines`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::wrap_respects_max_lines`。
+
+
+### Requirement: Deferred model and reasoning-effort resolution
+
+take_deferred_model_switch SHALL prioritize a stashed model/effort, resolve a CLI effort token only when the stashed effort is absent, report typed unsupported/unknown/no-active-model errors without dropping a stashed model, and omit a no-op switch when the resolved effort already equals the active model state. apply_deferred_model_switch SHALL consume the stash and apply_deferred_switch_outcome SHALL publish one typed control notice for an effort error.
+
+#### Scenario: Effort only
+- **WHEN** a CLI effort token is supplied with an active model
+- **THEN** the canonical/remapped token resolves, equal effort is skipped, and unsupported/unknown tokens return the typed error.
+
+#### Scenario: Stashed model
+- **WHEN** a stashed model exists with missing/invalid/unsupported effort
+- **THEN** the model switch is preserved and effort is resolved or reported without dropping the model.
+
+#### Scenario: No active model
+- **WHEN** only a CLI effort token exists and no current model is available
+- **THEN** NoActiveModel is reported.
+
+#### Scenario: Apply error
+- **WHEN** a deferred outcome contains an effort error
+- **THEN** one control notice explains the error and retry guidance.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeferredSwitchOutcome`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `take_deferred_model_switch`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `apply_deferred_model_switch`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `apply_deferred_switch_outcome`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `resolve_effort_for_model`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `EffortTokenError`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `deferred_model_switch`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `NoticeTone::Error`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `NoticeCategory::Control`。
+
+
+### Requirement: New session creation initialization and ready effects
+
+dispatch_new_session_inner_with_id SHALL unregister the previous active session, choose the active/session cwd and inherited worktree/permission state, create an empty placeholder with copied prompt/gate/plugin/bootstrap state, seed MCP progress and prompt-history loading when it can create immediately, and emit CreateSession with model and preferred session id. SessionCreated SHALL bind the session id, apply session models without overwriting the app new-session default, drain queued prompts only after deferred controls/reconnect barriers, fetch history/agent metadata/commands/marketplace/optional CTA, fetch pending extensions, register the active session, notify readiness, and keep minimal-mode resume messaging accurate.
+
+#### Scenario: New session
+- **WHEN** a new session is dispatched
+- **THEN** a new AgentView is focused with empty scrollback, prompt focus, bootstrap commands generation one, inherited permission/worktree state, and the expected CreateSession effect.
+
+#### Scenario: Session ready
+- **WHEN** SessionCreated supplies an id/models
+- **THEN** the agent binds the id, session models update only the agent, fixed readiness effects are emitted, and optional plugin CTA is gated by the app flag.
+
+#### Scenario: Queued prompt
+- **WHEN** a prompt was queued before creation
+- **THEN** the queue drains into SendPrompt unless reconnect/deferred Behavior holds the admission boundary.
+
+#### Scenario: Extensions
+- **WHEN** pending extension fetch is set
+- **THEN** five extension list effects are emitted and the flag clears; without the flag none are emitted.
+
+#### Scenario: Minimal mode
+- **WHEN** a new session is created in minimal mode with multiple agents
+- **THEN** the banner advertises /resume rather than /agents.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_new_session_inner_with_id`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_new_session_inner`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `handle_session_created`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `bind_session_id`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `CreateSession`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `FetchPromptHistory`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `FetchSessionAgentName`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `RefreshAvailableCommands`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `CheckMarketplaceUpdates`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `FetchPluginCtaCatalog`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `extensions_modal_tab_fetches`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `RegisterActiveSession`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `notify_session_ready`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `QueueDrain`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `maybe_drain_queue`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `session_switch_hint_command`。
+
+
+### Requirement: Worktree session creation, cwd projection, and queued startup
+
+dispatch_new_worktree_session SHALL require a git ancestor, preserve deferred worktree/load/label/ref/preferred-session intent while startup is gated, create a placeholder in CreateWorktree/RestoreWorktree command state with inherited app settings and optional prompt, and switch focus to it. WorktreeSessionCreated SHALL bind the id, mark worktree state, use the returned session cwd (including subdirectory offsets), finish the command/turn, show a ready notice, apply deferred controls, drain queued prompts, fetch metadata/extensions, register the session, and notify readiness.
+
+#### Scenario: Create worktree
+- **WHEN** cwd is inside a git repository and startup is allowed
+- **THEN** one placeholder agent and one CreateWorktreeSession effect are returned.
+
+#### Scenario: Non-git
+- **WHEN** cwd has no git ancestor
+- **THEN** no agent/effect is created and a warning is recorded.
+
+#### Scenario: Worktree ready
+- **WHEN** WorktreeSessionCreated returns root and session cwd
+- **THEN** the session uses the exact session cwd, worktree flag, ready notice, and readiness effects.
+
+#### Scenario: Queued prompt
+- **WHEN** a prompt is queued before worktree creation finishes
+- **THEN** it is sent after WorktreeSessionCreated and the queue clears.
+
+#### Scenario: Deferred gate
+- **WHEN** startup is not allowed
+- **THEN** worktree/load/ref/label/preferred id are stashed and no effect is emitted.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_new_worktree_session`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `handle_worktree_session_created`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `CreateWorktreeSession`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `AgentCommand::CreateWorktree`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `AgentCommand::RestoreWorktree`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `session_cwd`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `worktree_path`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `is_worktree`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `cwd_has_git_ancestor`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeferredSessionStartup::Load`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `worktree_ref`。
+
+
+### Requirement: Session and worktree creation failure cleanup
+
+handle_session_failed and handle_worktree_session_failed SHALL distinguish orphan placeholders from existing/forked agents: remove orphan agents and return to Welcome or a surviving agent with deduplicated startup warning/toast, while retaining non-orphan agents, clearing loading/MCP/extensions/live feedback, finishing commands/turns, clearing pending prompts/banners, and appending a TurnFailed event with elapsed time.
+
+#### Scenario: Orphan failure
+- **WHEN** a placeholder without session id/fork parent fails
+- **THEN** the placeholder is removed, welcome/fallback focus is restored, and the failure is surfaced as a startup warning or fallback toast.
+
+#### Scenario: Existing/forked failure
+- **WHEN** an existing or forked agent fails
+- **THEN** the agent remains, loading/command state clears, and TurnFailed is appended without deleting the agent.
+
+#### Scenario: Worktree failure
+- **WHEN** worktree creation fails
+- **THEN** the same orphan/non-orphan policy applies with a Cannot create worktree warning.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `handle_session_failed`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `handle_worktree_session_failed`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `push_session_create_failure_warning`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `remove_agent_and_cleanup`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `TurnFailed`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `clear_pending_extensions_fetch`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `clear_mcp_init_progress`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `pending_first_prompt`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `pending_fork_banner`。
+
+
+### Requirement: Trust gate persistence and deferred startup replay
+
+dispatch_trust_folder SHALL persist a still-valid folder identity before resolving trust, keep TrustState::Pending and toast when the folder changed, and finish_trust SHALL mark Done only when startup is allowed. drain_startup_actions SHALL consume all deferred session/worktree/fork/new/prompt/dashboard fields exactly once and replay the correct dispatcher while preserving preferred ids, labels, refs, and prompts.
+
+#### Scenario: Trust required
+- **WHEN** trust is pending
+- **THEN** session_startup_allowed is false and new/startup actions remain gated.
+
+#### Scenario: Trust accepted
+- **WHEN** workspace identity still matches
+- **THEN** trust is persisted, state becomes Done, and deferred startup actions replay.
+
+#### Scenario: Stale trust
+- **WHEN** workspace identity changed or persistence fails
+- **THEN** state remains Pending and a review/reopen toast is shown.
+
+#### Scenario: Deferred intents
+- **WHEN** fork/load/new/worktree/preferred/prompt/dashboard intents coexist
+- **THEN** all startup fields are cleared and each intent is routed once with the correct arguments/effect.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_trust_folder`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `finish_trust`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `drain_startup_actions`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `session_startup_allowed`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `TrustState::Pending`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `TrustState::Done`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `persist_trust`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeferredStartupActions`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeferredSessionStartup::Fork`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeferredSessionStartup::Load`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeferredSessionStartup::NewWithId`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_startup_fork_session`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_load_session`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_initial_prompt`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `OpenDashboard`。
+
+
+### Requirement: Project picker gating, selection, prompt preservation, and cwd synchronization
+
+dispatch_new_session SHALL open the project question when required and avoid duplicate placeholders; skip/selection paths SHALL restore the stashed prompt/model/preferred id, create exactly one session, update app/agent/dashboard cwd and git state, optionally persist picker disablement, and ignore late recents or duplicate selections after the picker is closed.
+
+#### Scenario: Non-project startup
+- **WHEN** cwd needs a project picker
+- **THEN** NewSession creates a placeholder and opens ProjectSelect before CreateSession.
+
+#### Scenario: Picker recents
+- **WHEN** the picker is untouched and recents complete
+- **THEN** recent directories are merged; after user navigation or picker closure, stale completion is a no-op.
+
+#### Scenario: Prompt preservation
+- **WHEN** a prompt arrives while picker is open
+- **THEN** it is attached/stashed behind the picker and later restored without premature submission.
+
+#### Scenario: Selection
+- **WHEN** a project path is selected
+- **THEN** cwd/session cwd/dashboard snapshot and SetWorkingDir/CreateSession effects use the selected canonical path.
+
+#### Scenario: Duplicate selection
+- **WHEN** a second selection arrives after create is armed
+- **THEN** it is a no-op and cannot consume a second create token or apply disablement.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_new_session`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_new_session_inner`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `open_new_session_question`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `skip_picker_and_create_session`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `open_project_question_with_context`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `ProjectSelect`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `ProjectPickerRecentsLoaded`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `ProjectSelected`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `pending_project_create`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `CreateSession`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `SetWorkingDir`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `mark_project_picker_done`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `project_picker_disabled`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dashboard.cwd`。
+
+
+### Requirement: Exit and delete session lifecycle effects
+
+dispatch_exit_session SHALL unregister the active session, return to Welcome, and clear picker/exit state. Delete confirmation SHALL require an active session, offer Delete/Cancel, cancel without effects, and on confirmation cancel the turn/subagents, kill running background tasks, toast progress, and emit DeleteSession targeting Welcome; completion SHALL clean up and guard absent sessions.
+
+#### Scenario: Exit
+- **WHEN** an active session exits
+- **THEN** the session is unregistered, Welcome is shown, and picker/exit state resets.
+
+#### Scenario: Delete prompt
+- **WHEN** an active session is present or absent
+- **THEN** the delete question opens or a no-session toast is shown.
+
+#### Scenario: Confirm delete
+- **WHEN** delete is confirmed
+- **THEN** CancelTurn, KillBgTask for running tasks, and DeleteSession effects are emitted.
+
+#### Scenario: Completion
+- **WHEN** deletion completes
+- **THEN** the agent is removed and Welcome transition is safe/idempotent.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_exit_session`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `open_delete_current_session_question`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_delete_current_session_answered`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeleteSession`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `CancelTurn`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `KillBgTask`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `AfterSessionDelete::Welcome`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `unregister_session_effect`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `show_welcome`。
+
+
+### Requirement: Sessionless input and permission/behavior control dispatch
+
+Sessionless SendPrompt SHALL queue text without emitting an effect, sessionless follow-up submission SHALL preserve chips and avoid SendPrompt, and control dispatch SHALL preserve auto/always-approve exclusivity, defer Plan behavior until a session exists, emit SwitchBehavior for an active idempotent transition, and ignore unknown background-task completions.
+
+#### Scenario: No session prompt
+- **WHEN** session_id is absent
+- **THEN** SendPrompt queues one prompt and emits no effect.
+
+#### Scenario: No session follow-up
+- **WHEN** follow-up chips exist without a session
+- **THEN** SubmitFollowUp emits no SendPrompt and keeps chips.
+
+#### Scenario: Permission modes
+- **WHEN** AlwaysApprove is enabled after Auto
+- **THEN** the auto display flag clears because always-approve wins.
+
+#### Scenario: Behavior mode
+- **WHEN** Plan is chosen without/with a session
+- **THEN** a new session is started with deferred Plan, or an active session emits SwitchBehavior once.
+
+#### Scenario: Unknown task
+- **WHEN** BgTaskKilled names an unknown session
+- **THEN** no effect is emitted and unrelated task state is unchanged.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `SendPrompt`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `SubmitFollowUp`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `skip_picker_and_create_session`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `SetPermissionMode`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `PermissionModeKind::AlwaysApprove`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `SetBehaviorMode`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `SwitchBehavior`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `deferred_session_mode`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `BgTaskKilled`。
+
+
+### Requirement: Session identity and title fallback integration
+
+The session lifecycle dispatch SHALL preserve an actionable short title/identity fallback for newly created sessions without prompts and keep dashboard/session identity resolvers round-trippable for top-level and subagent rows.
+
+#### Scenario: Untitled session
+- **WHEN** an agent has a session id but no prompt/display name
+- **THEN** the entry title falls back to the short session id.
+
+#### Scenario: Top-level resolver
+- **WHEN** a persisted top-level session id is mapped to a live agent
+- **THEN** resolve/to_persisted round-trip and absent ids return None.
+
+#### Scenario: Subagent resolver
+- **WHEN** a child session is registered under a parent
+- **THEN** the persisted parent/child identity round-trips to the live dashboard row.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `handle_session_created`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `entry_title`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `SessionIdResolver`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `PersistedRowId::TopLevel`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `PersistedRowId::Subagent`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DashboardRowId::TopLevel`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DashboardRowId::Subagent`。
+
+
+### Requirement: Dashboard stop integration through lifecycle dispatch seam
+
+The dispatch integration exercised alongside session lifecycle SHALL move dashboard selection/peek after deleting a selected top-level row and require a second Ctrl+X through handle_input to confirm deletion, preserving delete_confirm until dispatch consumes it.
+
+#### Scenario: Peek close
+- **WHEN** dashboard peek is open on the selected row
+- **THEN** DashboardStop deletes the selected row and moves selection/peek to the next row.
+
+#### Scenario: Double stop
+- **WHEN** Ctrl+X is pressed twice through handle_input
+- **THEN** the first press arms confirmation and the second emits DeleteSession; completion removes the target.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `dispatch_delete_current_session_answered`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DashboardStop`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeleteSession`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DeleteSessionComplete`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `delete_confirm`；`crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs` — `DashboardState::handle_input_with_paste_provenance`。

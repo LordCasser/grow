@@ -75204,6 +75204,51 @@
         "Scratch ownership",
         "the caller reuses the supplied scratch buffer across frames",
         "the pane passes that buffer through to the sticky/header render path and does not replace the caller-owned object."
+      ],
+      [
+        "Open state",
+        "a search session is opened",
+        "the query and match list are empty, the cursor is None and composing is true."
+      ],
+      [
+        "Query result",
+        "a valid query is updated and the daemon result is polled",
+        "the query is retained, match_count/current/current_index reflect the result and the cursor starts at index zero."
+      ],
+      [
+        "No-match and invalid query",
+        "a query has no matches, is cleared, or is malformed",
+        "matches and cursor are cleared; a malformed regex remains visible through query and has_error."
+      ],
+      [
+        "Cursor-only edit",
+        "a key moves the LineEditor cursor without changing text",
+        "the edit is consumed as CursorChanged, request_generation is unchanged and the settled matches remain until the new text scan."
+      ],
+      [
+        "Paste normalization",
+        "pasted text contains CR/LF or only CR/LF",
+        "line-editor paste normalizes the inserted text, enqueues once for a real text change and ignores a no-change paste."
+      ],
+      [
+        "Viewport graphemes",
+        "a long query contains wide, combining and emoji graphemes",
+        "query_viewport preserves complete grapheme spans and reports a cursor display column inside the requested width."
+      ],
+      [
+        "Content refresh",
+        "entries are appended while a search session remains open",
+        "the next query update increments the request generation, resynchronizes the corpus and finds the new entry."
+      ],
+      [
+        "Navigation and accept",
+        "matches exist, next/prev or accept is invoked",
+        "navigation wraps or no-ops as appropriate, and accept changes composing to false without losing query, matches or cursor."
+      ],
+      [
+        "Highlight state",
+        "the query is empty, malformed or valid",
+        "highlight_regex is None for empty/error input and is the compiled matcher for a valid nonempty query."
       ]
     ],
     "sources": [
@@ -75290,6 +75335,142 @@
       [
         "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
         "ScrollbackPane::render_with_scratch_and_selection_boundaries"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::open"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::update_query"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::update_derived_query"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::apply_query_key"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::apply_query_paste"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::handle_query_key"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::poll"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::next"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::prev"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::accept"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::current"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::current_index"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::match_count"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::query"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::query_viewport"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::highlight_regex"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::has_error"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::is_composing"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::state_with"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::update_and_wait"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::open_starts_empty_and_composing"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::update_query_finds_matches_and_parks_on_first"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::update_query_with_no_matches_clears_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::update_query_back_to_empty_clears_matches"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::update_query_with_invalid_regex_finds_nothing_but_keeps_query"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::cursor_only_query_edits_do_not_enqueue_daemon_work"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::paste_sanitizes_at_cursor_and_enqueues_only_text_mutation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::query_viewport_preserves_graphemes_and_actual_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::update_query_picks_up_content_added_mid_session"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::async_scan_delivers_results_and_navigation_wraps"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::next_and_prev_wrap_around_matches"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::next_and_prev_are_noop_without_matches"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::accept_stops_composing_but_keeps_matches"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::update_query_refinds_against_cached_corpus"
       ]
     ]
   },
@@ -160386,6 +160567,46 @@
         "Empty source",
         "all searchable fields are empty",
         "searchable_text returns None instead of indexing a blank string."
+      ],
+      [
+        "Ordered matches",
+        "indexed entries contain matching text in multiple entries or multiple positions",
+        "matches are returned in entry order with the expected EntryId, logical line and byte range."
+      ],
+      [
+        "Multiline metadata",
+        "one searchable entry contains repeated matches on later newline-separated lines",
+        "line_in_entry advances from zero and byte ranges remain ranges in the entry text."
+      ],
+      [
+        "Rendered Markdown corpus",
+        "an AgentMessage phrase crosses Markdown emphasis markers",
+        "the searchable rendered text yields the visible phrase match."
+      ],
+      [
+        "Empty or zero-width query",
+        "the query is empty or a regex only produces zero-width matches",
+        "the index returns an empty match list."
+      ],
+      [
+        "Malformed regex",
+        "TextMatcher reports a regex compilation error",
+        "find returns no matches."
+      ],
+      [
+        "Smart case",
+        "a lowercase, mixed-case or uppercase substring query is applied",
+        "matching follows TextMatcher smart-case behavior as asserted by the test."
+      ],
+      [
+        "Non-searchable block",
+        "an entry has empty searchable text alongside a searchable entry",
+        "the empty entry is omitted from the corpus and only the searchable entry matches."
+      ],
+      [
+        "Generation cache",
+        "scroll/viewport state changes without content_generation changing, or content is appended/cleared",
+        "sync is a no-op for view-only changes and rebuilds for content changes, updating the corpus accordingly."
       ]
     ],
     "sources": [
@@ -160432,6 +160653,66 @@
       [
         "crates/codegen/pager/src/scrollback/block.rs",
         "test_copy_does_not_capture_render_only_table_padding"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchIndex::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchIndex::sync"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchIndex::find"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "scan_matches"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::substring"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::find_locates_substring_matches_in_scrollback_order"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::find_reports_line_within_multiline_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::find_matches_markdown_phrase_spanning_emphasis"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::empty_query_finds_nothing"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::zero_width_matches_are_skipped"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::invalid_regex_finds_nothing"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::find_respects_smart_case"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::entries_without_searchable_text_are_skipped"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::sync_is_noop_when_content_generation_unchanged"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::sync_rebuilds_after_content_change"
       ]
     ]
   },
@@ -169151,6 +169432,36 @@
         "Debounce",
         "prompt or CTA debounce expires",
         "the corresponding generation-aware handler is invoked."
+      ],
+      [
+        "Newest update",
+        "a queued burst contains multiple queries and two Some corpus values",
+        "drain_to_latest keeps the newest query/generation and newest Some corpus."
+      ],
+      [
+        "Corpus carry-forward",
+        "a later Update carries corpus=None after an earlier Some corpus",
+        "the earlier corpus remains available while the later query/generation wins."
+      ],
+      [
+        "Stop priority",
+        "Stop follows a queued Update",
+        "drain_to_latest returns stop=true without applying a later scan."
+      ],
+      [
+        "Stale snapshot rejection",
+        "the daemon snapshot has an old generation, mismatched query or an ABA intermediate query",
+        "poll returns false and leaves matches/cursor unchanged until the current generation/query arrives."
+      ],
+      [
+        "Stable cursor",
+        "poll observes the same request generation repeatedly after navigation",
+        "poll returns false and does not snap the cursor back to the first match."
+      ],
+      [
+        "Coalesced end-to-end burst",
+        "several query updates are sent without polling and corpus content is unchanged",
+        "the worker reuses its held corpus, superseded snapshots are ignored and the final query result is applied."
       ]
     ],
     "sources": [
@@ -169189,6 +169500,54 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
         "TaskResult::ShellSuggestionsLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "drain_to_latest"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "SearchDaemon::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "SearchDaemon::drop"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::update_derived_query"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "ScrollbackSearchState::poll"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::corpus_of"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::drain_to_latest_keeps_newest_corpus_and_query"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::drain_to_latest_none_corpus_keeps_earlier_corpus"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::drain_to_latest_stop_wins"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::poll_rejects_same_query_and_aba_stale_snapshots"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::poll_without_new_generation_keeps_navigation_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/search.rs",
+        "tests::coalesced_burst_carries_corpus_forward_to_last_query"
       ]
     ]
   },
@@ -174864,6 +175223,1140 @@
       [
         "crates/codegen/pager/src/app/subagent.rs",
         "truncated"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The borderless welcome hero SHALL select a logo presentation tier from content width and height, degrading from big side-by-side to small side-by-side, stacked small, and text-only while never showing a logo that cannot fit the complete content block.",
+    "contract": "candidates SHALL use measured logo dimensions plus H_PAD, V_PAD and RIGHT_COL_MIN gates: big requires at least 143 columns and 39 rows, small side-by-side at least 113 columns and 26 rows, stacked small at least 54 columns and 26 rows, otherwise TextOnly. compute_hero SHALL try candidates in that order, account for menu, error, tip and announcement reservations, and fall back to TextOnly when fixed rows leave no fitting logo mode. HeroMode exposes SideBySide(LogoSize), Stacked(LogoSize), and TextOnly.",
+    "scenarios": [
+      [
+        "Big logo",
+        "the content area meets both big width and height gates",
+        "SideBySide(Big) is selected."
+      ],
+      [
+        "Small fallback",
+        "one big dimension is short but the small side-by-side gates fit",
+        "SideBySide(Small) is selected."
+      ],
+      [
+        "Stacked fallback",
+        "side-by-side does not fit but the small stacked gates fit",
+        "Stacked(Small) is selected with the logo above the text group."
+      ],
+      [
+        "Text-only fallback",
+        "the area is too narrow/short or tip/error rows consume the available height",
+        "TextOnly is selected and the logo rect has zero height."
+      ],
+      [
+        "Measured assets",
+        "logo resource dimensions or padding constants determine the thresholds",
+        "the gates derive from active asset dimensions rather than hardcoded art assumptions."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "STACKED_TEXT_WIDTH"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "HeroMode"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "HeroLayoutInput"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "big_gate"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "small_gate"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "stacked_gate"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "candidates"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "compute_hero"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::hero_tiers_by_width_and_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::hero_falls_back_when_fixed_rows_steal_space"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::hero_no_logo_when_too_small"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "compute_hero SHALL produce vertically centered, borderless hero geometry with stable version, subtitle, info, menu, tip and error rectangles for side-by-side, stacked and text-only modes.",
+    "contract": "fixed_below SHALL reserve tip_height plus one gap row only when a tip exists. The text group SHALL be capped at STACKED_TEXT_WIDTH after horizontal padding in stacked/text-only modes. Side-by-side SHALL allocate the left column as max(half content width, logo width plus horizontal padding), center the logo in it and vertically center the text group; stacked SHALL center the logo and use one separator row before text; text-only SHALL center only the text group. Rectangles with absent sections SHALL be zero, and section order SHALL be version, subtitle or info, then menu.",
+    "scenarios": [
+      [
+        "Side-by-side geometry",
+        "a wide/tall area selects a side-by-side mode",
+        "the hero fills its slot, the logo is centered in the left column, and text begins at the column split."
+      ],
+      [
+        "Stacked geometry",
+        "a medium area selects stacked mode",
+        "the small logo is horizontally centered and text begins one row below it at the stable width cap."
+      ],
+      [
+        "Text-only geometry",
+        "no logo fits",
+        "the text group is centered and its width shrinks to available content after padding."
+      ],
+      [
+        "Section order",
+        "no announcement is present",
+        "version, subtitle and menu have increasing rows and info is zero; with announcement, subtitle is hidden and info occupies that slot."
+      ],
+      [
+        "Fixed rows",
+        "tip or error height is nonzero",
+        "the layout reserves their rows and centers the remaining hero without overflowing the content area."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "HeroLayout"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "fixed_below"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "text_group_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "mode_geometry"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "info_slot_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "compute_hero"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::hero_side_by_side_geometry"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::hero_stacked_geometry"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::hero_no_logo_when_too_small"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::hero_keeps_version_subtitle_menu_order"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "render_hero SHALL render the selected logo, inline version badge, optional subtitle, announcement info slot and menu without borders, and return menu, announcement and promo CTA hit geometry plus truncation state.",
+    "contract": "render_hero SHALL derive hover position only when interactive, render the logo only for nonzero logo geometry using the selected LogoSize art, use HeroInline version badge mode, draw the fixed subtitle when present, call announcement rendering only when info has height and an announcement exists, and render menu only when menu has height. HeroRects SHALL report menu_rects, announcement_truncated, optional announcement_rect and optional promo_cta_rect.",
+    "scenarios": [
+      [
+        "Borderless hero",
+        "a normal hero is rendered into a Buffer",
+        "logo/text/menu content is drawn without border glyphs."
+      ],
+      [
+        "Interactive hover",
+        "interactive is false or true with a mouse position",
+        "hover styling is suppressed or forwarded to menu/announcement painters accordingly."
+      ],
+      [
+        "Menu hit areas",
+        "menu rows are rendered",
+        "one menu rectangle per row is returned in row order."
+      ],
+      [
+        "Announcement hit areas",
+        "announcement content fits or truncates",
+        "the full text area and truncation flag are returned when shown."
+      ],
+      [
+        "Optional sections",
+        "logo, info or menu are absent",
+        "their painters are skipped and the corresponding hit collections/rects are empty."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "HeroRects"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "render_hero"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "HERO_SUBTITLE"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::hero_renders_no_border_glyphs"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::hero_menu_rects_follow_rows"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The welcome announcement renderer SHALL display optional title and message text within its area, cap collapsed messages to two wrapped rows, show an ellipsis when content overflows, and brighten only genuinely expandable or expanded content on hover.",
+    "contract": "render_announcement_block SHALL color critical titles with accent_error and other titles with warning, truncate title text to area width, wrap message by Unicode display width, use at most two message rows when collapsed and all available rows when expanded, return whether rows were omitted, and use hover_style only when expanded or the wrapped message exceeds max_lines. A short fitting announcement SHALL remain non-interactive-looking on hover. render_wrapped_text SHALL clip the final visible row to width minus one column before painting a styled ellipsis and SHALL never draw when max_lines or width is zero.",
+    "scenarios": [
+      [
+        "Collapsed overflow",
+        "a long announcement is collapsed",
+        "title plus at most two message rows are shown, the final row has an ellipsis, and truncated is true."
+      ],
+      [
+        "Short message",
+        "the announcement fits within its rows",
+        "no ellipsis is drawn, truncated is false, and hover does not brighten the message."
+      ],
+      [
+        "Expanded message",
+        "expanded is true and enough rows exist",
+        "the full wrapped message is shown without an ellipsis or truncation."
+      ],
+      [
+        "Expanded clamp",
+        "expanded is true but the area is still too short",
+        "the visible rows remain in bounds and the final row keeps the ellipsis."
+      ],
+      [
+        "Hover affordance",
+        "the mouse is over an overflowing or expanded message",
+        "message and ellipsis use the bright hover style; a noninteractive short message stays gray."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "render_announcement_block"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "render_wrapped_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "wrapped_line_count"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::announcement_collapsed_long_shows_two_lines_and_ellipsis"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::announcement_short_no_ellipsis_no_rect"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::short_announcement_does_not_brighten_on_hover"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::overflowing_announcement_brightens_on_hover"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::announcement_expanded_shows_full_message"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::announcement_expanded_clamped_keeps_ellipsis"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The welcome hero SHALL keep announcement layout pre-pass row accounting identical to rendering, reserving a spacer and CTA row whenever a promo label is supplied and preventing message text from painting over the button.",
+    "contract": "announcement_text_rows SHALL count an optional title plus wrapped message rows, capped at two unless expanded. announcement_desired_rows SHALL add ANNOUNCEMENT_CTA_ROWS (spacer plus button) only when has_promo_cta. info_slot_height SHALL clamp desired announcement rows to remaining slack after error, base hero and fixed-below rows and require one spacer row before info. render_announcement_with_cta SHALL shrink text_area by the reserved rows, place the CTA after drawn text plus a spacer only when it fits, return the text area/truncation/optional button rect, and show a caption only for non-dismissible announcements when a usable caption exists.",
+    "scenarios": [
+      [
+        "No CTA",
+        "an announcement has no promo label",
+        "the full info area is available to text and no CTA rect is returned."
+      ],
+      [
+        "CTA reservation",
+        "a promo label is supplied",
+        "two rows are reserved so text cannot overlap the spacer/button area."
+      ],
+      [
+        "Pinned caption",
+        "a non-dismissible announcement has a usable CTA caption",
+        "the button row includes the dim caption and the returned rect covers only the button."
+      ],
+      [
+        "Dismissible promo",
+        "a dismissible announcement has a configured caption",
+        "the button remains bare and the caption is omitted."
+      ],
+      [
+        "Insufficient space",
+        "the computed slack cannot hold the info slot",
+        "info height is clamped or zero and the hero remains within the content area."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "ANNOUNCEMENT_CTA_ROWS"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "info_slot_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "announcement_text_rows"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "announcement_desired_rows"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "render_announcement_with_cta"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::hero_announcement_clamped_to_fit"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::promo_cta_reserves_rows_and_returns_button_rect"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The hero wrapping helpers SHALL split whitespace-delimited text by Unicode display width, preserve over-wide single words as clipped render lines, and provide shared row counts for layout and drawing.",
+    "contract": "wrap_lines SHALL return no rows for width zero or empty/whitespace-only input, join words with one space while the accumulated Unicode width fits, and emit an over-wide word as its own line for the renderer to clip. wrapped_line_count SHALL report the resulting row count as u16. render_wrapped_text SHALL use these rows, honor max_lines, and return whether omitted rows existed.",
+    "scenarios": [
+      [
+        "Single line",
+        "short text fits the width",
+        "one row is drawn and remaining rows stay empty."
+      ],
+      [
+        "Multiple rows",
+        "words exceed the width",
+        "words wrap into multiple nonempty rows without drawing beyond max_lines."
+      ],
+      [
+        "Empty input",
+        "text is empty or whitespace-only",
+        "no rows are produced and no pixels are written."
+      ],
+      [
+        "Zero limits",
+        "width or max_lines is zero",
+        "render_wrapped_text returns false without drawing."
+      ],
+      [
+        "Wide word",
+        "one token exceeds width",
+        "it remains a single over-wide logical line and is clipped by the renderer before the ellipsis when truncated."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "wrap_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "wrapped_line_count"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "render_wrapped_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::wrap_short_text_single_line"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::wrap_long_text_two_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::wrap_empty_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::wrap_zero_max_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/hero.rs",
+        "tests::wrap_respects_max_lines"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Deferred model and reasoning-effort resolution",
+    "contract": "take_deferred_model_switch SHALL prioritize a stashed model/effort, resolve a CLI effort token only when the stashed effort is absent, report typed unsupported/unknown/no-active-model errors without dropping a stashed model, and omit a no-op switch when the resolved effort already equals the active model state. apply_deferred_model_switch SHALL consume the stash and apply_deferred_switch_outcome SHALL publish one typed control notice for an effort error.",
+    "scenarios": [
+      [
+        "Effort only",
+        "a CLI effort token is supplied with an active model",
+        "the canonical/remapped token resolves, equal effort is skipped, and unsupported/unknown tokens return the typed error."
+      ],
+      [
+        "Stashed model",
+        "a stashed model exists with missing/invalid/unsupported effort",
+        "the model switch is preserved and effort is resolved or reported without dropping the model."
+      ],
+      [
+        "No active model",
+        "only a CLI effort token exists and no current model is available",
+        "NoActiveModel is reported."
+      ],
+      [
+        "Apply error",
+        "a deferred outcome contains an effort error",
+        "one control notice explains the error and retry guidance."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DeferredSwitchOutcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "take_deferred_model_switch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "apply_deferred_model_switch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "apply_deferred_switch_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "resolve_effort_for_model"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "EffortTokenError"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "deferred_model_switch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "NoticeTone::Error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "NoticeCategory::Control"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "New session creation initialization and ready effects",
+    "contract": "dispatch_new_session_inner_with_id SHALL unregister the previous active session, choose the active/session cwd and inherited worktree/permission state, create an empty placeholder with copied prompt/gate/plugin/bootstrap state, seed MCP progress and prompt-history loading when it can create immediately, and emit CreateSession with model and preferred session id. SessionCreated SHALL bind the session id, apply session models without overwriting the app new-session default, drain queued prompts only after deferred controls/reconnect barriers, fetch history/agent metadata/commands/marketplace/optional CTA, fetch pending extensions, register the active session, notify readiness, and keep minimal-mode resume messaging accurate.",
+    "scenarios": [
+      [
+        "New session",
+        "a new session is dispatched",
+        "a new AgentView is focused with empty scrollback, prompt focus, bootstrap commands generation one, inherited permission/worktree state, and the expected CreateSession effect."
+      ],
+      [
+        "Session ready",
+        "SessionCreated supplies an id/models",
+        "the agent binds the id, session models update only the agent, fixed readiness effects are emitted, and optional plugin CTA is gated by the app flag."
+      ],
+      [
+        "Queued prompt",
+        "a prompt was queued before creation",
+        "the queue drains into SendPrompt unless reconnect/deferred Behavior holds the admission boundary."
+      ],
+      [
+        "Extensions",
+        "pending extension fetch is set",
+        "five extension list effects are emitted and the flag clears; without the flag none are emitted."
+      ],
+      [
+        "Minimal mode",
+        "a new session is created in minimal mode with multiple agents",
+        "the banner advertises /resume rather than /agents."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_new_session_inner_with_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_new_session_inner"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "handle_session_created"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "bind_session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "CreateSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "FetchPromptHistory"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "FetchSessionAgentName"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "RefreshAvailableCommands"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "CheckMarketplaceUpdates"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "FetchPluginCtaCatalog"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "extensions_modal_tab_fetches"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "RegisterActiveSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "notify_session_ready"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "QueueDrain"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "maybe_drain_queue"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "session_switch_hint_command"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Worktree session creation, cwd projection, and queued startup",
+    "contract": "dispatch_new_worktree_session SHALL require a git ancestor, preserve deferred worktree/load/label/ref/preferred-session intent while startup is gated, create a placeholder in CreateWorktree/RestoreWorktree command state with inherited app settings and optional prompt, and switch focus to it. WorktreeSessionCreated SHALL bind the id, mark worktree state, use the returned session cwd (including subdirectory offsets), finish the command/turn, show a ready notice, apply deferred controls, drain queued prompts, fetch metadata/extensions, register the session, and notify readiness.",
+    "scenarios": [
+      [
+        "Create worktree",
+        "cwd is inside a git repository and startup is allowed",
+        "one placeholder agent and one CreateWorktreeSession effect are returned."
+      ],
+      [
+        "Non-git",
+        "cwd has no git ancestor",
+        "no agent/effect is created and a warning is recorded."
+      ],
+      [
+        "Worktree ready",
+        "WorktreeSessionCreated returns root and session cwd",
+        "the session uses the exact session cwd, worktree flag, ready notice, and readiness effects."
+      ],
+      [
+        "Queued prompt",
+        "a prompt is queued before worktree creation finishes",
+        "it is sent after WorktreeSessionCreated and the queue clears."
+      ],
+      [
+        "Deferred gate",
+        "startup is not allowed",
+        "worktree/load/ref/label/preferred id are stashed and no effect is emitted."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_new_worktree_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "handle_worktree_session_created"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "CreateWorktreeSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "AgentCommand::CreateWorktree"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "AgentCommand::RestoreWorktree"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "session_cwd"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "worktree_path"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "is_worktree"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "cwd_has_git_ancestor"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DeferredSessionStartup::Load"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "worktree_ref"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Session and worktree creation failure cleanup",
+    "contract": "handle_session_failed and handle_worktree_session_failed SHALL distinguish orphan placeholders from existing/forked agents: remove orphan agents and return to Welcome or a surviving agent with deduplicated startup warning/toast, while retaining non-orphan agents, clearing loading/MCP/extensions/live feedback, finishing commands/turns, clearing pending prompts/banners, and appending a TurnFailed event with elapsed time.",
+    "scenarios": [
+      [
+        "Orphan failure",
+        "a placeholder without session id/fork parent fails",
+        "the placeholder is removed, welcome/fallback focus is restored, and the failure is surfaced as a startup warning or fallback toast."
+      ],
+      [
+        "Existing/forked failure",
+        "an existing or forked agent fails",
+        "the agent remains, loading/command state clears, and TurnFailed is appended without deleting the agent."
+      ],
+      [
+        "Worktree failure",
+        "worktree creation fails",
+        "the same orphan/non-orphan policy applies with a Cannot create worktree warning."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "handle_session_failed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "handle_worktree_session_failed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "push_session_create_failure_warning"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "remove_agent_and_cleanup"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "TurnFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "clear_pending_extensions_fetch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "clear_mcp_init_progress"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "pending_first_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "pending_fork_banner"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Trust gate persistence and deferred startup replay",
+    "contract": "dispatch_trust_folder SHALL persist a still-valid folder identity before resolving trust, keep TrustState::Pending and toast when the folder changed, and finish_trust SHALL mark Done only when startup is allowed. drain_startup_actions SHALL consume all deferred session/worktree/fork/new/prompt/dashboard fields exactly once and replay the correct dispatcher while preserving preferred ids, labels, refs, and prompts.",
+    "scenarios": [
+      [
+        "Trust required",
+        "trust is pending",
+        "session_startup_allowed is false and new/startup actions remain gated."
+      ],
+      [
+        "Trust accepted",
+        "workspace identity still matches",
+        "trust is persisted, state becomes Done, and deferred startup actions replay."
+      ],
+      [
+        "Stale trust",
+        "workspace identity changed or persistence fails",
+        "state remains Pending and a review/reopen toast is shown."
+      ],
+      [
+        "Deferred intents",
+        "fork/load/new/worktree/preferred/prompt/dashboard intents coexist",
+        "all startup fields are cleared and each intent is routed once with the correct arguments/effect."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_trust_folder"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "finish_trust"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "drain_startup_actions"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "session_startup_allowed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "TrustState::Pending"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "TrustState::Done"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "persist_trust"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DeferredStartupActions"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DeferredSessionStartup::Fork"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DeferredSessionStartup::Load"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DeferredSessionStartup::NewWithId"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_startup_fork_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_load_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_initial_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "OpenDashboard"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Project picker gating, selection, prompt preservation, and cwd synchronization",
+    "contract": "dispatch_new_session SHALL open the project question when required and avoid duplicate placeholders; skip/selection paths SHALL restore the stashed prompt/model/preferred id, create exactly one session, update app/agent/dashboard cwd and git state, optionally persist picker disablement, and ignore late recents or duplicate selections after the picker is closed.",
+    "scenarios": [
+      [
+        "Non-project startup",
+        "cwd needs a project picker",
+        "NewSession creates a placeholder and opens ProjectSelect before CreateSession."
+      ],
+      [
+        "Picker recents",
+        "the picker is untouched and recents complete",
+        "recent directories are merged; after user navigation or picker closure, stale completion is a no-op."
+      ],
+      [
+        "Prompt preservation",
+        "a prompt arrives while picker is open",
+        "it is attached/stashed behind the picker and later restored without premature submission."
+      ],
+      [
+        "Selection",
+        "a project path is selected",
+        "cwd/session cwd/dashboard snapshot and SetWorkingDir/CreateSession effects use the selected canonical path."
+      ],
+      [
+        "Duplicate selection",
+        "a second selection arrives after create is armed",
+        "it is a no-op and cannot consume a second create token or apply disablement."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_new_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_new_session_inner"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "open_new_session_question"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "skip_picker_and_create_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "open_project_question_with_context"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "ProjectSelect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "ProjectPickerRecentsLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "ProjectSelected"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "pending_project_create"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "CreateSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "SetWorkingDir"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "mark_project_picker_done"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "project_picker_disabled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dashboard.cwd"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Exit and delete session lifecycle effects",
+    "contract": "dispatch_exit_session SHALL unregister the active session, return to Welcome, and clear picker/exit state. Delete confirmation SHALL require an active session, offer Delete/Cancel, cancel without effects, and on confirmation cancel the turn/subagents, kill running background tasks, toast progress, and emit DeleteSession targeting Welcome; completion SHALL clean up and guard absent sessions.",
+    "scenarios": [
+      [
+        "Exit",
+        "an active session exits",
+        "the session is unregistered, Welcome is shown, and picker/exit state resets."
+      ],
+      [
+        "Delete prompt",
+        "an active session is present or absent",
+        "the delete question opens or a no-session toast is shown."
+      ],
+      [
+        "Confirm delete",
+        "delete is confirmed",
+        "CancelTurn, KillBgTask for running tasks, and DeleteSession effects are emitted."
+      ],
+      [
+        "Completion",
+        "deletion completes",
+        "the agent is removed and Welcome transition is safe/idempotent."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_exit_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "open_delete_current_session_question"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_delete_current_session_answered"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DeleteSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "CancelTurn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "KillBgTask"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "AfterSessionDelete::Welcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "unregister_session_effect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "show_welcome"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Sessionless input and permission/behavior control dispatch",
+    "contract": "Sessionless SendPrompt SHALL queue text without emitting an effect, sessionless follow-up submission SHALL preserve chips and avoid SendPrompt, and control dispatch SHALL preserve auto/always-approve exclusivity, defer Plan behavior until a session exists, emit SwitchBehavior for an active idempotent transition, and ignore unknown background-task completions.",
+    "scenarios": [
+      [
+        "No session prompt",
+        "session_id is absent",
+        "SendPrompt queues one prompt and emits no effect."
+      ],
+      [
+        "No session follow-up",
+        "follow-up chips exist without a session",
+        "SubmitFollowUp emits no SendPrompt and keeps chips."
+      ],
+      [
+        "Permission modes",
+        "AlwaysApprove is enabled after Auto",
+        "the auto display flag clears because always-approve wins."
+      ],
+      [
+        "Behavior mode",
+        "Plan is chosen without/with a session",
+        "a new session is started with deferred Plan, or an active session emits SwitchBehavior once."
+      ],
+      [
+        "Unknown task",
+        "BgTaskKilled names an unknown session",
+        "no effect is emitted and unrelated task state is unchanged."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "SendPrompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "SubmitFollowUp"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "skip_picker_and_create_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "SetPermissionMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "PermissionModeKind::AlwaysApprove"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "SetBehaviorMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "SwitchBehavior"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "deferred_session_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "BgTaskKilled"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Session identity and title fallback integration",
+    "contract": "The session lifecycle dispatch SHALL preserve an actionable short title/identity fallback for newly created sessions without prompts and keep dashboard/session identity resolvers round-trippable for top-level and subagent rows.",
+    "scenarios": [
+      [
+        "Untitled session",
+        "an agent has a session id but no prompt/display name",
+        "the entry title falls back to the short session id."
+      ],
+      [
+        "Top-level resolver",
+        "a persisted top-level session id is mapped to a live agent",
+        "resolve/to_persisted round-trip and absent ids return None."
+      ],
+      [
+        "Subagent resolver",
+        "a child session is registered under a parent",
+        "the persisted parent/child identity round-trips to the live dashboard row."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "handle_session_created"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "entry_title"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "SessionIdResolver"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "PersistedRowId::TopLevel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "PersistedRowId::Subagent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DashboardRowId::TopLevel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DashboardRowId::Subagent"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Dashboard stop integration through lifecycle dispatch seam",
+    "contract": "The dispatch integration exercised alongside session lifecycle SHALL move dashboard selection/peek after deleting a selected top-level row and require a second Ctrl+X through handle_input to confirm deletion, preserving delete_confirm until dispatch consumes it.",
+    "scenarios": [
+      [
+        "Peek close",
+        "dashboard peek is open on the selected row",
+        "DashboardStop deletes the selected row and moves selection/peek to the next row."
+      ],
+      [
+        "Double stop",
+        "Ctrl+X is pressed twice through handle_input",
+        "the first press arms confirmation and the second emits DeleteSession; completion removes the target."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "dispatch_delete_current_session_answered"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DashboardStop"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DeleteSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DeleteSessionComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "delete_confirm"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/lifecycle.rs",
+        "DashboardState::handle_input_with_paste_provenance"
       ]
     ]
   }
