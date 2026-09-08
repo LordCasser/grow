@@ -1,0 +1,1 @@
+Keep the digest pin instead of using a floating latest tag. Resolve the upstream latest manifest and independently request its digest. Retain the existing pinned Rust bottle, OHOS SDK paths, stripping, smoke test and dual signing comparison. Validate workflow syntax and all-platform release gates; record the OHOS build result before archiving.
