@@ -38,3 +38,9 @@ ActivePaneSnapshot::Other has no constructors or match consumers; record_input m
 
 ## R24 reviewed boundary
 Announcement.persistent participates only in serde and default assignment; no client filter/display consumer exists. Remove field/default, preserve dismissible, expires_at, hidden-ID persistence and update payloads. Regress announcement library and actual client announcement tests.
+
+## R25 reviewed boundary
+Diagnostics id module has no internal callers; mid is declared only by diagnostics and UUID v5 is used there only for the device hash. Remove module/export/mid dependency and the exclusive diagnostics v5 feature request, preserve UUID v4/v7/session identity and user files. Refresh the lockfile without upgrading dependencies; verify remaining package entries unchanged and run isolated diagnostics tests plus locked metadata resolution.
+
+## R26 reviewed boundary
+snapshot_session_log has no callers, while snapshot_log and writer/trimming are active and retain tests. Remove only the unused filter function and its doc comment; run the retained unified_log tests (the crate installs a pre-main temporary-log redirect).

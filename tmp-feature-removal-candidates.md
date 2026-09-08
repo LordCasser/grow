@@ -220,7 +220,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：全仓Rust检索无构造/引用；record_input对现有ActivePane六项逐一映射，没有fallback。
 - 删除理由：无当前行为消费者的残留诊断分类。
 - 拟删除范围：仅Other变体；保留其余pane类别、原始输入ring、字符脱敏和真实dump入口。
-- 状态：等待用户确认，尚未删除。公共API仓库外消费者未知；审计见align-input-dump-target-ownership。
+- 状态：已获批并删除；输入日志 7/7 回归通过。公共API仓库外消费者未知；审计见align-input-dump-target-ownership。
 
 ## R24 · 未被公告行为消费的persistent字段
 

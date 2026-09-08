@@ -59,7 +59,6 @@ pub enum ActivePaneSnapshot {
     Queue,
     Tasks,
     Catalog,
-    Other,
 }
 /// Copy-friendly snapshot of the input outcome. No heap allocation.
 #[derive(Clone, Copy, Debug)]
