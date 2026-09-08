@@ -3151,9 +3151,31 @@ fn session_thread_reaper() -> &'static std::sync::mpsc::Sender<SessionReaperJob>
         std::thread::Builder::new()
             .name("session-reaper".into())
             .spawn(move || {
-                while let Ok((handle, sender)) = rx.recv() {
-                    let _ = handle.join();
-                    request_persistence_stop(sender.as_ref());
+                use std::sync::mpsc::RecvTimeoutError;
+                let interval = std::time::Duration::from_millis(20);
+                let mut pending: Vec<SessionReaperJob> = Vec::new();
+                loop {
+                    let received = if pending.is_empty() {
+                        rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+                    } else {
+                        rx.recv_timeout(interval)
+                    };
+                    match received {
+                        Ok(job) => pending.push(job),
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) if pending.is_empty() => break,
+                        Err(RecvTimeoutError::Disconnected) => std::thread::sleep(interval),
+                    }
+                    let mut index = 0;
+                    while index < pending.len() {
+                        if pending[index].0.is_finished() {
+                            let (handle, sender) = pending.swap_remove(index);
+                            let _ = handle.join();
+                            request_persistence_stop(sender.as_ref());
+                        } else {
+                            index += 1;
+                        }
+                    }
                 }
             })
             .expect("session thread reaper must start");
@@ -3783,6 +3805,21 @@ mod failed_session_init_join_tests {
         release.send(()).unwrap();
         let stop = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv()).await;
         assert!(matches!(stop, Ok(Some(crate::session::persistence::PersistenceMsg::Stop))), "reaper must stop persistence after join");
+    }
+
+    #[tokio::test]
+    async fn reaper_completed_session_is_not_blocked_by_live_predecessor() {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let blocked = std::thread::spawn(move || { let _ = wait.recv(); });
+        drop(SessionThread::new(blocked));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let finished = std::thread::spawn(|| {});
+        drop(SessionThread::with_persistence(finished, None, Some(sender.downgrade())));
+        let stop = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv()).await;
+        // Always release the predecessor before asserting, including on failure.
+        drop(release);
+        assert!(matches!(stop, Ok(Some(crate::session::persistence::PersistenceMsg::Stop))),
+            "a completed session must be reaped while its predecessor is still alive");
     }
 
     #[tokio::test]
