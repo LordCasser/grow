@@ -955,3 +955,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：clear_context does not reset selected, hovered, scroll_offset, or min_generation, leaving latent interaction state that is masked by visibility and later start_query resets.
 - Pager 审计债务：try_replace encodes prompt terminator handling, directory commit/dismiss semantics, cursor byte arithmetic, and path normalization in one pure method; changes to prompt element/undo contracts must be coordinated manually.
 - Pager 审计债务：The hard cap of 1000 is embedded in the view state and passed to the workspace matcher, so result-volume policy is not represented as configuration or a named UI contract.
+- Pager 审计债务：The event combines authorization provenance, access payloads, classifier explanations, latency, replay-safe text, and terminal rendering in one block module, coupling audit data schema to presentation text.
+- Pager 审计债务：SubagentPermissionBlock stores epoch metadata but its mutation API permits unrestricted push/extend, leaving primary-turn/epoch integrity entirely dependent on outer ScrollbackState orchestration.
+- Pager 审计债务：Full access_detail and classifier_reason are rendered without bounds or redaction while compact/searchable paths separately omit some fields; callers must choose the correct projection to avoid exposing verbose/sensitive data.
+- Pager 审计债务：Outcome aggregation duplicates verb/cardinality/styling decisions from other scrollback grouping components and identifies children by raw session strings rather than a shared child identity type.
+- Pager 审计债务：The compact line and aggregated header both claim selection range Some(0), while member-level click/detail mapping is implemented elsewhere; this distributed geometry contract can drift when rows or prefixes change.

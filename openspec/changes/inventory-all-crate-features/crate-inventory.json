@@ -3866,7 +3866,18 @@
       "Search metadata projection for mode and non-default input filters",
       "Search result output for content, file-only, count, empty, and error cases",
       "Search block fold and neutral visual protocol",
-      "Search indexing and Grep viewer dispatch integration"
+      "Search indexing and Grep viewer dispatch integration",
+      "AgentView SHALL enter inline edit only for an existing ordinary UserPrompt with a resolvable shell prompt index; bash, cron, interjection, missing entries, and missing rewind targets SHALL be rejected. A successful entry SHALL capture stable EntryId, prompt index, original text, textarea state, select and center the entry, and dismiss a stale jump picker.",
+      "While editing, bare Enter SHALL trim the candidate for validation, close with no action when empty or unchanged after trim, and return InlineEditSubmit when changed; Esc or Ctrl-C on an empty textarea SHALL discard. Other keys, including modified Enter, SHALL be forwarded to the textarea and consumed as Changed.",
+      "While editing, scroll wheel SHALL scroll the transcript by three rows per event; a left click inside the rendered textarea SHALL move its cursor and clear selection; a left click elsewhere inside the overlay SHALL be consumed without dismissal, while a click outside the overlay SHALL discard the edit.",
+      "Per-frame inline edit layout sync SHALL resolve the stable EntryId, compute a minimum one-row textarea height at the available content width, reserve that height for the edited entry, and return the first following entry index; when the entry disappears it SHALL exit editing and clear the override.",
+      "render_inline_edit SHALL clear previous hit rectangles before every frame, draw only when the edited entry has a nonzero visible screen area, blank the old entry content, paint the prompt arrow, render the textarea in the matching content area, record current hit rectangles, and return the hardware cursor position.",
+      "Quote bar style gating and raw-mode selection behavior",
+      "Rendered quote prefix shape scanner and interior-bar rejection",
+      "Quote prefix selection range and span splitting",
+      "Wrapped quote continuation copy reconstruction",
+      "Blank quote preservation and literal/table content safety",
+      "Raw markdown quote rows remain source-selectable"
     ],
     "reviewed_files": [
       {
@@ -6076,6 +6087,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/blocks/tool/search.rs",
         "sha256": "5f46cc53fac37fe5a29d2e2672d2194a5d10e4a1642e6ba61e09561ca89e457a"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "sha256": "41e8805fc8dc1ed06459d7ec592fb8fe0027cbfb607f72f32034fbbf919015da"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "sha256": "b4ac7888bc480c9d1fff2a32006b92f85b24f7dafaf435b39696742f9031287a"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "sha256": "a796a1f52e85864c48de228130c00bf69f634c19804dfca3da0c7d2898a904fe"
       }
     ],
     "review": "reviews/pager.md"

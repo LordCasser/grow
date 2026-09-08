@@ -70013,12 +70013,86 @@
         "Authorization state",
         "the audit row is appended",
         "no permission selection is changed here."
+      ],
+      [
+        "Canonical child title",
+        "a nonempty trimmed subagent_title exists",
+        "child_label and compact/detail projections use that title without falling back to type or description."
+      ],
+      [
+        "Fallback child label",
+        "title is absent/blank and type/description combinations vary",
+        "child_label chooses type plus description, type, description, or the literal `subagent` in that order."
+      ],
+      [
+        "Compact audit row",
+        "a permission event is rendered for ordinary scrollback/search",
+        "compact_text contains child, outcome, tool/access and optional summary while omitting child session, reason, classifier detail, and latency."
+      ],
+      [
+        "Complete live detail",
+        "access_detail, classifier reason, reason and latency are present",
+        "detail_text emits every audit field and the full access request without truncating it or adding replay-summary text."
+      ],
+      [
+        "Replay-safe detail",
+        "access_detail and classifier reason are absent but access_summary exists",
+        "detail_text uses `Access summary (replay-safe)` so replay retains safe context."
+      ],
+      [
+        "Outcome mapping",
+        "outcome is Approved, Denied, TimedOut, Unavailable or Cancelled",
+        "stable outcome text is returned and only Approved is considered approved."
       ]
     ],
     "sources": [
       [
         "crates/codegen/pager/src/app/acp_handler/session_notification.rs",
         "SubagentPermissionDecision"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionEvent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionEvent::child_label"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionEvent::outcome_label"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionEvent::is_approved"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionEvent::compact_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionEvent::detail_title"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionEvent::detail_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionEvent::compact_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "tests::compact_row_omits_verbose_audit_fields"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "tests::detail_contains_the_complete_audit_record"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "tests::replay_detail_identifies_the_safe_summary"
       ]
     ]
   },
@@ -78156,6 +78230,36 @@
         "Missing or committed anchor",
         "the anchor disappeared or was already committed",
         "missing anchors append, while committed anchors violate the documented precondition and panic only in debug builds."
+      ],
+      [
+        "Epoch construction",
+        "a block is created with new or new_in_epoch",
+        "the first event is retained and the block stores epoch zero or the supplied epoch."
+      ],
+      [
+        "Ordered append",
+        "push or extend receives additional decision events",
+        "members remain in insertion order and len increases by the appended count."
+      ],
+      [
+        "Member access",
+        "member is called with an in-range or out-of-range index",
+        "the corresponding event or None is returned without changing the block."
+      ],
+      [
+        "Ownership transfer",
+        "take_members consumes a block",
+        "all members are returned in original order."
+      ],
+      [
+        "Outcome aggregation",
+        "members contain repeated and interleaved outcomes",
+        "header_line creates one bucket per outcome in first-appearance order, with each count and the number of distinct child sessions."
+      ],
+      [
+        "Noun/cardinality",
+        "a bucket or child set has one versus multiple entries",
+        "request(s) and subagent(s) use the matching singular/plural form and no stray separator is emitted for a single bucket."
       ]
     ],
     "sources": [
@@ -78266,6 +78370,70 @@
       [
         "crates/codegen/pager/src/scrollback/state/mod.rs",
         "tests::reconnect_merges_before_and_splits_after_terminal"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::new_in_epoch"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::epoch"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::push"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::extend"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::members"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::member"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::take_members"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::len"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::is_empty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::header_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "tests::is_empty_matches_len_for_single_and_multi_member_blocks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "tests::header_aggregates_outcomes_in_first_appearance_order"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "tests::header_uses_singular_nouns_for_single_counts"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "tests::header_all_denied_has_no_stray_comma_or_title"
       ]
     ]
   },
@@ -161982,6 +162150,36 @@
         "Bullet visibility",
         "collapsed or header mode and a configured tool bullet are present",
         "has_bullet reports true; absent bullet glyph or non-header expanded body reports false."
+      ],
+      [
+        "Singleton rendering",
+        "the block has one member in any display mode",
+        "output contains exactly one compact permission line with selection range zero."
+      ],
+      [
+        "Collapsed group",
+        "the block has multiple members and mode is Collapsed",
+        "output contains exactly one aggregated header line."
+      ],
+      [
+        "Expanded group",
+        "the block has multiple members and mode is Expanded",
+        "output contains one header followed by one compact line per member."
+      ],
+      [
+        "Compact geometry",
+        "the renderer queries padding/accent/fold/group policies",
+        "has_vpad_for is false, accent is None, is_foldable is true only for multi-member blocks, default mode is Collapsed, and is_groupable is false."
+      ],
+      [
+        "Outcome styling",
+        "header contains Approved and non-approved buckets",
+        "Approved verb uses accent_success, other verbs use accent_error, count spans use gray_bright+BOLD, and punctuation/child suffix use muted style."
+      ],
+      [
+        "Search projection",
+        "searchable_text is requested",
+        "joined text includes compact/event identity and available audit fields, including latency formatted in milliseconds."
       ]
     ],
     "sources": [
@@ -162212,6 +162410,50 @@
       [
         "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
         "ThinkingBlock::text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionEvent::compact_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::accent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::has_vpad_for"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::is_foldable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::default_display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::is_groupable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "SubagentPermissionBlock::searchable_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "tests::group_is_one_line_collapsed_and_one_line_per_member_expanded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "tests::block_has_no_vertical_padding"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/subagent_permission.rs",
+        "tests::header_colors_verbs_by_outcome_and_counts_bold_gray"
       ]
     ]
   },
@@ -193233,6 +193475,654 @@
       [
         "crates/codegen/pager/src/scrollback/blocks/tool/search.rs",
         "SearchToolCallBlock"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "AgentView SHALL enter inline edit only for an existing ordinary UserPrompt with a resolvable shell prompt index; bash, cron, interjection, missing entries, and missing rewind targets SHALL be rejected. A successful entry SHALL capture stable EntryId, prompt index, original text, textarea state, select and center the entry, and dismiss a stale jump picker.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: enter_inline_edit is idempotent while an edit exists and returns true without replacing it. For a new edit it resolves the entry by index, requires RenderBlock::UserPrompt, rejects is_bash/is_cron/is_interjection, resolves shell_prompt_index_at, dismisses the jump picker, initializes TextArea with the full original text and cursor at text.len(), stores hit rects as None, selects the entry, and centers it. exit_inline_edit takes the state and clears ScrollbackState inline_edit_height; the feature master switch INLINE_EDIT_ENABLED is false and gates external entry points while leaving these methods and tests wired.",
+    "scenarios": [
+      [
+        "Ordinary prompt entry",
+        "entry 0 is a plain UserPrompt followed by an agent message",
+        "editing begins, original/textarea text and prompt_index are captured, and the entry is selected."
+      ],
+      [
+        "Non-editable prompt",
+        "entry is bash or cron",
+        "enter_inline_edit returns false and no state is created."
+      ],
+      [
+        "Interjection or no rewind target",
+        "prompt is an interjection or shell index lookup fails",
+        "entry is rejected so a wrong prompt cannot be rewound."
+      ],
+      [
+        "Re-entry while editing",
+        "inline_edit already exists",
+        "method returns true and preserves the existing editor state."
+      ],
+      [
+        "Jump picker conflict",
+        "a stale jump picker is open before entry",
+        "picker is dismissed before editor state becomes active."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "INLINE_EDIT_ENABLED"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "InlineEditState"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "AgentView::enter_inline_edit"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "AgentView::exit_inline_edit"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "enter_inline_edit_on_user_prompt_starts_editing"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "enter_inline_edit_rejects_bash_and_cron_prompts"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "While editing, bare Enter SHALL trim the candidate for validation, close with no action when empty or unchanged after trim, and return InlineEditSubmit when changed; Esc or Ctrl-C on an empty textarea SHALL discard. Other keys, including modified Enter, SHALL be forwarded to the textarea and consumed as Changed.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: handle_inline_edit_key returns Unchanged when no editor exists. Bare Enter compares trim() against original.trim(); empty or equal calls exit_inline_edit and returns Changed, while changed text returns Action(Action::InlineEditSubmit) and keeps state for dispatch. Esc with no modifiers, or Ctrl-C only when textarea.text() is exactly empty, exits and clears height. All other keys are passed to TextArea::input. The module does not perform rewind/resubmit itself; dispatch consumes InlineEditSubmit.",
+    "scenarios": [
+      [
+        "Unchanged submit",
+        "editor text remains the original prompt",
+        "Enter closes editing, emits no action effect, and clears layout override."
+      ],
+      [
+        "Empty submit",
+        "editor text is whitespace only",
+        "Enter closes editing and never submits an empty prompt."
+      ],
+      [
+        "Changed submit",
+        "editor text differs from original",
+        "Enter returns InlineEditSubmit while keeping inline_edit active for dispatch."
+      ],
+      [
+        "Escape discard",
+        "edited text exists and Esc is pressed without modifiers",
+        "editor closes, transcript prompt remains unchanged, and height override clears."
+      ],
+      [
+        "Text input",
+        "ordinary character key is pressed",
+        "textarea receives the character and state remains consumed/Changed."
+      ],
+      [
+        "Busy entry",
+        "session state is TurnRunning before entry",
+        "editor still opens; busy cancellation is deferred to submit dispatch."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "AgentView::handle_inline_edit_key"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "enter_with_unchanged_text_just_exits_editing"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "enter_with_emptied_text_just_exits_editing"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "enter_with_changed_text_dispatches_submit"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "esc_discards_edit_and_clears_height_override"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "typing_reaches_the_inline_textarea"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "enter_inline_edit_while_busy_opens_editor_immediately"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "While editing, scroll wheel SHALL scroll the transcript by three rows per event; a left click inside the rendered textarea SHALL move its cursor and clear selection; a left click elsewhere inside the overlay SHALL be consumed without dismissal, while a click outside the overlay SHALL discard the edit.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: handle_inline_edit_mouse handles ScrollUp/ScrollDown before requiring editor state. For a left Down it first maps the pointer through last_text_area and TextArea::buffer_pos_at_screen; a valid position clears textarea selection, sets cursor and returns Changed. If no textarea hit, last_rect containment determines whether to retain the edit; an outside click calls exit_inline_edit and swallows the click. Other mouse events return Unchanged, and no real terminal mouse capture is established here.",
+    "scenarios": [
+      [
+        "Wheel up/down",
+        "editor is active and transcript receives scroll events",
+        "scrollback moves by three rows and outcome is Changed."
+      ],
+      [
+        "Textarea click",
+        "left click falls inside last_text_area at a valid buffer position",
+        "selection clears, cursor moves, and editor remains active."
+      ],
+      [
+        "Overlay click",
+        "left click misses textarea but is inside last_rect",
+        "event is consumed and editor remains active."
+      ],
+      [
+        "Outside click",
+        "left click is outside last_rect",
+        "edit is discarded and the click is still consumed."
+      ],
+      [
+        "Unhandled mouse",
+        "mouse event is not wheel or left Down",
+        "outcome is Unchanged."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "AgentView::handle_inline_edit_mouse"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "InlineEditState::last_text_area"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "InlineEditState::last_rect"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Per-frame inline edit layout sync SHALL resolve the stable EntryId, compute a minimum one-row textarea height at the available content width, reserve that height for the edited entry, and return the first following entry index; when the entry disappears it SHALL exit editing and clear the override.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: sync_inline_edit_layout returns None without an active edit. It re-resolves entry_id through index_of_id, exits and clears height when absent, computes width from entry_text_column_width minus prompt-arrow display width with saturating_sub and max(1), computes textarea.desired_height(width).max(1), stores (entry_id,height), and returns idx.saturating_add(1) so callers dim content below the edited entry. Height follows multiline text and transcript replacement abandons the editor.",
+    "scenarios": [
+      [
+        "Single-line reserve",
+        "active entry is present with one-line text",
+        "inline_edit_height stores the entry id and height 1, and returned dim-from index is 1."
+      ],
+      [
+        "Multiline reserve",
+        "textarea text has three newline-separated lines",
+        "reserved height becomes 3."
+      ],
+      [
+        "Entry removal",
+        "transcript removes the edited entry before the next sync",
+        "sync returns None, editor is cleared, and height override is cleared."
+      ],
+      [
+        "Narrow width",
+        "scrollback width leaves little content after prefix",
+        "textarea width is saturated to at least one column rather than underflowing."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "AgentView::sync_inline_edit_layout"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "AgentView::inline_edit_text_width"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "sync_layout_reserves_height_and_survives_entry_removal"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "ScrollbackState::set_inline_edit_height"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "render_inline_edit SHALL clear previous hit rectangles before every frame, draw only when the edited entry has a nonzero visible screen area, blank the old entry content, paint the prompt arrow, render the textarea in the matching content area, record current hit rectangles, and return the hardware cursor position.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: render_inline_edit returns None without state, missing EntryId, missing screen area, or zero-width/height area. It clears last_text_area and last_rect before lookup so an offscreen edit cannot receive clicks at old coordinates. For a visible entry it fills the entry rect with theme.bg_visual spaces, derives HorizontalLayout content coordinates and width, paints prompt_arrow with accent_user, allocates textarea width as content_w-prefix_w saturated to one and height equal to entry rect, renders TextArea via render_ref, records both rects, and returns cursor_pos_with_state. The existing entry text is not mutated by rendering.",
+    "scenarios": [
+      [
+        "Visible overlay",
+        "edited entry is visible in the prepared scrollback area",
+        "old glyphs are blanked, prompt arrow and textarea are painted, hit rects are recorded, and cursor coordinates are returned."
+      ],
+      [
+        "Offscreen entry",
+        "edited entry scrolls beyond the viewport after a previous visible frame",
+        "last_rect and last_text_area are cleared and rendering returns None, preventing stale cursor hits."
+      ],
+      [
+        "Zero area",
+        "screen area has zero width or height",
+        "nothing is painted and no hit rectangle survives."
+      ],
+      [
+        "Entry removal before render",
+        "EntryId no longer resolves",
+        "render returns None without using stale rectangles."
+      ],
+      [
+        "Busy editing",
+        "session is already TurnRunning but entry remains visible",
+        "render path remains available; cancellation offer is not created by this module."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "AgentView::render_inline_edit"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "InlineEditState::last_text_area"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "InlineEditState::last_rect"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "render_clears_stale_mouse_rects_when_entry_scrolls_off_screen"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "HorizontalLayout::entry_content_area"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/inline_edit.rs",
+        "HorizontalLayout::content_width"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Quote bar style gating and raw-mode selection behavior",
+    "contract": "QuoteBarStrip SHALL cache an optional theme-derived blockquote bar style: enabled mode SHALL derive the exact DIM/blockquote_outer style, while disabled raw mode SHALL avoid theme lookup and return zero prefix width plus Selectable::All. Enabled selection SHALL delegate to quote_prefix_selectable only when a genuine styled bar prefix is present.",
+    "scenarios": [
+      [
+        "Pretty mode",
+        "QuoteBarStrip::new(true) is used",
+        "the current theme-derived bar style is cached and eligible rows can exclude a prefix."
+      ],
+      [
+        "Raw mode",
+        "QuoteBarStrip::new(false) is used",
+        "prefix_width returns 0, selectable returns All, and source `>` markers remain selectable."
+      ],
+      [
+        "Wrong style",
+        "a line starts with an unstyled or differently styled `│`",
+        "it is treated as content and remains fully selectable."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "QuoteBarStrip"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "QuoteBarStrip::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "bar_style"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "prefix_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "quote_bar_style"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Theme::current"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "blockquote_outer"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Color::Reset"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Modifier::DIM"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Selectable::All"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "quote_prefix_selectable"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Rendered quote prefix shape scanner and interior-bar rejection",
+    "contract": "rendered_quote_prefix_len SHALL recognize one or more bar_style-styled `│` bars separated by exactly one space, stop at the content boundary, and return the UTF-8 byte length including the separator. Bar-only rows with optional trailing space SHALL be accepted. Any unstyled/differently styled leading bar, interior bar after genuine prefix, malformed separator, or non-quote line SHALL return None so content is never deleted from copies.",
+    "scenarios": [
+      [
+        "Single/nested prefix",
+        "a row has `│ text` or `│ │ deep` with the exact bar style",
+        "the scanner returns the byte boundary before content."
+      ],
+      [
+        "Blank quote",
+        "a row is `│`, `│ `, `│ │`, or `│ │ `",
+        "the scanner returns the entire bar-only prefix length."
+      ],
+      [
+        "Content bar",
+        "a literal bar occurs after a genuine prefix",
+        "the scanner returns None rather than stripping user content."
+      ],
+      [
+        "Non-quote/malformed",
+        "the bar is unstyled, separators are wrong, or no bar exists",
+        "the scanner returns None."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "rendered_quote_prefix_len"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "BAR"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "BAR_LEN"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "bar_style"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "UnicodeWidthStr"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "chars"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "peekable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "interior-bar rule"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "None"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Some"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Quote prefix selection range and span splitting",
+    "contract": "quote_prefix_selectable SHALL require the parser-generated bar to be the first span and carry the exact bar style, scan a valid prefix, split a straddling span at the byte boundary, and return Selectable::Spans covering only content. Bar-only rows SHALL return an empty selectable span range so multiline copy retains their newline; all other rows SHALL remain Selectable::All.",
+    "scenarios": [
+      [
+        "Styled quote row",
+        "the first span is the genuine bar and content shares a span",
+        "the content span is split at the prefix boundary and only the content span range is selectable."
+      ],
+      [
+        "Nested quote",
+        "multiple genuine bars precede content",
+        "all nesting bars and separator spaces are excluded from derived selection text."
+      ],
+      [
+        "Blank quote row",
+        "the row contains only prefix bars",
+        "an empty Spans range is returned and remains selectable to the selection model."
+      ],
+      [
+        "Conservative first-span guard",
+        "a list bullet or other decoration precedes the bar",
+        "the row stays fully selectable, preserving the prefix as a documented false negative."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "quote_prefix_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "split_spans_at"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Selectable::Spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Selectable::All"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "prefix_spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "byte_offset"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Cow::Borrowed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Cow::Owned"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "content.spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "selection_range"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Wrapped quote continuation copy reconstruction",
+    "contract": "The quote-bar metadata SHALL be applied to every markdown-wrapped continuation row, excluding each reinjected `│ ` prefix from derived selection text while preserving joiner metadata. Reconstructing a drag selection across the rows SHALL rejoin the content with soft-wrap separators and produce the original quote text without bars or leading prefix spaces.",
+    "scenarios": [
+      [
+        "Wrapped quote",
+        "a long quoted paragraph wraps at a narrow width",
+        "every output row begins with a rendered bar, each derived selection omits the bar/prefix space, and no row begins with a prefix space."
+      ],
+      [
+        "Drag copy",
+        "the wrapped rows are reconstructed with their joiners",
+        "the copied text is the original paragraph with normal spaces and no quote bars."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "QuoteBarStrip::prefix_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "quote_prefix_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "MarkdownContent::output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "word_wrap"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "joiner"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "derive_selection_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "reconstruct_full_selection_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "wrapped continuation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "split_spans_at"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Blank quote preservation and literal/table content safety",
+    "contract": "Quote-bar detection SHALL preserve user-authored box-drawing bars, table borders, paragraph/code content, and quoted literal bars by returning Selectable::All whenever the interior-bar rule or first-span/style guard identifies content. A parser-generated blank quote row SHALL instead retain an empty selectable range and contribute a newline to full drag copies.",
+    "scenarios": [
+      [
+        "Blank line copy",
+        "a quote contains an empty `>` line between content",
+        "the bar-only row is retained as an empty selectable span and full drag copy contains a blank line."
+      ],
+      [
+        "Quoted box art",
+        "quote content begins with a literal `│`, including the degenerate bar-only content case",
+        "the content bar is not consumed and copied text retains both quote decoration/content bars."
+      ],
+      [
+        "List/paragraph/code/table",
+        "a bar appears under a list prefix, plain paragraph, code block, or table",
+        "the row remains fully selectable and table borders/literal bars survive copy."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "rendered_quote_prefix_len"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "quote_prefix_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "interior-bar rule"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Selectable::All"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Selectable::Spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "derive_selection_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "selectable_cols"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "reconstruct_full_selection_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "MarkdownContent::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "set_raw_mode"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Raw markdown quote rows remain source-selectable",
+    "contract": "When MarkdownContent raw mode is enabled, quote-bar stripping SHALL be disabled so the source `>` marker and following content remain fully selectable and are copied exactly as authored.",
+    "scenarios": [
+      [
+        "Raw quote",
+        "raw mode renders `> QUOTE alpha`",
+        "the row is Selectable::All and derived selection text is exactly `> QUOTE alpha`."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "QuoteBarStrip::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "bar_style"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "MarkdownContent::set_raw_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "Selectable::All"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/quote_bar.rs",
+        "derive_selection_text"
       ]
     ]
   }
