@@ -22098,3 +22098,346 @@ SelectionBoundary::apply SHALL concatenate optional prefix, selected text, and o
 - **THEN** the lines are preserved and boundaries start empty.
 
 证据：`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundary`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundary::new`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundary::apply`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundaryEntry`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundaries`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundaries::from_entries`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundaries::get`；`crates/codegen/pager/src/scrollback/types.rs` — `SelectionBoundaries::is_empty`；`crates/codegen/pager/src/scrollback/types.rs` — `RenderedBlockOutput`；`crates/codegen/pager/src/scrollback/types.rs` — `From<BlockOutput>`；`crates/codegen/pager/src/scrollback/types.rs` — `Arc`。
+
+
+### Requirement: The tutorial overlay SHALL model List, Topic, and Guide screens, mark successfully opened topics as viewed for the current launch, reset scroll/cache/modal chrome on screen transitions, and resolve a Go deeper guide only when its referenced document exists.
+
+The implementation SHALL satisfy the following tested behavior: TutorialState::new starts on List with empty viewed/picker, fresh ModalWindowState, zero scroll and no cached lines. open_topic bounds-checks, inserts the index into viewed, enters Topic, and resets scroll/cache/window; back_to_list returns to List with the same resets; open_guide checks TUTORIAL_TOPICS[index].go_deeper through docs::find_doc before entering Guide. TutorialOutcome distinguishes Consumed from Closed. Default delegates new.
+
+#### Scenario: Fresh tutorial
+- **WHEN** the overlay is opened
+- **THEN** screen is List, no topics are viewed, picker selection starts at zero, and no markdown cache exists.
+
+#### Scenario: Open topic
+- **WHEN** a valid list index is selected
+- **THEN** screen becomes Topic, the index is marked viewed, and scroll/cache/modal state reset.
+
+#### Scenario: Invalid topic
+- **WHEN** an out-of-range index is requested
+- **THEN** state is unchanged and no topic is marked viewed.
+
+#### Scenario: Guide reference
+- **WHEN** a topic has a go_deeper title resolving through docs::find_doc
+- **THEN** screen becomes Guide for that topic with fresh scroll/cache/window.
+
+#### Scenario: Missing guide
+- **WHEN** a topic has no resolvable guide
+- **THEN** d leaves the current Topic screen unchanged.
+
+#### Scenario: Back transition
+- **WHEN** a topic or guide is closed through its local back path
+- **THEN** state returns to List or originating Topic respectively and resets document state.
+
+证据：`crates/codegen/pager/src/views/tutorial.rs` — `TutorialScreen`；`crates/codegen/pager/src/views/tutorial.rs` — `TutorialState`；`crates/codegen/pager/src/views/tutorial.rs` — `TutorialState::new`；`crates/codegen/pager/src/views/tutorial.rs` — `TutorialState::open_topic`；`crates/codegen/pager/src/views/tutorial.rs` — `TutorialState::back_to_list`；`crates/codegen/pager/src/views/tutorial.rs` — `TutorialState::open_guide`；`crates/codegen/pager/src/views/tutorial.rs` — `TutorialOutcome`；`crates/codegen/pager/src/views/tutorial.rs` — `d_opens_the_go_deeper_guide_and_esc_returns_to_the_topic`；`crates/codegen/pager/src/views/tutorial.rs` — `d_is_a_noop_on_a_topic_without_a_guide`。
+
+
+### Requirement: The tutorial List screen SHALL consume all key, mouse, and paste input while open, use a non-searchable fixed topic picker, open the selected topic on selection, close on picker/chrome close, and prevent typing or paste from creating an invisible query.
+
+The implementation SHALL satisfy the following tested behavior: list_picker_config disables search, search hints and filtering while retaining picker navigation and selection. handle_list_input gives modal close-button mouse precedence, consumes key releases, swallows Event::Paste before picker routing, and maps PickerOutcome::Selected to open_topic, Closed to TutorialOutcome::Closed, and all other outcomes to Consumed. Alphabetic list keys therefore do not alter picker.query.
+
+#### Scenario: List navigation
+- **WHEN** Up/Down or picker navigation arrives on List
+- **THEN** the fixed picker selection changes and the event is Consumed.
+
+#### Scenario: Open selected topic
+- **WHEN** Enter yields PickerOutcome::Selected(i)
+- **THEN** the selected topic opens and is marked viewed.
+
+#### Scenario: Typing
+- **WHEN** a printable letter arrives on List
+- **THEN** the event is consumed and picker.query remains empty.
+
+#### Scenario: Paste
+- **WHEN** a bracketed or ordinary paste arrives on List
+- **THEN** the event is consumed before picker handling and no hidden query is created.
+
+#### Scenario: Close button/Esc
+- **WHEN** modal chrome or picker reports close
+- **THEN** TutorialOutcome::Closed is returned.
+
+#### Scenario: Release event
+- **WHEN** a key release arrives
+- **THEN** the event is consumed without changing picker state.
+
+证据：`crates/codegen/pager/src/views/tutorial.rs` — `list_picker_config`；`crates/codegen/pager/src/views/tutorial.rs` — `handle_list_input`；`crates/codegen/pager/src/views/tutorial.rs` — `handle_picker_input`；`crates/codegen/pager/src/views/tutorial.rs` — `PickerOutcome`；`crates/codegen/pager/src/views/tutorial.rs` — `list_typing_does_not_start_a_query`；`crates/codegen/pager/src/views/tutorial.rs` — `list_paste_does_not_start_a_query`；`crates/codegen/pager/src/views/tutorial.rs` — `enter_opens_selected_topic_and_marks_viewed`。
+
+
+### Requirement: Topic and Guide screens SHALL consume all input, give modal chrome first ownership, scroll document content through shared document helpers, and route Esc/close, Left/Right, and d according to screen semantics without allowing printable typing to escape.
+
+The implementation SHALL satisfy the following tested behavior: handle_topic_input and handle_guide_input consume key releases and all non-key/mouse events. They call modal key/mouse handlers first; CloseRequested returns Topic-to-List or Guide-to-originating-Topic, and Handled stops further routing. Topic Right opens the next bounded topic or returns to List at the end, Left opens the previous topic but saturates at the first, d opens a resolvable guide, and remaining keys/mouse wheel use apply_doc_scroll/apply_doc_mouse_scroll. Guide has no linear topic navigation and scrolls only its how-to document.
+
+#### Scenario: Topic Esc
+- **WHEN** Esc or modal close occurs on a topic
+- **THEN** the topic closes to List and the event is Consumed.
+
+#### Scenario: Guide Esc
+- **WHEN** Esc or modal close occurs on a guide
+- **THEN** the guide closes back to its originating Topic.
+
+#### Scenario: Next topic
+- **WHEN** Right is pressed before the final topic
+- **THEN** the next topic opens and is marked viewed.
+
+#### Scenario: End of tour
+- **WHEN** Right is pressed on the final topic
+- **THEN** the overlay returns to List rather than indexing past the catalog.
+
+#### Scenario: Previous topic
+- **WHEN** Left is pressed on a non-first topic
+- **THEN** the previous topic opens; Left on the first topic is a no-op.
+
+#### Scenario: Document scroll
+- **WHEN** Up/Down/page/home/end or mouse wheel arrives after chrome
+- **THEN** shared document scroll helpers update saturating scroll and the event remains consumed.
+
+#### Scenario: Typing on topic
+- **WHEN** a printable character arrives on a topic
+- **THEN** the screen stays active, scroll/navigation state is not replaced by search, and the event is consumed.
+
+证据：`crates/codegen/pager/src/views/tutorial.rs` — `handle_topic_input`；`crates/codegen/pager/src/views/tutorial.rs` — `handle_guide_input`；`crates/codegen/pager/src/views/tutorial.rs` — `handle_tutorial_input`；`crates/codegen/pager/src/views/tutorial.rs` — `ModalWindowOutcome`；`crates/codegen/pager/src/views/tutorial.rs` — `apply_doc_scroll`；`crates/codegen/pager/src/views/tutorial.rs` — `apply_doc_mouse_scroll`；`crates/codegen/pager/src/views/tutorial.rs` — `right_flows_through_topics_and_back_to_list`；`crates/codegen/pager/src/views/tutorial.rs` — `left_steps_back_and_stops_at_first_topic`；`crates/codegen/pager/src/views/tutorial.rs` — `topic_page_scrolls_and_ignores_typing`；`crates/codegen/pager/src/views/tutorial.rs` — `esc_pops_topic_to_list_then_closes`。
+
+
+### Requirement: Tutorial rendering SHALL render the active topic or guide through the shared markdown document viewer, reuse cached pre-rendered lines by width, expose next/done and go-deeper shortcuts for topics, and keep the modal title from duplicating a leading Markdown H1.
+
+The implementation SHALL satisfy the following tested behavior: render_tutorial selects the active screen and returns safely for invalid/stale indices or missing guide docs. Topic builds a next hint or done hint, conditionally adds d go deeper, adds Esc list, strips the first `# ` line through topic_body, and calls render_doc_viewer_overlay_with_shortcuts with st.cached_lines/scroll. Guide resolves docs::find_doc and calls render_doc_viewer_overlay with the document title/content and the same scroll/cache. The shared viewer owns markdown wrapping/clamping and modal geometry.
+
+#### Scenario: Topic rendering
+- **WHEN** screen is a valid Topic
+- **THEN** the title/body render through the shared viewer with scroll/cache and contextual next/done, guide, and Esc shortcuts.
+
+#### Scenario: Guide rendering
+- **WHEN** screen is Guide and the reference resolves
+- **THEN** the guide document title/content render through the shared viewer.
+
+#### Scenario: Missing guide render
+- **WHEN** screen is Guide but docs::find_doc returns None
+- **THEN** render_tutorial returns without attempting invalid content access.
+
+#### Scenario: Stale index render
+- **WHEN** screen contains an invalid Topic index
+- **THEN** render_tutorial returns safely.
+
+#### Scenario: Heading de-duplication
+- **WHEN** topic content starts with `# Title`
+- **THEN** topic_body removes the first heading and leading newlines before viewer rendering.
+
+#### Scenario: Non-heading content
+- **WHEN** content has no leading H1
+- **THEN** topic_body returns it unchanged.
+
+证据：`crates/codegen/pager/src/views/tutorial.rs` — `render_tutorial`；`crates/codegen/pager/src/views/tutorial.rs` — `topic_body`；`crates/codegen/pager/src/views/tutorial.rs` — `render_doc_viewer_overlay_with_shortcuts`；`crates/codegen/pager/src/views/tutorial.rs` — `render_doc_viewer_overlay`；`crates/codegen/pager/src/views/tutorial.rs` — `TutorialState::cached_lines`；`crates/codegen/pager/src/views/tutorial.rs` — `render_topic_screen_smoke`；`crates/codegen/pager/src/views/tutorial.rs` — `topic_body_strips_the_duplicated_h1`。
+
+
+### Requirement: The tutorial List renderer SHALL draw Welcome chrome and intro copy, show explored progress and topic navigation shortcuts, adapt title/blurb layout below the narrow threshold, mark viewed topics with success badges, delegate rows to the picker content renderer, and register one hit area per topic.
+
+The implementation SHALL satisfy the following tested behavior: render_list computes `{viewed}/{topic_count} explored`, configures centered modal sizing with compact support, paints two intro lines plus a gap, returns when no content height remains, and treats widths below 64 columns as narrow. Wide rows use title plus right_label blurb; narrow rows put blurb in description_lines and expand each row. PickerEntry rows carry selected state, viewed check badge, success badge color, no search/collapse fields, and render_picker_content_with_scrollbar_x receives modal inner scrollbar x. Returned content hit rectangles and entry indices populate PickerHitAreas with empty close/search/tab/filter rects.
+
+#### Scenario: Progress display
+- **WHEN** topics have been opened in the current launch
+- **THEN** the footer shortcut reports the viewed count over total topics and rows show check marks for viewed indices.
+
+#### Scenario: Wide list
+- **WHEN** content width is at least 64 columns
+- **THEN** each row keeps the blurb as a right-aligned label.
+
+#### Scenario: Narrow list
+- **WHEN** content width is below 64 columns
+- **THEN** the blurb moves below the title as a description line and rows use expanded layout.
+
+#### Scenario: Empty body
+- **WHEN** intro consumes all available content height
+- **THEN** render_list returns without building row hits.
+
+#### Scenario: Hit areas
+- **WHEN** the list has visible topic rows
+- **THEN** picker.hit_areas contains one item rectangle and entry index per tutorial topic.
+
+#### Scenario: Compact modal
+- **WHEN** compact is enabled
+- **THEN** modal sizing is passed through with_compact while content and hit mapping remain consistent.
+
+证据：`crates/codegen/pager/src/views/tutorial.rs` — `render_list`；`crates/codegen/pager/src/views/tutorial.rs` — `INTRO_LINES`；`crates/codegen/pager/src/views/tutorial.rs` — `NARROW_THRESHOLD`；`crates/codegen/pager/src/views/tutorial.rs` — `PickerEntry`；`crates/codegen/pager/src/views/tutorial.rs` — `PickerRow`；`crates/codegen/pager/src/views/tutorial.rs` — `PickerHitAreas`；`crates/codegen/pager/src/views/tutorial.rs` — `render_picker_content_with_scrollbar_x`；`crates/codegen/pager/src/views/tutorial.rs` — `render_list_populates_hit_areas`。
+
+
+### Requirement: The tutorial implementation SHALL be covered by inline behavior checks for list/topic/guide transitions, viewed marking, bounded linear navigation, scroll and typing consumption, guide absence, heading normalization, paste suppression, list hit areas, and topic render smoke behavior.
+
+The implementation SHALL satisfy the following tested behavior: The 12 inline tests invoke handlers and renderers with synthetic state/events. They assert exact TutorialScreen/TutorialOutcome transitions, viewed set growth across the full tour, first-topic Left saturation, scroll changes, empty picker query after typing/paste, guide resolution assumptions from the topic catalog, topic_body output, one hit rectangle per topic, and no-panic topic rendering. This audit records assertions without claiming test execution.
+
+#### Scenario: Open and viewed
+- **WHEN** Down then Enter is sent on a fresh list
+- **THEN** selected topic opens and its index is viewed.
+
+#### Scenario: Close sequence
+- **WHEN** Esc is sent from Topic then List
+- **THEN** first Esc returns to List and second Esc closes.
+
+#### Scenario: Guide flow
+- **WHEN** d is sent on a guided topic then Esc
+- **THEN** Guide opens and returns to the originating Topic.
+
+#### Scenario: Full tour
+- **WHEN** Right is sent through every topic
+- **THEN** each topic is viewed and final Right returns to List.
+
+#### Scenario: Input suppression
+- **WHEN** typing or paste is sent on List/Topic
+- **THEN** all input is consumed and list query remains empty.
+
+#### Scenario: Rendering evidence
+- **WHEN** List/Topic are rendered into a Buffer
+- **THEN** list hit areas are populated and topic rendering completes without panic.
+
+证据：`crates/codegen/pager/src/views/tutorial.rs` — `tests`；`crates/codegen/pager/src/views/tutorial.rs` — `enter_opens_selected_topic_and_marks_viewed`；`crates/codegen/pager/src/views/tutorial.rs` — `esc_pops_topic_to_list_then_closes`；`crates/codegen/pager/src/views/tutorial.rs` — `d_opens_the_go_deeper_guide_and_esc_returns_to_the_topic`；`crates/codegen/pager/src/views/tutorial.rs` — `d_is_a_noop_on_a_topic_without_a_guide`；`crates/codegen/pager/src/views/tutorial.rs` — `topic_body_strips_the_duplicated_h1`；`crates/codegen/pager/src/views/tutorial.rs` — `right_flows_through_topics_and_back_to_list`；`crates/codegen/pager/src/views/tutorial.rs` — `left_steps_back_and_stops_at_first_topic`；`crates/codegen/pager/src/views/tutorial.rs` — `topic_page_scrolls_and_ignores_typing`；`crates/codegen/pager/src/views/tutorial.rs` — `list_typing_does_not_start_a_query`；`crates/codegen/pager/src/views/tutorial.rs` — `list_paste_does_not_start_a_query`；`crates/codegen/pager/src/views/tutorial.rs` — `render_list_populates_hit_areas`；`crates/codegen/pager/src/views/tutorial.rs` — `render_topic_screen_smoke`。
+
+
+### Requirement: Other tool block state, output capture, image detection, and timing
+
+OtherToolCallBlock::new SHALL initialize the name and summary with no error/output/coordination/image references and no local timing. with_error/with_output SHALL update the corresponding state; set_output_text SHALL replace output and recompute image references from the complete text. is_success SHALL mean error is absent. set_error and finish SHALL capture elapsed milliseconds once when started_at exists, while elapsed_ms SHALL expose the stored value or a live duration.
+
+#### Scenario: Construction
+- **WHEN** an unknown tool block is created
+- **THEN** optional output, error, coordination, image, and timing fields are empty.
+
+#### Scenario: Output replacement
+- **WHEN** text is set or replaced
+- **THEN** the stored output is replaced and image references are re-extracted from the new text.
+
+#### Scenario: Error/timing
+- **WHEN** an error or completion arrives for a running block
+- **THEN** the error is updated and elapsed time is finalized without overwriting an existing duration.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `CoordinationRow`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `OtherToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `OtherToolCallBlock::new`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `with_error`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `with_output`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `set_output_text`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `is_success`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `set_error`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `finish`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `elapsed_ms`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `started_at`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `image_refs`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `extract_image_refs`。
+
+
+### Requirement: Coordination-aware media precedence and inline image presentation
+
+A coordination row or the named coordination tools list_active_sessions, ask_session, and get_inquiry SHALL treat image references as attachments to text: media_ref_path, inline_media, and inline_open_button return None so the structured inquiry output remains visible. Other tools SHALL expose the first detected image path, return inline media only when dimensions are known, and expose an open-button path only when inline graphics overlay is inactive. Media output SHALL render a header and percent-decoded filepath, preserve the stored path for actions, use a character-boundary middle ellipsis when too wide, and add a centered Open row when appropriate.
+
+#### Scenario: Coordination image
+- **WHEN** coordination output contains a raw or markdown image reference plus Question/Answer/Status text
+- **THEN** image references are detected but no media-only path, inline media, or open button replaces the text details.
+
+#### Scenario: Ordinary image
+- **WHEN** a non-coordination tool output contains an image reference
+- **THEN** the first image path is available for media/open behavior and running collapse starts in truncated mode.
+
+#### Scenario: Inline media dimensions
+- **WHEN** the first image has dimensions or lacks them
+- **THEN** InlineMediaInfo is returned with path/size/alt text only when dimensions are present.
+
+#### Scenario: Media header
+- **WHEN** an image block is rendered
+- **THEN** the header and decoded filepath are shown, stored path is unchanged, and optional Open button rows are added only when overlay is inactive.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `CoordinationRow`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `coordination`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `prefers_text_output`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `media_ref_path`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `set_output_text`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `image_references`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `inline_media`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `InlineMediaInfo`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `inline_open_button`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `scrollback_inline_overlay_active`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `ReadMediaKind`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `urlencoding::decode`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `media_open_button_label`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `media_open_button_col`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `media_ref_path`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `image_refs`。
+
+
+### Requirement: Other tool collapsed header labels, summaries, and width limits
+
+collapsed_line SHALL split a name containing `: ` into a bold label and text content, otherwise render the full name bold; muted mode SHALL dim both while retaining label boldness. A non-empty summary SHALL be appended with two spaces only when it fits the requested width (or always when width is absent), and the complete line SHALL be passed through truncate_line when a width is supplied.
+
+#### Scenario: Labeled name
+- **WHEN** name contains `: `
+- **THEN** label and content are separate styled spans with a trailing label space.
+
+#### Scenario: Summary fit
+- **WHEN** summary is non-empty and width is supplied
+- **THEN** summary is included only if the byte-length fit check passes; the line is then width-truncated.
+
+#### Scenario: No width
+- **WHEN** summary is non-empty and no width is supplied
+- **THEN** the full summary is appended.
+
+#### Scenario: Muted collapse
+- **WHEN** collapsed rendering requests muted style
+- **THEN** all text uses muted style and label remains bold.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `collapsed_line`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `split_once`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `: `；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `summary`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `truncate_line`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `Theme::muted`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `Theme::primary`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `Modifier::BOLD`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `unicode_width::UnicodeWidthStr::width`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `width`。
+
+
+### Requirement: Other tool expanded output, error wrapping, and structured Q&A rendering
+
+For non-media blocks, collapsed output SHALL contain only the width-aware header. Truncated and Expanded modes SHALL use an unmuted full header, wrap each error line to the context width, and render output either as numbered question/answer pairs when the parser recognizes AskUserQuestion text or as a blank separator plus muted generic wrapped lines. Empty answers SHALL display `(no answer)`; answered pairs SHALL use the user accent arrow.
+
+#### Scenario: Collapsed
+- **WHEN** the block has no media and mode is Collapsed
+- **THEN** one collapsed header line is emitted.
+
+#### Scenario: Error
+- **WHEN** error text contains one or more lines in Expanded/Truncated mode
+- **THEN** each error line is wrapped to context width and appended after the header.
+
+#### Scenario: Structured Q&A
+- **WHEN** output matches a recognized Q&A format
+- **THEN** questions are numbered and primary-colored, answers use a user-colored arrow, and missing answers use dim `(no answer)`.
+
+#### Scenario: Generic output
+- **WHEN** output is not recognized as Q&A
+- **THEN** a blank separator and muted wrapped output lines are emitted.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `output`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `DisplayMode::Collapsed`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `DisplayMode::Truncated`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `DisplayMode::Expanded`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `word_wrap_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `parse_ask_user_qa_pairs`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `BlockLine::styled`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `theme.accent_user`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `no answer`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `word_wrap_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `width.saturating_sub`。
+
+
+### Requirement: AskUserQuestion output parser format recognition and annotation cleanup
+
+parse_ask_user_qa_pairs SHALL recognize the answered sentence format with quoted question/answer pairs and its canonical suffix, return no pairs for the declined format, and recognize plan-mode bullet output only when the Questions asked marker and quoted bullets are present. It SHALL strip selected-preview and user-notes annotation suffixes from answers, map `(No answer provided)` to an empty answer, tolerate a missing answer line as empty, and return an empty vector for unknown or malformed prefixes while retaining pairs parsed before a later malformed segment.
+
+#### Scenario: Answered sentence
+- **WHEN** output starts with `User has answered your questions: ` and contains quoted pairs
+- **THEN** each quoted question/answer pair is returned and display-only annotation suffixes are removed.
+
+#### Scenario: Declined
+- **WHEN** output starts with `User declined to answer`
+- **THEN** no Q&A rows are returned.
+
+#### Scenario: Plan mode
+- **WHEN** output contains `Questions asked` and quoted bullet questions
+- **THEN** Answer lines map to answer text, `(No answer provided)` maps to empty, and missing/unrecognized next lines produce empty answers.
+
+#### Scenario: Unknown/malformed
+- **WHEN** the prefix/markers are absent or a pair cannot be parsed
+- **THEN** the parser returns no rows, or only pairs already parsed before the malformed remainder.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `parse_ask_user_qa_pairs`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `strip_prefix`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `strip_suffix`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `find`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `selected preview:`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `user notes:`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `Questions asked`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `Answer: `；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `No answer provided`。
+
+
+### Requirement: Other tool accent, bullet, folding, and neutral block protocol
+
+OtherToolCallBlock SHALL use no accent for ordinary collapsed blocks, otherwise select error red, running animated, terminal coordination success, or normal tool accent in precedence order. Error bullets are always red; coordination bullets follow coordination accent; ordinary collapsed bullets are absent and expanded/running bullets inherit accent. Blocks have no vertical padding, semantic background, or raw mode. Foldability depends on output/error; default mode is Collapsed, ordinary running tools cycle Collapsed→Truncated→Expanded, non-running/coordination tools toggle Collapsed↔Expanded, and collapse_mode chooses Truncated only for running ordinary tools.
+
+#### Scenario: Accent precedence
+- **WHEN** error, running, terminal coordination, or ordinary tool state applies
+- **THEN** the highest-priority matching accent style is returned, with animation only for running ordinary tools.
+
+#### Scenario: Bullet
+- **WHEN** error, coordination, collapsed ordinary, or expanded ordinary state applies
+- **THEN** the bullet is red, coordination-colored, absent, or inherited respectively.
+
+#### Scenario: Folding
+- **WHEN** a block has output/error and is running or coordination
+- **THEN** is_foldable reflects content; next_fold_mode and collapse_mode choose the documented running versus non-running cycle.
+
+#### Scenario: Protocol
+- **WHEN** the renderer asks for padding/background/raw/default mode
+- **THEN** false/None/Collapsed protocol values are returned.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `accent`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `bullet`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `background`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `collapse_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `AccentStyle::static_color`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `AccentStyle::animated`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `DisplayMode::Collapsed`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `DisplayMode::Truncated`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `DisplayMode::Expanded`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `accent_error`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `accent_running`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `accent_success`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `accent_tool`。
+
+
+### Requirement: Image reference exposure and text/media action routing
+
+image_references SHALL expose the block-owned detected image slice in insertion order. media_ref_path, inline_media, and inline_open_button SHALL all defer to prefers_text_output before inspecting image_refs, so coordination and inquiry text cannot be replaced by media actions; ordinary image tools SHALL retain the first reference for downstream media and open-button routing.
+
+#### Scenario: References
+- **WHEN** output text contains zero or more detected image references
+- **THEN** image_references exposes the stored slice without reparsing.
+
+#### Scenario: Text-priority tool
+- **WHEN** coordination or a named inquiry tool has an image reference
+- **THEN** all media action accessors return None while text output remains eligible.
+
+#### Scenario: Ordinary media
+- **WHEN** a non-priority tool has an image reference
+- **THEN** the first reference drives media_ref_path and eligible inline/open action routing.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `image_references`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `image_refs`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `media_ref_path`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `inline_media`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `inline_open_button`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `prefers_text_output`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `CoordinationRow`。

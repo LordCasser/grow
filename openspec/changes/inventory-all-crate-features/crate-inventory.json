@@ -3810,7 +3810,22 @@
       "Selectable display columns and selection width",
       "Decorative prefixes/suffixes and shifted selection metadata",
       "Pre-wrap source mapping and link sidecars",
-      "Selection boundary sidecars and rendered output conversion"
+      "Selection boundary sidecars and rendered output conversion",
+      "Clipboard delivery classification",
+      "Keyboard capability host scope",
+      "The tutorial overlay SHALL model List, Topic, and Guide screens, mark successfully opened topics as viewed for the current launch, reset scroll/cache/modal chrome on screen transitions, and resolve a Go deeper guide only when its referenced document exists.",
+      "The tutorial List screen SHALL consume all key, mouse, and paste input while open, use a non-searchable fixed topic picker, open the selected topic on selection, close on picker/chrome close, and prevent typing or paste from creating an invisible query.",
+      "Topic and Guide screens SHALL consume all input, give modal chrome first ownership, scroll document content through shared document helpers, and route Esc/close, Left/Right, and d according to screen semantics without allowing printable typing to escape.",
+      "Tutorial rendering SHALL render the active topic or guide through the shared markdown document viewer, reuse cached pre-rendered lines by width, expose next/done and go-deeper shortcuts for topics, and keep the modal title from duplicating a leading Markdown H1.",
+      "The tutorial List renderer SHALL draw Welcome chrome and intro copy, show explored progress and topic navigation shortcuts, adapt title/blurb layout below the narrow threshold, mark viewed topics with success badges, delegate rows to the picker content renderer, and register one hit area per topic.",
+      "The tutorial implementation SHALL be covered by inline behavior checks for list/topic/guide transitions, viewed marking, bounded linear navigation, scroll and typing consumption, guide absence, heading normalization, paste suppression, list hit areas, and topic render smoke behavior.",
+      "Other tool block state, output capture, image detection, and timing",
+      "Coordination-aware media precedence and inline image presentation",
+      "Other tool collapsed header labels, summaries, and width limits",
+      "Other tool expanded output, error wrapping, and structured Q&A rendering",
+      "AskUserQuestion output parser format recognition and annotation cleanup",
+      "Other tool accent, bullet, folding, and neutral block protocol",
+      "Image reference exposure and text/media action routing"
     ],
     "reviewed_files": [
       {
@@ -5972,6 +5987,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/types.rs",
         "sha256": "02f2c77d36cc566226993ec320c3175c76b4fb4b67688b356c8f2750ea4258bd"
+      },
+      {
+        "path": "crates/codegen/pager/src/diagnostics/view.rs",
+        "sha256": "bd6e27683e12540b31e53988cd9f7c7b68c184dbfdb8177032fd154756684265"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/tutorial.rs",
+        "sha256": "fc46ca1064a2496c923a29600275c0158e7bb9f8134d23d273c6a75918e4ee4a"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/other.rs",
+        "sha256": "e9aa676950093008e4b651c69849ae4380e1b08e80588b607e63e4d2eb6c2249"
       }
     ],
     "review": "reviews/pager.md"
