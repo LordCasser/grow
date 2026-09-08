@@ -170,7 +170,7 @@ fn async_compaction_scenario(action: &'static str) {
                 InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
                 summary_response);
             let mut tool = server.expect_response("foreground executes tool",
-                InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
                 ScriptedResponse::sse([
                     json!({"type":"message_start","message":{"id":"tool-msg","type":"message","role":"assistant","content":[],"model":"test","usage":{"input_tokens":74_000,"output_tokens":0}}}),
                     json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"async-todo","name":"todo_write","input":{}}}),
@@ -180,19 +180,16 @@ fn async_compaction_scenario(action: &'static str) {
                     json!({"type":"message_stop"}),
                 ].into_iter().map(|event| SseEvent::data(event.to_string())).collect()));
             let mut foreground = server.expect_response("foreground continues",
-                // This fixture has one tool and no attribution callback, so
-                // the mock classifies its foreground requests as auxiliary.
-                InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
                 messages_turn_with_usage(&[("foreground response after freeze", END_TURN)], END_TURN, 74_000));
             let (actor, mut notifications) = actor_with_sampler_cw_ex(&server, sampling_types::ApiBackend::Messages, 100_000, None, if action == "timeout" { 2 } else { 0 }).await;
-            *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
-            if action == "cross_turn" {
-                use tools::implementations::{context_recall::ContextRecallImpl, grow_build::todo::TodoWriteTool};
-                use tools::registry::types::ToolConfig;
-                *actor.agent.borrow_mut() = test_agent_with_tools(vec![
-                    ToolConfig::for_tool::<TodoWriteTool>(), ToolConfig::for_tool::<ContextRecallImpl>(),
-                ]).await;
-            }
+            use tools::implementations::{context_recall::ContextRecallImpl, grow_build::{todo::TodoWriteTool, read_file::ReadFileTool}};
+            use tools::registry::types::ToolConfig;
+            // Two stable tools distinguish foreground requests from the tool-free
+            // summary even when either reaches the mock server first.
+            let mut tools = vec![ToolConfig::for_tool::<TodoWriteTool>(), ToolConfig::for_tool::<ReadFileTool>()];
+            if action == "cross_turn" { tools.push(ToolConfig::for_tool::<ContextRecallImpl>()); }
+            *actor.agent.borrow_mut() = test_agent_with_tools(tools).await;
             if matches!(action, "goal" | "budget" | "promote_incomplete") {
                 actor.goal_tracker.lock().create_goal("async-goal".into(), "verify concurrent accounting".into(), Some(if action == "budget" { 75_000 } else { 500_000 }), "now".into()).unwrap();
                 actor.behavior.lock().select_behavior(tool_types::BehaviorId::Goal);
