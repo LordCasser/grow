@@ -3959,7 +3959,23 @@
       "Rewind dim origin is phase-aware",
       "Pending permission and question marks are rebuilt from tracker ownership",
       "Rewind keyboard input moves the cursor and maps terminal actions to app actions",
-      "Rewind mouse hit testing updates hover and activates the clicked row"
+      "Rewind mouse hit testing updates hover and activates the clicked row",
+      "Coordination rows use composite inquiry identity",
+      "Coordination replay and live state preserve timing",
+      "Coordination rows retain passive renderer chrome",
+      "Reconnect tail completion preserves original row state",
+      "Coordination rows stay outside primary tool grouping",
+      "The ListPane module SHALL expose the reusable ListPane, ListPaneState, layout, matcher, input-mode, and wrap/query types needed by callers, and SHALL provide a theme-derived ListPaneStyle for framework-owned overlays.",
+      "ListItem SHALL support a preferred content/prefix model with framework-derived rendering and a custom rendering escape hatch for items whose layout cannot be represented as one logical line.",
+      "The default ListItem::desired_height SHALL calculate a nonzero soft-wrap height from display-cell width, prefix width, and FirstFit word wrapping while remaining safe for zero or fully consumed widths.",
+      "ListItem SHALL provide stable model identity and conservative defaults for selectability, source-line navigation, ticking, searching, highlight offsets, and copy text so ListPane state can survive model mutations without owning item data.",
+      "line_display_width SHALL compute the terminal display width of a ratatui Line by summing Unicode display widths for every span and ignoring style metadata.",
+      "The list_pane module SHALL remain a reusable view contract: item models own data, ListPaneState owns scroll/selection/layout state in the sibling state module, and rendering/input behavior remains delegated to sibling modules.",
+      "Search-tool discovery identity, constructors, and completion timing",
+      "Search-tool copy text exposes query, limit, result count, and titled tool details",
+      "Search-tool headers truncate queries and expose only the query for selection",
+      "Search-tool block output renders collapsed, expanded, empty, and error states",
+      "Search-tool visual status, folding, padding, and viewer metadata"
     ],
     "reviewed_files": [
       {
@@ -6265,6 +6281,18 @@
       {
         "path": "crates/codegen/pager/src/app/agent_view/rewind.rs",
         "sha256": "8c6e0ae4550e4dbfb990cc8eabae0f7fc54b8e23e2fbcfc34a7f81f7463c8714"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/state/coordination.rs",
+        "sha256": "a17e8fb7e4fd69b755837aea82d08e1034c4b8d7027ce0d4f44625a6ab0106f9"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/list_pane/mod.rs",
+        "sha256": "7ed43ca007020c1e01e2f14c908c8eab2106db12a7c458e20e62e8b1f35b5e24"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs",
+        "sha256": "6e59a8324fd18258d2497547b84f49629160ec6bc6f10368ac9c9b8349564a10"
       }
     ],
     "review": "reviews/pager.md"

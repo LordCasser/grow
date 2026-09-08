@@ -988,3 +988,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The dispatch tests combine block-viewer media routing and plugin-modal delivery in one transcript module, so coverage ownership is split across unrelated UI surfaces.
 - Pager 审计债务：Native image opening is fire-and-forget from the dispatcher and has no observable effect contract in these tests, leaving launch failures outside the in-memory verification boundary.
 - Pager 审计债务：The plugin collapse invariant is represented by a modal boolean/set seed flag and is verified only through repeated delivery; a dedicated modal-level contract could reduce coupling to dispatcher fixtures.
+- Pager 审计债务：Passive coordination state is represented by OtherToolCallBlock and inferred through a coordination field, coupling sideband identity and ordinary tool rendering instead of using a dedicated row type.
+- Pager 审计债务：merge_coordination_rows_from_tail silently ignores coordination rows with no matching original identity, so a caller must separately define the policy for tail-only inquiry events.
+- Pager 审计债务：The module relies on a production expect for coordination identity; malformed upstream notices therefore remain a panic boundary rather than an explicit error path.
+- Pager 审计债务：Timing and replay semantics are encoded through the generic running/finish fields, which leaves passive-row lifecycle rules distributed across ScrollbackState and OtherToolCallBlock.

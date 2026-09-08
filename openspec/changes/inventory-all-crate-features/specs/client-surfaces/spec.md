@@ -25546,3 +25546,375 @@ handle_rewind_mouse SHALL return Unchanged without rewind state, outside the pro
 - **THEN** InputOutcome::Unchanged is returned.
 
 证据：`crates/codegen/pager/src/app/agent_view/rewind.rs` — `AgentView::handle_rewind_mouse`；`crates/codegen/pager/src/views/rewind.rs` — `rewind_row_at`；`crates/codegen/pager/src/views/rewind.rs` — `set_rewind_cursor`；`crates/codegen/pager/src/views/rewind.rs` — `rewind_activate`；`crates/codegen/pager/src/views/rewind.rs` — `RewindInput`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `AgentView::rewind_input_to_outcome`；`crates/codegen/pager/src/app/agent_view/input.rs` — `Event::Mouse`。
+
+
+### Requirement: Coordination rows use composite inquiry identity
+
+The implementation SHALL satisfy the following tested behavior: A coordination row is located by the pair of source_peer_id and inquiry_id. Rows with the same inquiry_id from different peers occupy separate entries, while separate inquiries from one peer update only their matching rows. Once an existing row is terminal, a later nonterminal receipt does not replace its identity or running state.
+
+#### Scenario: Peer isolation
+- **WHEN** two rows share an inquiry_id but have different source_peer_id values
+- **THEN** both rows remain in the scrollback and the second row can remain running independently.
+
+#### Scenario: Independent inquiries
+- **WHEN** two nonterminal rows from one peer receive a terminal update for only one inquiry
+- **THEN** the matching row stops while the other row remains running until its own terminal update.
+
+#### Scenario: Terminal protection
+- **WHEN** a terminal row receives a later nonterminal tail receipt
+- **THEN** the existing row remains terminal, keeps its EntryId, and no running entry is created.
+
+证据：`crates/codegen/pager/src/scrollback/state/coordination.rs` — `ScrollbackState::coordination_entry_id`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `ScrollbackState::upsert_coordination_row`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `tests::coordination_same_inquiry_id_from_different_peers_never_merges`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `tests::coordination_independent_inquiries_from_one_source_update_their_own_rows`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `tests::coordination_late_tail_receipt_does_not_downgrade_finished_state`。
+
+
+### Requirement: Coordination replay and live state preserve timing
+
+The implementation SHALL satisfy the following tested behavior: upsert_coordination_row starts a non-replay, nonterminal row as running, retains a live row when an older replay receipt is applied, and returns false for an unchanged replay duplicate. Terminal live updates finish the running entry; replay terminal updates call block.finish while leaving finished_at unset in the tested row and retaining elapsed timing. Foreground finish_all_running does not finish the passive coordination row.
+
+#### Scenario: Live versus replay
+- **WHEN** a live coordination row receives an identical replay receipt
+- **THEN** the operation reports no change and the row remains running.
+
+#### Scenario: Foreground cleanup
+- **WHEN** a running coordination row and a separate ordinary tool are present and finish_all_running is called
+- **THEN** the ordinary tool stops while the coordination row remains running with started_at and no elapsed_ms.
+
+#### Scenario: Replay completion
+- **WHEN** a live row receives a terminal replay receipt
+- **THEN** the row is no longer running, finished_at remains None, and elapsed_ms is populated without a replay flash.
+
+证据：`crates/codegen/pager/src/scrollback/state/coordination.rs` — `ScrollbackState::upsert_coordination_row`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::finish_all_running`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_entry_running`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `OtherToolCallBlock::finish`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `tests::coordination_foreground_cleanup_preserves_passive_timing`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `tests::coordination_old_replay_receipt_does_not_stop_a_live_row`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `tests::coordination_replayed_completion_freezes_live_timing_without_a_replay_flash`。
+
+
+### Requirement: Coordination rows retain passive renderer chrome
+
+The implementation SHALL satisfy the following tested behavior: A nonterminal coordination row remains in DisplayMode::Collapsed with animated accent and bullet chrome. After a terminal update the same collapsed row has nonanimated accent and bullet chrome. Coordination rows are represented as Other tool blocks and use the normal tool renderer.
+
+#### Scenario: Running chrome
+- **WHEN** a nonterminal coordination row is rendered in its default entry context
+- **THEN** the mode is Collapsed and both accent and bullet are animated.
+
+#### Scenario: Finished chrome
+- **WHEN** the same row receives a terminal update and is rendered again
+- **THEN** the mode remains Collapsed and both accent and bullet are nonanimated.
+
+证据：`crates/codegen/pager/src/scrollback/state/coordination.rs` — `ScrollbackState::upsert_coordination_row`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `OtherToolCallBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `OtherToolCallBlock::bullet`；`crates/codegen/pager/src/app/appearance.rs` — `AppearanceConfig`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `tests::coordination_collapsed_row_has_run_like_running_and_finished_chrome`。
+
+
+### Requirement: Reconnect tail completion preserves original row state
+
+The implementation SHALL satisfy the following tested behavior: merge_coordination_rows_from_tail scans only coordination Other tool entries that already have a matching row in the original state, upserts the tail block into the original row, transfers a committed tail marker to the original EntryId, and removes the consumed tail entry. The tested merge preserves the original EntryId, manual Expanded display mode, elapsed timing, and an unrelated tail entry.
+
+#### Scenario: Tail completion
+- **WHEN** a fresh continuation contains a terminal completion for an existing live coordination row and an unrelated notice
+- **THEN** the completion replaces the original row in place, the unrelated notice remains in the tail result, and the original row is not emitted twice.
+
+#### Scenario: Manual fold
+- **WHEN** the original row was manually expanded with respect_manual_folds enabled before tail merge
+- **THEN** the merged row remains Expanded and its timing remains available.
+
+证据：`crates/codegen/pager/src/scrollback/state/coordination.rs` — `ScrollbackState::merge_coordination_rows_from_tail`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `ScrollbackState::upsert_coordination_row`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::append_entries_from`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::fresh_continuation`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `tests::coordination_tail_completion_merges_into_original_id_and_preserves_manual_fold`。
+
+
+### Requirement: Coordination rows stay outside primary tool grouping
+
+The implementation SHALL satisfy the following tested behavior: Adding a coordination row does not replace the last ordinary tool-call EntryId. In the tested state the ordinary Other tool block remains groupable, while the coordination row is not groupable, so passive inquiry rendering does not join the main tool group.
+
+#### Scenario: Primary hook isolation
+- **WHEN** an ordinary Other tool call is inserted before a terminal coordination row
+- **THEN** last_tool_call_entry_id still returns the ordinary tool EntryId.
+
+#### Scenario: Group isolation
+- **WHEN** the ordinary tool and coordination row are inspected for groupability
+- **THEN** the ordinary tool is groupable and the coordination row is not.
+
+证据：`crates/codegen/pager/src/scrollback/state/coordination.rs` — `ScrollbackState::upsert_coordination_row`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::last_tool_call_entry_id`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::is_groupable`；`crates/codegen/pager/src/scrollback/state/coordination.rs` — `tests::coordination_row_cannot_capture_main_tool_hooks_or_join_tool_groups`。
+
+
+### Requirement: The ListPane module SHALL expose the reusable ListPane, ListPaneState, layout, matcher, input-mode, and wrap/query types needed by callers, and SHALL provide a theme-derived ListPaneStyle for framework-owned overlays.
+
+The module SHALL keep layout, render, and state implementation modules private while re-exporting QueryKind, ListLayoutCache, WrapMode, ListPane, InputBarMode, ListMatcher, ListPaneConfig, ListPaneState, and MatchMode. ListPaneStyle SHALL carry selection_bg, visual_select_bg, input_bar_bg, input_bar_prompt_fg, input_bar_text_fg, scrollbar_bg, scrollbar_fg, indicator_fg, follow_indicator_fg, toast_fg, uniform_visual_bg, and show_corner_indicators. Default SHALL obtain theme colors from Theme::current; uniform_visual_bg SHALL default false and show_corner_indicators SHALL default true. Match highlights use inversion and therefore do not require dedicated colors.
+
+#### Scenario: Public surface
+- **WHEN** a caller imports the generic pane API
+- **THEN** the module exposes the documented state/render/layout/matcher types while keeping submodules private.
+
+#### Scenario: Theme defaults
+- **WHEN** a ListPaneStyle is constructed with Default
+- **THEN** all overlay colors are sourced from the current theme and the two behavior flags default to false/true.
+
+#### Scenario: Uniform visual selection
+- **WHEN** uniform_visual_bg is true
+- **THEN** cursor rows inside a visual selection may use visual_select_bg and rely on prefix_cursor to distinguish the cursor.
+
+#### Scenario: Corner indicator ownership
+- **WHEN** show_corner_indicators is false
+- **THEN** the renderer can suppress its corner indicators for a pane that draws its own affordance.
+
+证据：`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListPaneStyle`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListPaneStyle::default`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `QueryKind`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListLayoutCache`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `WrapMode`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListPane`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `InputBarMode`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListMatcher`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListPaneConfig`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `MatchMode`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `mod layout`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `mod render`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `mod state`。
+
+
+### Requirement: ListItem SHALL support a preferred content/prefix model with framework-derived rendering and a custom rendering escape hatch for items whose layout cannot be represented as one logical line.
+
+content SHALL default to a shared empty Line, which signals that the framework should use custom render. prefix SHALL default to None and represent a fixed-width left column; prefix_in_selection and prefix_cursor SHALL default to prefix and allow range/cursor-specific visuals. background SHALL default to None and, when Some, represent a full item-area background applied before content. render SHALL default to a no-op and is called only when content is empty; custom renderers MUST override desired_height because the default sizing is content-based. These hooks borrow item data from the model rather than owning it in the view.
+
+#### Scenario: Content item
+- **WHEN** content returns a nonempty logical Line
+- **THEN** the framework can render the item, wrap or truncate it, and apply overlays without a custom painter.
+
+#### Scenario: Prefix column
+- **WHEN** an item supplies a prefix
+- **THEN** the prefix occupies a fixed-width left column and wrapped continuation lines are indented by its display width.
+
+#### Scenario: Selection-specific prefix
+- **WHEN** an item is in visual selection or is the cursor line
+- **THEN** prefix_in_selection or prefix_cursor is called instead of the ordinary prefix.
+
+#### Scenario: Custom item
+- **WHEN** content returns the default empty Line
+- **THEN** the framework invokes render and callers provide a matching desired_height implementation.
+
+#### Scenario: Item background
+- **WHEN** background returns Some(color)
+- **THEN** the framework fills the full item row area before writing prefix/content.
+
+证据：`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::content`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::prefix`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::prefix_in_selection`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::prefix_cursor`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::background`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::render`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::desired_height`。
+
+
+### Requirement: The default ListItem::desired_height SHALL calculate a nonzero soft-wrap height from display-cell width, prefix width, and FirstFit word wrapping while remaining safe for zero or fully consumed widths.
+
+desired_height SHALL return 1 when width is zero, content display width is zero, or the prefix consumes the width. Otherwise it SHALL subtract the prefix display width with saturation, flatten all content span strings, call textwrap with the available text width, FirstFit, and break_words=true, and return the wrap count clamped to at least 1. NoWrap callers are expected to ignore this estimate and use one row; custom renderers are expected to override it. The calculation uses display-cell width via line_display_width rather than byte or character count.
+
+#### Scenario: Zero width
+- **WHEN** desired_height receives width 0
+- **THEN** the result is 1 and no wrapping operation is needed.
+
+#### Scenario: Empty content
+- **WHEN** content has no display cells
+- **THEN** the result is 1 even if a prefix exists.
+
+#### Scenario: Prefix consumes area
+- **WHEN** prefix display width is at least the requested width
+- **THEN** the available text width saturates to zero and the result remains 1.
+
+#### Scenario: Wrapped content
+- **WHEN** nonempty content has available text width
+- **THEN** the flattened spans are wrapped with FirstFit and break_words=true and the number of visual lines is returned.
+
+#### Scenario: NoWrap caller
+- **WHEN** the pane is configured not to wrap
+- **THEN** the pane ignores this estimate and uses one row as documented by the trait.
+
+证据：`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::desired_height`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `line_display_width`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `textwrap::Options::new`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `textwrap::WrapAlgorithm::FirstFit`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `textwrap::wrap`。
+
+
+### Requirement: ListItem SHALL provide stable model identity and conservative defaults for selectability, source-line navigation, ticking, searching, highlight offsets, and copy text so ListPane state can survive model mutations without owning item data.
+
+stable_id SHALL be required and unique within the list so selection survives insertion, removal, and reorder. is_selectable SHALL default true; goto_line_number SHALL default None, allowing callers to map semantic source lines instead of visual indices; needs_tick SHALL default false. search_text SHALL default to an empty string, making the item non-searchable, and the framework may call regex.is_match and find_iter on the returned bytes. search_text_col_offset SHALL default to the prefix display width as u16, aligning byte-match highlighting with rendered content; custom renderers may override it. copy_text SHALL concatenate content span strings without style metadata and may be overridden when custom render has empty content.
+
+#### Scenario: Stable selection
+- **WHEN** items are reordered or inserted/removed while an item remains present
+- **THEN** the unique stable_id, rather than an index, is the state identity.
+
+#### Scenario: Separator row
+- **WHEN** an item should not receive selection
+- **THEN** the implementation can override is_selectable to false; ordinary items remain selectable by default.
+
+#### Scenario: Goto line
+- **WHEN** an item has a semantic source line
+- **THEN** goto_line_number can return Some(line) so navigation need not use the visual index.
+
+#### Scenario: Non-searchable item
+- **WHEN** search_text is not overridden
+- **THEN** the empty string causes filter/highlight matching to find no item text.
+
+#### Scenario: Prefixed search
+- **WHEN** searchable content follows a prefix
+- **THEN** the default column offset equals the prefix display width so match highlights begin at content.
+
+#### Scenario: Copy content
+- **WHEN** copy is requested for a content-based item
+- **THEN** copy_text returns concatenated plain span text without styles.
+
+证据：`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::stable_id`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::is_selectable`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::goto_line_number`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::needs_tick`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::search_text`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::search_text_col_offset`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::copy_text`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `regex.is_match`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `regex.find_iter`。
+
+
+### Requirement: line_display_width SHALL compute the terminal display width of a ratatui Line by summing Unicode display widths for every span and ignoring style metadata.
+
+line_display_width SHALL iterate all spans, pass each span content to unicode_width::UnicodeWidthStr::width, and sum the resulting cell widths. It SHALL count the visual width of Unicode graphemes according to the dependency rather than bytes or Rust scalar count, and style changes between spans SHALL not affect the numeric width.
+
+#### Scenario: Multiple spans
+- **WHEN** a Line contains several styled or unstyled spans
+- **THEN** their individual Unicode display widths are summed in source order.
+
+#### Scenario: Wide Unicode
+- **WHEN** a span contains wide Unicode text
+- **THEN** the result follows Unicode terminal-cell width rather than byte length.
+
+#### Scenario: Style-only difference
+- **WHEN** two lines have identical span text with different styles
+- **THEN** both return the same display width.
+
+#### Scenario: Empty line
+- **WHEN** the line has no spans or only zero-width text
+- **THEN** the result is zero.
+
+证据：`crates/codegen/pager/src/views/list_pane/mod.rs` — `line_display_width`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `unicode_width::UnicodeWidthStr::width`。
+
+
+### Requirement: The list_pane module SHALL remain a reusable view contract: item models own data, ListPaneState owns scroll/selection/layout state in the sibling state module, and rendering/input behavior remains delegated to sibling modules.
+
+The implementation SHALL satisfy the following tested behavior: The module documentation defines ListPaneState plus ListPane as a generic scrollable, selectable list whose state is non-generic and owns only scroll/selection/layout data while item data remains external and borrowed. This file declares the trait/style and width primitive but does not perform scrolling, filtering mutation, input editing, scrollbar rendering, buffer painting, or model persistence; those behaviors belong to the private layout/render/state modules and their callers. No inline tests exist in this 314-line source, so only the documented contract and signatures are proven here.
+
+#### Scenario: Borrowed model
+- **WHEN** a pane is created over an external item slice
+- **THEN** the view borrows items and does not duplicate model ownership.
+
+#### Scenario: State ownership
+- **WHEN** scroll, selection, or layout changes are needed
+- **THEN** callers use ListPaneState from the sibling state module rather than fields in ListItem.
+
+#### Scenario: Rendering ownership
+- **WHEN** items use content-based or custom rendering
+- **THEN** the sibling renderer consumes these trait hooks and applies overlays after item rendering.
+
+#### Scenario: Audit boundary
+- **WHEN** this source is inspected without inline tests
+- **THEN** test_count is zero and sibling-module behavior is not claimed from this file.
+
+证据：`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListPane`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::content`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `ListItem::render`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `mod layout`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `mod render`；`crates/codegen/pager/src/views/list_pane/mod.rs` — `mod state`。
+
+
+### Requirement: Search-tool discovery identity, constructors, and completion timing
+
+DiscoveredTool SHALL preserve name, server, description, and score. discovered_tool_action SHALL strip a trusted `{server}__` prefix from a tool name while preserving flat names and names whose prefix does not match the server. SearchToolCallBlock::new SHALL initialize a query with no limit, zero result count, empty results/content/error, and no timing. with_error SHALL set an error; is_success SHALL be true exactly when error is absent. set_error and finish SHALL capture elapsed milliseconds once a started_at exists, and elapsed_ms SHALL return stored elapsed time or the current duration while running.
+
+#### Scenario: Local MCP name
+- **WHEN** tool.name starts with tool.server followed by `__`
+- **THEN** discovered_tool_action returns only the action suffix.
+
+#### Scenario: Gateway/flat name
+- **WHEN** the name does not have the exact server-prefixed form
+- **THEN** discovered_tool_action returns the original full name.
+
+#### Scenario: Fresh block
+- **WHEN** SearchToolCallBlock::new(query) is constructed
+- **THEN** query is retained and optional/result/error/content/timing fields use their documented empty defaults.
+
+#### Scenario: Error state
+- **WHEN** with_error or set_error receives an error
+- **THEN** error is present and is_success returns false; set_error records elapsed time when a started block had not been completed.
+
+#### Scenario: Completion timing
+- **WHEN** finish or elapsed_ms is called after started_at
+- **THEN** elapsed_ms is captured once, finish does not overwrite an existing value, and an unfinished block reports the current elapsed duration.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `DiscoveredTool`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `discovered_tool_action`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::new`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::with_error`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::is_success`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::set_error`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::finish`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::elapsed_ms`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `discovered_tool_action_strips_local_mcp_prefix`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `discovered_tool_action_keeps_gateway_flat_name`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `discovered_tool_action_strips_gateway_mcp_prefix`；`crates/codegen/pager/src/acp/tracker.rs` — `parse_search_tool_results`；`crates/codegen/pager/src/acp/tracker.rs` — `parse_search_tool_results_grouped_format`；`crates/codegen/pager/src/acp/tracker.rs` — `parse_search_tool_results_old_flat_format_returns_empty`。
+
+
+### Requirement: Search-tool copy text exposes query, limit, result count, and titled tool details
+
+copy_text SHALL emit a stable text representation with `query:`, an optional `limit:` line, singular `1 result` or plural `{N} results`, then numbered discovered tools. Each tool line SHALL titleize the action and server independently, and SHALL include a description line only when the description is non-empty.
+
+#### Scenario: Query and limit
+- **WHEN** a block has a query and optional limit
+- **THEN** copy text starts with query and includes the limit line only when present.
+
+#### Scenario: Result count grammar
+- **WHEN** result_count is one or any other value
+- **THEN** the count is rendered with `result` for one and `results` otherwise.
+
+#### Scenario: Tool details
+- **WHEN** results contain action/server names and descriptions
+- **THEN** each result is numbered, action/server labels are MCP-titleized, and non-empty descriptions follow on an indented line.
+
+#### Scenario: Empty description
+- **WHEN** a discovered tool has an empty description
+- **THEN** no blank description line is added for that tool.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::copy_text`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `discovered_tool_action`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `mcp_titleize_segment`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::copy_text`；`crates/codegen/pager/src/scrollback/block.rs` — `ToolCallBlock::IntegrationSearch`。
+
+
+### Requirement: Search-tool headers truncate queries and expose only the query for selection
+
+header_line SHALL render a bold `Search Tools ` label, a command-colored query, and an optional dim result suffix when a bounded width can fit it. For a bounded width it SHALL omit the suffix when the label plus suffix does not fit, allocate the remaining query budget with saturating subtraction, and truncate the query to that budget. header_block_line and expanded wrapped header lines SHALL make only the query span selectable, attach TOOL_HEADER_RANGE and the query selection text on the first line, and omit selection text from continuation lines.
+
+#### Scenario: Unbounded header
+- **WHEN** header_line is rendered without max_width
+- **THEN** the label and full query are rendered without a result suffix.
+
+#### Scenario: Bounded fitting header
+- **WHEN** max_width is large enough for label, query budget, and suffix
+- **THEN** the query is truncated to the available budget and the dim `(N result[s])` suffix is included.
+
+#### Scenario: Bounded narrow header
+- **WHEN** the label plus suffix cannot fit
+- **THEN** the suffix is omitted and the query uses the remaining width budget.
+
+#### Scenario: Collapsed selection
+- **WHEN** the collapsed header is converted by header_block_line
+- **THEN** the label/suffix are excluded and only the query span carries selection range/text.
+
+#### Scenario: Wrapped expanded header
+- **WHEN** the header wraps across lines
+- **THEN** each line remains selectable after the label span, while only the first line exposes the query selection text and later lines use a joiner.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::header_line`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::header_block_line`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::output`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `TOOL_HEADER_RANGE`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `truncate_str`；`crates/codegen/pager-render/src/render/wrapping.rs` — `wrap_header_flush`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockLine`；`crates/codegen/pager/src/scrollback/types.rs` — `Selectable::Spans`。
+
+
+### Requirement: Search-tool block output renders collapsed, expanded, empty, and error states
+
+BlockContent::output SHALL render a collapsed selectable header using configured collapsed muting and bounded width. Truncated and Expanded modes SHALL render a wrapped header; when results exist they SHALL render numbered action/server rows with titleized action and dim server, when results are empty and no error they SHALL render `(no results found)`, and when error is present they SHALL append the error in the error accent. Expanded output SHALL keep result descriptions out of the compact result rows while copy_text remains the detailed representation.
+
+#### Scenario: Collapsed display
+- **WHEN** ctx.mode is Collapsed
+- **THEN** only the bounded header line is returned, with muted styling according to collapse configuration and query-only selection.
+
+#### Scenario: Results display
+- **WHEN** ctx.mode is Truncated or Expanded and results are non-empty
+- **THEN** wrapped header, separator, and one numbered row per result are emitted; rows show action and optional server labels.
+
+#### Scenario: No results
+- **WHEN** expanded/truncated output has no results and no error
+- **THEN** a separator and muted `(no results found)` line are emitted.
+
+#### Scenario: Error display
+- **WHEN** the block has an error
+- **THEN** an error line is appended in the theme error color, including when the block has no results.
+
+#### Scenario: Mode consistency
+- **WHEN** ctx.mode is Truncated or Expanded
+- **THEN** both modes use the same expanded result/error structure rather than a collapsed-only header.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `impl BlockContent for SearchToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::output`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::header_line`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `DisplayMode::Collapsed`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `DisplayMode::Truncated`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `DisplayMode::Expanded`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `BlockOutput`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `BlockLine::separator`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `mcp_titleize_segment`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::copy_text`。
+
+
+### Requirement: Search-tool visual status, folding, padding, and viewer metadata
+
+SearchToolCallBlock SHALL have no vertical padding, no raw mode, and no background. Its collapsed display has no accent/bullet except an error bullet; running expanded blocks use animated running accent, completed successful expanded blocks use static tool accent, and errors use static error accent. It SHALL be foldable only when successful with at least one result, default to Collapsed, toggle Collapsed to Expanded and every other mode back to Collapsed, and expose the header as its preamble.
+
+#### Scenario: Successful running block
+- **WHEN** error is absent, ctx is expanded, and the entry is running
+- **THEN** accent and bullet use the animated running color.
+
+#### Scenario: Successful completed block
+- **WHEN** error is absent and the entry is not running in an expanded mode
+- **THEN** accent and bullet use the static tool color.
+
+#### Scenario: Error block
+- **WHEN** error is present in any mode
+- **THEN** accent and bullet use static error color; foldability is false.
+
+#### Scenario: Collapsed success
+- **WHEN** ctx.mode is Collapsed and no error exists
+- **THEN** accent and bullet are absent and foldability depends on results.
+
+#### Scenario: Fold/display metadata
+- **WHEN** the block is queried for fold mode, default mode, preamble, padding, background, or raw mode
+- **THEN** default mode is Collapsed, only Collapsed toggles to Expanded, preamble is the header, padding/background/raw mode remain disabled, and successful non-empty blocks are foldable.
+
+#### Scenario: Integration classification
+- **WHEN** the block is wrapped as ToolCallBlock::IntegrationSearch
+- **THEN** tool grouping labels it as Searching and MCP tool/MCP tools according to count.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::bullet`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::background`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::preamble`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `ToolCallBlock::IntegrationSearch`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `VerbGroupKind::IntegrationSearch`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `verb_is_tense_aware`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `noun_pluralizes_by_count`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `every_variant_has_a_group_decision`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_integration_search`；`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `dispatch_open_block_viewer`。
