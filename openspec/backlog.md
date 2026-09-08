@@ -977,3 +977,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The painter duplicates policy boundaries from full ScrollbackPane: no sticky headers, padding, gaps, or accent chrome are intentionally hard-coded here, so visual behavior can drift when shared layout rules change.
 - Pager 审计债务：Current-turn selection is inferred by reverse scanning for the last user prompt rather than consuming an authoritative turn range, leaving prompt identity and turn projection coupled to block classification.
 - Pager 审计债务：Global thinking visibility and process-global Theme::current are read during pure-looking projection, which complicates deterministic rendering and parallel tests.
+- Pager 审计债务：The parser is a permissive ad-hoc text protocol coupled to exact Markdown marker strings, with malformed input silently converted to empty/zero fields.
+- Pager 审计债务：Path shortening recomputes a display string from config.grow_home on every result and uses textual prefix matching instead of a path-aware component comparison.
+- Pager 审计债务：Structured result parsing and UI presentation are coupled through MemoryResult fields while searchable_text and tool dispatch live elsewhere, spreading the memory-search contract across modules.
+- Pager 审计债务：Timing state is duplicated across each concrete tool block and relies on caller-set started_at; this file provides completion timing but cannot enforce start/finish lifecycle ordering.

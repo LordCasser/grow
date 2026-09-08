@@ -24587,3 +24587,346 @@ The context bar SHALL expose the status-bar separator as the stable `│` consta
 - **THEN** the usage signal color is shared with the progress fill/default text and the hover percentage remains secondary-colored on the base background.
 
 证据：`crates/codegen/pager/src/views/context_bar.rs` — `SEPARATOR`；`crates/codegen/pager/src/views/context_bar.rs` — `context_bar_line_for_session`；`crates/codegen/pager/src/views/context_bar.rs` — `Style::default`；`crates/codegen/pager/src/views/context_bar.rs` — `theme.bg_base`；`crates/codegen/pager/src/views/context_bar.rs` — `theme.bg_highlight`；`crates/codegen/pager/src/views/context_bar.rs` — `theme.text_secondary`；`crates/codegen/pager/src/views/context_bar.rs` — `quantize`；`crates/codegen/pager/src/views/context_bar.rs` — `blend_color`。
+
+
+### Requirement: Memory search output and soft failures
+
+parse_memory_results SHALL split tool output on the exact `### Result ` marker, ignore non-numeric sections and the preamble, parse score/source metadata from the result heading with numeric fallback 0.0, parse the optional `**File:**` path and inclusive line range, extract the first fenced code body, and retain a result when either path or snippet is nonempty. Missing or malformed fields are represented by empty strings or zero values rather than an error. shorten_path SHALL remove the configured memory-root prefix plus its first child component when possible, preserve the top-level memory filename, and otherwise fall back to the final slash-delimited path component.
+
+#### Scenario: Single result
+- **WHEN** tool output contains one numeric Result heading, File line, score/source metadata, and a fenced snippet
+- **THEN** one MemoryResult preserves score, source, path, start/end lines, and snippet text.
+
+#### Scenario: Multiple results
+- **WHEN** tool output contains several exact Result sections
+- **THEN** results are returned in source order with each section's independent score/source/path metadata.
+
+#### Scenario: No result output
+- **WHEN** output contains only a nonnumeric preamble or no Result section
+- **THEN** the parser returns an empty vector without raising an error.
+
+#### Scenario: Path shortening
+- **WHEN** a path is under the configured memory root, is the root-level memory file, or is outside the root
+- **THEN** the display path becomes the path after the first memory child component, the root filename, or the final slash component respectively.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/memory_search.rs` — `shorten_path`；`crates/codegen/pager/src/scrollback/blocks/tool/memory_search.rs` — `parse_memory_results`；`crates/codegen/pager/src/scrollback/blocks/tool/memory_search.rs` — `tests::parse_single_result`；`crates/codegen/pager/src/scrollback/blocks/tool/memory_search.rs` — `tests::parse_multiple_results`；`crates/codegen/pager/src/scrollback/blocks/tool/memory_search.rs` — `tests::parse_no_results`；`crates/codegen/pager/src/scrollback/blocks/tool/memory_search.rs` — `tests::shorten_memory_path`。
+
+
+### Requirement: dispatch_show_plan SHALL target the active Agent and return no effects; when plan approval is already visible it SHALL reopen that approval, otherwise it SHALL request the AgentView plan preview.
+
+The implementation SHALL satisfy the following tested behavior: The helper routes through with_active_agent, selecting reopen_plan_approval when plan_approval_view.is_some() and show_plan_preview otherwise. Missing/non-Agent views are a no-op because with_active_agent cannot invoke the closure. It does not itself read files, emit effects, or mutate unrelated agents.
+
+#### Scenario: Existing approval
+- **WHEN** active Agent has plan_approval_view
+- **THEN** the approval view is reopened with no effects.
+
+#### Scenario: No approval
+- **WHEN** active Agent has no plan approval view
+- **THEN** show_plan_preview is invoked with no effects.
+
+#### Scenario: No active agent
+- **WHEN** active view is Welcome or cannot resolve an agent
+- **THEN** nothing is changed and the effect list is empty.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `dispatch_show_plan`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentView::reopen_plan_approval`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentView::show_plan_preview`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `with_active_agent`。
+
+
+### Requirement: dispatch_set_behavior_then_prompt SHALL only act on an active root Agent, reject child-owned behavior, enforce behavior availability and session presence, optionally enqueue a prompt with recognized skill-token ranges, stage one deferred behavior target, and enqueue behavior control only when the same target is not already pending and the session is not reconnecting.
+
+The implementation SHALL satisfy the following tested behavior: Non-Agent or missing Agent returns empty effects. If parent.active_subagent is Some, the helper refuses to control the child and toasts the resolved child "Behavior is owned by the parent session" when present. behavior_unavailable_reason and missing session produce toasts and no control. With a prompt, the prompt is enqueued first using slash_controller.recognized_token_ranges, deferred_session_mode is set to mode, and an already matching behavior_control_target returns no effect while leaving staged state; otherwise enqueue_behavior_control receives !reconnect_pending. Without a prompt, a matching pending target only toasts "Behavior selection is pending"; other selections enqueue control. Permission policy is untouched by this route.
+
+#### Scenario: Inactive root
+- **WHEN** active_view is not an Agent or its id is missing
+- **THEN** no prompt/control effect is emitted.
+
+#### Scenario: Child ownership
+- **WHEN** active root has active_subagent and child view exists
+- **THEN** child receives ownership toast and parent behavior is not changed.
+
+#### Scenario: Unavailable behavior
+- **WHEN** behavior_unavailable_reason returns a reason
+- **THEN** reason is toasted and no session control is queued.
+
+#### Scenario: Sessionless behavior
+- **WHEN** root agent has no session_id
+- **THEN** No active session is toasted and no behavior control is emitted.
+
+#### Scenario: Staged prompt
+- **WHEN** session exists and prompt is supplied
+- **THEN** prompt is queued with recognized skill ranges, deferred mode is set, and behavior control is queued unless that exact mode is already pending.
+
+#### Scenario: Reconnect
+- **WHEN** reconnect_pending is true
+- **THEN** control is enqueued with immediate admission disabled.
+
+#### Scenario: Pending no-prompt selection
+- **WHEN** same mode is already behavior_control_target and no prompt is supplied
+- **THEN** selection is a pending toast with no duplicate control.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `dispatch_set_behavior_then_prompt`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `ActiveView::Agent`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentView::behavior_unavailable_reason`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentSession::behavior_control_target`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentSession::enqueue_prompt_with_skill_tokens`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `SlashController::recognized_token_ranges`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentSession::deferred_session_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `enqueue_behavior_control`。
+
+
+### Requirement: dispatch_set_behavior_mode SHALL select one root Agent behavior without changing permission policy, preserve parent ownership, gate unavailable/pending modes, maintain one deferred_session_mode for sessionless or failed admissions, clear an accepted Plan nudge, refresh open settings modals, and either enqueue session control or create a session for an unbound agent.
+
+The implementation SHALL satisfy the following tested behavior: Non-Agent and active-subagent views return empty effects, with a child toast when resolvable. If a deferred mode equals the current behavior mode, the helper marks canceling_deferred_admission and toasts that queued prompts wait for confirmation clearance. Unavailable behavior or duplicate behavior_control_target returns after any required admission toast. Selecting Plan clears PLAN_NUDGE_KEY and logs Accepted. A pre-existing deferred target is replaced by the new mode unless this is the canceling case. Without session_id, non-Normal modes store deferred_session_mode and all modes call skip_picker_and_create_session; with a session, enqueue_behavior_control receives !reconnect_pending. Settings modal snapshots refresh before the final effect/creation result.
+
+#### Scenario: Parent-owned mode
+- **WHEN** active root displays an active child
+- **THEN** parent mode change is rejected and child gets ownership feedback.
+
+#### Scenario: Cancel deferred admission
+- **WHEN** deferred_session_mode exists and requested mode equals current behavior_mode
+- **THEN** deferred target is retained and a confirmation-clearance toast is shown.
+
+#### Scenario: Unavailable/pending
+- **WHEN** requested mode is unavailable or already a control target
+- **THEN** no duplicate control is emitted and the reason/pending toast is shown.
+
+#### Scenario: Plan tip acceptance
+- **WHEN** requested mode is Plan while current tip is PLAN_NUDGE_KEY
+- **THEN** tip is cleared and contextual acceptance is logged before admission.
+
+#### Scenario: Sessionless Plan
+- **WHEN** no session_id and mode is non-Normal
+- **THEN** deferred target is stored and session creation/picker flow is invoked.
+
+#### Scenario: Sessionless Normal
+- **WHEN** no session_id and mode is Normal
+- **THEN** no deferred behavior target is stored, but session creation/picker flow still runs.
+
+#### Scenario: Connected session
+- **WHEN** session_id exists
+- **THEN** one behavior control is enqueued and settings modal snapshots refresh.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `dispatch_set_behavior_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentSession::deferred_session_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentSession::behavior_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentSession::effective_plan_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentView::ephemeral_tip`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `PLAN_NUDGE_KEY`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `enqueue_behavior_control`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `refresh_open_settings_modals`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `skip_picker_and_create_session`。
+
+
+### Requirement: When auto_mode_gate is disabled, downgrade_displayed_auto_if_gated SHALL convert every active Auto session and the global current UI mirror to Ask, and inherit_permission_mode SHALL convert an Auto future default to Ask; enabled gates SHALL preserve the configured mode.
+
+The implementation SHALL satisfy the following tested behavior: downgrade_displayed_auto_if_gated returns immediately when the gate is on. When off it iterates all agents, changes session.permission_mode Auto to Ask, and changes current_ui.permission_mode only when it is exactly "auto". inherit_permission_mode returns Ask for default Auto with gate off and otherwise returns app.default_permission_mode unchanged. The helpers do not persist settings or emit effects.
+
+#### Scenario: Kill switch
+- **WHEN** auto_mode_gate is false and one or more sessions/global UI display Auto
+- **THEN** all per-session Auto values and the global auto mirror become Ask.
+
+#### Scenario: Already clamped
+- **WHEN** gate is false but no session/UI value is Auto
+- **THEN** helper makes no additional changes.
+
+#### Scenario: Gate enabled
+- **WHEN** auto_mode_gate is true
+- **THEN** displayed sessions and inherited default are preserved.
+
+#### Scenario: New session inheritance
+- **WHEN** default permission is Auto while gate is false
+- **THEN** new-session resolver receives Ask.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `downgrade_displayed_auto_if_gated`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `inherit_permission_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentSession::is_auto`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AppView::current_ui`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AppView::default_permission_mode`。
+
+
+### Requirement: set_permission_mode SHALL clamp Auto to Ask when gated off, require an active bound Agent session, mutate only that session through the scoped setter, auto-approve root-owned queued requests with AllowOnce when AlwaysApprove is enabled, preserve child requests, and emit one canonical NotifySessionPermissionMode effect with plan-aware feedback.
+
+The implementation SHALL satisfy the following tested behavior: A non-Agent/missing session returns empty effects; a missing session additionally shows "Permission can be changed after the session connects." Auto is rewritten to Ask if auto_mode_gate is false. set_permission_mode_inner_scoped flips the session mode before draining, iterates the permission queue, responds Selected(AllowOnce) for root-session requests when available or Cancelled otherwise, retains child requests, resolves queue transition if the original front was removed, and logs diagnostics only on a real mode change. The public setter always emits NotifySessionPermissionMode for a bound session, toasts permission_mode_toast, or uses ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST when AlwaysApprove enters effective plan mode. It never changes default_permission_mode.
+
+#### Scenario: No session
+- **WHEN** active Agent has no session_id
+- **THEN** setter toasts connection requirement and emits no notification.
+
+#### Scenario: Auto gate off
+- **WHEN** Auto is requested while auto_mode_gate is false
+- **THEN** runtime mode is Ask and notification canonical is ask.
+
+#### Scenario: AlwaysApprove root drain
+- **WHEN** bound root session has queued root and child permission requests
+- **THEN** root requests are answered using AllowOnce where present, child requests remain queued, and notification targets root session.
+
+#### Scenario: No AllowOnce
+- **WHEN** root request lacks an AllowOnce option
+- **THEN** that root response is Cancelled rather than selecting another option.
+
+#### Scenario: Plan-aware approval
+- **WHEN** AlwaysApprove is selected while effective plan is active
+- **THEN** warning toast preserves Plan approval/contract enforcement.
+
+#### Scenario: Ordinary commit
+- **WHEN** Ask or Auto transition succeeds
+- **THEN** canonical session notification is emitted and current session state changes without changing future default.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `set_permission_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `set_permission_mode_inner_scoped`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `respond_permission`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentSession::permission_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentSession::permission_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `AgentSession::effective_plan_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `Effect::NotifySessionPermissionMode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST`。
+
+
+### Requirement: set_default_permission_mode SHALL change only the future-session default, reject gated Auto, no-op idempotent selections, update the current UI canonical mirror and open settings snapshots, show a branded default toast, and emit PersistPermissionMode with session_id=None and the previous canonical value for rollback.
+
+The implementation SHALL satisfy the following tested behavior: When Auto is requested with auto_mode_gate false, the helper toasts "Auto permission mode is unavailable" and returns no effect. If the requested canonical equals the current default it returns empty without mutation. Otherwise it records the prior canonical, updates default_permission_mode and current_ui.permission_mode, refreshes open settings modals, emits "✓ Default permission mode: <display>" and returns PersistPermissionMode{canonical, session_id:None, persist:WithRollback(previous)}. It never drains active permission queues or changes active session mode.
+
+#### Scenario: Gated Auto default
+- **WHEN** Auto is requested while auto_mode_gate is false
+- **THEN** future default remains unchanged and no persistence effect is emitted.
+
+#### Scenario: Idempotent default
+- **WHEN** requested canonical equals current default
+- **THEN** no state, toast, refresh or persistence mutation occurs.
+
+#### Scenario: Changed default
+- **WHEN** requested default differs
+- **THEN** default and UI mirror update, modal snapshots refresh, and rollback-bearing persistence effect is returned.
+
+#### Scenario: Session isolation
+- **WHEN** active session has a different permission mode
+- **THEN** default commit leaves active session untouched.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `set_default_permission_mode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `refresh_open_settings_modals`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `Effect::PersistPermissionMode`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `PermissionModePersist::WithRollback`。
+
+
+### Requirement: permission_mode_toast SHALL return stable, mode-specific feedback: warning AlwaysApprove-on, safe AlwaysApprove-off, classifier Auto, and branded Ask; ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST SHALL explicitly preserve Plan approval and contract enforcement.
+
+The implementation SHALL satisfy the following tested behavior: permission_mode_toast maps AlwaysApprove to always_approve_toast(true), Auto to "✓ Permission mode: Auto (classifier)", and Ask to "✓ Permission mode: Ask". always_approve_toast(true) returns "⚠ Always-approve ON: all tool actions auto-run"; false delegates save_success_toast("Always-approve", false). The Plan constant is "⚠ Always-approve ON: Plan approval phases and contract remain enforced" and is selected only by the public setter when effective plan is active.
+
+#### Scenario: Ask label
+- **WHEN** permission_mode_toast(Ask) is requested
+- **THEN** result uses the Permission mode brand and Ask label.
+
+#### Scenario: Auto label
+- **WHEN** permission_mode_toast(Auto) is requested
+- **THEN** result identifies classifier-backed Auto mode.
+
+#### Scenario: Always on
+- **WHEN** always_approve_toast(true) is requested
+- **THEN** result is warning-branded and explains all tool actions auto-run.
+
+#### Scenario: Always under Plan
+- **WHEN** AlwaysApprove is committed while effective_plan is true
+- **THEN** Plan-specific warning preserves approval/contract semantics.
+
+#### Scenario: Always off
+- **WHEN** always_approve_toast(false) is requested
+- **THEN** result delegates to the standard successful Always-approve off toast.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `permission_mode_toast`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `always_approve_toast`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `save_success_toast`。
+
+
+### Requirement: Remember mode entry, rewrite review, and memory note save
+
+dispatch_enter_remember_mode SHALL set the active agent to Remember input mode, clear the prompt, and emit no effect. dispatch_send_remember_note SHALL require an active Agent view/agent, restore Normal mode, clear the prompt and ephemeral submit tip, trim input, reject empty notes with a notice, open a raw-only review modal without a session, or otherwise open a nonce-correlated raw/rewrite review modal and emit RewriteMemoryNote with session id, raw text, extracted context, and nonce. dispatch_save_remember_note SHALL save the displayed enhanced text when selected (falling back to raw), trim it, close the modal, set replaceable progress feedback, and emit SaveMemoryNote with agent id/text/cwd. Completion SHALL clear feedback and append success/error notices.
+
+#### Scenario: Enter remember
+- **WHEN** an active agent enters remember mode
+- **THEN** prompt mode is Remember, prompt text is empty, and no effect is emitted.
+
+#### Scenario: Empty note
+- **WHEN** trimmed text is empty
+- **THEN** mode/prompt are reset, a Please provide notice is appended, and no rewrite/save effect is emitted.
+
+#### Scenario: No session
+- **WHEN** a non-empty note has no session id
+- **THEN** raw-only RememberNoteReview opens with enhanced None, tab unavailable semantics, and nonce 0.
+
+#### Scenario: Rewrite path
+- **WHEN** a non-empty note has a session id
+- **THEN** review modal opens with a fresh nonce and RewriteMemoryNote carries raw text/session/context.
+
+#### Scenario: Save review
+- **WHEN** a review modal is active
+- **THEN** the chosen enhanced/raw text is trimmed, modal closes, progress feedback is set, and SaveMemoryNote carries cwd.
+
+#### Scenario: Save completion
+- **WHEN** memory save succeeds or fails
+- **THEN** feedback clears and a success path or error notice is appended.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `dispatch_enter_remember_mode`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `dispatch_send_remember_note`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `dispatch_save_remember_note_from_modal`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `handle_memory_note_saved`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `next_rewrite_nonce`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `REWRITE_NONCE`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `PromptInputMode::Remember`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `PromptInputMode::Normal`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `ActiveModal::RememberNoteReview`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Effect::RewriteMemoryNote`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Effect::SaveMemoryNote`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `ephemeral_tip.clear_on_submit`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Saving memory note`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Memory saved to`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Couldn't save memory note`；`crates/codegen/pager/src/app/root/dispatch/tests/router.rs` — `send_remember_note_clears_active_ephemeral_tip`。
+
+
+### Requirement: Session context extraction for memory rewrites
+
+extract_session_context SHALL walk scrollback newest-first, collect up to five recent user prompts and up to twenty recent Read/Edit/ListDir file paths, truncate long prompt text at the configured character boundary, stop once both budgets are filled, then emit CWD, optional git branch, prompts in chronological order, and deduplicated file paths preserving first-seen reverse-walk order under Recent prompts/Recent files headings.
+
+#### Scenario: Prompt context
+- **WHEN** scrollback contains user prompts
+- **THEN** at most five are collected newest-first then reversed for chronological output; long prompt text is abbreviated with an ellipsis.
+
+#### Scenario: File context
+- **WHEN** Read/Edit/ListDir tool calls occur
+- **THEN** at most twenty paths are collected, unrelated tools are ignored, duplicates are removed while retaining first-seen order.
+
+#### Scenario: Session metadata
+- **WHEN** cwd and optional current_branch are present
+- **THEN** CWD is always emitted and Branch is emitted only when available.
+
+#### Scenario: Budget stop
+- **WHEN** both collection caps are reached
+- **THEN** reverse scan stops early.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `extract_session_context`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `RenderBlock::UserPrompt`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `RenderBlock::ToolCall`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `ToolCallBlock::Read`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `ToolCallBlock::Edit`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `ToolCallBlock::ListDir`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `user_prompts`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `file_paths`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `char_indices`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Recent prompts:`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Recent files:`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `CWD:`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Branch:`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `HashSet`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `current_branch`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `session.cwd`。
+
+
+### Requirement: Btw side-question dispatch, minimal correlation, and response focus
+
+dispatch_send_btw SHALL require an active Agent view/agent and session id, clear the prompt, and in minimal mode start a correlated minimal request while in fullscreen mode set a Loading overlay and leave prompt focus. It SHALL emit SendBtw with agent/session/question and optional minimal request id. handle_btw_response SHALL route correlated minimal responses to finish_minimal_btw, ignore stale/dismissed requests through that lifecycle, and for fullscreen responses show Done/focus on success or Error/retain prompt focus on failure without emitting effects.
+
+#### Scenario: Minimal request
+- **WHEN** minimal screen has an active session
+- **THEN** a correlated minimal request starts and SendBtw carries its UUID.
+
+#### Scenario: Fullscreen request
+- **WHEN** fullscreen screen has an active session
+- **THEN** BtwOverlayState::Loading is stored, prompt is cleared, btw_focused is false, and SendBtw has no minimal id.
+
+#### Scenario: No session
+- **WHEN** SendBtw is requested without a session
+- **THEN** minimal app gets a system notice, fullscreen app gets a toast, and no effect is emitted.
+
+#### Scenario: Minimal response
+- **WHEN** a correlated response arrives after dismissal or while another request is active
+- **THEN** finish_minimal_btw scopes the response by request id; stale/dismissed responses do not re-open state.
+
+#### Scenario: Fullscreen response
+- **WHEN** a normal response succeeds or fails
+- **THEN** Done stores the question/answer and focuses the panel; Error stores question/error and leaves prompt focus.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `dispatch_send_btw`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `handle_btw_response`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `SendBtw`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `BtwOverlayState::Loading`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `BtwOverlayState::done`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `BtwOverlayState::Error`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `minimal_api::start_minimal_btw`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `minimal_api::finish_minimal_btw`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `minimal_request_id`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `btw_state`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `btw_focused`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `No active session`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `prompt.set_text`。
+
+
+### Requirement: Session recap availability, history detection, and manual/automatic dispatch
+
+recap_unavailable_toast SHALL distinguish empty history (`No messages yet`) from generation failure (`Couldn't generate recap`). scrollback_has_user_messages SHALL scan actual scrollback entries for user prompts rather than turn_count. dispatch_send_recap SHALL honor the shell-authoritative session_recap_available gate, require a session id, clear the manual prompt, short-circuit manual empty non-replay sessions with the empty toast, keep requesting during replay/batch history loading, set replaceable manual progress feedback, and emit SendRecap with auto flag. Automatic calls SHALL note the retry attempt and silently no-op when unavailable/no session.
+
+#### Scenario: Availability
+- **WHEN** session recap is disabled
+- **THEN** manual dispatch shows a disabled toast while automatic dispatch emits nothing.
+
+#### Scenario: No session
+- **WHEN** recap is enabled but no session id exists
+- **THEN** manual dispatch shows No active session; automatic dispatch silently no-ops.
+
+#### Scenario: Empty manual session
+- **WHEN** manual recap has no user prompt and replay is not loading
+- **THEN** prompt is cleared, no effect/live status is left, and No messages yet is shown.
+
+#### Scenario: History present
+- **WHEN** scrollback contains a user prompt
+- **THEN** SendRecap auto=false is emitted and Generating session recap feedback is set.
+
+#### Scenario: Batch/replay loading
+- **WHEN** turn_count is stale during batch or replay is still loading
+- **THEN** entry scan/loading flag prevents the empty short-circuit and SendRecap is still emitted.
+
+#### Scenario: Automatic retry
+- **WHEN** auto=true with a session
+- **THEN** focus tracker records an auto recap attempt and SendRecap auto=true is emitted.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `recap_unavailable_toast`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `scrollback_has_user_messages`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `dispatch_send_recap`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `session_recap_available`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `SendRecap`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `recap_unavailable_toast`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `turn_count`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `iter_entries`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `is_user_prompt`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `loading_replay`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `notification_service.focus_tracker.note_auto_recap_attempt`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `No messages yet`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Couldn't generate recap`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Generating session recap`。
+
+
+### Requirement: Recap task-result failure distinction and note feedback contract
+
+When the recap request completes with a transport error, the task-result path SHALL clear the replaceable recap live status and distinguish no-user-history from sessions with turns using recap_unavailable_toast; this dispatcher contract keeps the empty-session message separate from generic generation failure.
+
+#### Scenario: Failure without history
+- **WHEN** a recap request fails and no user prompt exists
+- **THEN** live status clears and the toast says No messages yet.
+
+#### Scenario: Failure with history
+- **WHEN** a recap request fails after a user prompt exists
+- **THEN** live status clears and the generic Couldn't generate recap toast is shown.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `recap_unavailable_toast`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `recap_request_transport_failure_with_no_turns_uses_empty_toast`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `recap_request_transport_failure_with_turns_uses_generic_toast`。

@@ -3918,7 +3918,20 @@
       "Usage gradient breakpoints and terminal-compatible color interpolation",
       "Context bar availability, gateway suppression, and usage prerequisites",
       "Default and hover context bar width invariant and progress rendering",
-      "Context bar exported separator and theme-aware line spans"
+      "Context bar exported separator and theme-aware line spans",
+      "Memory search output and soft failures",
+      "dispatch_show_plan SHALL target the active Agent and return no effects; when plan approval is already visible it SHALL reopen that approval, otherwise it SHALL request the AgentView plan preview.",
+      "dispatch_set_behavior_then_prompt SHALL only act on an active root Agent, reject child-owned behavior, enforce behavior availability and session presence, optionally enqueue a prompt with recognized skill-token ranges, stage one deferred behavior target, and enqueue behavior control only when the same target is not already pending and the session is not reconnecting.",
+      "dispatch_set_behavior_mode SHALL select one root Agent behavior without changing permission policy, preserve parent ownership, gate unavailable/pending modes, maintain one deferred_session_mode for sessionless or failed admissions, clear an accepted Plan nudge, refresh open settings modals, and either enqueue session control or create a session for an unbound agent.",
+      "When auto_mode_gate is disabled, downgrade_displayed_auto_if_gated SHALL convert every active Auto session and the global current UI mirror to Ask, and inherit_permission_mode SHALL convert an Auto future default to Ask; enabled gates SHALL preserve the configured mode.",
+      "set_permission_mode SHALL clamp Auto to Ask when gated off, require an active bound Agent session, mutate only that session through the scoped setter, auto-approve root-owned queued requests with AllowOnce when AlwaysApprove is enabled, preserve child requests, and emit one canonical NotifySessionPermissionMode effect with plan-aware feedback.",
+      "set_default_permission_mode SHALL change only the future-session default, reject gated Auto, no-op idempotent selections, update the current UI canonical mirror and open settings snapshots, show a branded default toast, and emit PersistPermissionMode with session_id=None and the previous canonical value for rollback.",
+      "permission_mode_toast SHALL return stable, mode-specific feedback: warning AlwaysApprove-on, safe AlwaysApprove-off, classifier Auto, and branded Ask; ALWAYS_APPROVE_ON_UNDER_PLAN_TOAST SHALL explicitly preserve Plan approval and contract enforcement.",
+      "Remember mode entry, rewrite review, and memory note save",
+      "Session context extraction for memory rewrites",
+      "Btw side-question dispatch, minimal correlation, and response focus",
+      "Session recap availability, history detection, and manual/automatic dispatch",
+      "Recap task-result failure distinction and note feedback contract"
     ],
     "reviewed_files": [
       {
@@ -6188,6 +6201,18 @@
       {
         "path": "crates/codegen/pager/src/views/context_bar.rs",
         "sha256": "df7be568d1a1ca957c99dafcad695709c1157a9866ba0f5ae67e4f206cc98538"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/memory_search.rs",
+        "sha256": "e8594f444b28082272811741c4193486c7c788e3d5a2c05fba77fa3cc9f58c42"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/modes.rs",
+        "sha256": "5692410746408a284ce797aab935e5eaaf21294ce94b9eae61dea5f62b1c0410"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/notes.rs",
+        "sha256": "a7ed7d14ba7282658879e0beaab561888efd3f30cc93e66b89b09b7149bc1e00"
       }
     ],
     "review": "reviews/pager.md"
