@@ -3975,7 +3975,22 @@
       "Search-tool copy text exposes query, limit, result count, and titled tool details",
       "Search-tool headers truncate queries and expose only the query for selection",
       "Search-tool block output renders collapsed, expanded, empty, and error states",
-      "Search-tool visual status, folding, padding, and viewer metadata"
+      "Search-tool visual status, folding, padding, and viewer metadata",
+      "Hook run data and content predicates",
+      "Hook count summaries classify outcomes and omit skipped runs",
+      "Expanded hook details render status, timing, errors, output, and truncation",
+      "Display modes gate hook sections and separators",
+      "Hook phases and lifecycle grouping retain source ownership",
+      "AtContext SHALL represent the complete @-token byte range, cursor byte position, and query text while exposing mode predicates and a path-only replacement range that preserves the @ and hidden marker.",
+      "detect SHALL identify the rightmost valid @-token at or before the cursor, reject invalid cursor positions and email-like anchors, stop at whitespace/comma/semicolon, and return no context when the cursor lies after the token.",
+      "detect_with_drill SHALL optionally treat whitespace inside the currently drilled directory prefix as token content while reverting to ordinary delimiters when the text no longer starts with that exact prefix.",
+      "normalize_display_path SHALL remove one leading `./` from a display path while preserving other path text and returning a borrowed slice.",
+      "The file-search context module SHALL parse prompt bytes and expose completion modes/ranges without performing filesystem search, fuzzy ranking, path validation, insertion, or viewer side effects.",
+      "Session entry title precedence, cleaning, truncation, and fallbacks",
+      "Latest prompt and agent reply summaries obey turn pairing and safe first-line projection",
+      "Display text sanitization removes terminal control injection without needless allocation",
+      "Derived titles truncate by Unicode codepoint without splitting UTF-8",
+      "Relative time formatting uses compact floor-second buckets"
     ],
     "reviewed_files": [
       {
@@ -6293,6 +6308,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs",
         "sha256": "6e59a8324fd18258d2497547b84f49629160ec6bc6f10368ac9c9b8349564a10"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "sha256": "7b0b3a8d1f4610990a4da72297f42f24e2dcba5866b6b6640ba6d609a96408d2"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/file_search/context.rs",
+        "sha256": "0549821b784d9fce16418ca516cf4a2f58caac249645beb1d03f48e0600c42b3"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/session_title.rs",
+        "sha256": "7defd0577e460230e6bd086a5f156aeda1996c918a96ee2aa210b5a286de4790"
       }
     ],
     "review": "reviews/pager.md"

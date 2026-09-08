@@ -201334,5 +201334,980 @@
         "dispatch_open_block_viewer"
       ]
     ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Hook run data and content predicates",
+    "contract": "The implementation SHALL satisfy the following tested behavior: HookRunStatus represents Success with elapsed time, Skipped, Blocked with detail and elapsed time, and Failed with error and elapsed time. HookRunEntry carries a name, status, and optional output. ToolCallHookData stores pre_hooks, post_hooks, and named lifecycle groups; is_empty is true only when all three collections are empty, while has_content is true when any run in any collection is not Skipped.",
+    "scenarios": [
+      [
+        "Empty hook data",
+        "pre_hooks, post_hooks, and lifecycle are all empty",
+        "is_empty returns true and has_content returns false."
+      ],
+      [
+        "Skipped-only data",
+        "collections contain only HookRunStatus::Skipped entries",
+        "is_empty is false when entries exist but has_content remains false."
+      ],
+      [
+        "Content-bearing data",
+        "any pre, post, or lifecycle run has Success, Blocked, or Failed status",
+        "has_content returns true."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "HookRunStatus"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "HookRunEntry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "ToolCallHookData"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "ToolCallHookData::is_empty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "ToolCallHookData::has_content"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Hook count summaries classify outcomes and omit skipped runs",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The inline hook summary aggregates pre, post, and lifecycle runs. Success and Blocked count as successes, Failed counts as failures, and Skipped contributes to neither. No runs produce None; otherwise the summary starts with two spaces and `[hooks: `, colors success and failure numbers using the current theme, inserts `/` only when both counts are present, and closes with `]`. Stop-hook summaries apply the same counts per named event, skip groups with no non-skipped runs, and join remaining event groups with two muted spaces.",
+    "scenarios": [
+      [
+        "Success-only summary",
+        "one or more Success or Blocked runs exist and no Failed runs exist",
+        "the summary contains only the success count without a slash or failure count."
+      ],
+      [
+        "Failure summary",
+        "Failed runs exist and no Success or Blocked runs exist",
+        "the summary contains only the failure count."
+      ],
+      [
+        "Mixed stop groups",
+        "named stop groups contain a mixture of active and skipped runs",
+        "skipped-only groups are omitted and remaining event summaries are separated by two spaces."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "count_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "hooks_count_spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "render_hooks_inline_suffix"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "render_stop_hooks_summary"
+      ],
+      [
+        "crates/codegen/pager/src/theme.rs",
+        "Theme::current"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Expanded hook details render status, timing, errors, output, and truncation",
+    "contract": "The implementation SHALL satisfy the following tested behavior: Expanded hook rendering suppresses a section when every run is Skipped; otherwise it emits an indented bold muted event header followed by one detail line per run. Success uses a check mark and elapsed milliseconds, Skipped uses `- name skipped`, Blocked uses a running arrow and up to three detail lines, and Failed uses a ballot-X, strips a leading `hook 'name' ` prefix from the error, and emits up to three error lines. Optional output is appended for every run as up to three lines after truncation to 120 characters, with muted styling.",
+    "scenarios": [
+      [
+        "All skipped section",
+        "render_hooks_expanded receives a run list where every status is Skipped",
+        "it returns no lines."
+      ],
+      [
+        "Blocked detail",
+        "a run has Blocked status with detail and elapsed time",
+        "the output contains a running marker, the hook name and duration, followed by at most three truncated detail lines."
+      ],
+      [
+        "Failed error cleanup",
+        "a run has Failed status and its error begins with the hook name prefix",
+        "the prefix is removed before at most three truncated error lines are rendered."
+      ],
+      [
+        "Captured output",
+        "a run has optional stdout/stderr output",
+        "up to three truncated output lines are appended after the status-specific lines."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "render_hooks_expanded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "render_hooks_expanded_inner"
+      ],
+      [
+        "crates/codegen/pager/src/render/line_utils.rs",
+        "truncate_str"
+      ],
+      [
+        "crates/codegen/pager/src/glyphs.rs",
+        "check_mark"
+      ],
+      [
+        "crates/codegen/pager/src/glyphs.rs",
+        "ballot_x"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Display modes gate hook sections and separators",
+    "contract": "The implementation SHALL satisfy the following tested behavior: render_hooks_for_mode and render_hooks_detail return no lines for empty runs or Collapsed mode. Expanded and Truncated modes render hook content; the former includes the event section header while the detail helper emits only per-run lines. render_hook_separator returns one muted separator line containing four spaces followed by three horizontal box-drawing characters. The detail helper is intended for lifecycle blocks whose event name is already the block header.",
+    "scenarios": [
+      [
+        "Collapsed mode",
+        "hook runs are supplied with DisplayMode::Collapsed",
+        "both section and detail render helpers return an empty vector."
+      ],
+      [
+        "Expanded or truncated mode",
+        "nonempty hook runs are supplied with DisplayMode::Expanded or DisplayMode::Truncated",
+        "render_hooks_for_mode emits the event header and details, while render_hooks_detail emits details without the header."
+      ],
+      [
+        "Separator",
+        "a caller requests the shared hook separator",
+        "one muted separator BlockLine is returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "render_hooks_for_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "render_hooks_detail"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "render_hook_separator"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "render_separator"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/types.rs",
+        "DisplayMode"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Hook phases and lifecycle grouping retain source ownership",
+    "contract": "The implementation SHALL satisfy the following tested behavior: HookPhase distinguishes Pre and Post phases. ToolCallHookData keeps pre_tool_use and post_tool_use runs in separate vectors and keeps lifecycle runs as event-name/vector pairs, allowing the rendering helpers to aggregate all runs for inline summaries while preserving phase and event grouping for expanded output.",
+    "scenarios": [
+      [
+        "Pre/post ownership",
+        "a caller supplies runs from the two tool execution phases",
+        "the data model retains them in separate pre_hooks and post_hooks collections."
+      ],
+      [
+        "Lifecycle ownership",
+        "a lifecycle event supplies one or more hook runs",
+        "the event name and its run vector remain paired in lifecycle data and are available to summary/detail renderers."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "HookPhase"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "ToolCallHookData::pre_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "ToolCallHookData::post_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "ToolCallHookData::lifecycle"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/hook.rs",
+        "render_hooks_inline_suffix"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "AtContext SHALL represent the complete @-token byte range, cursor byte position, and query text while exposing mode predicates and a path-only replacement range that preserves the @ and hidden marker.",
+    "contract": "AtContext::range SHALL include the leading @ and extend through the detected token terminator, cursor SHALL be the supplied byte position, and query SHALL be the text after @ through cursor (including a leading ! when present). is_dir_mode SHALL test query.ends_with(\"/\"); is_hidden_mode SHALL test query.starts_with(\"!\"); matcher_query SHALL strip exactly one leading ! for fuzzy matching. path_range SHALL start after @ plus one extra byte in hidden mode and end at range.end, so callers replace only path bytes while retaining @/!.",
+    "scenarios": [
+      [
+        "Plain context",
+        "the cursor is inside @foo",
+        "range covers the token, query is foo, and directory/hidden modes are false."
+      ],
+      [
+        "Directory mode",
+        "query ends with /",
+        "is_dir_mode is true and matcher_query retains the slash."
+      ],
+      [
+        "Hidden mode",
+        "query starts with !",
+        "is_hidden_mode is true and matcher_query removes only the leading !."
+      ],
+      [
+        "Hidden directory",
+        "query starts with ! and ends with /",
+        "both mode predicates are true and the fuzzy query excludes only !."
+      ],
+      [
+        "Path replacement",
+        "a plain or hidden context is accepted",
+        "path_range excludes @ and, when present, !, while ending at the whole token end."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "AtContext"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "AtContext::is_dir_mode"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "AtContext::is_hidden_mode"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "AtContext::matcher_query"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "AtContext::path_range"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "path_range_skips_at_only"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "path_range_skips_at_and_bang_in_hidden_mode"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "path_range_with_prefix_text_offset"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "basic_at_token"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "hidden_mode"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "dir_mode"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "hidden_dir_mode"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "detect SHALL identify the rightmost valid @-token at or before the cursor, reject invalid cursor positions and email-like anchors, stop at whitespace/comma/semicolon, and return no context when the cursor lies after the token.",
+    "contract": "detect SHALL delegate to detect_with_drill with no drill prefix. detect_with_drill SHALL return None when cursor exceeds text length or is not a char boundary, find the rightmost @ in text[..cursor], reject @ when immediately preceded by an alphanumeric character or underscore, and locate token_end at the first whitespace, comma, or semicolon after @ (or text.len()). The cursor SHALL be accepted at or before token_end and rejected only when cursor > token_end. A successful result SHALL use byte-safe slicing to return AtContext with range at_idx..token_end and query text[at_idx+1..cursor].",
+    "scenarios": [
+      [
+        "Cursor validity",
+        "cursor is outside text or splits a UTF-8 code point",
+        "detection returns None without constructing an invalid slice."
+      ],
+      [
+        "Anchor validation",
+        "@ is preceded by an alphanumeric or underscore",
+        "detection returns None, preventing email/user_identifier activation."
+      ],
+      [
+        "Special-character anchor",
+        "@ follows whitespace, punctuation, or an opening delimiter",
+        "the token is accepted."
+      ],
+      [
+        "Delimiter",
+        "a whitespace, comma, or semicolon follows the token",
+        "range ends immediately before that delimiter."
+      ],
+      [
+        "Cursor after token",
+        "cursor is after the delimiter",
+        "detection returns None."
+      ],
+      [
+        "Rightmost anchor",
+        "multiple @ characters precede the cursor",
+        "the rightmost @ is used as the active token."
+      ],
+      [
+        "Empty token",
+        "text is exactly @ and cursor is after it",
+        "a context with an empty query is returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "detect"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "detect_with_drill"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "text.is_char_boundary"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "str::rfind"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "str::find_map"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "AtContext"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "rejected_email_like"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "cursor_past_token"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "at_after_special_chars"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "token_delimited_by_comma"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "token_delimited_by_semicolon"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "multiple_at_picks_rightmost"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "cursor_at_sign_only"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "cursor_at_zero"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "empty_text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "detect_with_drill SHALL optionally treat whitespace inside the currently drilled directory prefix as token content while reverting to ordinary delimiters when the text no longer starts with that exact prefix.",
+    "contract": "When drill_prefix is Some(prefix) and the text after @ (and optional !) starts with prefix, detection SHALL establish an internal_until byte boundary after that prefix. Whitespace, comma, or semicolon before that boundary SHALL not terminate the token; delimiters at or after it SHALL terminate normally. A prefix mismatch, an empty prefix, or text edited so it no longer starts with the prefix SHALL leave whitespace as a terminator. The rule SHALL work for hidden mode, tabs, multi-byte prefix names, second-level path segments, cursor-in-token queries, and a trailing slash directory mode.",
+    "scenarios": [
+      [
+        "Space in drilled name",
+        "drill_prefix exactly matches a path containing a space",
+        "the entire drilled name remains one token and its query includes the space."
+      ],
+      [
+        "Tab in drilled name",
+        "drill_prefix exactly matches a path containing a tab",
+        "the tab is retained as token content."
+      ],
+      [
+        "Hidden drilled name",
+        "the token begins @! and the prefix matches after !",
+        "hidden mode remains active and matcher_query removes !."
+      ],
+      [
+        "Second-level space",
+        "the prefix contains multiple path segments with spaces",
+        "all matching internal spaces remain within one token."
+      ],
+      [
+        "Drilled directory",
+        "the matching prefix is followed by /",
+        "is_dir_mode is true."
+      ],
+      [
+        "Mismatch",
+        "the text after @ does not start with drill_prefix",
+        "ordinary whitespace termination applies and a cursor after that space yields None."
+      ],
+      [
+        "Post-prefix whitespace",
+        "whitespace occurs after the matched prefix",
+        "the whitespace terminates the token."
+      ],
+      [
+        "Backspace invalidation",
+        "editing removes part of the drill prefix",
+        "the drill rule becomes inert and the normal delimiter rejects the context."
+      ],
+      [
+        "Mid-token cursor",
+        "cursor is inside a matching drilled token",
+        "range still covers the full token while query ends at the cursor."
+      ],
+      [
+        "Unicode prefix",
+        "drill_prefix contains multi-byte characters",
+        "byte offsets remain valid and the full prefix is retained."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "detect_with_drill"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "internal_until"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_allows_internal_space"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_enters_dir_mode_with_trailing_slash"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_allows_internal_tab"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_with_hidden_mode"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_mismatch_falls_back_to_whitespace_terminator"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_whitespace_after_prefix_terminates"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "no_drill_prefix_space_still_terminates"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_cursor_mid_token"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_inert_when_backspaced_out_of_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_allows_multibyte_dir_name"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_empty_collapses_to_no_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "drill_prefix_allows_second_level_space_segment"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "normalize_display_path SHALL remove one leading `./` from a display path while preserving other path text and returning a borrowed slice.",
+    "contract": "normalize_display_path SHALL return path.strip_prefix(\"./\").unwrap_or(path): `./foo/bar` becomes `foo/bar`, `./` becomes the empty string, and paths without that exact leading segment remain unchanged. It SHALL not canonicalize, resolve, trim, collapse repeated prefixes, or touch filesystem state.",
+    "scenarios": [
+      [
+        "Relative prefix",
+        "path starts with ./ followed by content",
+        "the returned display path omits exactly that prefix."
+      ],
+      [
+        "Bare prefix",
+        "path is ./",
+        "the returned display path is empty."
+      ],
+      [
+        "Other path",
+        "path does not start with ./",
+        "the original path is returned unchanged."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "normalize_display_path"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "normalize_path"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The file-search context module SHALL parse prompt bytes and expose completion modes/ranges without performing filesystem search, fuzzy ranking, path validation, insertion, or viewer side effects.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: This module owns lexical @-token detection, hidden/dir mode interpretation, matcher-query extraction, replacement boundaries, and display-prefix normalization. It consumes only prompt text, cursor bytes, and an optional already-selected drill prefix. It does not inspect the filesystem, apply ignore rules, perform fuzzy matching, mutate prompt text, open viewers, or close undo groups; those responsibilities remain in FileSearchState, prompt integration, and search/viewer callers. The 31 inline tests cover lexical and range behavior only.",
+    "scenarios": [
+      [
+        "Lexical-only input",
+        "prompt text, cursor, and optional drill prefix are supplied",
+        "the result is a pure AtContext or None with no external I/O."
+      ],
+      [
+        "Matcher handoff",
+        "a caller needs fuzzy input",
+        "matcher_query supplies the lexical query after removing only the hidden marker."
+      ],
+      [
+        "Insertion handoff",
+        "a caller accepts a file result",
+        "path_range supplies the path replacement span while preserving @/! markers."
+      ],
+      [
+        "No filesystem claim",
+        "a path token is detected",
+        "this module does not assert that a matching file exists or is allowed."
+      ],
+      [
+        "Test boundary",
+        "the source is audited statically",
+        "31 inline tests establish lexical cases; integration with FileSearchState and filesystem results remains unproven here."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "detect"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "detect_with_drill"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "AtContext::matcher_query"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "AtContext::path_range"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "normalize_display_path"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/context.rs",
+        "tests module"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Session entry title precedence, cleaning, truncation, and fallbacks",
+    "contract": "entry_title SHALL choose the first non-empty source in this order: display_name, generated_session_title, first UserPrompt text, then a short session id or `loading...` when no session id exists. Every selected human/model/prompt title SHALL be trimmed, skill command XML SHALL be converted to its display text when applicable, terminal control characters SHALL be sanitized, and the final title SHALL pass through the shared character-based truncation. A session id fallback SHALL use its first eight Unicode characters prefixed by `session `.",
+    "scenarios": [
+      [
+        "Manual title precedence",
+        "display_name is non-empty",
+        "it wins over generated title and prompt content and is returned after trim/sanitize/truncate."
+      ],
+      [
+        "Generated title precedence",
+        "display_name is absent/blank and generated_session_title is non-empty",
+        "the generated title is cleaned for skill command markup and used before scrollback."
+      ],
+      [
+        "Prompt fallback",
+        "no usable name exists and a UserPrompt block is present",
+        "the first prompt text is trimmed, skill markup is projected to display text, sanitized, and used as the title."
+      ],
+      [
+        "Session id fallback",
+        "no usable title or prompt exists and session_id is present",
+        "the first eight session-id characters are returned as `session <short-id>`."
+      ],
+      [
+        "Loading fallback",
+        "no usable title/prompt exists and session_id is absent",
+        "the exact title is `loading...`."
+      ],
+      [
+        "Blank values",
+        "display/generated/prompt text is empty after trim",
+        "that source is skipped and precedence continues to the next fallback."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "entry_title"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "first_user_prompt_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "truncate_title"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "sanitize_display_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "extract_skill_display_text"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs",
+        "entry_title_falls_back_to_short_session_id_when_no_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs",
+        "entry_title_loading_when_no_session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "entry_title_uses_display_name_when_set"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "entry_title_strips_skill_xml_from_generated_title"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "entry_title_strips_skill_xml_from_first_prompt"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Latest prompt and agent reply summaries obey turn pairing and safe first-line projection",
+    "contract": "last_user_prompt_line SHALL scan newest-first for the latest non-empty UserPrompt first line, strip ANSI escapes, sanitize ASCII controls, and trim the result. last_agent_message_line SHALL scan newest-first for the newest AgentMessage, return its first non-empty rendered line after the same cleaning, return None when that message has no renderable line, and return None immediately when a newer UserPrompt marks an unanswered turn so an older reply is not paired with it. first_user_prompt_text SHALL scan oldest-first and return the first UserPrompt full text, skipping non-prompt entries and defensive missing entries.",
+    "scenarios": [
+      [
+        "Latest user prompt",
+        "scrollback contains one or more UserPrompt blocks",
+        "the newest prompt with a non-empty first line is projected as a sanitized single-line string."
+      ],
+      [
+        "Unanswered turn",
+        "a UserPrompt is newer than every AgentMessage",
+        "last_agent_message_line returns None rather than pairing the prompt with an older reply."
+      ],
+      [
+        "Latest agent reply",
+        "the newest relevant block is an AgentMessage with a non-empty rendered line and no newer UserPrompt",
+        "only its first non-empty line is returned after ANSI/control sanitization."
+      ],
+      [
+        "Empty reply",
+        "the newest AgentMessage has no non-empty renderable line",
+        "last_agent_message_line returns None and does not fall back to an older message."
+      ],
+      [
+        "First prompt fallback",
+        "first_user_prompt_text scans a scrollback containing structural blocks and prompts",
+        "the oldest UserPrompt text is returned; a missing indexed entry is skipped defensively."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "last_user_prompt_line"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "last_agent_message_line"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "first_user_prompt_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "RenderBlock::UserPrompt"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "RenderBlock::AgentMessage"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "strip_ansi_escapes::strip_str"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "sanitize_display_text"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/event_loop.rs",
+        "make_run_result"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/peek.rs",
+        "extract_last_user_message"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/peek.rs",
+        "extract_first_user_message"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Display text sanitization removes terminal control injection without needless allocation",
+    "contract": "sanitize_display_text SHALL replace every ASCII control character, including ESC, BEL, DEL, tab, newline, and carriage return, with U+FFFD while preserving all other Unicode/codepoint content. For already-clean input, including clean Unicode and empty strings, it SHALL return Cow::Borrowed; for input containing controls it SHALL return Cow::Owned with no remaining ASCII controls.",
+    "scenarios": [
+      [
+        "Clean ASCII",
+        "input contains no ASCII controls",
+        "the text is unchanged and returned as Cow::Borrowed."
+      ],
+      [
+        "Clean Unicode",
+        "input contains wide or accented Unicode codepoints without controls",
+        "the text and codepoints are unchanged and returned borrowed."
+      ],
+      [
+        "Terminal escape payload",
+        "input contains OSC/CSI escape bytes or BEL",
+        "all control bytes become U+FFFD and no ASCII control remains."
+      ],
+      [
+        "DEL and line controls",
+        "input contains DEL, tab, newline, or carriage return",
+        "each control is replaced with U+FFFD while surrounding characters remain in order."
+      ],
+      [
+        "Empty text",
+        "input is empty",
+        "an empty borrowed Cow is returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "sanitize_display_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "Cow::Borrowed"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "Cow::Owned"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "is_ascii_control"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "sanitize_passes_through_clean_ascii_unchanged_no_alloc"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "sanitize_passes_through_unicode_widechars"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "sanitize_strips_osc_escape_sequence"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "sanitize_strips_csi_sequence"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "sanitize_strips_bel_and_del"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "sanitize_strips_tab_newline_carriage_return"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "sanitize_empty_returns_empty_borrowed"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/row.rs",
+        "sanitize"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RenameSessionComplete"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Derived titles truncate by Unicode codepoint without splitting UTF-8",
+    "contract": "truncate_title SHALL return short text unchanged. When text exceeds MAX_TITLE_CHARS (60 Unicode codepoints), it SHALL keep the first 60 codepoints and append exactly `...`, producing 63 codepoints total. The truncation SHALL be codepoint-based so multibyte UTF-8 characters are not split; grapheme-cluster boundaries are outside this contract.",
+    "scenarios": [
+      [
+        "Short title",
+        "text length is at most 60 codepoints",
+        "the exact original string is returned without an ellipsis."
+      ],
+      [
+        "Long ASCII title",
+        "text exceeds 60 codepoints",
+        "the first 60 codepoints plus `...` are returned and total length is 63 codepoints."
+      ],
+      [
+        "Long multibyte title",
+        "text exceeds 60 codepoints using multibyte characters",
+        "truncation succeeds without invalid UTF-8 or partial codepoint bytes."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "truncate_title"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "MAX_TITLE_CHARS"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "truncate_title_keeps_short_strings"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "truncate_title_appends_ellipsis_when_too_long"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "truncate_title_handles_multibyte_codepoints_safely"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Relative time formatting uses compact floor-second buckets",
+    "contract": "format_relative_time SHALL format elapsed durations using floor seconds: less than 1 second as `now`, 1–59 seconds as `{n}s ago`, 1–59 minutes as `{n}m ago`, 1–23 hours as `{n}h ago`, and 1 or more days as `{n}d ago`.",
+    "scenarios": [
+      [
+        "Sub-second age",
+        "elapsed duration is below one second",
+        "the exact label is `now`."
+      ],
+      [
+        "Seconds bucket",
+        "elapsed duration is 1 through 59 seconds",
+        "the integer seconds and `s ago` suffix are returned."
+      ],
+      [
+        "Minutes bucket",
+        "elapsed duration is 60 seconds through 59 minutes",
+        "whole minutes and `m ago` are returned."
+      ],
+      [
+        "Hours bucket",
+        "elapsed duration is 60 minutes through 23 hours",
+        "whole hours and `h ago` are returned."
+      ],
+      [
+        "Days bucket",
+        "elapsed duration is at least 24 hours",
+        "whole days and `d ago` are returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "format_relative_time"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/state.rs",
+        "format_relative_time"
+      ],
+      [
+        "crates/codegen/pager/src/project_picker/mod.rs",
+        "format_relative_time"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "format_relative_time_sub_second_is_now"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "format_relative_time_seconds"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "format_relative_time_minutes"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "format_relative_time_hours"
+      ],
+      [
+        "crates/codegen/pager/src/views/session_title.rs",
+        "format_relative_time_days"
+      ]
+    ]
   }
 ]

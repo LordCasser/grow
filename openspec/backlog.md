@@ -992,3 +992,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：merge_coordination_rows_from_tail silently ignores coordination rows with no matching original identity, so a caller must separately define the policy for tail-only inquiry events.
 - Pager 审计债务：The module relies on a production expect for coordination identity; malformed upstream notices therefore remain a panic boundary rather than an explicit error path.
 - Pager 审计债务：Timing and replay semantics are encoded through the generic running/finish fields, which leaves passive-row lifecycle rules distributed across ScrollbackState and OtherToolCallBlock.
+- Pager 审计债务：Hook rendering owns outcome counting, status glyphs, detail truncation, and output truncation in one helper module, coupling semantic presentation policy to ratatui styling.
+- Pager 审计债务：The repeated 120-character and three-line limits are hard-coded in both Blocked/Failed detail paths and output handling rather than represented by a shared rendering budget.
+- Pager 审计债务：The module has no local tests despite being a central presentation boundary; current OpenSpec evidence is indirect through entry/session-event composition requirements.
+- Pager 审计债务：HookPhase is a data enum in this file but rendering receives separate vectors and does not use the phase value directly, leaving phase validation to callers.

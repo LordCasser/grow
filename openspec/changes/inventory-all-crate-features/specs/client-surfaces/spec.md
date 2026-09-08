@@ -25918,3 +25918,384 @@ SearchToolCallBlock SHALL have no vertical padding, no raw mode, and no backgrou
 - **THEN** tool grouping labels it as Searching and MCP tool/MCP tools according to count.
 
 证据：`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::bullet`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::background`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/search_tool.rs` — `SearchToolCallBlock::preamble`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `ToolCallBlock::IntegrationSearch`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `VerbGroupKind::IntegrationSearch`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `verb_is_tense_aware`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `noun_pluralizes_by_count`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `every_variant_has_a_group_decision`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_integration_search`；`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `dispatch_open_block_viewer`。
+
+
+### Requirement: Hook run data and content predicates
+
+The implementation SHALL satisfy the following tested behavior: HookRunStatus represents Success with elapsed time, Skipped, Blocked with detail and elapsed time, and Failed with error and elapsed time. HookRunEntry carries a name, status, and optional output. ToolCallHookData stores pre_hooks, post_hooks, and named lifecycle groups; is_empty is true only when all three collections are empty, while has_content is true when any run in any collection is not Skipped.
+
+#### Scenario: Empty hook data
+- **WHEN** pre_hooks, post_hooks, and lifecycle are all empty
+- **THEN** is_empty returns true and has_content returns false.
+
+#### Scenario: Skipped-only data
+- **WHEN** collections contain only HookRunStatus::Skipped entries
+- **THEN** is_empty is false when entries exist but has_content remains false.
+
+#### Scenario: Content-bearing data
+- **WHEN** any pre, post, or lifecycle run has Success, Blocked, or Failed status
+- **THEN** has_content returns true.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `HookRunStatus`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `HookRunEntry`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `ToolCallHookData`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `ToolCallHookData::is_empty`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `ToolCallHookData::has_content`。
+
+
+### Requirement: Hook count summaries classify outcomes and omit skipped runs
+
+The implementation SHALL satisfy the following tested behavior: The inline hook summary aggregates pre, post, and lifecycle runs. Success and Blocked count as successes, Failed counts as failures, and Skipped contributes to neither. No runs produce None; otherwise the summary starts with two spaces and `[hooks: `, colors success and failure numbers using the current theme, inserts `/` only when both counts are present, and closes with `]`. Stop-hook summaries apply the same counts per named event, skip groups with no non-skipped runs, and join remaining event groups with two muted spaces.
+
+#### Scenario: Success-only summary
+- **WHEN** one or more Success or Blocked runs exist and no Failed runs exist
+- **THEN** the summary contains only the success count without a slash or failure count.
+
+#### Scenario: Failure summary
+- **WHEN** Failed runs exist and no Success or Blocked runs exist
+- **THEN** the summary contains only the failure count.
+
+#### Scenario: Mixed stop groups
+- **WHEN** named stop groups contain a mixture of active and skipped runs
+- **THEN** skipped-only groups are omitted and remaining event summaries are separated by two spaces.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `count_hooks`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `hooks_count_spans`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `render_hooks_inline_suffix`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `render_stop_hooks_summary`；`crates/codegen/pager/src/theme.rs` — `Theme::current`。
+
+
+### Requirement: Expanded hook details render status, timing, errors, output, and truncation
+
+The implementation SHALL satisfy the following tested behavior: Expanded hook rendering suppresses a section when every run is Skipped; otherwise it emits an indented bold muted event header followed by one detail line per run. Success uses a check mark and elapsed milliseconds, Skipped uses `- name skipped`, Blocked uses a running arrow and up to three detail lines, and Failed uses a ballot-X, strips a leading `hook 'name' ` prefix from the error, and emits up to three error lines. Optional output is appended for every run as up to three lines after truncation to 120 characters, with muted styling.
+
+#### Scenario: All skipped section
+- **WHEN** render_hooks_expanded receives a run list where every status is Skipped
+- **THEN** it returns no lines.
+
+#### Scenario: Blocked detail
+- **WHEN** a run has Blocked status with detail and elapsed time
+- **THEN** the output contains a running marker, the hook name and duration, followed by at most three truncated detail lines.
+
+#### Scenario: Failed error cleanup
+- **WHEN** a run has Failed status and its error begins with the hook name prefix
+- **THEN** the prefix is removed before at most three truncated error lines are rendered.
+
+#### Scenario: Captured output
+- **WHEN** a run has optional stdout/stderr output
+- **THEN** up to three truncated output lines are appended after the status-specific lines.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `render_hooks_expanded`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `render_hooks_expanded_inner`；`crates/codegen/pager/src/render/line_utils.rs` — `truncate_str`；`crates/codegen/pager/src/glyphs.rs` — `check_mark`；`crates/codegen/pager/src/glyphs.rs` — `ballot_x`。
+
+
+### Requirement: Display modes gate hook sections and separators
+
+The implementation SHALL satisfy the following tested behavior: render_hooks_for_mode and render_hooks_detail return no lines for empty runs or Collapsed mode. Expanded and Truncated modes render hook content; the former includes the event section header while the detail helper emits only per-run lines. render_hook_separator returns one muted separator line containing four spaces followed by three horizontal box-drawing characters. The detail helper is intended for lifecycle blocks whose event name is already the block header.
+
+#### Scenario: Collapsed mode
+- **WHEN** hook runs are supplied with DisplayMode::Collapsed
+- **THEN** both section and detail render helpers return an empty vector.
+
+#### Scenario: Expanded or truncated mode
+- **WHEN** nonempty hook runs are supplied with DisplayMode::Expanded or DisplayMode::Truncated
+- **THEN** render_hooks_for_mode emits the event header and details, while render_hooks_detail emits details without the header.
+
+#### Scenario: Separator
+- **WHEN** a caller requests the shared hook separator
+- **THEN** one muted separator BlockLine is returned.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `render_hooks_for_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `render_hooks_detail`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `render_hook_separator`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `render_separator`；`crates/codegen/pager/src/scrollback/types.rs` — `DisplayMode`。
+
+
+### Requirement: Hook phases and lifecycle grouping retain source ownership
+
+The implementation SHALL satisfy the following tested behavior: HookPhase distinguishes Pre and Post phases. ToolCallHookData keeps pre_tool_use and post_tool_use runs in separate vectors and keeps lifecycle runs as event-name/vector pairs, allowing the rendering helpers to aggregate all runs for inline summaries while preserving phase and event grouping for expanded output.
+
+#### Scenario: Pre/post ownership
+- **WHEN** a caller supplies runs from the two tool execution phases
+- **THEN** the data model retains them in separate pre_hooks and post_hooks collections.
+
+#### Scenario: Lifecycle ownership
+- **WHEN** a lifecycle event supplies one or more hook runs
+- **THEN** the event name and its run vector remain paired in lifecycle data and are available to summary/detail renderers.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `HookPhase`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `ToolCallHookData::pre_hooks`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `ToolCallHookData::post_hooks`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `ToolCallHookData::lifecycle`；`crates/codegen/pager/src/scrollback/blocks/tool/hook.rs` — `render_hooks_inline_suffix`。
+
+
+### Requirement: AtContext SHALL represent the complete @-token byte range, cursor byte position, and query text while exposing mode predicates and a path-only replacement range that preserves the @ and hidden marker.
+
+AtContext::range SHALL include the leading @ and extend through the detected token terminator, cursor SHALL be the supplied byte position, and query SHALL be the text after @ through cursor (including a leading ! when present). is_dir_mode SHALL test query.ends_with("/"); is_hidden_mode SHALL test query.starts_with("!"); matcher_query SHALL strip exactly one leading ! for fuzzy matching. path_range SHALL start after @ plus one extra byte in hidden mode and end at range.end, so callers replace only path bytes while retaining @/!.
+
+#### Scenario: Plain context
+- **WHEN** the cursor is inside @foo
+- **THEN** range covers the token, query is foo, and directory/hidden modes are false.
+
+#### Scenario: Directory mode
+- **WHEN** query ends with /
+- **THEN** is_dir_mode is true and matcher_query retains the slash.
+
+#### Scenario: Hidden mode
+- **WHEN** query starts with !
+- **THEN** is_hidden_mode is true and matcher_query removes only the leading !.
+
+#### Scenario: Hidden directory
+- **WHEN** query starts with ! and ends with /
+- **THEN** both mode predicates are true and the fuzzy query excludes only !.
+
+#### Scenario: Path replacement
+- **WHEN** a plain or hidden context is accepted
+- **THEN** path_range excludes @ and, when present, !, while ending at the whole token end.
+
+证据：`crates/codegen/pager/src/views/file_search/context.rs` — `AtContext`；`crates/codegen/pager/src/views/file_search/context.rs` — `AtContext::is_dir_mode`；`crates/codegen/pager/src/views/file_search/context.rs` — `AtContext::is_hidden_mode`；`crates/codegen/pager/src/views/file_search/context.rs` — `AtContext::matcher_query`；`crates/codegen/pager/src/views/file_search/context.rs` — `AtContext::path_range`；`crates/codegen/pager/src/views/file_search/context.rs` — `path_range_skips_at_only`；`crates/codegen/pager/src/views/file_search/context.rs` — `path_range_skips_at_and_bang_in_hidden_mode`；`crates/codegen/pager/src/views/file_search/context.rs` — `path_range_with_prefix_text_offset`；`crates/codegen/pager/src/views/file_search/context.rs` — `basic_at_token`；`crates/codegen/pager/src/views/file_search/context.rs` — `hidden_mode`；`crates/codegen/pager/src/views/file_search/context.rs` — `dir_mode`；`crates/codegen/pager/src/views/file_search/context.rs` — `hidden_dir_mode`。
+
+
+### Requirement: detect SHALL identify the rightmost valid @-token at or before the cursor, reject invalid cursor positions and email-like anchors, stop at whitespace/comma/semicolon, and return no context when the cursor lies after the token.
+
+detect SHALL delegate to detect_with_drill with no drill prefix. detect_with_drill SHALL return None when cursor exceeds text length or is not a char boundary, find the rightmost @ in text[..cursor], reject @ when immediately preceded by an alphanumeric character or underscore, and locate token_end at the first whitespace, comma, or semicolon after @ (or text.len()). The cursor SHALL be accepted at or before token_end and rejected only when cursor > token_end. A successful result SHALL use byte-safe slicing to return AtContext with range at_idx..token_end and query text[at_idx+1..cursor].
+
+#### Scenario: Cursor validity
+- **WHEN** cursor is outside text or splits a UTF-8 code point
+- **THEN** detection returns None without constructing an invalid slice.
+
+#### Scenario: Anchor validation
+- **WHEN** @ is preceded by an alphanumeric or underscore
+- **THEN** detection returns None, preventing email/user_identifier activation.
+
+#### Scenario: Special-character anchor
+- **WHEN** @ follows whitespace, punctuation, or an opening delimiter
+- **THEN** the token is accepted.
+
+#### Scenario: Delimiter
+- **WHEN** a whitespace, comma, or semicolon follows the token
+- **THEN** range ends immediately before that delimiter.
+
+#### Scenario: Cursor after token
+- **WHEN** cursor is after the delimiter
+- **THEN** detection returns None.
+
+#### Scenario: Rightmost anchor
+- **WHEN** multiple @ characters precede the cursor
+- **THEN** the rightmost @ is used as the active token.
+
+#### Scenario: Empty token
+- **WHEN** text is exactly @ and cursor is after it
+- **THEN** a context with an empty query is returned.
+
+证据：`crates/codegen/pager/src/views/file_search/context.rs` — `detect`；`crates/codegen/pager/src/views/file_search/context.rs` — `detect_with_drill`；`crates/codegen/pager/src/views/file_search/context.rs` — `text.is_char_boundary`；`crates/codegen/pager/src/views/file_search/context.rs` — `str::rfind`；`crates/codegen/pager/src/views/file_search/context.rs` — `str::find_map`；`crates/codegen/pager/src/views/file_search/context.rs` — `AtContext`；`crates/codegen/pager/src/views/file_search/context.rs` — `rejected_email_like`；`crates/codegen/pager/src/views/file_search/context.rs` — `cursor_past_token`；`crates/codegen/pager/src/views/file_search/context.rs` — `at_after_special_chars`；`crates/codegen/pager/src/views/file_search/context.rs` — `token_delimited_by_comma`；`crates/codegen/pager/src/views/file_search/context.rs` — `token_delimited_by_semicolon`；`crates/codegen/pager/src/views/file_search/context.rs` — `multiple_at_picks_rightmost`；`crates/codegen/pager/src/views/file_search/context.rs` — `cursor_at_sign_only`；`crates/codegen/pager/src/views/file_search/context.rs` — `cursor_at_zero`；`crates/codegen/pager/src/views/file_search/context.rs` — `empty_text`。
+
+
+### Requirement: detect_with_drill SHALL optionally treat whitespace inside the currently drilled directory prefix as token content while reverting to ordinary delimiters when the text no longer starts with that exact prefix.
+
+When drill_prefix is Some(prefix) and the text after @ (and optional !) starts with prefix, detection SHALL establish an internal_until byte boundary after that prefix. Whitespace, comma, or semicolon before that boundary SHALL not terminate the token; delimiters at or after it SHALL terminate normally. A prefix mismatch, an empty prefix, or text edited so it no longer starts with the prefix SHALL leave whitespace as a terminator. The rule SHALL work for hidden mode, tabs, multi-byte prefix names, second-level path segments, cursor-in-token queries, and a trailing slash directory mode.
+
+#### Scenario: Space in drilled name
+- **WHEN** drill_prefix exactly matches a path containing a space
+- **THEN** the entire drilled name remains one token and its query includes the space.
+
+#### Scenario: Tab in drilled name
+- **WHEN** drill_prefix exactly matches a path containing a tab
+- **THEN** the tab is retained as token content.
+
+#### Scenario: Hidden drilled name
+- **WHEN** the token begins @! and the prefix matches after !
+- **THEN** hidden mode remains active and matcher_query removes !.
+
+#### Scenario: Second-level space
+- **WHEN** the prefix contains multiple path segments with spaces
+- **THEN** all matching internal spaces remain within one token.
+
+#### Scenario: Drilled directory
+- **WHEN** the matching prefix is followed by /
+- **THEN** is_dir_mode is true.
+
+#### Scenario: Mismatch
+- **WHEN** the text after @ does not start with drill_prefix
+- **THEN** ordinary whitespace termination applies and a cursor after that space yields None.
+
+#### Scenario: Post-prefix whitespace
+- **WHEN** whitespace occurs after the matched prefix
+- **THEN** the whitespace terminates the token.
+
+#### Scenario: Backspace invalidation
+- **WHEN** editing removes part of the drill prefix
+- **THEN** the drill rule becomes inert and the normal delimiter rejects the context.
+
+#### Scenario: Mid-token cursor
+- **WHEN** cursor is inside a matching drilled token
+- **THEN** range still covers the full token while query ends at the cursor.
+
+#### Scenario: Unicode prefix
+- **WHEN** drill_prefix contains multi-byte characters
+- **THEN** byte offsets remain valid and the full prefix is retained.
+
+证据：`crates/codegen/pager/src/views/file_search/context.rs` — `detect_with_drill`；`crates/codegen/pager/src/views/file_search/context.rs` — `internal_until`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_allows_internal_space`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_enters_dir_mode_with_trailing_slash`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_allows_internal_tab`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_with_hidden_mode`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_mismatch_falls_back_to_whitespace_terminator`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_whitespace_after_prefix_terminates`；`crates/codegen/pager/src/views/file_search/context.rs` — `no_drill_prefix_space_still_terminates`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_cursor_mid_token`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_inert_when_backspaced_out_of_prefix`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_allows_multibyte_dir_name`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_empty_collapses_to_no_prefix`；`crates/codegen/pager/src/views/file_search/context.rs` — `drill_prefix_allows_second_level_space_segment`。
+
+
+### Requirement: normalize_display_path SHALL remove one leading `./` from a display path while preserving other path text and returning a borrowed slice.
+
+normalize_display_path SHALL return path.strip_prefix("./").unwrap_or(path): `./foo/bar` becomes `foo/bar`, `./` becomes the empty string, and paths without that exact leading segment remain unchanged. It SHALL not canonicalize, resolve, trim, collapse repeated prefixes, or touch filesystem state.
+
+#### Scenario: Relative prefix
+- **WHEN** path starts with ./ followed by content
+- **THEN** the returned display path omits exactly that prefix.
+
+#### Scenario: Bare prefix
+- **WHEN** path is ./
+- **THEN** the returned display path is empty.
+
+#### Scenario: Other path
+- **WHEN** path does not start with ./
+- **THEN** the original path is returned unchanged.
+
+证据：`crates/codegen/pager/src/views/file_search/context.rs` — `normalize_display_path`；`crates/codegen/pager/src/views/file_search/context.rs` — `normalize_path`。
+
+
+### Requirement: The file-search context module SHALL parse prompt bytes and expose completion modes/ranges without performing filesystem search, fuzzy ranking, path validation, insertion, or viewer side effects.
+
+The implementation SHALL satisfy the following tested behavior: This module owns lexical @-token detection, hidden/dir mode interpretation, matcher-query extraction, replacement boundaries, and display-prefix normalization. It consumes only prompt text, cursor bytes, and an optional already-selected drill prefix. It does not inspect the filesystem, apply ignore rules, perform fuzzy matching, mutate prompt text, open viewers, or close undo groups; those responsibilities remain in FileSearchState, prompt integration, and search/viewer callers. The 31 inline tests cover lexical and range behavior only.
+
+#### Scenario: Lexical-only input
+- **WHEN** prompt text, cursor, and optional drill prefix are supplied
+- **THEN** the result is a pure AtContext or None with no external I/O.
+
+#### Scenario: Matcher handoff
+- **WHEN** a caller needs fuzzy input
+- **THEN** matcher_query supplies the lexical query after removing only the hidden marker.
+
+#### Scenario: Insertion handoff
+- **WHEN** a caller accepts a file result
+- **THEN** path_range supplies the path replacement span while preserving @/! markers.
+
+#### Scenario: No filesystem claim
+- **WHEN** a path token is detected
+- **THEN** this module does not assert that a matching file exists or is allowed.
+
+#### Scenario: Test boundary
+- **WHEN** the source is audited statically
+- **THEN** 31 inline tests establish lexical cases; integration with FileSearchState and filesystem results remains unproven here.
+
+证据：`crates/codegen/pager/src/views/file_search/context.rs` — `detect`；`crates/codegen/pager/src/views/file_search/context.rs` — `detect_with_drill`；`crates/codegen/pager/src/views/file_search/context.rs` — `AtContext::matcher_query`；`crates/codegen/pager/src/views/file_search/context.rs` — `AtContext::path_range`；`crates/codegen/pager/src/views/file_search/context.rs` — `normalize_display_path`；`crates/codegen/pager/src/views/file_search/context.rs` — `tests module`。
+
+
+### Requirement: Session entry title precedence, cleaning, truncation, and fallbacks
+
+entry_title SHALL choose the first non-empty source in this order: display_name, generated_session_title, first UserPrompt text, then a short session id or `loading...` when no session id exists. Every selected human/model/prompt title SHALL be trimmed, skill command XML SHALL be converted to its display text when applicable, terminal control characters SHALL be sanitized, and the final title SHALL pass through the shared character-based truncation. A session id fallback SHALL use its first eight Unicode characters prefixed by `session `.
+
+#### Scenario: Manual title precedence
+- **WHEN** display_name is non-empty
+- **THEN** it wins over generated title and prompt content and is returned after trim/sanitize/truncate.
+
+#### Scenario: Generated title precedence
+- **WHEN** display_name is absent/blank and generated_session_title is non-empty
+- **THEN** the generated title is cleaned for skill command markup and used before scrollback.
+
+#### Scenario: Prompt fallback
+- **WHEN** no usable name exists and a UserPrompt block is present
+- **THEN** the first prompt text is trimmed, skill markup is projected to display text, sanitized, and used as the title.
+
+#### Scenario: Session id fallback
+- **WHEN** no usable title or prompt exists and session_id is present
+- **THEN** the first eight session-id characters are returned as `session <short-id>`.
+
+#### Scenario: Loading fallback
+- **WHEN** no usable title/prompt exists and session_id is absent
+- **THEN** the exact title is `loading...`.
+
+#### Scenario: Blank values
+- **WHEN** display/generated/prompt text is empty after trim
+- **THEN** that source is skipped and precedence continues to the next fallback.
+
+证据：`crates/codegen/pager/src/views/session_title.rs` — `entry_title`；`crates/codegen/pager/src/views/session_title.rs` — `first_user_prompt_text`；`crates/codegen/pager/src/views/session_title.rs` — `truncate_title`；`crates/codegen/pager/src/views/session_title.rs` — `sanitize_display_text`；`crates/codegen/pager/src/views/session_title.rs` — `extract_skill_display_text`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `entry_title_falls_back_to_short_session_id_when_no_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `entry_title_loading_when_no_session_id`；`crates/codegen/pager/src/app/root/dispatch/tests/router.rs` — `entry_title_uses_display_name_when_set`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `entry_title_strips_skill_xml_from_generated_title`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `entry_title_strips_skill_xml_from_first_prompt`。
+
+
+### Requirement: Latest prompt and agent reply summaries obey turn pairing and safe first-line projection
+
+last_user_prompt_line SHALL scan newest-first for the latest non-empty UserPrompt first line, strip ANSI escapes, sanitize ASCII controls, and trim the result. last_agent_message_line SHALL scan newest-first for the newest AgentMessage, return its first non-empty rendered line after the same cleaning, return None when that message has no renderable line, and return None immediately when a newer UserPrompt marks an unanswered turn so an older reply is not paired with it. first_user_prompt_text SHALL scan oldest-first and return the first UserPrompt full text, skipping non-prompt entries and defensive missing entries.
+
+#### Scenario: Latest user prompt
+- **WHEN** scrollback contains one or more UserPrompt blocks
+- **THEN** the newest prompt with a non-empty first line is projected as a sanitized single-line string.
+
+#### Scenario: Unanswered turn
+- **WHEN** a UserPrompt is newer than every AgentMessage
+- **THEN** last_agent_message_line returns None rather than pairing the prompt with an older reply.
+
+#### Scenario: Latest agent reply
+- **WHEN** the newest relevant block is an AgentMessage with a non-empty rendered line and no newer UserPrompt
+- **THEN** only its first non-empty line is returned after ANSI/control sanitization.
+
+#### Scenario: Empty reply
+- **WHEN** the newest AgentMessage has no non-empty renderable line
+- **THEN** last_agent_message_line returns None and does not fall back to an older message.
+
+#### Scenario: First prompt fallback
+- **WHEN** first_user_prompt_text scans a scrollback containing structural blocks and prompts
+- **THEN** the oldest UserPrompt text is returned; a missing indexed entry is skipped defensively.
+
+证据：`crates/codegen/pager/src/views/session_title.rs` — `last_user_prompt_line`；`crates/codegen/pager/src/views/session_title.rs` — `last_agent_message_line`；`crates/codegen/pager/src/views/session_title.rs` — `first_user_prompt_text`；`crates/codegen/pager/src/views/session_title.rs` — `RenderBlock::UserPrompt`；`crates/codegen/pager/src/views/session_title.rs` — `RenderBlock::AgentMessage`；`crates/codegen/pager/src/views/session_title.rs` — `strip_ansi_escapes::strip_str`；`crates/codegen/pager/src/views/session_title.rs` — `sanitize_display_text`；`crates/codegen/pager/src/app/root/event_loop.rs` — `make_run_result`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `extract_last_user_message`；`crates/codegen/pager/src/views/dashboard/peek.rs` — `extract_first_user_message`。
+
+
+### Requirement: Display text sanitization removes terminal control injection without needless allocation
+
+sanitize_display_text SHALL replace every ASCII control character, including ESC, BEL, DEL, tab, newline, and carriage return, with U+FFFD while preserving all other Unicode/codepoint content. For already-clean input, including clean Unicode and empty strings, it SHALL return Cow::Borrowed; for input containing controls it SHALL return Cow::Owned with no remaining ASCII controls.
+
+#### Scenario: Clean ASCII
+- **WHEN** input contains no ASCII controls
+- **THEN** the text is unchanged and returned as Cow::Borrowed.
+
+#### Scenario: Clean Unicode
+- **WHEN** input contains wide or accented Unicode codepoints without controls
+- **THEN** the text and codepoints are unchanged and returned borrowed.
+
+#### Scenario: Terminal escape payload
+- **WHEN** input contains OSC/CSI escape bytes or BEL
+- **THEN** all control bytes become U+FFFD and no ASCII control remains.
+
+#### Scenario: DEL and line controls
+- **WHEN** input contains DEL, tab, newline, or carriage return
+- **THEN** each control is replaced with U+FFFD while surrounding characters remain in order.
+
+#### Scenario: Empty text
+- **WHEN** input is empty
+- **THEN** an empty borrowed Cow is returned.
+
+证据：`crates/codegen/pager/src/views/session_title.rs` — `sanitize_display_text`；`crates/codegen/pager/src/views/session_title.rs` — `Cow::Borrowed`；`crates/codegen/pager/src/views/session_title.rs` — `Cow::Owned`；`crates/codegen/pager/src/views/session_title.rs` — `is_ascii_control`；`crates/codegen/pager/src/views/session_title.rs` — `sanitize_passes_through_clean_ascii_unchanged_no_alloc`；`crates/codegen/pager/src/views/session_title.rs` — `sanitize_passes_through_unicode_widechars`；`crates/codegen/pager/src/views/session_title.rs` — `sanitize_strips_osc_escape_sequence`；`crates/codegen/pager/src/views/session_title.rs` — `sanitize_strips_csi_sequence`；`crates/codegen/pager/src/views/session_title.rs` — `sanitize_strips_bel_and_del`；`crates/codegen/pager/src/views/session_title.rs` — `sanitize_strips_tab_newline_carriage_return`；`crates/codegen/pager/src/views/session_title.rs` — `sanitize_empty_returns_empty_borrowed`；`crates/codegen/pager/src/views/dashboard/row.rs` — `sanitize`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `TaskResult::RenameSessionComplete`。
+
+
+### Requirement: Derived titles truncate by Unicode codepoint without splitting UTF-8
+
+truncate_title SHALL return short text unchanged. When text exceeds MAX_TITLE_CHARS (60 Unicode codepoints), it SHALL keep the first 60 codepoints and append exactly `...`, producing 63 codepoints total. The truncation SHALL be codepoint-based so multibyte UTF-8 characters are not split; grapheme-cluster boundaries are outside this contract.
+
+#### Scenario: Short title
+- **WHEN** text length is at most 60 codepoints
+- **THEN** the exact original string is returned without an ellipsis.
+
+#### Scenario: Long ASCII title
+- **WHEN** text exceeds 60 codepoints
+- **THEN** the first 60 codepoints plus `...` are returned and total length is 63 codepoints.
+
+#### Scenario: Long multibyte title
+- **WHEN** text exceeds 60 codepoints using multibyte characters
+- **THEN** truncation succeeds without invalid UTF-8 or partial codepoint bytes.
+
+证据：`crates/codegen/pager/src/views/session_title.rs` — `truncate_title`；`crates/codegen/pager/src/views/session_title.rs` — `MAX_TITLE_CHARS`；`crates/codegen/pager/src/views/session_title.rs` — `truncate_title_keeps_short_strings`；`crates/codegen/pager/src/views/session_title.rs` — `truncate_title_appends_ellipsis_when_too_long`；`crates/codegen/pager/src/views/session_title.rs` — `truncate_title_handles_multibyte_codepoints_safely`。
+
+
+### Requirement: Relative time formatting uses compact floor-second buckets
+
+format_relative_time SHALL format elapsed durations using floor seconds: less than 1 second as `now`, 1–59 seconds as `{n}s ago`, 1–59 minutes as `{n}m ago`, 1–23 hours as `{n}h ago`, and 1 or more days as `{n}d ago`.
+
+#### Scenario: Sub-second age
+- **WHEN** elapsed duration is below one second
+- **THEN** the exact label is `now`.
+
+#### Scenario: Seconds bucket
+- **WHEN** elapsed duration is 1 through 59 seconds
+- **THEN** the integer seconds and `s ago` suffix are returned.
+
+#### Scenario: Minutes bucket
+- **WHEN** elapsed duration is 60 seconds through 59 minutes
+- **THEN** whole minutes and `m ago` are returned.
+
+#### Scenario: Hours bucket
+- **WHEN** elapsed duration is 60 minutes through 23 hours
+- **THEN** whole hours and `h ago` are returned.
+
+#### Scenario: Days bucket
+- **WHEN** elapsed duration is at least 24 hours
+- **THEN** whole days and `d ago` are returned.
+
+证据：`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time`；`crates/codegen/pager/src/views/dashboard/state.rs` — `format_relative_time`；`crates/codegen/pager/src/project_picker/mod.rs` — `format_relative_time`；`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time_sub_second_is_now`；`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time_seconds`；`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time_minutes`；`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time_hours`；`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time_days`。
