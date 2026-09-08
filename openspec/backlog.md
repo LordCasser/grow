@@ -895,3 +895,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：permission persistence 和通用 setting rollback 没有 request generation/revision 判定，旧完成结果可能覆盖较新的乐观状态；这是既有 delta 明确记录的未版本化语义。
 - Pager 审计债务：多处 JSON 解析采用 wrapped-result/top-level fallback 或缺省值，兼容性便利会把协议漂移和字段缺失压低为静默空数据。
 - Pager 审计债务：生产 helpers 没有同文件测试，行为证据分散在 effects/tests.rs、dispatch tests 与调用方，重构时容易出现契约与局部实现脱节。
+- Pager 审计债务：UserPromptBlock 同时承载数据模型、非可信 replay 元数据校验、Unicode wrapping、主题样式、选择坐标、折叠估算和 BlockContent 能力，职责跨度较大。
+- Pager 审计债务：token_styled_line 依赖 lines() 返回 self.text 子切片并用指针差恢复 byte offset，虽有 debug_assert，仍把实现安全性绑定到该切片不变量。
+- Pager 审计债务：截断路径需先按样式行重排再拼接 ellipsis，并手工维护 LinkSource、Selectable span 和 source_column，布局与选择元数据耦合度高。
+- Pager 审计债务：is_foldable 的固定 MIN_CONTENT_WIDTH=60 与真实 ctx.width 分离，在宽终端上可能提前进入可折叠状态；这是源码主动接受的保守策略。
+- Pager 审计债务：Skill token range 使用 UTF-8 byte range，而测试和渲染同时依赖 span 索引与显示列宽，后续扩展复杂 token 或 grapheme 交互时存在多坐标体系维护成本。

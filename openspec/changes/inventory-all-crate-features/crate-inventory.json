@@ -3715,7 +3715,19 @@
       "SSH shell planning, platform gates, and exact customization conflict detection",
       "Validated shell discovery, source snapshot integrity, and fail-closed decoding",
       "SSH managed outcomes, planned-shell verification, and diagnostic report filtering",
-      "Shell alias runtime expansion and explicit bypass"
+      "Shell alias runtime expansion and explicit bypass",
+      "peek_live_tail_desired_content SHALL budget a no-question live-tail peek from status, optional pinned user, measured body and reply rows while keeping content within max_content and capping body height.",
+      "allocate_peek SHALL reserve chrome and a list floor before allocating a peek box, enforce minimum and fractional maximum heights, and return inner content capacity for the chosen whole-box height.",
+      "compute_layout SHALL tile the dashboard content area into top margin, header, header gap, list, dispatch, footer and bottom margin rectangles with responsive chrome thresholds and aligned horizontal insets.",
+      "compute_layout_with_dispatch SHALL grow the dispatch box for multiline input while preserving list/footer spacing, and all layout paths SHALL return valid zero or narrow rectangles without arithmetic panics.",
+      "Dashboard peek visibility SHALL grow the dispatch rectangle using list-first allocation while retaining a zero standalone peek rectangle, and callers with a chosen box height SHALL be bounded by the same list floor and fractional cap.",
+      "DashboardLayout SHALL expose named rectangles and allocation DTOs as the geometry contract for renderers, including a retained zero-height peek field and explicit short-terminal/width boundaries.",
+      "Cancellation, rewind resubmission, and orphan prompt response isolation",
+      "Inline edit entry, rewind mode selection, and cancellation overlays",
+      "Inline edit rewind execution, mode-specific resubmission, and draft reconciliation",
+      "Inline rewind failure recovery and editor preservation",
+      "Successful rewind memory release and screen-mode confirmation surface",
+      "Shell prompt index and scrollback entry lookup with interjection-aware fallback"
     ],
     "reviewed_files": [
       {
@@ -5781,6 +5793,18 @@
       {
         "path": "crates/codegen/pager/src/diagnostics/fix_tests.rs",
         "sha256": "9e08059fb8d8e1e436a652fd5542b29328dc6a91f4c79e88ad4e7f127b6f897f"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/user.rs",
+        "sha256": "92b5ea302270279a8527448de62ccfda56330bc311ce11fcbccd66a6e4398fbd"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/dashboard/layout.rs",
+        "sha256": "8224cf499ad099cf62f6c69536c64794fe3081ea2036d743bf943e0a3b5744ac"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
+        "sha256": "adc89bfa2b16b738adc067579dc9db5a16e826b815f5ac6592c32a6ccedbfeca"
       }
     ],
     "review": "reviews/pager.md"

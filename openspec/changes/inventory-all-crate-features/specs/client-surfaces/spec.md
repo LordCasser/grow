@@ -19458,3 +19458,307 @@ The generated POSIX and fish SSH aliases SHALL expand `ssh -p 2222 host` into th
 - **THEN** fish produces the same exact argv and no ssh environment variable is present.
 
 证据：`crates/codegen/pager/src/diagnostics/fix_tests.rs` — `shell_aliases_expand_to_exact_argv_and_bypass_is_explicit`；`crates/codegen/pager/src/diagnostics/fix.rs` — `SSH_WRAP_ALIAS_POSIX`；`crates/codegen/pager/src/diagnostics/fix.rs` — `SSH_WRAP_ALIAS_FISH`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ShellKind::alias`；`crates/codegen/pager/src/diagnostics/fix.rs` — `find_on_path`。
+
+
+### Requirement: peek_live_tail_desired_content SHALL budget a no-question live-tail peek from status, optional pinned user, measured body and reply rows while keeping content within max_content and capping body height.
+
+reply_rows SHALL be floored to one. Fixed content is one status row plus reply_rows plus one optional pin row. If max_content is below fixed, live_tail=0 and content_rows=max_content. Otherwise body is measured content or one empty/hint row, capped by MAX_LIVE_TAIL_ROWS and remaining capacity; a blank row is preferred when body and capacity permit, but omitted when no body room remains. content_rows never exceeds max_content.
+
+#### Scenario: Empty body
+- **WHEN** body_measured is zero and enough room remains
+- **THEN** one live-tail body row plus a breathing blank is budgeted.
+
+#### Scenario: Pinned prompt
+- **WHEN** pin_user is true
+- **THEN** one additional pin row is reserved and measured body remains representable.
+
+#### Scenario: Tight content
+- **WHEN** max_content leaves only fixed rows plus body
+- **THEN** blank_row is false and body still fits.
+
+#### Scenario: Long body
+- **WHEN** body_measured exceeds available space or MAX_LIVE_TAIL_ROWS
+- **THEN** live_tail is capped and content_rows stays within max_content.
+
+#### Scenario: Very small box
+- **WHEN** max_content is below status/reply/pin fixed rows
+- **THEN** no body/blank is reserved and content_rows equals max_content.
+
+证据：`crates/codegen/pager/src/views/dashboard/layout.rs` — `PeekLiveTailBudget`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `MAX_LIVE_TAIL_ROWS`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `peek_live_tail_desired_content`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::peek_live_tail_desired_empty_uses_one_body_row`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::peek_live_tail_desired_tight_pin_skips_blank`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::peek_live_tail_desired_short_body_budgets_blank_and_pin`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::peek_live_tail_desired_long_body_hits_live_tail_cap`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::peek_live_tail_desired_pin_fits_in_measured_body_budget`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::peek_live_tail_desired_never_exceeds_max_content`。
+
+
+### Requirement: allocate_peek SHALL reserve chrome and a list floor before allocating a peek box, enforce minimum and fractional maximum heights, and return inner content capacity for the chosen whole-box height.
+
+peek_max_box_rows SHALL calculate floor(H * 3/8). allocate_peek SHALL subtract fixed_overhead, reserve min(12, after) list rows, cap remainder by peek_max_box_rows, derive max_content_rows by subtracting two border rows, hide the peek when max_peek is below peek_min_box, and otherwise choose min(max(desired_content_rows+2, peek_min_box), max_peek). chrome_overhead SHALL expose dashboard fixed overhead. max_peek_content_rows SHALL return zero at heights <=8 and otherwise probe the full candidate with the live-tail minimum.
+
+#### Scenario: No remaining area
+- **WHEN** area height is fully consumed by fixed overhead
+- **THEN** allocate_peek returns show_peek=false and zero box/content heights.
+
+#### Scenario: Below minimum
+- **WHEN** remainder after list floor is below peek_min_box
+- **THEN** the peek is hidden while max_content_rows reports the bounded candidate.
+
+#### Scenario: Desired content
+- **WHEN** desired_content_rows grows within the candidate
+- **THEN** peek_box_h grows from content plus borders and list shrinks.
+
+#### Scenario: Fraction cap
+- **WHEN** desired content is large
+- **THEN** peek_box_h never exceeds floor(height*3/8) and list retains LIST_FLOOR_ROWS when possible.
+
+#### Scenario: Short terminal probe
+- **WHEN** height is 8 or less
+- **THEN** max_peek_content_rows returns zero.
+
+证据：`crates/codegen/pager/src/views/dashboard/layout.rs` — `LIST_FLOOR_ROWS`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `PEEK_MIN_BOX_LIVE_TAIL`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `PEEK_MIN_BOX_QUESTION`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `PEEK_MAX_FRAC_NUM`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `PEEK_MAX_FRAC_DEN`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `PeekAllocation`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `peek_max_box_rows`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `chrome_overhead`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `allocate_peek`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `max_peek_content_rows`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_hides_peek_when_too_short`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::allocate_peek_refuses_when_remainder_below_min`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::peek_box_sizes_to_content_rows`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::allocate_peek_list_floor_and_max_fraction`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::allocate_peek_respects_three_eighths_cap`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::reply_growth_steals_from_list_down_to_floor_then_body`。
+
+
+### Requirement: compute_layout SHALL tile the dashboard content area into top margin, header, header gap, list, dispatch, footer and bottom margin rectangles with responsive chrome thresholds and aligned horizontal insets.
+
+The implementation SHALL satisfy the following tested behavior: Top margin exists when height>6, header when height>4, header/list gap when height>10, footer when height>=2, dispatch/footer gaps when height>10, and bottom margin when height>16; a short_terminal flag is height<=8. Header and dispatch use two-column outer padding, list uses LIST_OUTER_HPAD, footer/gaps/margins span the full area. Header and list share x/width, dispatch aligns to those columns, gaps are represented in y spacing, and the rectangles tile the area after intentional gap rows.
+
+#### Scenario: Tall terminal
+- **WHEN** the area is 80x30 or otherwise above thresholds
+- **THEN** top/bottom margins and header/list/dispatch breathing gaps are reserved.
+
+#### Scenario: Short terminal
+- **WHEN** height reaches a chrome threshold such as 6, 10 or 16
+- **THEN** the corresponding margin/gap collapses so list space is preserved.
+
+#### Scenario: Column alignment
+- **WHEN** header, list and dispatch are laid out
+- **THEN** header and list align, and dispatch uses the same inset columns.
+
+#### Scenario: Outer padding
+- **WHEN** area is wide enough for insets
+- **THEN** dispatch/header/list widths lose their configured padding on both sides while footer remains full width.
+
+#### Scenario: Tiling
+- **WHEN** all layout sections are measured
+- **THEN** section heights plus intentional gap rows account for the full area without overlap.
+
+证据：`crates/codegen/pager/src/views/dashboard/layout.rs` — `MIN_DASHBOARD_WIDTH`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `DISPATCH_OUTER_HPAD`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `HEADER_OUTER_HPAD`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `LIST_OUTER_HPAD`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `DashboardLayout`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `dashboard_chrome_heights`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `dashboard_fixed_overhead`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `compute_layout`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_assigns_disjoint_areas`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_reserves_bottom_margin_on_tall_terminals`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_drops_bottom_margin_on_short_terminals`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_applies_outer_hpad_to_dispatch_box`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_insets_header_and_list`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_applies_outer_hpad_to_list`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_applies_outer_hpad_to_header`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_reserves_dispatch_and_shortcuts_gaps`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_drops_gaps_on_short_terminals`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_reserves_header_gap_on_tall_terminals`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_drops_header_gap_on_short_terminals`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_reserves_top_margin_on_tall_terminals`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_drops_top_margin_on_short_terminals`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_at_minimum_width_returns_valid_rect`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_header_aligns_with_list_and_dispatch`。
+
+
+### Requirement: compute_layout_with_dispatch SHALL grow the dispatch box for multiline input while preserving list/footer spacing, and all layout paths SHALL return valid zero or narrow rectangles without arithmetic panics.
+
+compute_layout SHALL request one dispatch text row. compute_layout_with_dispatch SHALL use max(dispatch_text_rows,1) and add two border rows when no peek is forced; with short_terminal it uses one row. A zero-height area returns all zero-height subrects at the original x/width; zero-width and below-minimum-width areas remain valid with saturated inset widths and leave narrow-mode truncation to the renderer.
+
+#### Scenario: Multiline input
+- **WHEN** dispatch_text_rows grows from one to three
+- **THEN** dispatch height grows by two rows and list height shrinks by the same amount while footer gap remains.
+
+#### Scenario: Zero text rows
+- **WHEN** dispatch_text_rows is zero
+- **THEN** the dispatch still has the single-line three-row chrome.
+
+#### Scenario: Zero height
+- **WHEN** area.height is zero
+- **THEN** all subrects have zero height and no underflow/panic occurs.
+
+#### Scenario: Zero width
+- **WHEN** area.width is zero
+- **THEN** list and dispatch widths are zero and the layout remains valid.
+
+#### Scenario: Narrow area
+- **WHEN** width is below MIN_DASHBOARD_WIDTH
+- **THEN** valid inset subrects are returned for renderer narrow-mode truncation.
+
+证据：`crates/codegen/pager/src/views/dashboard/layout.rs` — `compute_layout`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `compute_layout_with_dispatch`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `compute_layout_with_dispatch_inner`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::dispatch_box_grows_for_multiline_input`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::dispatch_box_floors_at_single_text_row`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_height_zero_produces_zero_subrects`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_width_zero_returns_zero_width_subrects`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_width_below_min_returns_valid_subrects`。
+
+
+### Requirement: Dashboard peek visibility SHALL grow the dispatch rectangle using list-first allocation while retaining a zero standalone peek rectangle, and callers with a chosen box height SHALL be bounded by the same list floor and fractional cap.
+
+compute_layout_with_peek_box SHALL route a forced height through compute_layout_with_dispatch_inner with at least three rows. When peek_visible without a forced height, short terminals use one dispatch row; otherwise allocate_peek chooses a live-tail box or the fallback three-row dispatch. forced_peek_box_h SHALL be clamped to available remainder, max peek fraction and at least three. The returned peek field remains Rect::default because peek content is rendered inside dispatch; list height stays at least LIST_FLOOR_ROWS whenever allocation permits.
+
+#### Scenario: Visible live tail
+- **WHEN** peek_visible is true on a tall area
+- **THEN** dispatch grows to the allocated peek box and list remains at least the floor.
+
+#### Scenario: Too short
+- **WHEN** peek_visible is true on a short area
+- **THEN** standalone peek is zero and dispatch uses the short one-row path.
+
+#### Scenario: Forced height
+- **WHEN** caller supplies a selected peek_box_h
+- **THEN** dispatch uses the bounded forced height and standalone peek stays zero.
+
+#### Scenario: Content growth
+- **WHEN** desired dispatch text rows increase while peek is visible
+- **THEN** dispatch grows until max fraction and list gives up only available rows down to floor.
+
+证据：`crates/codegen/pager/src/views/dashboard/layout.rs` — `compute_layout_with_peek_box`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `compute_layout_with_dispatch`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `compute_layout_with_dispatch_inner`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_grows_dispatch_when_peek_visible`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::peek_box_sizes_to_content_rows`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::allocate_peek_list_floor_and_max_fraction`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::reply_growth_steals_from_list_down_to_floor_then_body`。
+
+
+### Requirement: DashboardLayout SHALL expose named rectangles and allocation DTOs as the geometry contract for renderers, including a retained zero-height peek field and explicit short-terminal/width boundaries.
+
+The implementation SHALL satisfy the following tested behavior: DashboardLayout exposes top_margin, header, header_gap, list, peek, dispatch, footer and bottom_margin. PeekAllocation exposes show_peek, whole-box peek_box_h and max_content_rows. MIN_DASHBOARD_WIDTH documents the meaningful-row threshold while compute_layout still returns valid geometry below it. PEEK_MIN_BOX_QUESTION is available as the question-peek minimum constant even though this module's default allocation path uses the live-tail minimum. The standalone peek rect is intentionally retained at zero for existing destructuring callers while peek rendering occurs in dispatch.
+
+#### Scenario: Layout consumers
+- **WHEN** a renderer consumes DashboardLayout
+- **THEN** all named sections are available with zero/default rectangles for absent areas.
+
+#### Scenario: Compatibility peek
+- **WHEN** a caller still reads layout.peek
+- **THEN** it receives a zero-height rect while dispatch carries the peek allocation.
+
+#### Scenario: Question minimum
+- **WHEN** a question/permission caller selects a different minimum
+- **THEN** the public question minimum constant is available for the caller's allocation policy.
+
+#### Scenario: Boundary values
+- **WHEN** height/width is zero, short, narrow or exactly a threshold
+- **THEN** layout and allocation return bounded DTOs without overflow.
+
+证据：`crates/codegen/pager/src/views/dashboard/layout.rs` — `DashboardLayout`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `PeekAllocation`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `PEEK_MIN_BOX_QUESTION`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `MIN_DASHBOARD_WIDTH`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `compute_layout_with_peek_box`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_height_zero_produces_zero_subrects`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_width_zero_returns_zero_width_subrects`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::layout_at_minimum_width_returns_valid_rect`；`crates/codegen/pager/src/views/dashboard/layout.rs` — `tests::max_peek_content_rows_zero_on_short_terminal`。
+
+
+### Requirement: Cancellation, rewind resubmission, and orphan prompt response isolation
+
+Cancellation SHALL preserve a prompt block that has already been committed to native scrollback: it SHALL emit the ordinary CancelTurn effect, leave the committed block in scrollback, avoid restoring its text into the composer, and enter cancelling state. After a rewind, the session SHALL become idle with no current prompt id so a new prompt can send immediately; each new turn SHALL receive a distinct prompt id, and late cancelled PromptResponse messages whose promptId does not match the current turn SHALL be discarded without changing the active turn or adding banners.
+
+#### Scenario: Committed in-flight prompt
+- **WHEN** a queued prompt has been committed to scrollback before CancelTurn
+- **THEN** the prompt remains exactly once in scrollback, the composer stays empty, CancelTurn is emitted, and session state is cancelling.
+
+#### Scenario: Immediate post-rewind send
+- **WHEN** a first turn is cancelled and a second prompt is submitted before the cancelled response arrives
+- **THEN** the second prompt sends immediately with a new prompt id and remains turn-running when the orphan first response arrives.
+
+#### Scenario: Stacked cancelled responses
+- **WHEN** two cancelled turns produce two distinct prompt ids and both late responses arrive while no turn is current
+- **THEN** both responses are silently ignored, scrollback remains empty, and the session ends idle.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `cancel_does_not_rewind_when_in_flight_block_committed`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `rewind_then_resubmit_drains_immediately_and_discards_orphan`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `stacked_rewinds_each_get_their_own_pid_and_orphans_drop_independently`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_cancel_turn`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_send_prompt_inner`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `handle_prompt_response`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `current_prompt_id`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `in_flight_prompt`。
+
+
+### Requirement: Inline edit entry, rewind mode selection, and cancellation overlays
+
+Submitting a changed inline edit SHALL enter the same rewind flow as `/rewind`, preselecting the edited prompt and fetching rewind points while keeping the editor open; unchanged or empty text SHALL close the editor without effects. Loaded points SHALL open ModeSelect over the editor, hide the FilesOnly option for inline edit, preserve that hidden state when returning from preview, and retain the FilesOnly option for classic rewind. A busy inline submit SHALL open a targeted CancelOffer; confirming SHALL emit CancelTurn plus FetchRewindPoints and retain the target, while dismissing any mode or cancel overlay SHALL restore the editor text and clear transient rewind state without stashing a resubmit.
+
+#### Scenario: Changed inline submit
+- **WHEN** the editor text differs from the original and the session is idle
+- **THEN** FetchRewindPoints is emitted, phase is Loading, selected target is the edited prompt, and the editor remains open with no pending resubmit.
+
+#### Scenario: No-op inline submit
+- **WHEN** the editor text is unchanged or empty
+- **THEN** no effect is emitted, the editor closes, no rewind state is entered, and inline edit layout is cleared.
+
+#### Scenario: Inline points loaded
+- **WHEN** rewind points arrive for a preselected inline target
+- **THEN** phase is ModeSelect with the target and file-change flag, offer_files_only is false, and the editor remains open.
+
+#### Scenario: Classic points loaded
+- **WHEN** classic `/rewind` has no inline editor
+- **THEN** ModeSelect keeps offer_files_only true.
+
+#### Scenario: Back navigation
+- **WHEN** an inline All-mode preview has opened and RewindBackToModeSelect is dispatched
+- **THEN** ModeSelect is restored with offer_files_only false and the editor still open.
+
+#### Scenario: Dismissal
+- **WHEN** ModeSelect or CancelOffer is dismissed
+- **THEN** rewind state and pending inline resubmit are cleared, and the original edited text stays in the editor.
+
+#### Scenario: Busy confirmation
+- **WHEN** a changed inline edit is submitted during a running turn and the cancel offer is confirmed
+- **THEN** CancelTurn and FetchRewindPoints are emitted, phase becomes Loading, selected target remains the edited prompt, and the editor stays open.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_submit_enters_rewind_flow_via_points_fetch`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_submit_with_unchanged_text_closes_editor`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_points_loaded_opens_mode_select_over_open_editor`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `classic_rewind_mode_select_keeps_files_only_row`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_back_to_mode_select_preserves_hidden_files_only_row`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_dismiss_from_mode_select_returns_to_editor`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_busy_submit_cancel_offer_confirm_cancels_and_fetches_points`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_busy_cancel_offer_dismiss_returns_to_editor`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_inline_edit_submit`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `handle_rewind_points_loaded`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_select_mode`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_dismiss`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_back_to_mode_select`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_cancel_offer`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `stash_prompt`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `stash_inline_resubmit_if_editing`。
+
+
+### Requirement: Inline edit rewind execution, mode-specific resubmission, and draft reconciliation
+
+A successful inline conversation rewind SHALL arm the edited text only when execution begins, truncate the transcript at the target, close the editor, preserve the composer draft, and resubmit the edited text from the rewound point. All-mode SHALL require preview and confirmation when file changes exist before the same resubmit. FilesOnly SHALL execute without preview when appropriate, leave conversation entries intact, close the editor, and place the edited text in the composer without sending. Resubmission SHALL treat slash-prefixed text literally, and if the active view changed it SHALL append the text to the target agent composer without sending; existing image draft elements and image registrations SHALL survive that append.
+
+#### Scenario: Conversation-only success
+- **WHEN** inline edit targets the newest prompt and rewind succeeds in conversation_only mode
+- **THEN** RewindExecute is emitted after confirmation, pending text is armed at execute time, transcript is truncated, edited text is sent, editor closes, composer draft survives, and no reverted-conversation notice is added.
+
+#### Scenario: All-mode preview
+- **WHEN** file changes exist and All is selected
+- **THEN** RewindPreview is emitted first, then Confirm, then RewindExecute; after success the edited text is resubmitted and editor closes.
+
+#### Scenario: Files-only success
+- **WHEN** FilesOnly is selected for an inline edit with no conversation rewind
+- **THEN** RewindExecute is emitted directly, no SendPrompt occurs, editor closes, edited text fills composer, and original prompt/reply remain.
+
+#### Scenario: Slash-looking edit
+- **WHEN** edited text begins with `/`
+- **THEN** SendPrompt receives the exact text literally instead of routing it as a slash command.
+
+#### Scenario: View switch
+- **WHEN** the active view changes before successful conversation rewind completes
+- **THEN** no SendPrompt is emitted and the text is appended on a new line to the target composer.
+
+#### Scenario: Image draft
+- **WHEN** the target composer contains an image chip before the view switch append
+- **THEN** the text is appended while one image chip remains and its drained image retains the re-registered element id.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_conversation_only_success_resubmits_and_closes_editor`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_all_mode_previews_confirms_and_resubmits`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_files_only_success_prefills_composer_without_resubmit`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_resubmit_sends_slash_text_literally`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_rewind_success_after_view_switch_appends_to_draft`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_view_switch_preserves_image_draft_when_appending_resubmit`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_select_mode`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_confirm`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_conversation_only_confirm`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_success`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `stash_inline_resubmit_if_editing`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_send_prompt_inner`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `find_user_prompt_entry_for_shell_index`。
+
+
+### Requirement: Inline rewind failure recovery and editor preservation
+
+A failed rewind execution or an unsuccessful rewind response SHALL emit no further effect, drop pending inline resubmit text, transition to the Error phase, preserve the inline editor and its edited text, and leave the transcript untouched so dismissing the error can return to editing.
+
+#### Scenario: Execution failure
+- **WHEN** RewindExecuteFailed carries an error after an inline resubmit was armed
+- **THEN** pending_inline_resubmit is cleared, Error phase is shown, no effects are emitted, editor text remains, and transcript length is unchanged.
+
+#### Scenario: Unsuccessful response
+- **WHEN** RewindExecuteComplete contains success=false and an error
+- **THEN** the same Error state and editor preservation occur without truncating the transcript.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_execute_failure_keeps_editor_open`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `inline_edit_unsuccessful_response_keeps_editor_open`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `handle_rewind_execute_failed`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_success`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `RewindPhase::Error`。
+
+
+### Requirement: Successful rewind memory release and screen-mode confirmation surface
+
+Successful conversation rewinds SHALL remove the transcript tail from the resolved prompt anchor, explicitly drop removed entries before invoking the retained-memory release hook exactly once; FilesOnly SHALL not truncate or purge. Full TUI mode SHALL show the mode-specific success message as a toast without adding a confirmation block to scrollback, while Minimal mode SHALL avoid toasts and append the success notice as a system block.
+
+#### Scenario: Files-only memory
+- **WHEN** a successful files_only response does not remove conversation entries
+- **THEN** the retained-memory hook count does not increase.
+
+#### Scenario: Conversation memory
+- **WHEN** a successful all response removes the tail from the prompt anchor
+- **THEN** scrollback shrinks and retained-memory release is called exactly once after removal.
+
+#### Scenario: Full TUI
+- **WHEN** all or files_only succeeds in non-Minimal screen mode
+- **THEN** the correct Reverted conversation/file changes message appears as a toast and no confirmation scrollback block is appended.
+
+#### Scenario: Minimal TUI
+- **WHEN** files_only succeeds in Minimal mode
+- **THEN** no toast exists and the exact Reverted file changes system block is committed to scrollback.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `rewind_success_truncation_releases_retained_memory`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `dispatch_rewind_success`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `find_user_prompt_entry_for_shell_index`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `release_retained_memory_with`。
+
+
+### Requirement: Shell prompt index and scrollback entry lookup with interjection-aware fallback
+
+Prompt lookup SHALL prefer explicit prompt_index metadata and return the corresponding user prompt entry, while the positional fallback SHALL count only indexed non-interjection user prompts. shell_prompt_index_at SHALL resolve an interjection or later block in the same turn to the enclosing prompt and skip interjections for legacy metadata-less scrollbacks; lookup SHALL return None when no matching prompt exists.
+
+#### Scenario: Explicit index path
+- **WHEN** user prompt blocks carry prompt_index 0, 1, and 2
+- **THEN** find_user_prompt_entry_for_shell_index returns the exact entry index for each shell prompt.
+
+#### Scenario: Metadata-less fallback
+- **WHEN** prompt blocks have no prompt_index and ordinary agent messages separate them
+- **THEN** positional lookup returns the first, second, and third real prompt entries.
+
+#### Scenario: Interjection fallback
+- **WHEN** an interjection appears between two real prompts
+- **THEN** the next shell index maps to the next real prompt and never to the interjection.
+
+#### Scenario: Enclosing turn
+- **WHEN** the selected entry is an interjection or a block after it before the next prompt
+- **THEN** shell_prompt_index_at returns the preceding turn index.
+
+#### Scenario: Legacy interjection count
+- **WHEN** metadata-less shell_prompt_index_at resolves a prompt after an interjection
+- **THEN** the interjection is excluded from the count and the prompt receives the correct index.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `primary_path_returns_correct_idx_for_each_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `fallback_path_skips_interjections`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `shell_prompt_index_at_resolves_interjection_to_enclosing_turn`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `shell_prompt_index_at_counting_fallback_skips_interjections`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `fallback_path_returns_correct_idx_when_prompt_index_is_none`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `is_indexed_user_prompt`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `shell_prompt_index_at`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `find_user_prompt_entry_for_shell_index`。
