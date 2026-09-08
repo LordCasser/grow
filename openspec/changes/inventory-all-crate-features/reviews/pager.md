@@ -2330,3 +2330,7 @@ Luna/high复用代理完整读取`app/root/dispatch/tests/session/lifecycle.rs`�
 Luna/high复用代理完整读取`app/root/dispatch/prompt.rs`共1488行、无内联测试；主代理复核SHA-256与14项功能需求来源，覆盖prompt dispatch、队列/输入控制、权限和会话路由边界。未运行Cargo或动态prompt dispatch。
 
 Luna/high复用代理第二轮完整读取`app/root/dispatch/tests/session/lifecycle.rs`共2166行、70项内联测试；相较早期摘要，补入12项更细的session创建、worktree、deferred control、trust、project picker、删除/退出和dashboard stop契约。SHA-256与工作树匹配，未运行Cargo或动态session dispatch。
+
+Luna/high复用代理完整读取`views/tasks_pane.rs`共3311行、51项内联测试；主代理复核SHA-256与12项功能需求来源，覆盖任务/Workflow列表、运行状态、选择、停止/取消、过滤、排序和提示投影。未运行Cargo或真实任务运行时。
+
+Luna/high复用代理第二轮完整复核`scrollback/state/mod.rs`共3966行、65项内联测试；该文件已有feature-map登记，本轮补齐独立全量来源与SHA-256核验，未运行Cargo或真实终端。

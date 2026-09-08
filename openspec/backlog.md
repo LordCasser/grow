@@ -828,3 +828,11 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager session lifecycle跨越创建、trust、deferred control和picker
 
 第二轮细化表明`session/lifecycle.rs`还同时覆盖session创建、worktree、deferred control、workspace trust、project picker、删除/退出和dashboard stop。新增12条静态契约已登记，后续需按创建事务、信任准入、延迟控制和picker状态拆分；本轮不改实现。
+
+## 待拆分：Pager tasks pane混合任务身份、状态控制和列表渲染
+
+`views/tasks_pane.rs`同时处理任务/Workflow列表、运行状态、选择、停止/取消、过滤、排序和提示投影。12条静态契约已登记，后续需按任务身份、运行控制和列表渲染拆分并补真实任务运行验证；本轮不改tasks pane。
+
+## 待拆分：Pager scrollback state聚合导航、折叠和过滤状态
+
+第二轮复核确认`scrollback/state/mod.rs`聚合导航、折叠、过滤、选择和布局状态。既有契约来源已补齐，后续需按状态域拆分并补真实终端矩阵；本轮不改scrollback state。

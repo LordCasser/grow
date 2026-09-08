@@ -15914,3 +15914,318 @@ The 70 inline tests in lifecycle.rs SHALL be treated as static evidence for disp
 - **THEN** selection/delete/peek state is asserted without a live terminal.
 
 证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `tests module`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `all_system_texts`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `project_selected_creates_session_and_sends_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `trust_folder_grants_and_resolves`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `dashboard_stop_with_peek_open_moves_selection_and_peek_down_one`。
+### Requirement: Task output line-count badge formatting
+format_line_count_badge SHALL return no badge for zero, use exact truncating SI thresholds for raw counts, decimal/whole thousands and millions, and append `+` only when a nonzero rolling buffer is truncated.
+
+#### Scenario: Zero
+- **WHEN** count is zero
+- **THEN** empty badge is returned even when truncated.
+
+#### Scenario: SI scaling
+- **WHEN** count crosses a threshold
+- **THEN** the expected truncated k/M form is returned.
+
+#### Scenario: Truncated
+- **WHEN** buffer dropped data
+- **THEN** a plus suffix is added.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `format_line_count_badge`；`crates/codegen/pager/src/views/tasks_pane.rs` — `line_badge_empty_for_zero`；`crates/codegen/pager/src/views/tasks_pane.rs` — `line_badge_raw_under_thousand`；`crates/codegen/pager/src/views/tasks_pane.rs` — `line_badge_decimal_thousands`；`crates/codegen/pager/src/views/tasks_pane.rs` — `line_badge_whole_thousands`；`crates/codegen/pager/src/views/tasks_pane.rs` — `line_badge_decimal_millions`；`crates/codegen/pager/src/views/tasks_pane.rs` — `line_badge_whole_millions`；`crates/codegen/pager/src/views/tasks_pane.rs` — `line_badge_truncated_appends_plus_suffix`。
+
+### Requirement: Background task labels, syntax highlighting, monitors, and stable identity
+TaskEntry::from_bg_task SHALL prefer trimmed descriptions with a searchable `Task` prefix, collapse description newlines, fall back to a single-line command when absent/blank, syntax-highlight bare commands with dim finished styling, render monitor rows as an accent `Monitor` tag plus neutral description, and hash task ids deterministically in a namespace distinct from agents.
+
+#### Scenario: Description
+- **WHEN** a nonblank task description exists
+- **THEN** the one-line searchable label and styled Task prefix are used.
+
+#### Scenario: Monitor
+- **WHEN** is_monitor is true
+- **THEN** Monitor tag styling is used instead of bash highlighting.
+
+#### Scenario: Identity
+- **WHEN** same task is converted repeatedly or collides with agent id
+- **THEN** stable id is deterministic and namespaced.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `TaskEntry`；`crates/codegen/pager/src/views/tasks_pane.rs` — `from_bg_task`；`crates/codegen/pager/src/views/tasks_pane.rs` — `highlight_bash_command`；`crates/codegen/pager/src/views/tasks_pane.rs` — `dim_spans`；`crates/codegen/pager/src/views/tasks_pane.rs` — `is_monitor`；`crates/codegen/pager/src/views/tasks_pane.rs` — `stable_id`；`crates/codegen/pager/src/views/tasks_pane.rs` — `bg_task_label_single_line`；`crates/codegen/pager/src/views/tasks_pane.rs` — `bg_task_label_multiline_truncated`；`crates/codegen/pager/src/views/tasks_pane.rs` — `bg_task_label_prefers_description_over_command`；`crates/codegen/pager/src/views/tasks_pane.rs` — `bg_task_styled_prefix_uses_secondary_color`；`crates/codegen/pager/src/views/tasks_pane.rs` — `monitor_task_styled_with_monitor_tag`；`crates/codegen/pager/src/views/tasks_pane.rs` — `bg_task_no_prefix_when_no_description`；`crates/codegen/pager/src/views/tasks_pane.rs` — `bg_task_label_falls_back_to_command_for_blank_description`；`crates/codegen/pager/src/views/tasks_pane.rs` — `bg_task_label_collapses_description_newlines`；`crates/codegen/pager/src/views/tasks_pane.rs` — `bg_task_stable_id_deterministic`；`crates/codegen/pager/src/views/tasks_pane.rs` — `bg_task_and_agent_ids_differ`。
+
+### Requirement: Tasks pane overlay status badges and restored-task auto-show
+TasksPane SHALL render status icons/spinners, elapsed/killing text, line-count badges and kill/view controls without label bleed; restored replay tasks SHALL not trigger the 0→N auto-open edge while new live tasks do.
+
+#### Scenario: Output
+- **WHEN** stdout_line_count is nonzero
+- **THEN** compact badge appears beside status/time.
+
+#### Scenario: Truncated
+- **WHEN** stdout was capped
+- **THEN** badge has plus marker.
+
+#### Scenario: Replay/live
+- **WHEN** restored and new running tasks are synced
+- **THEN** restored task leaves overlay closed; new live task opens it.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `render_bg_task_overlay`；`crates/codegen/pager/src/views/tasks_pane.rs` — `clear_overlay_area`；`crates/codegen/pager/src/views/tasks_pane.rs` — `format_line_count_badge`；`crates/codegen/pager/src/views/tasks_pane.rs` — `sync_at`；`crates/codegen/pager/src/views/tasks_pane.rs` — `restored_from_replay`；`crates/codegen/pager/src/views/tasks_pane.rs` — `opened_by_auto`；`crates/codegen/pager/src/views/tasks_pane.rs` — `render_shows_line_count_badge_for_bg_task_with_stdout`；`crates/codegen/pager/src/views/tasks_pane.rs` — `restored_running_tasks_do_not_auto_show`；`crates/codegen/pager/src/views/tasks_pane.rs` — `render_shows_plus_suffix_when_truncated`；`crates/codegen/pager/src/views/tasks_pane.rs` — `render_hides_badge_when_stdout_empty`。
+
+### Requirement: Tasks pane search-bar and scroll-indicator layout
+render SHALL keep the ListPane search/filter bottom bar free of overlay controls, add one desired-height row for the bar, truncate scheduled labels before kill buttons, and reserve centered ▲/▼ rows only when content is above/below the viewport.
+
+#### Scenario: Search
+- **WHEN** input/filter bar is open
+- **THEN** overlay area shrinks below the bar and desired height grows one row.
+
+#### Scenario: Overflow
+- **WHEN** list exceeds viewport
+- **THEN** centered down arrow is shown; at bottom only up arrow remains.
+
+#### Scenario: Tight row
+- **WHEN** scheduled prompt is long
+- **THEN** text truncates before kill control with no bleed.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `render`；`crates/codegen/pager/src/views/tasks_pane.rs` — `desired_height`；`crates/codegen/pager/src/views/tasks_pane.rs` — `bottom_bar_height`；`crates/codegen/pager/src/views/tasks_pane.rs` — `draw_centered_arrow`；`crates/codegen/pager/src/views/tasks_pane.rs` — `clear_overlay_area`；`crates/codegen/pager/src/views/tasks_pane.rs` — `scroll_offset`；`crates/codegen/pager/src/views/tasks_pane.rs` — `search_bar_not_overwritten_by_task_overlay`；`crates/codegen/pager/src/views/tasks_pane.rs` — `search_bar_adds_a_line_keeping_last_entry_visible`；`crates/codegen/pager/src/views/tasks_pane.rs` — `render_loop_row_truncates_before_kill_button`；`crates/codegen/pager/src/views/tasks_pane.rs` — `render_shows_centered_down_arrow_when_overflowing`；`crates/codegen/pager/src/views/tasks_pane.rs` — `render_hides_down_arrow_at_bottom`。
+
+### Requirement: Task synchronization sorting, visibility, and group headers
+sync_at SHALL rebuild live task, subagent, scheduled, and workflow entries, hide completed items by default, sort workflow/subagent/task/monitor/scheduled types with running-first/newest/stable tie breaks, combine monitors and loops under Watchers while keeping monitor-before-loop order, insert labeled count headers, exclude workflow-owned child agents, and ignore replay-restored tasks for auto-open counting.
+
+#### Scenario: Sync
+- **WHEN** source maps contain mixed task kinds
+- **THEN** display items are rebuilt and grouped with headers.
+
+#### Scenario: Visibility
+- **WHEN** show_done is false
+- **THEN** only active task/subagent/workflow rows remain.
+
+#### Scenario: Workflow child
+- **WHEN** subagent has workflow_run_id
+- **THEN** child is excluded and workflow counts once.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `sync`；`crates/codegen/pager/src/views/tasks_pane.rs` — `sync_at`；`crates/codegen/pager/src/views/tasks_pane.rs` — `TaskEntry::type_order`；`crates/codegen/pager/src/views/tasks_pane.rs` — `is_running`；`crates/codegen/pager/src/views/tasks_pane.rs` — `group_kind`；`crates/codegen/pager/src/views/tasks_pane.rs` — `rebuild_entries`；`crates/codegen/pager/src/views/tasks_pane.rs` — `GroupKind::Watchers`；`crates/codegen/pager/src/views/tasks_pane.rs` — `workflow_run_id`；`crates/codegen/pager/src/views/tasks_pane.rs` — `show_done`；`crates/codegen/pager/src/views/tasks_pane.rs` — `running_count`；`crates/codegen/pager/src/views/tasks_pane.rs` — `sync_sorts_running_before_done`；`crates/codegen/pager/src/views/tasks_pane.rs` — `sync_groups_agents_before_bg_tasks`；`crates/codegen/pager/src/views/tasks_pane.rs` — `sync_groups_monitors_as_their_own_block`；`crates/codegen/pager/src/views/tasks_pane.rs` — `monitors_and_loops_share_one_watchers_section`；`crates/codegen/pager/src/views/tasks_pane.rs` — `sync_hides_done_by_default`；`crates/codegen/pager/src/views/tasks_pane.rs` — `sync_inserts_group_headers_with_counts`；`crates/codegen/pager/src/views/tasks_pane.rs` — `workflows_section_lists_runs`；`crates/codegen/pager/src/views/tasks_pane.rs` — `workflow_children_are_excluded_and_run_counts_once`。
+
+### Requirement: Task group collapse and selection preservation
+toggle_group and set_group_collapsed SHALL hide/show group members while retaining the header, make arrow-style idempotent explicit setting return false when unchanged, preserve header selection after a change, and forget collapse state when a group empties so future items reopen expanded.
+
+#### Scenario: Toggle
+- **WHEN** a group is toggled
+- **THEN** header remains and items are hidden or restored.
+
+#### Scenario: Explicit
+- **WHEN** same collapse state is set twice
+- **THEN** first call rebuilds/returns true; second is a no-op/false.
+
+#### Scenario: Empty/repopulate
+- **WHEN** collapsed group disappears then receives an item
+- **THEN** stale collapse is forgotten and new item is visible.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `toggle_group`；`crates/codegen/pager/src/views/tasks_pane.rs` — `set_group_collapsed`；`crates/codegen/pager/src/views/tasks_pane.rs` — `selected_header_group`；`crates/codegen/pager/src/views/tasks_pane.rs` — `collapsed_groups`；`crates/codegen/pager/src/views/tasks_pane.rs` — `select_by_id`；`crates/codegen/pager/src/views/tasks_pane.rs` — `rebuild_entries`；`crates/codegen/pager/src/views/tasks_pane.rs` — `toggle_group_hides_and_shows_items`；`crates/codegen/pager/src/views/tasks_pane.rs` — `arrow_keys_expand_and_collapse_group`；`crates/codegen/pager/src/views/tasks_pane.rs` — `emptied_group_forgets_collapse_state`。
+
+### Requirement: Subagent labels, model metadata, activity, and styling
+TaskEntry::from_subagent SHALL use formatted/capitalized type labels, include description and optional model in searchable text, style running/pending/completed/failed states with appropriate vivid/blended colors, append live activity only to rendered text, and cap the displayed description to preserve activity while retaining full searchable label.
+
+#### Scenario: Metadata
+- **WHEN** type/model/description fields exist
+- **THEN** label contains normalized type, description, and model where present.
+
+#### Scenario: Activity
+- **WHEN** running activity exists
+- **THEN** rendered line appends activity but searchable label does not.
+
+#### Scenario: Finished
+- **WHEN** activity is stale or row is finished
+- **THEN** activity suffix disappears and long description is only capped when suffix needs space.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `from_subagent`；`crates/codegen/pager/src/views/tasks_pane.rs` — `format_subagent_label`；`crates/codegen/pager/src/views/tasks_pane.rs` — `format_context_badge`；`crates/codegen/pager/src/views/tasks_pane.rs` — `activity_label`；`crates/codegen/pager/src/views/tasks_pane.rs` — `ACTIVITY_DESC_MAX_WIDTH`；`crates/codegen/pager/src/views/tasks_pane.rs` — `pending_kill`；`crates/codegen/pager/src/views/tasks_pane.rs` — `display_elapsed_at`；`crates/codegen/pager/src/views/tasks_pane.rs` — `subagents_ordered_by_agent_type`；`crates/codegen/pager/src/views/tasks_pane.rs` — `entry_label_includes_type_badge`；`crates/codegen/pager/src/views/tasks_pane.rs` — `entry_label_includes_model_meta`；`crates/codegen/pager/src/views/tasks_pane.rs` — `entry_label_no_meta_when_empty`；`crates/codegen/pager/src/views/tasks_pane.rs` — `subagent_activity_suffix_renders_while_running_only`；`crates/codegen/pager/src/views/tasks_pane.rs` — `subagent_activity_suffix_caps_description`。
+
+### Requirement: Scheduled task labels and countdown status
+TaskEntry::from_scheduled SHALL capitalize the tag, truncate long prompts safely by characters, show linked/running, provisional starting, RFC3339 future/past, approximate interval, or no suffix according to schedule state, and never panic on Unicode or malformed dates.
+
+#### Scenario: Future
+- **WHEN** next_fire_at is future
+- **THEN** label shows next-in duration.
+
+#### Scenario: Provisional
+- **WHEN** task id starts provisional-
+- **THEN** label shows starting.
+
+#### Scenario: Past/bad
+- **WHEN** time is past or RFC3339 parse fails
+- **THEN** due-now or approximate interval is shown.
+
+#### Scenario: Unknown/Unicode
+- **WHEN** schedule is unknown or prompt is multibyte
+- **THEN** no invalid suffix/panic occurs and preview remains safe.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `from_scheduled`；`crates/codegen/pager/src/views/tasks_pane.rs` — `parse_schedule_interval_secs`；`crates/codegen/pager/src/views/tasks_pane.rs` — `next_fire_at`；`crates/codegen/pager/src/views/tasks_pane.rs` — `last_subagent_id`；`crates/codegen/pager/src/views/tasks_pane.rs` — `format_duration`；`crates/codegen/pager/src/views/tasks_pane.rs` — `scheduled_label_shows_next_in_countdown`；`crates/codegen/pager/src/views/tasks_pane.rs` — `scheduled_provisional_shows_starting`；`crates/codegen/pager/src/views/tasks_pane.rs` — `scheduled_past_shows_due_now`；`crates/codegen/pager/src/views/tasks_pane.rs` — `scheduled_unicode_prompt_safe_no_panic`；`crates/codegen/pager/src/views/tasks_pane.rs` — `scheduled_bad_next_fire_at_falls_back_to_approx`；`crates/codegen/pager/src/views/tasks_pane.rs` — `scheduled_unknown_schedule_no_suffix`。
+
+### Requirement: Workflow entries, phases, running-agent suffix, and stoppability
+TaskEntry::from_workflow_run SHALL style workflow rows by active/complete/terminal/paused status, include phase and count only running roster agents, derive elapsed time, and set stoppable from can_stop rather than is_active.
+
+#### Scenario: Active
+- **WHEN** workflow is active
+- **THEN** spinner/running styling and phase/agent suffix are shown.
+
+#### Scenario: Roster
+- **WHEN** mixed running/done workflow agents exist
+- **THEN** suffix counts only running agents.
+
+#### Scenario: Paused/terminal
+- **WHEN** can_stop differs from is_active
+- **THEN** stoppable follows can_stop and status styling reflects state.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `from_workflow_run`；`crates/codegen/pager/src/views/tasks_pane.rs` — `WorkflowRunSnapshot`；`crates/codegen/pager/src/views/tasks_pane.rs` — `is_active`；`crates/codegen/pager/src/views/tasks_pane.rs` — `is_terminal`；`crates/codegen/pager/src/views/tasks_pane.rs` — `can_stop`；`crates/codegen/pager/src/views/tasks_pane.rs` — `live_elapsed_ms_at`；`crates/codegen/pager/src/views/tasks_pane.rs` — `workflow_suffix_counts_only_running_roster_rows`；`crates/codegen/pager/src/views/tasks_pane.rs` — `workflow_row_stoppable_tracks_can_stop_not_is_active`。
+
+### Requirement: Tasks pane visibility, dimensions, liveness, and input forwarding
+TasksPane SHALL initialize a configured searchable/filterable/copyable ListPane with clipboard provider and centered-indicator style; expose visibility/show_done/live-motion/running count, return zero height when hidden or viewport<12, cap visible height by 8 and 15%, and forward key/paste/scroll/mouse to ListPane while `h` toggles done mode outside input.
+
+#### Scenario: Hidden
+- **WHEN** overlay is not visible
+- **THEN** desired_height is zero and state input closes on state change.
+
+#### Scenario: Visible
+- **WHEN** running/entries exist
+- **THEN** height is bounded and live motion reports running entries.
+
+#### Scenario: Input
+- **WHEN** key/paste/scroll/mouse arrives
+- **THEN** ListPane receives it, with h toggling show_done only outside input mode.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `TasksPane::new`；`crates/codegen/pager/src/views/tasks_pane.rs` — `ListPaneConfig`；`crates/codegen/pager/src/views/tasks_pane.rs` — `show_done`；`crates/codegen/pager/src/views/tasks_pane.rs` — `is_visible`；`crates/codegen/pager/src/views/tasks_pane.rs` — `has_live_motion`；`crates/codegen/pager/src/views/tasks_pane.rs` — `running_count`；`crates/codegen/pager/src/views/tasks_pane.rs` — `desired_height`；`crates/codegen/pager/src/views/tasks_pane.rs` — `handle_key`；`crates/codegen/pager/src/views/tasks_pane.rs` — `handle_paste`；`crates/codegen/pager/src/views/tasks_pane.rs` — `handle_scroll`；`crates/codegen/pager/src/views/tasks_pane.rs` — `handle_mouse`；`crates/codegen/pager/src/views/tasks_pane.rs` — `on_state_change`。
+
+### Requirement: Task selection and action identity projections
+TasksPane SHALL expose the selected entry and return task_id only for BgTask, subagent_id/child_session_id only for Agent, while headers and other kinds yield None; TaskEntry SHALL implement ListItem content/prefix/search/stable identity and all entries remain selectable.
+
+#### Scenario: Selection
+- **WHEN** a row is selected
+- **THEN** typed identity accessor returns its corresponding id.
+
+#### Scenario: Other/header
+- **WHEN** header or unrelated row is selected
+- **THEN** inapplicable accessors return None.
+
+#### Scenario: List item
+- **WHEN** list renders/searches
+- **THEN** content, prefix, searchable text, stable id, and selectability are provided.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `selected_entry`；`crates/codegen/pager/src/views/tasks_pane.rs` — `selected_task_id`；`crates/codegen/pager/src/views/tasks_pane.rs` — `selected_subagent_id`；`crates/codegen/pager/src/views/tasks_pane.rs` — `selected_child_session_id`；`crates/codegen/pager/src/views/tasks_pane.rs` — `impl ListItem`；`crates/codegen/pager/src/views/tasks_pane.rs` — `content`；`crates/codegen/pager/src/views/tasks_pane.rs` — `prefix`；`crates/codegen/pager/src/views/tasks_pane.rs` — `search_text`；`crates/codegen/pager/src/views/tasks_pane.rs` — `stable_id`；`crates/codegen/pager/src/views/tasks_pane.rs` — `is_selectable`。
+
+### Requirement: Overlay controls for workflows, background tasks, agents, and scheduled watchers
+The overlay SHALL draw centered status icons and right-aligned elapsed/model/context/countdown text, reserve and clear its width with ellipsis, expose kill/view hit rectangles by TaskEntryId, show kill while running/pending, view for inspectable entries, and style hovered controls with semantic theme colors.
+
+#### Scenario: Workflow
+- **WHEN** a workflow row is visible
+- **THEN** stoppable active rows get kill hit; completion gets success/error icon.
+
+#### Scenario: Task/agent
+- **WHEN** row is running/done/pending
+- **THEN** status/icon/button/elapsed/model/badge overlay is aligned and non-overpainting.
+
+#### Scenario: Scheduled
+- **WHEN** a watcher row is visible
+- **THEN** kill always appears and view appears only when linked subagent exists.
+
+#### Scenario: Hover
+- **WHEN** kill/view id matches row
+- **THEN** control color brightens and hit rect identifies the entry.
+
+证据：`crates/codegen/pager/src/views/tasks_pane.rs` — `render_overlay`；`crates/codegen/pager/src/views/tasks_pane.rs` — `render_workflow_overlay`；`crates/codegen/pager/src/views/tasks_pane.rs` — `render_bg_task_overlay`；`crates/codegen/pager/src/views/tasks_pane.rs` — `render_agent_overlay`；`crates/codegen/pager/src/views/tasks_pane.rs` — `render_scheduled_overlay`；`crates/codegen/pager/src/views/tasks_pane.rs` — `kill_button_rects`；`crates/codegen/pager/src/views/tasks_pane.rs` — `view_button_rects`；`crates/codegen/pager/src/views/tasks_pane.rs` — `hovered_kill`；`crates/codegen/pager/src/views/tasks_pane.rs` — `hovered_view`；`crates/codegen/pager/src/views/tasks_pane.rs` — `OverlayEntryData`。
+### Requirement: Scrollback identity, immutable event deduplication, minimal replay frontier, and continuation merge
+ScrollbackState SHALL keep transcript entries in insertion order under non-reused EntryId identity, deduplicate only immutable domain events carrying the same event id, maintain minimal-mode native-scrollback commitment by EntryId, and stage reconnect continuations in a shared monotonic id and invalidation-generation space. A full replay SHALL inherit native commitment only across a semantically equivalent committed prefix, permitting old local notices without durable identity to be skipped but treating durable notices or divergent blocks as a frontier stop. Tail merge SHALL preserve entry ids, running/dirty/committed state and advance both invalidation generations. The bounded expand history retains at most 256 folded committed ids.
+
+#### Scenario: Immutable event identity
+- **WHEN** a durable event id is inserted repeatedly, removed, cleared, or rebuilt during merge
+- **THEN** one indexed row represents that id while local notices without event ids remain distinct and removal/clear permits a later fresh insertion.
+
+#### Scenario: Replay commitment frontier
+- **WHEN** a rebuilt transcript is compared with previously committed native-scrollback entries
+- **THEN** only the committed replay-equivalent common prefix is inherited, old local non-durable notices may be skipped, and durable or branch divergence stops inheritance.
+
+#### Scenario: Reconnect continuation identity
+- **WHEN** a fresh continuation is merged or discarded
+- **THEN** EntryIds are not reused, view preferences survive staging, and generation floors advance beyond every state consumers may have cached.
+
+#### Scenario: Ordered access and removal
+- **WHEN** entries are read by index/id or removed
+- **THEN** IndexMap order and O(1)-average id lookup remain aligned while auxiliary identity and commit indexes are updated.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::new`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_block_if_absent`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::fresh_continuation`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::append_entries_from`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::raise_id_floor`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::raise_invalidation_floor`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::reconcile_minimal_native_frontier_from`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::remove_entry`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::remove_from`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::clear`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::get_by_id`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::index_of_id`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::iter_entries`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::commit_scan_cursor`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_commit_scan_cursor`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::is_committed`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::mark_committed`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::record_committed_for_expand`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::take_expandable_committed`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_empty_state`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `immutable_ui_events_deduplicate_by_event_id_only`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `immutable_event_index_tracks_removal_clear_and_reinsert`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `minimal_replay_frontier_stops_at_a_divergent_branch`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `minimal_replay_frontier_skips_committed_local_notices`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `minimal_replay_frontier_does_not_skip_durable_notices`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `minimal_replay_frontier_inherits_only_committed_common_prefix`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_push_and_selection`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `fresh_continuation_and_append_share_id_space`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `raise_id_floor_skips_ids_allocated_by_discarded_sibling`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `continuation_swaps_never_regress_invalidation_generations`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `fresh_continuation_preserves_view_preferences`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_iter_entries_yields_all_in_order`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_get_by_id_is_o1`。
+
+### Requirement: Scrollback materialization, streaming mutation, hook attribution, and generation invalidation
+ScrollbackState SHALL own entry materialization and mutation invalidation: pushes allocate identity, apply the effective Edit display policy, index immutable events, update turns/layout incrementally when possible, and advance content plus link generations. Streaming agent, thinking, execute and hook mutations SHALL invalidate affected render/height state. Display, scroll, appearance and viewport-only changes SHALL leave content_generation unchanged. Edit replacement SHALL preserve Edit-to-Edit user mode except an untrusted-summary rising edge, honor pinned folds when configured, and reset genuine kind transitions to the new block default. Stop hooks SHALL attach only to the latest attributable terminal turn marker, with prompt identity required when stamped. Cwd changes invalidate every cwd-dependent entry cache.
+
+#### Scenario: Edit materialization
+- **WHEN** an Edit is pushed or a placeholder/refinement is replaced
+- **THEN** failed edits collapse, untrusted successful summaries expand, the appearance default controls trusted success, and eligible user display choices survive later Edit refinement.
+
+#### Scenario: Stop hook attribution
+- **WHEN** stop hooks arrive stamped, unstamped, repeated, or after interleaved rows
+- **THEN** only the latest compatible turn-terminal marker accepts them and same-name or foreign-turn attachment is refused.
+
+#### Scenario: Streaming mutation
+- **WHEN** agent, thinking or execute content changes through typed mutation methods
+- **THEN** only compatible existing block kinds mutate, their render/height cache is dirtied, and content/link generations advance.
+
+#### Scenario: Generation separation
+- **WHEN** content, display, scroll, resize or batching changes state
+- **THEN** content changes advance both generations while view-only changes advance link geometry without redefining the searchable corpus, and the next layout preparation reconciles dirty or appended heights.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_cwd`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_appearance`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::begin_batch`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::end_batch`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_block`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::replace_tool_block`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::attach_hooks`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_lifecycle_hooks`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::latest_turn_marker_accepting`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::attach_stop_hooks_to_marker`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_chunk_to_agent`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_chunk_to_agent_deferred`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_execute_output`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_chunk_to_thinking`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_chunk_to_thinking_deferred`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::append_execute_output`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_chunk_to_execute`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::mark_height_dirty`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_inline_edit_height`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::content_generation`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::generation`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `push_applies_edit_materialize_policy`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `replace_tool_block_edit_policy`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `replace_tool_block_untrusted_rising_edge_expands`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `push_uses_canonical_edit_default_and_explicit_override`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `stop_hooks_attach_only_to_turn_terminal_markers`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `stop_hooks_respect_marker_prompt_id`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `stop_hooks_merge_walks_past_interleaved_tail_blocks`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_push_chunk_to_agent`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_push_chunk_to_nonexistent_entry`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_push_chunk_to_wrong_type`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_dirty_heights_cleared_after_prepare_layout`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_content_generation_bumps_on_content_changes`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_content_generation_unchanged_by_display_toggles`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_content_generation_unchanged_by_scroll_and_resize`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_push_then_prepare_layout_updates_total_height`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_push_in_batch_still_nullifies_cache`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_push_into_empty_state_with_no_cache`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_mark_height_dirty`。
+
+### Requirement: Running lifecycle, finish flash, pending input, and display-mode policy
+ScrollbackState SHALL track running entries separately from transcript order, request animation only for running rows overlapping the current viewport, and use an absolute finish-flash deadline for one final visible repaint. Finishing SHALL finalize supported streaming blocks, record completion time, remove running state, apply thinking/tool display policy, dirty layout and advance content generation. Pending-user-input flags SHALL be idempotent, participate in structural grouping, clear in bulk or on entry completion, and remain distinct from running state. Off-screen render-cache eviction SHALL preserve layout geometry.
+
+#### Scenario: Viewport animation gate
+- **WHEN** running entries move outside or inside a prepared viewport
+- **THEN** only visible running rows demand motion frames, with pre-layout state conservatively animated.
+
+#### Scenario: Finish deadline
+- **WHEN** a running row completes and its flash expires or the row is removed
+- **THEN** periodic animation stops, one visible expiry repaint is requested, and stale flash ids drain.
+
+#### Scenario: Pending input
+- **WHEN** a row begins, repeats, resolves, completes, or is bulk-cleared from awaiting input
+- **THEN** actual flag transitions are reported, group structure is dirtied, and no stale pending mark remains.
+
+#### Scenario: Thinking completion mode
+- **WHEN** streaming thinking was untouched, manually expanded, toggled back, or governed by sticky expansion
+- **THEN** completion selects the corresponding collapsed or expanded resting mode.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_last_running`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_entry_running`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::finish_running`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::finish_running_with_time`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::finish_all_running`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::maintain`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::needs_animation`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::next_ui_deadline`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_pending_user_input`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::clear_all_pending_user_input`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::has_pending_user_input`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::tick_running`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::evict_offscreen_render_caches`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `bash_execute_expands_on_finish_unless_user_collapsed`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `offscreen_running_entry_needs_no_animation`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `finish_flash_is_tracked_and_drained`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `finish_flash_drops_removed_entries`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `evict_offscreen_render_caches_sweeps_far_entries_only`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `set_pending_user_input_toggles_flag_and_reports_change`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `mark_completed_clears_pending_user_input`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `user_expanded_running_thinking_stays_expanded_on_finish`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `untouched_running_thinking_collapses_on_finish`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `running_thinking_toggled_back_to_truncated_collapses_on_finish`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `sticky_expanded_mode_still_expands_untouched_thinking_on_finish`。
+
+### Requirement: Layout preparation, viewport snapshots, turn projection, and scroll geometry
+ScrollbackState SHALL orchestrate a three-case layout preparation boundary: missing/width-changed cache causes a full rebuild and width-cache invalidation, dirty entries cause incremental height processing with structural or streaming virtual-position repair, and clean stable width recomputes current visible-range height. Follow mode, exact visible measurement and deferred warm-above processing run at that boundary. Viewport snapshots SHALL restore scroll/follow/selection/turn/width state and invalidate layout so the restored width is fully prepared again. Direct scroll positioning clamps to the available range and disables follow. Turn ranges and selection remain coherent at the tested prompt-delimited boundary.
+
+#### Scenario: Layout case selection
+- **WHEN** width, height, cache presence or dirty-height state changes
+- **THEN** width changes take full Case 1, dirty state takes Case 2, and stable clean or height-only changes remain Case 3.
+
+#### Scenario: Height and appearance
+- **WHEN** prompt vertical padding or appended entries change measured content
+- **THEN** cached heights and total height reflect the effective appearance after preparation.
+
+#### Scenario: Turn navigation projection
+- **WHEN** prompt-delimited entries are selected or turn navigation moves
+- **THEN** turn ranges, current turn, selection and pinned-prompt state remain coherent at the tested boundary.
+
+#### Scenario: Viewport snapshot
+- **WHEN** a temporary guest view mutates width, height, follow, selection, turn and scroll state
+- **THEN** restore reinstates the captured interaction state, discards the guest layout cache and rebuilds at the restored width.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::prepare_layout`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::begin_frame`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::invalidate_if_width_changed`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::capture_viewport_snapshot`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::restore_viewport_snapshot`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_viewport_height`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_total_height`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_scroll_offset`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_turn_detection`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_turn_navigation`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_pinned_prompt_index`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_cached_height_respects_appearance_vpad`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `test_cached_height_with_default_appearance_has_vpad`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `viewport_snapshot_restore_roundtrip_after_guest_mutate`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `restore_invalidates_stale_peek_width_cache_before_full_prepare`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `prepare_layout_width_change_is_case1_height_only_is_not`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `restore_reverts_follow_autoselect_and_current_turn`。
+
+### Requirement: Permission epochs and ordered insertion preserve transcript and native commit invariants
+ScrollbackState SHALL aggregate subagent permission decisions into one stable running block per primary-turn permission epoch, ignoring intervening UI rows; terminal primary-turn completion seals that group and advances the epoch. Reconnect tail merge SHALL combine same-epoch members into the original open group, seal it when the tail crossed a terminal boundary, and retain post-terminal members in a new epoch. insert_block_before SHALL allocate a unique id, preserve anchor order and selection identity, rebuild positional turn state, pull the minimal commit cursor back to the insertion point, and fall back to append when the anchor vanished. Its uncommitted-anchor precondition is enforced only by debug_assert.
+
+#### Scenario: Open permission epoch
+- **WHEN** multiple permission decisions arrive around unrelated UI rows before primary completion
+- **THEN** one stable running group accumulates the epoch members without reordering those UI rows.
+
+#### Scenario: Reconnect permission merge
+- **WHEN** a continuation contains decisions before and/or after an epoch terminal
+- **THEN** same-epoch members merge into the original group, the original seals, and later decisions remain a new running group.
+
+#### Scenario: Ordered insertion
+- **WHEN** a finalized block is inserted before a live uncommitted anchor
+- **THEN** it receives a unique id at the anchor position, selection stays with its prior entry, turns rebuild, and the native commit scan cannot skip it.
+
+#### Scenario: Missing or committed anchor
+- **WHEN** the anchor disappeared or was already committed
+- **THEN** missing anchors append, while committed anchors violate the documented precondition and panic only in debug builds.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_subagent_permission`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::seal_subagent_permission_group`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::merge_permission_groups_from_tail`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::insert_block_before`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `permission_updates_rejoin_the_open_primary_turn_group`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `completed_primary_turn_seals_the_permission_group`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `reconnect_merges_permissions_from_the_same_epoch`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `reconnect_terminal_seals_the_original_permission_epoch`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `reconnect_merges_same_epoch_members_before_terminal`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `reconnect_keeps_post_terminal_permissions_in_a_new_group`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `reconnect_merges_before_and_splits_after_terminal`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `insert_block_before_positions_and_keeps_ids_unique`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `insert_block_before_falls_back_to_push_when_the_anchor_is_gone`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `insert_block_before_keeps_the_selection_on_its_entry`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `insert_block_before_never_strands_the_entry_below_the_commit_frontier`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `insert_block_before_rejects_an_already_committed_anchor`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `insert_block_before_rebuilds_turn_indices`。
