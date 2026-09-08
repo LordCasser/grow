@@ -905,3 +905,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：按钮宽度和三列 gap 由静态标签与 UnicodeWidthStr 计算，绘制/命中虽共享 AffordanceRow，但国际化或文案变更仍需同步协议与测试。
 - Pager 审计债务：post-wrap 插入通过 source_for 索引、insert_at+k 和反向插入维护文档顺序，调用方必须保持 prewrap_ranges 与 output.lines 同一帧映射。
 - Pager 审计债务：MermaidContent 明确不保存 per-diagram render state，所有异步状态由 AgentView worker 层维护，跨模块状态边界清晰但重构成本较高。
+- Pager 审计债务：One AgentView module centralizes search, todo, task, catalog, modal, viewer, question, dropdown, and base-pane routing; adding another pane increases precedence coupling and makes ownership review harder.
+- Pager 审计债务：handle_scroll clones workflow view and synthesizes MouseEvent values for prompt scrolling, while the same method directly mutates many modal-specific offsets; scroll ownership is split across heterogeneous APIs.
+- Pager 审计债务：Task action eligibility is reconstructed from session maps in the router, so display identity and action identity can drift if TasksPane projections change without updating this module.
+- Pager 审计债务：Search paste has a separate route from key handling and deliberately consumes browse-mode paste as Unchanged; this implicit ownership contract is only covered by one inline test.

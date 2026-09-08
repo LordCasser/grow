@@ -3739,7 +3739,19 @@
       "Btw overlay state, markdown content, and bounded scrolling",
       "Btw panel geometry, status rendering, title truncation, and close affordance",
       "Overlay text selection geometry and complete copy reconstruction",
-      "Source-aware Markdown hyperlink, URL, file path, and viewport link overlays"
+      "Source-aware Markdown hyperlink, URL, file path, and viewport link overlays",
+      "The workflow overlay SHALL construct pause, resume, and stop slash commands only when the selected run capability permits the operation, with the budget_limited management-available resume exception preserved; unsupported or terminally non-resumable operations SHALL be consumed without dispatch.",
+      "The workflow overlay SHALL translate definition focus, edit, validate, run, publish, and discard actions into `/workflow` prompts, with publish and discard available only for session-scoped definitions; action dispatch SHALL preserve the current draft and close the overlay.",
+      "Opening workflow details SHALL validate the run identity, reset the workflow view, set both selected and detail run ids, show the overlay, and hide goal detail; list navigation SHALL preserve the selected run identity when newer runs are inserted.",
+      "While the workflow overlay is active, keyboard input SHALL provide modal-local close and navigation: Ctrl-Q bubbles as Unchanged, Esc/q closes or backs from detail, g closes the overlay, Tab/Left backs from detail, arrows select runs or phases, and Enter in detail opens the selected phase transcript when a target exists.",
+      "Entering a workflow detail transcript SHALL target agents in the selected phase, or all agents for a run with no phase data, preferring the newest running agent and falling back to the last available agent; with no agents it SHALL do nothing safely.",
+      "Mouse input owned by the workflow overlay SHALL first honor modal window outcomes and shortcut ids, then activate agent, phase, definition, or run hit rectangles with coordinate containment; unhandled clicks SHALL still return Changed and keep the overlay state stable.",
+      "Scrollback entry identity, initialization, timestamps, and lifecycle metadata",
+      "Display mode, raw mode, foldability, and thinking visibility controls",
+      "Width-aware source line estimation and cheap estimate cache",
+      "Render output cache keys, selection branches, and edit boundary sidecars",
+      "Truncated height caching, width invalidation, eviction, and render contexts",
+      "Tool hook rendering and output composition"
     ],
     "reviewed_files": [
       {
@@ -5829,6 +5841,18 @@
       {
         "path": "crates/codegen/pager/src/views/btw_overlay.rs",
         "sha256": "a9527990806c60b8c4df4a136d4fb6b719b60c74cae241a800073e998d2425a5"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "sha256": "666f5ec81587eb73ef6a5cdd4211f7bc88742b4ad2c97517901c9487af5f31e8"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "sha256": "98b10015df775ed9da5f1070646a8d5a22ba32af17d328017a2fe296467158f2"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/entry.rs",
+        "sha256": "764cad36aac411bbdc825d9931c84ebf9ebc885271effd0d2d3bc0d9abd2024a"
       }
     ],
     "review": "reviews/pager.md"

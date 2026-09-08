@@ -59277,6 +59277,36 @@
         "Blank find query",
         "find参数为空或全空白",
         "打开无初始query的scrollback search。"
+      ],
+      [
+        "Search open gate",
+        "a pane switch is blocked by an existing dirty queued-prompt edit",
+        "no search state is created and the search bar cannot become active."
+      ],
+      [
+        "Composing query",
+        "search is composing and a paste, cursor key, text key, or Enter arrives",
+        "the search query state changes only through ScrollbackSearchState, with Enter accepting nonempty text or closing an empty query."
+      ],
+      [
+        "Browse navigation",
+        "search is accepted and n, N, Up, or Down arrives with allowed modifiers",
+        "the matching result advances or retreats and its entry line is revealed; unrelated keys can fall through."
+      ],
+      [
+        "Async match",
+        "poll reports changed results and the current entry id exists in scrollback",
+        "reveal_entry_line is called for the current entry and line, and polling reports a redraw."
+      ],
+      [
+        "Short scrollback",
+        "search is active in a one-row scrollback area",
+        "reserved rows are clamped to one rather than pushing the search bar outside the area."
+      ],
+      [
+        "Scoped paste",
+        "an open composing search receives paste text while the prompt contains unrelated draft text",
+        "the search query changes and the prompt text remains unchanged; accepted browse mode consumes later paste without changing either value."
       ]
     ],
     "sources": [
@@ -59431,6 +59461,46 @@
       [
         "crates/codegen/pager/src/app/agent_view/links.rs",
         "subagent_scrollback_search_delivers_results_via_child_poll"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::handle_scrollback_key"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::open_scrollback_search"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::navigate_search"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::search_reserved_rows"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::handle_scrollback_search_key"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::handle_scrollback_search_paste"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::set_scrollback_search_query"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::poll_scrollback_search"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::reveal_current_search_match"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "paste_routing_tests::scrollback_search_paste_stays_scoped_and_browse_is_inert"
       ]
     ]
   },
@@ -87103,6 +87173,31 @@
         "Drag promotion",
         "the pointer moves with a left button held over a pending scrollback selection",
         "the drag is promoted; ordinary motion leaves the pending click available for mouse-up selection."
+      ],
+      [
+        "Fullscreen ownership",
+        "workflows, goal detail, or an active modal owns the frame",
+        "the event is consumed by that surface and scrollback is not changed."
+      ],
+      [
+        "Viewer ownership",
+        "block viewer, rewind, jump, line-viewer popup, BTW result, or history search is active at the event location",
+        "only the owning viewer/search state is changed and lower pane routing is skipped."
+      ],
+      [
+        "Dropdown step",
+        "a wheel event lands in a slash or completion item rectangle with magnitude 3 or -3",
+        "selection moves exactly one item in the corresponding direction."
+      ],
+      [
+        "Question routing",
+        "question_view is active and the event is inside the prompt region",
+        "inline prompt scrolling or question scroll region handling consumes it; an event outside those subregions does not fall through to ordinary pane routing."
+      ],
+      [
+        "Pane hit test",
+        "no higher-priority owner matches",
+        "the stored pane areas select the target; scrollback, list panes, or prompt receive the signed delta."
       ]
     ],
     "sources": [
@@ -87161,6 +87256,26 @@
       [
         "crates/codegen/pager/src/app/root/mod.rs",
         "dashboard_shortcuts_modal_is_scroll_blocking"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::handle_scroll"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "scroll_granularity_tests::wheel_notch_over_slash_dropdown_moves_selection_one_step"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "scroll_granularity_tests::wheel_notch_over_completion_dropdown_moves_selection_one_step"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "scroll_granularity_tests::wheel_over_fullscreen_overlays_never_scrolls_panes_beneath"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "completion_item"
       ]
     ]
   },
@@ -95962,6 +96077,36 @@
         "History toggle while searching",
         "输入模式已打开并收到 h",
         "不切换 show_done，由 ListPane 处理。"
+      ],
+      [
+        "Todo toggle",
+        "Ctrl-T arrives while the todo pane is focused",
+        "the overlay toggles, state-change bookkeeping runs, and closing returns focus toward Scrollback."
+      ],
+      [
+        "Task group input",
+        "Right, Left, Enter, or Ctrl-F arrives with no task list input mode and a group header selected",
+        "the group expands, collapses, or toggles without being sent to content editing."
+      ],
+      [
+        "Task viewer action",
+        "Enter/Ctrl-F targets a background task with session metadata",
+        "a BlockViewerPane is created from its stdout and entry id fallback, the scrollback pane is forced active, and the outcome is Changed."
+      ],
+      [
+        "Task cancellation",
+        "x targets a running task, running non-pending-kill subagent, scheduled task, or stoppable workflow",
+        "the corresponding KillBgTask, KillSubagent, CancelScheduledTask, or draft-preserving workflow stop action is returned."
+      ],
+      [
+        "Catalog activation",
+        "an unmodified Enter targets a catalog entry",
+        "ViewCatalogEntry carries that entry kind and name; no selection yields Unchanged."
+      ],
+      [
+        "Delegated content",
+        "no router-owned action matches",
+        "the selected child pane handles the key and its boolean result is converted to Changed or Unchanged."
       ]
     ],
     "sources": [
@@ -95992,6 +96137,18 @@
       [
         "crates/codegen/pager/src/views/tasks_pane.rs",
         "TasksPane::on_state_change"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::handle_todo_key"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::handle_bg_tasks_key"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/panes.rs",
+        "AgentView::handle_catalog_key"
       ]
     ]
   },
@@ -181473,6 +181630,960 @@
       [
         "crates/codegen/pager/src/views/btw_overlay.rs",
         "col_end"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The workflow overlay SHALL construct pause, resume, and stop slash commands only when the selected run capability permits the operation, with the budget_limited management-available resume exception preserved; unsupported or terminally non-resumable operations SHALL be consumed without dispatch.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: management_command maps pause/resume/stop to WorkflowRunSnapshot::can_pause/can_resume/can_stop and returns `/workflow-run {op} {name}` only when the gate passes. resolve_management_command first uses that gate, then allows resume for a budget_limited run only when management_available is true. handle_workflows_overlay_input hides the overlay and returns SendSlashCommandPreservingDraft for a resolved command, otherwise returns Changed and keeps the overlay open.",
+    "scenarios": [
+      [
+        "Allowed pause/resume/stop",
+        "the selected detail or list run reports the corresponding can_* capability",
+        "the overlay dispatches the normalized workflow-run command and closes."
+      ],
+      [
+        "Budget-limited resume",
+        "the run status is budget_limited and management_available is true",
+        "resume dispatches even when the ordinary can_resume gate does not allow it."
+      ],
+      [
+        "Failed-run resume",
+        "the run is failed and its resume capability is available",
+        "r dispatches `/workflow-run resume <name>` and closes the overlay."
+      ],
+      [
+        "Unsupported resume",
+        "a completed, unsupported, or management-unavailable run is selected",
+        "no command is dispatched and the overlay remains visible."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "management_command"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "resolve_management_command"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "WorkflowRunSnapshot::can_pause / can_resume / can_stop"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "paused_budget_limited_and_failed_runs_are_resumable_others_fail_closed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The workflow overlay SHALL translate definition focus, edit, validate, run, publish, and discard actions into `/workflow` prompts, with publish and discard available only for session-scoped definitions; action dispatch SHALL preserve the current draft and close the overlay.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: definition_command returns None for a missing definition, unknown operation, or publish/discard on a non-session definition. focus, edit, validate, and run include the definition_id and operation-specific instruction; edit explicitly derives a saved definition session draft and limits changes to the next Run. When a definition shortcut or list Enter selects edit, handle_workflows_overlay_input returns Action::SendSlashCommandPreservingDraft, sets show_workflows false, and does not execute the workflow itself.",
+    "scenarios": [
+      [
+        "Focus definition",
+        "a definition is selected and f or the focus shortcut is pressed",
+        "the overlay sends a `/workflow` focus instruction containing the definition id."
+      ],
+      [
+        "Edit definition",
+        "a definition is selected and Enter/e or the edit shortcut is pressed",
+        "the overlay sends the draft-preserving edit instruction and closes."
+      ],
+      [
+        "Validate or run",
+        "a definition is selected and v/r or its shortcut is pressed",
+        "the overlay sends the corresponding validation or run instruction with the definition id."
+      ],
+      [
+        "Session publish/discard",
+        "a session-scoped definition is selected",
+        "p publishes or d discards through the workflow command route."
+      ],
+      [
+        "Non-session publish/discard",
+        "a project/user definition is selected",
+        "the operation is rejected locally and the overlay remains open."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "definition_command"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "handle_workflows_overlay_input"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "Action::SendSlashCommandPreservingDraft"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "ctrl_q_bubbles_and_g_closes_from_detail"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Opening workflow details SHALL validate the run identity, reset the workflow view, set both selected and detail run ids, show the overlay, and hide goal detail; list navigation SHALL preserve the selected run identity when newer runs are inserted.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: open_workflow_detail resolves a name to a run id and delegates to open_workflow_detail_by_run_id. The id variant returns without mutation when the id is absent; otherwise it resets workflows_view, stores selected_run_id/detail_run_id, enables show_workflows, and calls set_goal_detail_visible(false). Key and mouse list activation use the normalized newest-first run snapshot and existing run identity to open details, rather than relying on a stale numeric row index.",
+    "scenarios": [
+      [
+        "Valid run open",
+        "a name or run id exists in session.workflow_runs",
+        "the view is reset, detail and selection point at that run, the overlay is visible, and goal detail is hidden."
+      ],
+      [
+        "Missing run",
+        "the requested name or id is absent",
+        "the open helper returns without changing the workflow overlay state."
+      ],
+      [
+        "Keyboard list open",
+        "the list has a selected run and Enter or Right is pressed",
+        "that run becomes detail_run_id and the overlay remains open."
+      ],
+      [
+        "Newest-first insertion",
+        "a selected older run remains in the session while a newer run is appended",
+        "normalization resolves the selected run by selected_run_id and Enter opens the original run."
+      ],
+      [
+        "Mouse run activation",
+        "a left click hits a known run rectangle",
+        "the hit run is selected by id, detail is opened, and phase pinning is cleared."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "AgentView::open_workflow_detail"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "AgentView::open_workflow_detail_by_run_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "handle_workflows_overlay_input"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "run_selection_survives_newest_first_insert"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "click_on_run_row_opens_that_run_detail"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "While the workflow overlay is active, keyboard input SHALL provide modal-local close and navigation: Ctrl-Q bubbles as Unchanged, Esc/q closes or backs from detail, g closes the overlay, Tab/Left backs from detail, arrows select runs or phases, and Enter in detail opens the selected phase transcript when a target exists.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: handle_workflows_overlay_input ignores key-release events, returns Unchanged for Ctrl-Q, returns Changed for modified local keys without dispatch, and normalizes a cloned WorkflowsView before routing. In detail, Esc/q/Tab/Left clear detail_run_id and phase_pinned when the run list has multiple items (Left always backs even for one run); on the list Left is consumed as a no-op. Up/k and Down/j select phases in detail or list items otherwise. Enter in detail uses transcript_target and open_subagent_fullscreen; Enter/Right on the list opens a definition edit command or the selected run.",
+    "scenarios": [
+      [
+        "Ctrl-Q bubble",
+        "Ctrl-Q arrives while the overlay is shown",
+        "the result is Unchanged and the overlay remains visible for the outer cancel owner."
+      ],
+      [
+        "Close from list",
+        "Esc, q, or g arrives while the overlay is on the list",
+        "Esc/q close the overlay and g closes it directly."
+      ],
+      [
+        "Back from detail",
+        "Esc/q, Tab, or Left arrives in detail",
+        "detail and phase pin are cleared while the overlay remains available according to the run-count close rule; Left also works with one run."
+      ],
+      [
+        "List Left no-op",
+        "Left arrives while already on the runs list",
+        "the event is consumed as Changed without changing selection or closing the overlay."
+      ],
+      [
+        "Run and phase navigation",
+        "up/down or j/k arrives in list or detail",
+        "the selected run or phase advances within the normalized view."
+      ],
+      [
+        "Detail transcript",
+        "Enter arrives in detail and a transcript target exists",
+        "the selected child transcript opens fullscreen and the overlay remains underneath."
+      ],
+      [
+        "Modified local key",
+        "a local control character carries modifiers",
+        "no workflow command is dispatched and the overlay remains shown."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "AgentView::handle_workflows_overlay_input"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "transcript_target"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "ctrl_q_bubbles_and_g_closes_from_detail"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "left_in_detail_returns_to_runs_list"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "left_in_detail_has_no_run_count_guard"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "left_on_list_is_consumed_noop"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "modified_local_chars_do_not_trigger_workflow_controls"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "right_on_list_opens_selected_run_detail"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Entering a workflow detail transcript SHALL target agents in the selected phase, or all agents for a run with no phase data, preferring the newest running agent and falling back to the last available agent; with no agents it SHALL do nothing safely.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: transcript_target treats an empty phases list plus no current_phase as an all-agent view and otherwise calls agents_in_phase with the selected phase. It searches the returned list in reverse for state == running, then falls back to agents.last(), and clones the agent_id. handle_workflows_overlay_input opens the child fullscreen only when this returns Some.",
+    "scenarios": [
+      [
+        "Running phase agent",
+        "the selected phase contains both done and running agents",
+        "the newest running agent id is selected."
+      ],
+      [
+        "No running agent",
+        "the selected phase contains agents but none is running",
+        "the last phase agent is selected as fallback."
+      ],
+      [
+        "All-agent run",
+        "the run has no phases and no current phase",
+        "the target is chosen from the full agent list."
+      ],
+      [
+        "Empty roster",
+        "the selected scope has no agents",
+        "Enter is consumed as Changed without opening a child view."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "transcript_target"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "WorkflowRunSnapshot::agents_in_phase"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "enter_in_detail_opens_selected_phase_transcript"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Mouse input owned by the workflow overlay SHALL first honor modal window outcomes and shortcut ids, then activate agent, phase, definition, or run hit rectangles with coordinate containment; unhandled clicks SHALL still return Changed and keep the overlay state stable.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: handle_workflows_overlay_input delegates mouse events to handle_modal_mouse. CloseRequested applies the same detail-back versus overlay-close policy; OPEN/RUNS mutate run detail and phase pin; definition shortcut ids dispatch definition_command; management shortcut ids dispatch resolve_management_command. For left-down unhandled clicks, detail agent hits open a local child fullscreen, phase hits select and pin a phase, list definition hits select a definition, run hits select/open a run, and empty body clicks are consumed without closing.",
+    "scenarios": [
+      [
+        "Agent roster click",
+        "a left click is inside an agent hit rectangle and a local subagent view exists",
+        "the child transcript opens fullscreen while the workflow overlay stays underneath."
+      ],
+      [
+        "Missing local view",
+        "an agent hit has no matching subagent view",
+        "the click is consumed and no active subagent is opened."
+      ],
+      [
+        "Phase click",
+        "a left click hits a phase row in detail",
+        "the phase is selected and phase_pinned becomes true."
+      ],
+      [
+        "Definition click",
+        "a left click hits a definition rectangle on the list",
+        "the matching definition is selected without executing it."
+      ],
+      [
+        "Run click",
+        "a left click hits a run rectangle",
+        "the run is selected, detail opens, and phase pinning is cleared."
+      ],
+      [
+        "Empty modal body",
+        "a left click misses all registered hit rectangles",
+        "the result is Changed and the overlay remains open."
+      ],
+      [
+        "Modal shortcut",
+        "the modal helper reports a recognized shortcut",
+        "the corresponding open/runs/definition/management behavior is applied before raw hit testing."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "AgentView::handle_workflows_overlay_input"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "handle_modal_mouse"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "ModalWindowOutcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "workflow::shortcut_ids"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "click_on_roster_agent_opens_transcript_fullscreen_over_overlay"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "click_on_roster_agent_without_local_view_is_consumed_noop"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "click_on_phase_row_pins_that_phase"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "click_on_run_row_opens_that_run_detail"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/workflows_overlay.rs",
+        "click_on_empty_body_space_is_consumed_and_keeps_overlay"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Scrollback entry identity, initialization, timestamps, and lifecycle metadata",
+    "contract": "EntryId SHALL be a stable, copyable, hashable wrapper around a u64 with explicit construction and value access. ScrollbackEntry::new/with_id SHALL initialize a non-running entry with the block default display mode, pending-input false, raw false, unpinned display mode, empty caches, and a local creation timestamp; running/running_with_id SHALL preserve those defaults while setting is_running. with_display_mode SHALL change only the selected display mode and retain metadata such as created_at. Entry fields SHALL retain block content, hook data, completion timestamp, and pending-user-input state for renderer coordination.",
+    "scenarios": [
+      [
+        "Normal entry",
+        "a block is wrapped with new or with_id",
+        "the entry is not running, has the block default display mode, is not pinned, and receives created_at."
+      ],
+      [
+        "Running entry",
+        "a block is wrapped with running or running_with_id",
+        "is_running is true, display mode is the block default, and created_at is present."
+      ],
+      [
+        "Explicit identity",
+        "an EntryId is constructed or read",
+        "new preserves the supplied u64 and value returns it for external handles."
+      ],
+      [
+        "Display builder",
+        "with_display_mode is applied to a new entry",
+        "the requested mode is stored without clearing the creation timestamp."
+      ],
+      [
+        "Completion metadata",
+        "mark_completed is called",
+        "running and pending user input are cleared and caches are invalidated."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_entry_new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_entry_running"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_entry_new_has_timestamp"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_entry_running_has_timestamp"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_entry_with_display_mode_preserves_timestamp"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "EntryId"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "EntryId::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "EntryId::value"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "ScrollbackEntry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "ScrollbackEntry::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "ScrollbackEntry::with_id"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "ScrollbackEntry::running"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "ScrollbackEntry::running_with_id"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "with_display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "created_at"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "finished_at"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "is_running"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "is_pending_user_input"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "display_mode_pinned"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "hook_data"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "mark_completed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Display mode, raw mode, foldability, and thinking visibility controls",
+    "contract": "ScrollbackEntry SHALL expose display_mode and set_display_mode, invalidate width-dependent render caches when the mode changes, toggle raw rendering only for blocks supporting raw mode, and toggle fold state only when the block or hook data is foldable. Block-owned foldable modes SHALL use next_fold_mode with running state; hook-only foldability SHALL switch Collapsed/Expanded. is_hidden_thinking SHALL report true only for a thinking block when show_thinking is false.",
+    "scenarios": [
+      [
+        "Foldable block",
+        "toggle_fold is called on an expanded stub/block that supports folding",
+        "display mode changes to Collapsed and a second toggle returns to Expanded."
+      ],
+      [
+        "Non-foldable block",
+        "toggle_fold is called without block or hook foldability",
+        "display mode is unchanged and no invalidation is needed."
+      ],
+      [
+        "Raw-capable block",
+        "toggle_raw is called",
+        "raw flag and block raw mode toggle together and all content/width caches are invalidated."
+      ],
+      [
+        "Mode assignment",
+        "set_display_mode receives a different mode",
+        "the mode changes and caches are invalidated; assigning the same mode is a no-op."
+      ],
+      [
+        "Thinking visibility",
+        "a thinking block is rendered with show_thinking false or true",
+        "is_hidden_thinking is true only in the hidden case."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_entry_toggle_fold"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "toggle_raw"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "toggle_fold"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "set_display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "mark_completed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "is_foldable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "is_hidden_thinking"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "DisplayMode::Collapsed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "DisplayMode::Expanded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "next_fold_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "has_raw_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "set_raw_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "invalidate_cache"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Width-aware source line estimation and cheap estimate cache",
+    "contract": "estimate_source_lines SHALL derive a cheap wrapped-line estimate from searchable source text by stripping one trailing newline, measuring each source line in Unicode display width, summing per-line ceiling divisions at content_width (with minimum width one), and saturating at u16::MAX; no searchable text SHALL estimate as one line. The width-independent line-width profile SHALL survive invalidate_width_caches but be cleared by invalidate_cache. Explicit cheap estimates SHALL be keyed by content width and cleared by invalidate_cache.",
+    "scenarios": [
+      [
+        "Per-line ceiling",
+        "a multi-line prompt is estimated at widths 10, 5, and 100",
+        "each source line is independently ceiling-wrapped and the sums are 5, 8, and 3."
+      ],
+      [
+        "No searchable source",
+        "the block has no searchable text",
+        "estimate_source_lines returns one line."
+      ],
+      [
+        "Resize invalidation",
+        "invalidate_width_caches is called after estimating",
+        "the cached width profile remains available."
+      ],
+      [
+        "Content invalidation",
+        "invalidate_cache is called after estimating",
+        "the width profile and keyed estimate cache are removed."
+      ],
+      [
+        "Explicit estimate key",
+        "a stored estimate is queried at its original and another width",
+        "the original width hits and another width misses."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "estimate_source_lines_is_the_per_line_ceiling_sum"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "width_invalidation_keeps_the_line_profile_content_invalidation_drops_it"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "estimate_source_lines_without_searchable_text_is_one_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "estimate_lines_cache_stores_keyed_on_width_and_clears_on_invalidate"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "wrapped_lines_from_widths"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "estimate_source_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "cached_estimate_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "store_estimate_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "invalidate_width_caches"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "invalidate_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "cached_line_widths"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "searchable_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "UnicodeWidthStr"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "u16::MAX"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Render output cache keys, selection branches, and edit boundary sidecars",
+    "contract": "ensure_cached SHALL lazily render and memoize RenderedBlockOutput under width, raw flag, current theme, effective selection, and cwd keys. Selection SHALL affect the cache key only for UserPrompt, ToolCall, Thinking, BgTask, and Subagent blocks; other block selection changes SHALL normalize to false. cached_output_ref SHALL borrow the validated render output, output SHALL reuse it for ordinary rendering, and effective_output SHALL return Cached or Selected kind with a context reflecting selection and vertical padding. Edit blocks SHALL retain boundary sidecar metadata in modes where boundaries are rendered and clear it in collapsed mode.",
+    "scenarios": [
+      [
+        "Cache hit/miss",
+        "the same block is output at the same and a different width",
+        "the same-width call reuses valid output and width change regenerates output without changing logical line count."
+      ],
+      [
+        "Edit boundaries",
+        "an edit block is cached expanded, selected, then collapsed",
+        "boundary sidecar remains available for expanded output and is empty for collapsed output."
+      ],
+      [
+        "Unselected effective output",
+        "effective_output is requested with is_selected false",
+        "kind is Cached and output is available through the borrowed cache."
+      ],
+      [
+        "Selected effective output",
+        "effective_output is requested with is_selected true",
+        "kind is Selected, ctx.is_selected is true, and output is available."
+      ],
+      [
+        "Cache key context",
+        "theme, cwd, raw, width, or an output-varying selection changes",
+        "the cached rendering is regenerated; irrelevant selection changes do not thrash non-varying blocks."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_entry_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "edit_boundary_sidecar_tracks_cached_output_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_effective_output_uses_cached_branch_when_not_selected"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_effective_output_uses_selected_branch_when_selected"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "ensure_cached"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "cached_output_ref"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "cached_rendered_output_ref"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "effective_output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "EffectiveOutput"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "EffectiveOutputKind::Cached"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "EffectiveOutputKind::Selected"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "CachedOutput"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "RenderedBlockOutput"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "is_user_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "is_tool_call"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "is_thinking"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "is_bg_task"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "is_subagent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "boundaries"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "has_vpad"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Truncated height caching, width invalidation, eviction, and render contexts",
+    "contract": "ensure_truncated_height_cached SHALL compute the Truncated block output height plus vertical padding and cache it by content width, raw flag, current theme, and cwd, excluding selection because line count is selection-independent. Repeated calls with an unchanged key SHALL return the cached height; width/raw/theme/cwd changes SHALL replace it. invalidate_width_caches SHALL clear render, truncated-height, and estimate caches while retaining the width-independent profile; invalidate_cache SHALL clear all caches, and evict_render_cache SHALL drop heavyweight render caches while preserving cheap layout estimates. Context builders SHALL preserve entry state while applying optional mode, row budget, selection, appearance, and cwd overrides without mutating display_mode.",
+    "scenarios": [
+      [
+        "First height call",
+        "truncated height is requested for an uncached entry",
+        "a positive height is returned and the cache is populated."
+      ],
+      [
+        "Height cache hit",
+        "the same width/raw/theme/cwd is requested twice",
+        "the height and cached tuple remain unchanged."
+      ],
+      [
+        "Height width miss",
+        "the width changes from 80 to 40",
+        "a new tuple is stored with width 40."
+      ],
+      [
+        "Full invalidation",
+        "invalidate_cache follows a populated height/output cache",
+        "both truncated height and cached output are cleared."
+      ],
+      [
+        "Resize invalidation",
+        "invalidate_width_caches is used for terminal resize",
+        "width-keyed caches clear while source width profile survives."
+      ],
+      [
+        "Context override",
+        "a caller requests budget, mode, mode+budget, or selection context",
+        "the returned BlockContext carries the override and cwd/appearance without mutating the entry."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_truncated_height_cache_populates_on_first_call"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_truncated_height_cache_hits_when_key_unchanged"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_truncated_height_cache_misses_on_width_change"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "test_invalidate_cache_clears_truncated_height_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "ensure_truncated_height_cached"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "CachedTruncatedHeight"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "context_with_budget"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "context_with_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "context_with_mode_and_budget"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "context"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "invalidate_width_caches"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "invalidate_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "evict_render_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "cached_truncated_height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "cached_output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "cached_estimate_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "has_vpad"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Tool hook rendering and output composition",
+    "contract": "When hook_data is attached, output_with_hooks SHALL render the base tool block followed by lifecycle/pre/post hook content according to the requested display mode. Collapsed output SHALL append an inline [hooks: N/M] suffix to the first header line when hook content exists; expanded output SHALL insert a hook separator for non-lifecycle blocks, append pre/post sections and lifecycle details, and omit the redundant separator/section header for lifecycle blocks whose event name is already the block header. The injected output SHALL retain the base RenderedBlockOutput sidecar boundaries.",
+    "scenarios": [
+      [
+        "Collapsed hooks",
+        "a hook-bearing tool entry is rendered in Collapsed mode",
+        "the first line receives the inline hook summary when available."
+      ],
+      [
+        "Expanded tool hooks",
+        "a non-lifecycle ToolCall has pre/post/lifecycle hook runs",
+        "a separator and mode-specific hook sections follow the tool output."
+      ],
+      [
+        "Lifecycle block",
+        "the block itself is a lifecycle tool event",
+        "the separator and redundant section header are skipped while hook details are appended."
+      ],
+      [
+        "No hooks",
+        "hook_data is absent or empty",
+        "base block output is returned unchanged."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "rendered_output_with_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "output_with_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "ToolCallHookData"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "render_hooks_inline_suffix"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "render_hook_separator"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "render_hooks_for_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "render_hooks_detail"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "pre_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "post_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "lifecycle"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "ToolCallBlock::Lifecycle"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/entry.rs",
+        "RenderedBlockOutput"
       ]
     ]
   }
