@@ -3783,7 +3783,20 @@
       "Group headers SHALL carry exactly one shared VerbGroupHeaderLabel payload regardless of whether they originate from a verb run or a truncation fold, preserving the styled Line and its plain text for selection/copy while keeping header-family chrome decisions outside this state module.",
       "The inline grouping contract SHALL be represented by exhaustive tests for first-appearance ordering, skill/file separation, tense and failure changes, separator and thinking transparency, truncation participant limits, action-tool buckets, and distinct subagent identities.",
       "Project picker recents, guarded selection, and deferred session creation",
-      "Startup fork deferral and parent context propagation"
+      "Startup fork deferral and parent context propagation",
+      "MarkdownContent SHALL wrap a StreamingMarkdownRenderer with configurable table width, pretty/source-faithful soft-break policy, tab expansion, syntax-style finalization, and distinct complete versus streaming initialization semantics.",
+      "MarkdownContent SHALL expose source text, emptiness, style-stripped rendered text, source line mapping, pre-wrap styled lines, hyperlink targets, Mermaid ranges/content, and a monotonic generation that advances on content/raw mutations while read-only projections avoid unnecessary copies where specified.",
+      "Word wrapping SHALL be cached by content width, generation, and theme; unchanged requests SHALL reuse the cache, width/theme/content changes SHALL invalidate the necessary portion, and streaming shall wrap newly frozen prefixes once while rewrapping only the mutable tail.",
+      "Raw mode SHALL toggle the renderer between pretty and raw output only when the requested state changes, invalidate wrap/frozen caches and advance generation on an actual toggle, and provide explicit off-screen cache eviction that preserves source/generation while forcing a later rebuild.",
+      "Markdown output SHALL convert cached wrapped lines into BlockLine values with joiners, one shared markdown body selection range, quote-bar-aware selectability, source line/column link provenance, and per-line background styles; output_tail SHALL support bounded tail cloning and return a placeholder for empty content.",
+      "MarkdownContent SHALL maintain equivalent visible wrapped text between incremental streaming and one-shot construction for the same source, while retaining explicit source-faithful mode for line-numbered consumers and complete joiner metadata for selection reconstruction.",
+      "Read block construction, content state, skill identity, and timing",
+      "Skill-aware read header identity and selection",
+      "Read path, range, cwd, and media header formatting",
+      "Read header selection and semantic file links",
+      "Read content syntax highlighting, absolute gutters, wrapping, and truncation",
+      "Read display modes, folding, error presentation, and block protocol",
+      "Read image references and preamble projection"
     ],
     "reviewed_files": [
       {
@@ -5921,6 +5934,18 @@
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
         "sha256": "7952557aa8f874fb0dad4b806d1b9db5e6cb59e98f58956618f839647c052f07"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/media.rs",
+        "sha256": "b8af07c36a83497ad175450e4b9d914955e172a1351e1b21f16020e0b4551e8c"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "sha256": "f33054624355dfb270e9a35e6c288ca212cf3f7044c1cf3a212bfc3e1ff4c599"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "sha256": "6d52d8264b2749b89a54363060e1a2ab7e2611e1128c620ec1c42ccce5edcc4b"
       }
     ],
     "review": "reviews/pager.md"

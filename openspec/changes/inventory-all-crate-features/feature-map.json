@@ -76486,6 +76486,31 @@
         "Continuation semantics",
         "an inserted row is created",
         "it is a separator with an empty joiner and is excluded from selection/copy."
+      ],
+      [
+        "Oversized payload",
+        "a single completion exceeds 64 MiB",
+        "it is rejected and marked failed rather than entering the cache."
+      ],
+      [
+        "Aggregate cap",
+        "accepted bytes would exceed 64 MiB",
+        "oldest cache keys are removed until the incoming payload fits, then the new path is inserted."
+      ],
+      [
+        "Successful retry",
+        "a path previously marked failed later produces valid bytes",
+        "the path is cached and removed from the failed set."
+      ],
+      [
+        "Media path link",
+        "scrollback contains media_ref_path entries",
+        "ensure_media_link_paths records those paths only for the current scrollback generation."
+      ],
+      [
+        "Path copy",
+        "a filepath hit is clicked",
+        "the displayed path string is sent through copy_to_clipboard and Changed is returned."
       ]
     ],
     "sources": [
@@ -76568,6 +76593,22 @@
       [
         "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
         "tests::apply_affordance_rows_offset_follows_wrapped_body"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::insert_inline_media_cache"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::apply_inline_media_completions"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::ensure_media_link_paths"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::handle_inline_media_click"
       ]
     ]
   },
@@ -89509,6 +89550,41 @@
         "Viewer early return",
         "a line, image, game, block, agents or extensions viewer is active",
         "that viewer owns the overlay and shortcut area and ordinary post-viewer decorations are skipped."
+      ],
+      [
+        "Viewer absent",
+        "an image-viewer key arrives without image_viewer",
+        "InputOutcome::Unchanged is returned and no clear/release occurs."
+      ],
+      [
+        "Viewer close",
+        "Esc or q arrives with an active image viewer",
+        "Kitty clear is written under the stderr lock, image_viewer is removed, and retained memory release is invoked once."
+      ],
+      [
+        "Viewer other key",
+        "a non-close key arrives with an active viewer",
+        "the viewer remains and Changed is returned."
+      ],
+      [
+        "Gboom close",
+        "the active gboom reports Close",
+        "Kitty is cleared under the stderr lock, gboom is dropped, and Changed is returned."
+      ],
+      [
+        "Gboom input",
+        "release or mouse input arrives with/without a live game",
+        "the live game receives the event when present and the outer result is Changed."
+      ],
+      [
+        "Native open",
+        "open_media_natively succeeds or fails",
+        "the path is sent to the OS opener and the corresponding success/failure toast is shown."
+      ],
+      [
+        "Image copy",
+        "a copy-image hit is clicked",
+        "set_image_file runs off-thread and the UI immediately reports Copied image."
       ]
     ],
     "sources": [
@@ -89735,6 +89811,30 @@
       [
         "crates/codegen/pager/src/app/agent_view/prompt.rs",
         "history_browse_panel_tests::populated_at_token_does_not_steal_arrows"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::handle_image_viewer_key"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::open_media_natively"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::handle_gboom_key"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::handle_gboom_release"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::handle_gboom_mouse"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "tests::image_viewer_close_releases_retained_memory"
       ]
     ]
   },
@@ -89813,6 +89913,36 @@
         "Occluded OSC 8 link",
         "a rendered link overlaps any frame occluder rectangle",
         "it is excluded from emitted LinkSpan output."
+      ],
+      [
+        "Loader deduplication",
+        "a path is already cached, pending, or failed",
+        "request_inline_media_load returns without spawning another worker."
+      ],
+      [
+        "Rename race",
+        "the file is absent when queued and appears during the bounded worker window",
+        "a prepared result is published through the completion mailbox and apply_inline_media_completions caches it and clears pending."
+      ],
+      [
+        "Completion failure",
+        "image preparation returns None or worker spawn fails",
+        "the path is marked failed and no cache entry is installed."
+      ],
+      [
+        "Session reset",
+        "reset_inline_media_loader runs while old work can still publish",
+        "CPU/path-derived state and the mailbox are replaced/cleared, loading visibility is false, and later old-mailbox bytes cannot enter the new cache."
+      ],
+      [
+        "Generation cache",
+        "scrollback generation is unchanged or changed",
+        "unchanged generations retain media_link_paths; changed generations clear and rebuild them from entry block media_ref_path values."
+      ],
+      [
+        "Click priority",
+        "a pointer lands in an open/media rect, copy-image rect, filepath rect, Mermaid button, or none",
+        "the first matching action is performed and returns Changed; no hit returns None."
       ]
     ],
     "sources": [
@@ -89823,6 +89953,42 @@
       [
         "crates/codegen/pager/src/app/agent_view/mod.rs",
         "InlineMediaHitAreas / bracketed_paste_should_probe / is_link_modifier_held / is_link_modifier_for_key / supports_osc22 / has_native_link_hover / app_should_open_link_on_click / app_should_open_link_on_click_with / is_text_selection_on_double_click / collect_citation_links"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::has_visible_inline_media_load"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::reset_inline_media_loader"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::apply_inline_media_completions"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::insert_inline_media_cache"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::request_inline_media_load"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::ensure_media_link_paths"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::handle_inline_media_click"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "tests::inline_media_waits_off_thread_and_completes_by_snapshot"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "tests::session_boundary_detaches_late_inline_media_completion"
       ]
     ]
   },
@@ -156074,6 +156240,36 @@
         "Dropdown geometry",
         "full or embedded chrome is rendered above/below",
         "items occupy the requested side and embedded layout is flush-left."
+      ],
+      [
+        "Wide affordance",
+        "label and buttons fit within the row",
+        "all fitting labels are painted, button hits are registered, and the source is stored once."
+      ],
+      [
+        "Narrow affordance",
+        "a label/button/status segment exceeds the row width",
+        "that segment is omitted and no out-of-bounds hit rectangle is registered for it."
+      ],
+      [
+        "Hover styling",
+        "the pointer lies within one button rectangle",
+        "only that button uses primary bold/underlined style; idle buttons remain gray and the marker/status remain dim."
+      ],
+      [
+        "Rendering state",
+        "a Mermaid source has a live worker action",
+        "the trailing rendering hint is painted when it fits; otherwise no hint is emitted."
+      ],
+      [
+        "Copy source",
+        "CopySource is clicked",
+        "the source is sent to clipboard without starting a render; failed delivery writes a structured unified-log error."
+      ],
+      [
+        "Lazy actions",
+        "Open or CopyPath is clicked",
+        "the source is moved to request_mermaid_render with the matching worker action."
       ]
     ],
     "sources": [
@@ -156108,6 +156304,18 @@
       [
         "crates/codegen/pager/src/app/agent_view/paste.rs",
         "dropdown_chrome_embedded_is_flush_left"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::paint_diagram_affordances"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::diagram_is_rendering"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::on_mermaid_affordance_click"
       ]
     ]
   },
@@ -156131,6 +156339,36 @@
         "Takeover cleanup",
         "a parent or child view is closed/taken over",
         "the appropriate placements are deleted and tracking resets without deleting an active child’s own placements."
+      ],
+      [
+        "Cache miss",
+        "a placement has no cache bytes and no existing id",
+        "build_inline_media_escapes returns None without allocating an id."
+      ],
+      [
+        "First placement",
+        "cached bytes exist and the path has no id",
+        "the returned escape contains a transmit followed by placement and the id is recorded."
+      ],
+      [
+        "Repeat placement",
+        "the same path is placed again",
+        "placement is emitted without a second transmit."
+      ],
+      [
+        "iTerm move",
+        "the detected protocol is iTerm2 and the screen rectangle differs from the last one",
+        "the image is re-emitted for the new rectangle and that rectangle becomes the tracked last placement."
+      ],
+      [
+        "Own cleanup",
+        "own ids or active placement state exists",
+        "clear escapes are produced for each id and own id/iTerm/last-placement state is cleared."
+      ],
+      [
+        "Nested cleanup",
+        "subagent views contain placements",
+        "recursive child clear escapes are appended; a child takeover path can leave the child view untouched until it draws."
       ]
     ],
     "sources": [
@@ -156161,6 +156399,26 @@
       [
         "crates/codegen/pager/src/app/agent_view/paste.rs",
         "draw_after_subagent_close_clears_child_inline_media"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::build_inline_media_escapes"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::get_or_alloc_media_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::take_inline_media_clear_escapes"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::take_own_inline_media_clear_escapes"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::take_subagent_inline_media_clear_escapes"
       ]
     ]
   },
@@ -159166,6 +159424,26 @@
         "Cache maintenance",
         "the runtime is first used",
         "the session sweep is scheduled once, preferring spawn_blocking under Tokio and inline otherwise."
+      ],
+      [
+        "Mermaid hit lookup",
+        "a Mermaid hit points to a valid source index",
+        "the exact source is moved to the action dispatcher."
+      ],
+      [
+        "Stale source index",
+        "a Mermaid hit index is absent from the source table",
+        "an empty source is supplied to the action dispatcher and the click remains consumed."
+      ],
+      [
+        "Action mapping",
+        "the hit kind is Open or CopyPath",
+        "the matching MermaidClickAction is used and no direct file operation occurs in this module."
+      ],
+      [
+        "Liveness query",
+        "paint requests the rendering state for a source",
+        "the result comes from mermaid_is_rendering and is used only for the affordance hint."
       ]
     ],
     "sources": [
@@ -159204,6 +159482,18 @@
       [
         "crates/codegen/pager/src/app/agent_view/mermaid_worker.rs",
         "mermaid_view_pending_dedup_wins_over_disk_hit_race"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::handle_inline_media_click"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::on_mermaid_affordance_click"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/media.rs",
+        "AgentView::diagram_is_rendering"
       ]
     ]
   },
@@ -186235,6 +186525,946 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
         "new_session_id"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "MarkdownContent SHALL wrap a StreamingMarkdownRenderer with configurable table width, pretty/source-faithful soft-break policy, tab expansion, syntax-style finalization, and distinct complete versus streaming initialization semantics.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: new and new_with_table_width render a complete document immediately with collapse_soft_breaks enabled; new_source_faithful disables soft-break collapse so source lines map one-to-one for line-oriented previews. All constructors expand tabs using the global tab width, set max table width, push the source, and call renderer.finish(Some(get_syntect())). streaming starts an empty renderer with generation zero and defers rendering until chunks arrive. expand_tabs returns borrowed input when no replacement is needed and replaces tabs with configured spaces otherwise.",
+    "scenarios": [
+      [
+        "Complete markdown",
+        "MarkdownContent::new receives source text",
+        "the renderer is finished immediately and pretty CommonMark output is available."
+      ],
+      [
+        "Source-faithful preview",
+        "new_source_faithful receives line-oriented source",
+        "soft breaks remain line boundaries and source line mapping is preserved."
+      ],
+      [
+        "Table constraint",
+        "a max_table_width is supplied",
+        "the renderer receives the width constraint before rendering."
+      ],
+      [
+        "Streaming initialization",
+        "MarkdownContent::streaming is created",
+        "source/output starts empty, generation is zero, and later chunks can render incrementally."
+      ],
+      [
+        "Tabs",
+        "source text contains tab characters",
+        "tabs expand to configured spaces while tab-free input uses the borrowed fast path."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::new_with_table_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::new_source_faithful"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::new_inner"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::streaming"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "expand_tabs"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "StreamingMarkdownRenderer::set_collapse_soft_breaks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "StreamingMarkdownRenderer::set_max_table_width"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "MarkdownContent SHALL expose source text, emptiness, style-stripped rendered text, source line mapping, pre-wrap styled lines, hyperlink targets, Mermaid ranges/content, and a monotonic generation that advances on content/raw mutations while read-only projections avoid unnecessary copies where specified.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: push_chunk expands and renders a chunk immediately, push_chunk_deferred appends without rendering for replay batching, and finish fully renders then resets frozen tracking; each mutation increments generation. text/is_empty read renderer source; rendered_plain_text concatenates spans without styles; line_source_map and pre_wrap_lines clone renderer projections; with_hyperlinks and with_link_content borrow through closures; mermaid_block_ranges scans current view and mermaid_content builds the detection skeleton. generation reports the current mutation counter and is_raw reports current pretty/raw state.",
+    "scenarios": [
+      [
+        "Immediate streaming chunk",
+        "push_chunk receives new markdown",
+        "renderer output updates and generation increments."
+      ],
+      [
+        "Deferred replay chunk",
+        "push_chunk_deferred receives historical content",
+        "source/generation update without immediate render, allowing later finish/render batching."
+      ],
+      [
+        "Finish",
+        "finish is called after streaming",
+        "held renderer state flushes, frozen tracking resets, and generation increments."
+      ],
+      [
+        "Plain rendered copy",
+        "styled markdown output is requested",
+        "rendered_plain_text returns span text joined by newlines without ratatui styles."
+      ],
+      [
+        "Link and Mermaid projection",
+        "a caller requests links or diagram metadata",
+        "the closure or helper sees current pre-wrap hyperlinks/ranges/detection content without rebuilding source text."
+      ],
+      [
+        "Empty source",
+        "source has no content",
+        "is_empty returns true while output can still supply a placeholder line."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::push_chunk"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::push_chunk_deferred"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::finish"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::is_empty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::rendered_plain_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::line_source_map"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::pre_wrap_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::with_hyperlinks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::with_link_content"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::mermaid_block_ranges"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::mermaid_content"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::generation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::is_raw"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Word wrapping SHALL be cached by content width, generation, and theme; unchanged requests SHALL reuse the cache, width/theme/content changes SHALL invalidate the necessary portion, and streaming shall wrap newly frozen prefixes once while rewrapping only the mutable tail.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ensure_wrapped checks cache_width/cache_generation/cache_theme. Theme changes update renderer style, force a miss, and reset frozen counters; width changes reset frozen counters. It sets renderer table width, renders, reads frozen_lines_count, wraps newly frozen pre-wrap lines and the unfrozen tail with word_wrap_lines_with_joiners, truncates stale tail while retaining cached frozen output, appends new frozen/tail lines and updates cache/frozen metadata. with_wrapped_lines ensures this state then lends cache slices through WrappedLines; repeated same-width/same-generation calls return without rebuilding.",
+    "scenarios": [
+      [
+        "Cache hit",
+        "the same width, generation, and theme are requested twice",
+        "the second access reuses cache_lines/cache_joiners and preserves cache metadata."
+      ],
+      [
+        "Width change",
+        "output is requested at a different width",
+        "the frozen cache is reset and all current renderer lines are wrapped for the new width."
+      ],
+      [
+        "Content change",
+        "a chunk changes generation",
+        "stale mutable tail is dropped while stable frozen prefix output is retained and new content is appended."
+      ],
+      [
+        "Theme change",
+        "theme_cache::current_kind differs from cache_theme",
+        "renderer style and cache are invalidated even if width/content are unchanged."
+      ],
+      [
+        "Borrowed post-processing",
+        "a caller needs wrapped lines without cloning",
+        "with_wrapped_lines exposes cached lines and joiners for the closure lifetime."
+      ],
+      [
+        "Frozen streaming prefix",
+        "previously stable lines become frozen after another chunk",
+        "frozen_wrapped_count grows monotonically and the prefix is not rewrapped."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "RenderState"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::ensure_wrapped"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::with_wrapped_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "WrappedLines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "word_wrap_lines_with_joiners"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "frozen_cache_is_reused"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "cache_hit_on_same_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "cache_invalidated_on_width_change"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "incremental_wrap_matches_full_wrap"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Raw mode SHALL toggle the renderer between pretty and raw output only when the requested state changes, invalidate wrap/frozen caches and advance generation on an actual toggle, and provide explicit off-screen cache eviction that preserves source/generation while forcing a later rebuild.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: set_raw_mode is idempotent for the current state; on change it updates current_raw, calls renderer.set_pretty(!raw) and render, resets frozen counters, and increments generation. evict_wrap_cache clears cache_lines/cache_joiners and frozen counts, sets cache_generation to u64::MAX to force a rebuild, and returns immediately when caches are already empty. is_raw reflects current_raw; QuoteBarStrip in output_tail uses the opposite of raw to strip pretty quote bars.",
+    "scenarios": [
+      [
+        "Enter raw mode",
+        "set_raw_mode(true) is called while pretty output is active",
+        "renderer raw mode is rendered, generation increments, and cached wrapping is invalidated."
+      ],
+      [
+        "Repeated raw request",
+        "set_raw_mode(true) is called again",
+        "generation and renderer state remain unchanged."
+      ],
+      [
+        "Return pretty",
+        "set_raw_mode(false) is called from raw mode",
+        "pretty rendering resumes and caches are invalidated for the new generation."
+      ],
+      [
+        "Evict off-screen cache",
+        "wrap caches contain lines/joiners",
+        "the cache storage is dropped without changing source text, and the next output rebuilds it."
+      ],
+      [
+        "Evict empty cache",
+        "no wrap cache is present",
+        "eviction is a no-op without unnecessary state mutation."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::set_raw_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::evict_wrap_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::is_raw"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "RenderState::cache_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "RenderState::cache_joiners"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "raw_mode_invalidates_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "QuoteBarStrip"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Markdown output SHALL convert cached wrapped lines into BlockLine values with joiners, one shared markdown body selection range, quote-bar-aware selectability, source line/column link provenance, and per-line background styles; output_tail SHALL support bounded tail cloning and return a placeholder for empty content.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: output delegates to output_tail with an unlimited count. output_tail ensures wrapping, returns one empty Line placeholder when no wrapped lines exist, tracks source line_index and display columns across joiners, strips non-selectable quote-bar prefixes in pretty mode, clones only the retained tail, sets MARKDOWN_BODY_RANGE on every BlockLine, preserves joiner, selectable and background, and attaches LinkSource with columns/display_start. A joiner of None advances the source line; wrapped continuation joiners preserve soft-wrap source coordinates.",
+    "scenarios": [
+      [
+        "Empty content",
+        "the wrapped renderer has no lines",
+        "output returns one placeholder BlockLine."
+      ],
+      [
+        "Wrapped body",
+        "a paragraph exceeds the width",
+        "multiple lines share MARKDOWN_BODY_RANGE and continuation lines retain non-None joiners."
+      ],
+      [
+        "Selectable markdown",
+        "a normal markdown body line is emitted",
+        "the line remains Selectable::All after quote-bar processing."
+      ],
+      [
+        "Source coordinates",
+        "wrapped lines are traversed",
+        "line_index and display columns advance through joiners and line widths, with display_start recording stripped quote chrome."
+      ],
+      [
+        "Tail projection",
+        "output_tail requests a finite count",
+        "only the final count wrapped lines are cloned while source/link coordinates remain based on the complete wrapped document."
+      ],
+      [
+        "Styled table widths",
+        "markdown tables contain emoji or wide glyphs",
+        "rendered line content fills the requested display width without ghost cells."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MARKDOWN_BODY_RANGE"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::output_tail"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "BlockOutput"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "BlockLine::with_selection_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "BlockLine::with_joiner"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "LinkSource"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "QuoteBarStrip::selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "markdown_body_lines_share_one_selection_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "markdown_output_keeps_joiners_for_wrapped_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "markdown_body_lines_remain_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "table_rows_fill_content_width_with_emoji"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "empty_content_returns_placeholder"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "MarkdownContent SHALL maintain equivalent visible wrapped text between incremental streaming and one-shot construction for the same source, while retaining explicit source-faithful mode for line-numbered consumers and complete joiner metadata for selection reconstruction.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: Streaming chunks may be wrapped between pushes and later appended after additional chunks; ensure_wrapped preserves frozen prefixes and rebuilds the tail so the final line text matches MarkdownContent::new(full_text) at the same width. Hard breaks retain separate logical lines while soft breaks follow the renderer collapse policy. The test suite also pins cache reuse, width invalidation, push invalidation, raw idempotence, joiners, selection range, empty placeholder and frozen-cache growth.",
+    "scenarios": [
+      [
+        "Incremental equivalence",
+        "the same markdown is fed in multiple chunks with output calls between chunks",
+        "final incremental line text and count equal one-shot full construction at the same width."
+      ],
+      [
+        "Hard breaks",
+        "source uses two trailing spaces plus newline",
+        "wrapped output preserves separate logical lines and joiner entries."
+      ],
+      [
+        "Soft breaks",
+        "source contains a bare newline in pretty mode",
+        "the configured renderer policy may collapse it to a space; source-faithful mode retains the source line boundary."
+      ],
+      [
+        "Cache invalidation evidence",
+        "width, chunks, raw state and frozen prefixes change",
+        "the inline tests observe updated cache/generation behavior without losing output."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::new_source_faithful"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::streaming"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::push_chunk"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "MarkdownContent::output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "incremental_wrap_matches_full_wrap"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "with_wrapped_lines_provides_access"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "cache_invalidated_on_push_chunk"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
+        "frozen_cache_is_reused"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Read block construction, content state, skill identity, and timing",
+    "contract": "ReadToolCallBlock::new SHALL initialize a completed-safe block with only its path set; fluent setters SHALL update the requested line range, content/total line count, or error; is_success SHALL mean error is absent and has_content SHALL require non-empty content. Skill identity SHALL be delegated to skill_name_from_path. set_error SHALL capture elapsed time once when a running block is finalized, finish SHALL be idempotent, and elapsed_ms SHALL expose the finalized value or a live duration from started_at.",
+    "scenarios": [
+      [
+        "Construction",
+        "a read block is created",
+        "all optional content, range, timing, image, and media fields are None."
+      ],
+      [
+        "Content/error mutation",
+        "content, line range, or an error is supplied",
+        "the corresponding field is updated and success/content predicates reflect the new state."
+      ],
+      [
+        "Skill identity",
+        "the path is a skill SKILL.md, an ordinary file, or another markdown file",
+        "only the canonical skill path yields a skill name/is_skill_read=true."
+      ],
+      [
+        "Timing",
+        "a running block is finalized by set_error or finish",
+        "elapsed_ms is captured once; repeated finish does not replace it and a pre-completed block remains None."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "ReadToolCallBlock::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "with_line_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "with_content"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "with_error"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "is_success"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "has_content"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "skill_name"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "is_skill_read"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "set_error"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "finish"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "elapsed_ms"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "started_at"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "elapsed_ms"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Skill-aware read header identity and selection",
+    "contract": "A read targeting a canonical SKILL.md path SHALL render a semantic `Skill {skill_name}` header, select only the skill name span, and omit a filesystem link target; ordinary files SHALL remain on the regular Read path.",
+    "scenarios": [
+      [
+        "Skill header",
+        "the path is `/.../skills/deploy/SKILL.md`",
+        "the first line is `Skill deploy` and the selectable text is only `deploy`."
+      ],
+      [
+        "Non-skill markdown",
+        "the path is a normal file or README.md",
+        "the block is not treated as a skill read and uses the normal file header."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "skill_name"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "is_skill_read"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "collapsed_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "header_block_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "skill_name_from_path"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "Selectable::Spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "TOOL_HEADER_RANGE"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Read path, range, cwd, and media header formatting",
+    "contract": "The header SHALL use the Read prefix for ordinary files, shorten the displayed path through the tool-path surface and cwd, show a requested range, append `of total` when the range is a strict subset of the known file, and append mutually exclusive empty/image/PDF details. Expanded headers may display a cwd-relative path while the fullscreen preamble preserves the absolute path.",
+    "scenarios": [
+      [
+        "Regular file",
+        "an ordinary path is read",
+        "the collapsed header starts with `Read` and includes the basename/path."
+      ],
+      [
+        "Range and shortening",
+        "a range and cwd are available",
+        "collapsed output shows the shortened path and range; expanded output shows the cwd-relative path while the preamble uses the fullscreen path."
+      ],
+      [
+        "Total/media details",
+        "the block has total lines, empty content, image media, or PDF pages",
+        "the corresponding `(start-end of total)`, `(empty)`, `(image)`, or `(N pages)` suffix is shown."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "collapsed_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "preamble"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "line_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "total_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "media_kind"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "ReadMediaKind::Image"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "ReadMediaKind::Pdf"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "path_for_tool_surface"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "ToolPathSurface::Collapsed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "ToolPathSurface::Expanded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "ToolPathSurface::Fullscreen"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Read header selection and semantic file links",
+    "contract": "The ordinary read header SHALL expose only the painted path span as selectable, use TOOL_HEADER_RANGE for header selection, derive copied text from the displayed path, and attach an absolute OSC8 file target that remains stable across collapsed and expanded path presentation. Skill headers SHALL select the skill name without a file target.",
+    "scenarios": [
+      [
+        "Collapsed selection",
+        "a long absolute ordinary path is collapsed",
+        "only span 1..2 is selectable and copied text is the basename."
+      ],
+      [
+        "Expanded selection",
+        "the ordinary path lies under cwd",
+        "copied text is the cwd-relative path."
+      ],
+      [
+        "File link",
+        "an ordinary absolute path is rendered in collapsed or expanded mode",
+        "the link target resolves to the absolute file URL and the target is reused across modes."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "header_block_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "TOOL_HEADER_RANGE"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "Selectable::Spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "selection_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "derive_selection_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "tool_path_file_target"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "LinkTarget::File"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "resolve_link_target"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "link_target"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "selection_text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Read content syntax highlighting, absolute gutters, wrapping, and truncation",
+    "contract": "Expanded content SHALL be line-numbered from the requested one-based start (or 1), syntax-highlighted according to the read path, wrapped to the available width with joiners, and marked with panel backgrounds. Truncated mode SHALL retain the first five and last three wrapped lines with a single ellipsis only when content exceeds that threshold; shorter content SHALL remain complete.",
+    "scenarios": [
+      [
+        "Preview styling",
+        "non-empty content is shown in expanded mode",
+        "content lines carry panel background metadata and syntax-highlighted spans."
+      ],
+      [
+        "Absolute line numbers",
+        "a line range starts at 50",
+        "the gutter begins at 50 and increments for each raw line."
+      ],
+      [
+        "Truncation",
+        "more than FIRST_LINES + LAST_LINES wrapped lines exist",
+        "the first five and final three wrapped lines are retained with an ellipsis; the first and last source lines remain visible."
+      ],
+      [
+        "Width/wrapping",
+        "content exceeds the available width",
+        "wrapping is performed before truncation and joiner metadata is preserved."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "render_content_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "FIRST_LINES"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "LAST_LINES"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "digit_count"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "base_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "gutter_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "content_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "highlight_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "get_syntect"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "word_wrap_lines_with_joiners"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "BlockLine::styled"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "BlockLine::separator"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "with_panel_background"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "with_joiner"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Read display modes, folding, error presentation, and block protocol",
+    "contract": "ReadToolCallBlock SHALL default to collapsed and finish collapsed; a content-bearing block SHALL be foldable and cycle Collapsed→Truncated→Collapsed. Expanded/truncated output SHALL include the header plus content when content exists, or styled error lines when it does not. Errors SHALL receive an error bullet accent, while read blocks have no semantic block accent, vertical padding, custom background, or raw-mode rendering.",
+    "scenarios": [
+      [
+        "Foldability",
+        "content is present or absent",
+        "is_foldable returns true only for non-empty content."
+      ],
+      [
+        "Fold cycle",
+        "the current mode is collapsed, truncated, or expanded",
+        "next_fold_mode returns truncated from collapsed and collapsed from either non-collapsed mode."
+      ],
+      [
+        "Error rendering",
+        "an error exists without content in expanded/truncated mode",
+        "the header is followed by each error line using the theme error color and the bullet reports the same accent."
+      ],
+      [
+        "Protocol defaults",
+        "the block is queried for accent, background, padding, raw mode, or default/finished mode",
+        "the declared neutral/no-padding/no-raw/collapsed protocol values are returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "accent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "bullet"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "has_vpad_for"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "background"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "has_raw_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "is_foldable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "default_display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "finished_display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "next_fold_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "BlockOutput"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "DisplayMode::Collapsed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "DisplayMode::Truncated"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "DisplayMode::Expanded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "AccentStyle::static_color"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Read image references and preamble projection",
+    "contract": "image_references SHALL expose exactly the stored inline image reference when present and an empty slice otherwise. The preamble SHALL always project the fullscreen path/skill header with the configured detail style and cwd context, independent of the collapsed/expanded body mode.",
+    "scenarios": [
+      [
+        "Image reference",
+        "image_ref is set or absent",
+        "image_references returns a one-element slice or an empty slice without allocating a new semantic reference."
+      ],
+      [
+        "Preamble",
+        "a read block is used as a fullscreen preamble",
+        "the same header formatter is used with Fullscreen path presentation and current cwd/detail configuration."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "image_references"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "image_ref"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "ScrollbackImageRef"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "preamble"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "ToolPathSurface::Fullscreen"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/tool/read.rs",
+        "dim_details"
       ]
     ]
   }

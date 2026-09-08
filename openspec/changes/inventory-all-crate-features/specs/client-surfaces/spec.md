@@ -21461,3 +21461,310 @@ A startup fork SHALL defer its parent session id, parent cwd, and new session id
 - **THEN** the handler emits no child session effect and leaves the state available for caller handling.
 
 证据：`crates/codegen/pager/src/app/root/dispatch/session/fork.rs` — `dispatch_startup_fork_session`；`crates/codegen/pager/src/app/root/dispatch/session/fork.rs` — `StartupFork`；`crates/codegen/pager/src/app/root/dispatch/session/fork.rs` — `Effect::CreateSession`；`crates/codegen/pager/src/app/root/dispatch/session/fork.rs` — `Effect::ForkSession`；`crates/codegen/pager/src/app/root/dispatch/session/fork.rs` — `parent_session_id`；`crates/codegen/pager/src/app/root/dispatch/session/fork.rs` — `parent_cwd`；`crates/codegen/pager/src/app/root/dispatch/session/fork.rs` — `parent_is_worktree`；`crates/codegen/pager/src/app/root/dispatch/session/fork.rs` — `new_session_id`。
+
+
+### Requirement: MarkdownContent SHALL wrap a StreamingMarkdownRenderer with configurable table width, pretty/source-faithful soft-break policy, tab expansion, syntax-style finalization, and distinct complete versus streaming initialization semantics.
+
+The implementation SHALL satisfy the following tested behavior: new and new_with_table_width render a complete document immediately with collapse_soft_breaks enabled; new_source_faithful disables soft-break collapse so source lines map one-to-one for line-oriented previews. All constructors expand tabs using the global tab width, set max table width, push the source, and call renderer.finish(Some(get_syntect())). streaming starts an empty renderer with generation zero and defers rendering until chunks arrive. expand_tabs returns borrowed input when no replacement is needed and replaces tabs with configured spaces otherwise.
+
+#### Scenario: Complete markdown
+- **WHEN** MarkdownContent::new receives source text
+- **THEN** the renderer is finished immediately and pretty CommonMark output is available.
+
+#### Scenario: Source-faithful preview
+- **WHEN** new_source_faithful receives line-oriented source
+- **THEN** soft breaks remain line boundaries and source line mapping is preserved.
+
+#### Scenario: Table constraint
+- **WHEN** a max_table_width is supplied
+- **THEN** the renderer receives the width constraint before rendering.
+
+#### Scenario: Streaming initialization
+- **WHEN** MarkdownContent::streaming is created
+- **THEN** source/output starts empty, generation is zero, and later chunks can render incrementally.
+
+#### Scenario: Tabs
+- **WHEN** source text contains tab characters
+- **THEN** tabs expand to configured spaces while tab-free input uses the borrowed fast path.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::new`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::new_with_table_width`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::new_source_faithful`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::new_inner`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::streaming`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `expand_tabs`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `StreamingMarkdownRenderer::set_collapse_soft_breaks`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `StreamingMarkdownRenderer::set_max_table_width`。
+
+
+### Requirement: MarkdownContent SHALL expose source text, emptiness, style-stripped rendered text, source line mapping, pre-wrap styled lines, hyperlink targets, Mermaid ranges/content, and a monotonic generation that advances on content/raw mutations while read-only projections avoid unnecessary copies where specified.
+
+The implementation SHALL satisfy the following tested behavior: push_chunk expands and renders a chunk immediately, push_chunk_deferred appends without rendering for replay batching, and finish fully renders then resets frozen tracking; each mutation increments generation. text/is_empty read renderer source; rendered_plain_text concatenates spans without styles; line_source_map and pre_wrap_lines clone renderer projections; with_hyperlinks and with_link_content borrow through closures; mermaid_block_ranges scans current view and mermaid_content builds the detection skeleton. generation reports the current mutation counter and is_raw reports current pretty/raw state.
+
+#### Scenario: Immediate streaming chunk
+- **WHEN** push_chunk receives new markdown
+- **THEN** renderer output updates and generation increments.
+
+#### Scenario: Deferred replay chunk
+- **WHEN** push_chunk_deferred receives historical content
+- **THEN** source/generation update without immediate render, allowing later finish/render batching.
+
+#### Scenario: Finish
+- **WHEN** finish is called after streaming
+- **THEN** held renderer state flushes, frozen tracking resets, and generation increments.
+
+#### Scenario: Plain rendered copy
+- **WHEN** styled markdown output is requested
+- **THEN** rendered_plain_text returns span text joined by newlines without ratatui styles.
+
+#### Scenario: Link and Mermaid projection
+- **WHEN** a caller requests links or diagram metadata
+- **THEN** the closure or helper sees current pre-wrap hyperlinks/ranges/detection content without rebuilding source text.
+
+#### Scenario: Empty source
+- **WHEN** source has no content
+- **THEN** is_empty returns true while output can still supply a placeholder line.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::push_chunk`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::push_chunk_deferred`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::finish`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::text`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::is_empty`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::rendered_plain_text`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::line_source_map`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::pre_wrap_lines`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::with_hyperlinks`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::with_link_content`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::mermaid_block_ranges`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::mermaid_content`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::generation`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::is_raw`。
+
+
+### Requirement: Word wrapping SHALL be cached by content width, generation, and theme; unchanged requests SHALL reuse the cache, width/theme/content changes SHALL invalidate the necessary portion, and streaming shall wrap newly frozen prefixes once while rewrapping only the mutable tail.
+
+The implementation SHALL satisfy the following tested behavior: ensure_wrapped checks cache_width/cache_generation/cache_theme. Theme changes update renderer style, force a miss, and reset frozen counters; width changes reset frozen counters. It sets renderer table width, renders, reads frozen_lines_count, wraps newly frozen pre-wrap lines and the unfrozen tail with word_wrap_lines_with_joiners, truncates stale tail while retaining cached frozen output, appends new frozen/tail lines and updates cache/frozen metadata. with_wrapped_lines ensures this state then lends cache slices through WrappedLines; repeated same-width/same-generation calls return without rebuilding.
+
+#### Scenario: Cache hit
+- **WHEN** the same width, generation, and theme are requested twice
+- **THEN** the second access reuses cache_lines/cache_joiners and preserves cache metadata.
+
+#### Scenario: Width change
+- **WHEN** output is requested at a different width
+- **THEN** the frozen cache is reset and all current renderer lines are wrapped for the new width.
+
+#### Scenario: Content change
+- **WHEN** a chunk changes generation
+- **THEN** stale mutable tail is dropped while stable frozen prefix output is retained and new content is appended.
+
+#### Scenario: Theme change
+- **WHEN** theme_cache::current_kind differs from cache_theme
+- **THEN** renderer style and cache are invalidated even if width/content are unchanged.
+
+#### Scenario: Borrowed post-processing
+- **WHEN** a caller needs wrapped lines without cloning
+- **THEN** with_wrapped_lines exposes cached lines and joiners for the closure lifetime.
+
+#### Scenario: Frozen streaming prefix
+- **WHEN** previously stable lines become frozen after another chunk
+- **THEN** frozen_wrapped_count grows monotonically and the prefix is not rewrapped.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `RenderState`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::ensure_wrapped`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::with_wrapped_lines`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `WrappedLines`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `word_wrap_lines_with_joiners`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `frozen_cache_is_reused`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `cache_hit_on_same_width`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `cache_invalidated_on_width_change`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `incremental_wrap_matches_full_wrap`。
+
+
+### Requirement: Raw mode SHALL toggle the renderer between pretty and raw output only when the requested state changes, invalidate wrap/frozen caches and advance generation on an actual toggle, and provide explicit off-screen cache eviction that preserves source/generation while forcing a later rebuild.
+
+The implementation SHALL satisfy the following tested behavior: set_raw_mode is idempotent for the current state; on change it updates current_raw, calls renderer.set_pretty(!raw) and render, resets frozen counters, and increments generation. evict_wrap_cache clears cache_lines/cache_joiners and frozen counts, sets cache_generation to u64::MAX to force a rebuild, and returns immediately when caches are already empty. is_raw reflects current_raw; QuoteBarStrip in output_tail uses the opposite of raw to strip pretty quote bars.
+
+#### Scenario: Enter raw mode
+- **WHEN** set_raw_mode(true) is called while pretty output is active
+- **THEN** renderer raw mode is rendered, generation increments, and cached wrapping is invalidated.
+
+#### Scenario: Repeated raw request
+- **WHEN** set_raw_mode(true) is called again
+- **THEN** generation and renderer state remain unchanged.
+
+#### Scenario: Return pretty
+- **WHEN** set_raw_mode(false) is called from raw mode
+- **THEN** pretty rendering resumes and caches are invalidated for the new generation.
+
+#### Scenario: Evict off-screen cache
+- **WHEN** wrap caches contain lines/joiners
+- **THEN** the cache storage is dropped without changing source text, and the next output rebuilds it.
+
+#### Scenario: Evict empty cache
+- **WHEN** no wrap cache is present
+- **THEN** eviction is a no-op without unnecessary state mutation.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::set_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::evict_wrap_cache`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::is_raw`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `RenderState::cache_lines`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `RenderState::cache_joiners`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `raw_mode_invalidates_cache`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `QuoteBarStrip`。
+
+
+### Requirement: Markdown output SHALL convert cached wrapped lines into BlockLine values with joiners, one shared markdown body selection range, quote-bar-aware selectability, source line/column link provenance, and per-line background styles; output_tail SHALL support bounded tail cloning and return a placeholder for empty content.
+
+The implementation SHALL satisfy the following tested behavior: output delegates to output_tail with an unlimited count. output_tail ensures wrapping, returns one empty Line placeholder when no wrapped lines exist, tracks source line_index and display columns across joiners, strips non-selectable quote-bar prefixes in pretty mode, clones only the retained tail, sets MARKDOWN_BODY_RANGE on every BlockLine, preserves joiner, selectable and background, and attaches LinkSource with columns/display_start. A joiner of None advances the source line; wrapped continuation joiners preserve soft-wrap source coordinates.
+
+#### Scenario: Empty content
+- **WHEN** the wrapped renderer has no lines
+- **THEN** output returns one placeholder BlockLine.
+
+#### Scenario: Wrapped body
+- **WHEN** a paragraph exceeds the width
+- **THEN** multiple lines share MARKDOWN_BODY_RANGE and continuation lines retain non-None joiners.
+
+#### Scenario: Selectable markdown
+- **WHEN** a normal markdown body line is emitted
+- **THEN** the line remains Selectable::All after quote-bar processing.
+
+#### Scenario: Source coordinates
+- **WHEN** wrapped lines are traversed
+- **THEN** line_index and display columns advance through joiners and line widths, with display_start recording stripped quote chrome.
+
+#### Scenario: Tail projection
+- **WHEN** output_tail requests a finite count
+- **THEN** only the final count wrapped lines are cloned while source/link coordinates remain based on the complete wrapped document.
+
+#### Scenario: Styled table widths
+- **WHEN** markdown tables contain emoji or wide glyphs
+- **THEN** rendered line content fills the requested display width without ghost cells.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MARKDOWN_BODY_RANGE`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::output`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::output_tail`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `BlockOutput`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `BlockLine::with_selection_range`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `BlockLine::with_joiner`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `LinkSource`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `QuoteBarStrip::selectable`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `markdown_body_lines_share_one_selection_range`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `markdown_output_keeps_joiners_for_wrapped_lines`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `markdown_body_lines_remain_selectable`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `table_rows_fill_content_width_with_emoji`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `empty_content_returns_placeholder`。
+
+
+### Requirement: MarkdownContent SHALL maintain equivalent visible wrapped text between incremental streaming and one-shot construction for the same source, while retaining explicit source-faithful mode for line-numbered consumers and complete joiner metadata for selection reconstruction.
+
+The implementation SHALL satisfy the following tested behavior: Streaming chunks may be wrapped between pushes and later appended after additional chunks; ensure_wrapped preserves frozen prefixes and rebuilds the tail so the final line text matches MarkdownContent::new(full_text) at the same width. Hard breaks retain separate logical lines while soft breaks follow the renderer collapse policy. The test suite also pins cache reuse, width invalidation, push invalidation, raw idempotence, joiners, selection range, empty placeholder and frozen-cache growth.
+
+#### Scenario: Incremental equivalence
+- **WHEN** the same markdown is fed in multiple chunks with output calls between chunks
+- **THEN** final incremental line text and count equal one-shot full construction at the same width.
+
+#### Scenario: Hard breaks
+- **WHEN** source uses two trailing spaces plus newline
+- **THEN** wrapped output preserves separate logical lines and joiner entries.
+
+#### Scenario: Soft breaks
+- **WHEN** source contains a bare newline in pretty mode
+- **THEN** the configured renderer policy may collapse it to a space; source-faithful mode retains the source line boundary.
+
+#### Scenario: Cache invalidation evidence
+- **WHEN** width, chunks, raw state and frozen prefixes change
+- **THEN** the inline tests observe updated cache/generation behavior without losing output.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::new_source_faithful`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::streaming`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::push_chunk`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `MarkdownContent::output`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `incremental_wrap_matches_full_wrap`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `with_wrapped_lines_provides_access`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `cache_invalidated_on_push_chunk`；`crates/codegen/pager/src/scrollback/blocks/markdown_content.rs` — `frozen_cache_is_reused`。
+
+
+### Requirement: Read block construction, content state, skill identity, and timing
+
+ReadToolCallBlock::new SHALL initialize a completed-safe block with only its path set; fluent setters SHALL update the requested line range, content/total line count, or error; is_success SHALL mean error is absent and has_content SHALL require non-empty content. Skill identity SHALL be delegated to skill_name_from_path. set_error SHALL capture elapsed time once when a running block is finalized, finish SHALL be idempotent, and elapsed_ms SHALL expose the finalized value or a live duration from started_at.
+
+#### Scenario: Construction
+- **WHEN** a read block is created
+- **THEN** all optional content, range, timing, image, and media fields are None.
+
+#### Scenario: Content/error mutation
+- **WHEN** content, line range, or an error is supplied
+- **THEN** the corresponding field is updated and success/content predicates reflect the new state.
+
+#### Scenario: Skill identity
+- **WHEN** the path is a skill SKILL.md, an ordinary file, or another markdown file
+- **THEN** only the canonical skill path yields a skill name/is_skill_read=true.
+
+#### Scenario: Timing
+- **WHEN** a running block is finalized by set_error or finish
+- **THEN** elapsed_ms is captured once; repeated finish does not replace it and a pre-completed block remains None.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `ReadToolCallBlock::new`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `with_line_range`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `with_content`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `with_error`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `is_success`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `has_content`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `skill_name`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `is_skill_read`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `set_error`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `finish`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `elapsed_ms`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `started_at`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `elapsed_ms`。
+
+
+### Requirement: Skill-aware read header identity and selection
+
+A read targeting a canonical SKILL.md path SHALL render a semantic `Skill {skill_name}` header, select only the skill name span, and omit a filesystem link target; ordinary files SHALL remain on the regular Read path.
+
+#### Scenario: Skill header
+- **WHEN** the path is `/.../skills/deploy/SKILL.md`
+- **THEN** the first line is `Skill deploy` and the selectable text is only `deploy`.
+
+#### Scenario: Non-skill markdown
+- **WHEN** the path is a normal file or README.md
+- **THEN** the block is not treated as a skill read and uses the normal file header.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `skill_name`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `is_skill_read`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `collapsed_line`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `header_block_line`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `skill_name_from_path`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `Selectable::Spans`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `TOOL_HEADER_RANGE`。
+
+
+### Requirement: Read path, range, cwd, and media header formatting
+
+The header SHALL use the Read prefix for ordinary files, shorten the displayed path through the tool-path surface and cwd, show a requested range, append `of total` when the range is a strict subset of the known file, and append mutually exclusive empty/image/PDF details. Expanded headers may display a cwd-relative path while the fullscreen preamble preserves the absolute path.
+
+#### Scenario: Regular file
+- **WHEN** an ordinary path is read
+- **THEN** the collapsed header starts with `Read` and includes the basename/path.
+
+#### Scenario: Range and shortening
+- **WHEN** a range and cwd are available
+- **THEN** collapsed output shows the shortened path and range; expanded output shows the cwd-relative path while the preamble uses the fullscreen path.
+
+#### Scenario: Total/media details
+- **WHEN** the block has total lines, empty content, image media, or PDF pages
+- **THEN** the corresponding `(start-end of total)`, `(empty)`, `(image)`, or `(N pages)` suffix is shown.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `collapsed_line`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `preamble`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `line_range`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `total_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `media_kind`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `ReadMediaKind::Image`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `ReadMediaKind::Pdf`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `path_for_tool_surface`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `ToolPathSurface::Collapsed`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `ToolPathSurface::Expanded`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `ToolPathSurface::Fullscreen`。
+
+
+### Requirement: Read header selection and semantic file links
+
+The ordinary read header SHALL expose only the painted path span as selectable, use TOOL_HEADER_RANGE for header selection, derive copied text from the displayed path, and attach an absolute OSC8 file target that remains stable across collapsed and expanded path presentation. Skill headers SHALL select the skill name without a file target.
+
+#### Scenario: Collapsed selection
+- **WHEN** a long absolute ordinary path is collapsed
+- **THEN** only span 1..2 is selectable and copied text is the basename.
+
+#### Scenario: Expanded selection
+- **WHEN** the ordinary path lies under cwd
+- **THEN** copied text is the cwd-relative path.
+
+#### Scenario: File link
+- **WHEN** an ordinary absolute path is rendered in collapsed or expanded mode
+- **THEN** the link target resolves to the absolute file URL and the target is reused across modes.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `header_block_line`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `TOOL_HEADER_RANGE`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `Selectable::Spans`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `selection_range`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `derive_selection_text`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `tool_path_file_target`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `LinkTarget::File`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `resolve_link_target`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `link_target`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `selection_text`。
+
+
+### Requirement: Read content syntax highlighting, absolute gutters, wrapping, and truncation
+
+Expanded content SHALL be line-numbered from the requested one-based start (or 1), syntax-highlighted according to the read path, wrapped to the available width with joiners, and marked with panel backgrounds. Truncated mode SHALL retain the first five and last three wrapped lines with a single ellipsis only when content exceeds that threshold; shorter content SHALL remain complete.
+
+#### Scenario: Preview styling
+- **WHEN** non-empty content is shown in expanded mode
+- **THEN** content lines carry panel background metadata and syntax-highlighted spans.
+
+#### Scenario: Absolute line numbers
+- **WHEN** a line range starts at 50
+- **THEN** the gutter begins at 50 and increments for each raw line.
+
+#### Scenario: Truncation
+- **WHEN** more than FIRST_LINES + LAST_LINES wrapped lines exist
+- **THEN** the first five and final three wrapped lines are retained with an ellipsis; the first and last source lines remain visible.
+
+#### Scenario: Width/wrapping
+- **WHEN** content exceeds the available width
+- **THEN** wrapping is performed before truncation and joiner metadata is preserved.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `render_content_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `FIRST_LINES`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `LAST_LINES`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `digit_count`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `base_line`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `gutter_width`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `content_width`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `highlight_line`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `get_syntect`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `word_wrap_lines_with_joiners`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `BlockLine::styled`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `BlockLine::separator`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `with_panel_background`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `with_joiner`。
+
+
+### Requirement: Read display modes, folding, error presentation, and block protocol
+
+ReadToolCallBlock SHALL default to collapsed and finish collapsed; a content-bearing block SHALL be foldable and cycle Collapsed→Truncated→Collapsed. Expanded/truncated output SHALL include the header plus content when content exists, or styled error lines when it does not. Errors SHALL receive an error bullet accent, while read blocks have no semantic block accent, vertical padding, custom background, or raw-mode rendering.
+
+#### Scenario: Foldability
+- **WHEN** content is present or absent
+- **THEN** is_foldable returns true only for non-empty content.
+
+#### Scenario: Fold cycle
+- **WHEN** the current mode is collapsed, truncated, or expanded
+- **THEN** next_fold_mode returns truncated from collapsed and collapsed from either non-collapsed mode.
+
+#### Scenario: Error rendering
+- **WHEN** an error exists without content in expanded/truncated mode
+- **THEN** the header is followed by each error line using the theme error color and the bullet reports the same accent.
+
+#### Scenario: Protocol defaults
+- **WHEN** the block is queried for accent, background, padding, raw mode, or default/finished mode
+- **THEN** the declared neutral/no-padding/no-raw/collapsed protocol values are returned.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `output`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `accent`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `bullet`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `background`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `finished_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `BlockOutput`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `DisplayMode::Collapsed`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `DisplayMode::Truncated`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `DisplayMode::Expanded`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `AccentStyle::static_color`。
+
+
+### Requirement: Read image references and preamble projection
+
+image_references SHALL expose exactly the stored inline image reference when present and an empty slice otherwise. The preamble SHALL always project the fullscreen path/skill header with the configured detail style and cwd context, independent of the collapsed/expanded body mode.
+
+#### Scenario: Image reference
+- **WHEN** image_ref is set or absent
+- **THEN** image_references returns a one-element slice or an empty slice without allocating a new semantic reference.
+
+#### Scenario: Preamble
+- **WHEN** a read block is used as a fullscreen preamble
+- **THEN** the same header formatter is used with Fullscreen path presentation and current cwd/detail configuration.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `image_references`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `image_ref`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `ScrollbackImageRef`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `preamble`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `ToolPathSurface::Fullscreen`；`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` — `dim_details`。
