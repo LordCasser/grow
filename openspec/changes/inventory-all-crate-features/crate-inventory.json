@@ -3727,7 +3727,19 @@
       "Inline edit rewind execution, mode-specific resubmission, and draft reconciliation",
       "Inline rewind failure recovery and editor preservation",
       "Successful rewind memory release and screen-mode confirmation surface",
-      "Shell prompt index and scrollback entry lookup with interjection-aware fallback"
+      "Shell prompt index and scrollback entry lookup with interjection-aware fallback",
+      "Terminal Mermaid dispatch",
+      "Mermaid affordance routing and dropdown geometry contract",
+      "The slash suggestion dropdown SHALL count each suggestion as one flat row when its description is empty or cannot receive the minimum description width, otherwise count its Unicode-aware wrapped description lines, and SHALL cap the returned visible row count at MAX_DROPDOWN_ROWS while returning zero for an empty list.",
+      "The slash dropdown SHALL derive a shared label column from the available content width so command labels, optional kind prefixes, and optional bracketed source tags remain aligned and bounded without overflowing the row.",
+      "When the slash snapshot is open and the terminal rectangle has usable geometry, the dropdown SHALL render its visible physical lines with selected and hovered row styles, clamp an out-of-range selected index, and return the source suggestion index associated with each rendered line.",
+      "The dropdown SHALL reserve a scrollbar column when the flattened physical-line count exceeds the visible height, choose a scroll offset that keeps the selected line visible with centered bias, and render a styled track/thumb without changing suggestion ownership mapping.",
+      "Each suggestion SHALL be rendered with a selection gutter, optional kind and tag metadata, highlighted fuzzy-match character spans, and a description aligned after the shared label column; wrapped continuation lines SHALL retain the description indentation and visual row background.",
+      "The dropdown SHALL wrap description and label text using Unicode display width, normalize embedded newlines, prefer the last fitting word boundary, and fall back to a valid character boundary when a token is wider than the available width.",
+      "Btw overlay state, markdown content, and bounded scrolling",
+      "Btw panel geometry, status rendering, title truncation, and close affordance",
+      "Overlay text selection geometry and complete copy reconstruction",
+      "Source-aware Markdown hyperlink, URL, file path, and viewport link overlays"
     ],
     "reviewed_files": [
       {
@@ -5805,6 +5817,18 @@
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs",
         "sha256": "adc89bfa2b16b738adc067579dc9db5a16e826b815f5ac6592c32a6ccedbfeca"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "sha256": "384b8043366424ee27927c969b0646921c690909b5d116cfe87acfcd9741d71c"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "sha256": "80f1a0e302d63ac61547e6c2a45d9a819ad5edef5000f162e64f39081d185084"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/btw_overlay.rs",
+        "sha256": "a9527990806c60b8c4df4a136d4fb6b719b60c74cae241a800073e998d2425a5"
       }
     ],
     "review": "reviews/pager.md"

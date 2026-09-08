@@ -900,3 +900,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：截断路径需先按样式行重排再拼接 ellipsis，并手工维护 LinkSource、Selectable span 和 source_column，布局与选择元数据耦合度高。
 - Pager 审计债务：is_foldable 的固定 MIN_CONTENT_WIDTH=60 与真实 ctx.width 分离，在宽终端上可能提前进入可折叠状态；这是源码主动接受的保守策略。
 - Pager 审计债务：Skill token range 使用 UTF-8 byte range，而测试和渲染同时依赖 span 索引与显示列宽，后续扩展复杂 token 或 grapheme 交互时存在多坐标体系维护成本。
+- Pager 审计债务：模块同时维护 Markdown 检测、缓存键协议、用户设置显示策略、按钮文案/几何和输出行插入，检测层与交互呈现层耦合。
+- Pager 审计债务：缓存文件名依赖手工 RENDER_REVISION=3；渲染行为变化若遗漏递增会复用旧 PNG，编译器无法约束。
+- Pager 审计债务：按钮宽度和三列 gap 由静态标签与 UnicodeWidthStr 计算，绘制/命中虽共享 AffordanceRow，但国际化或文案变更仍需同步协议与测试。
+- Pager 审计债务：post-wrap 插入通过 source_for 索引、insert_at+k 和反向插入维护文档顺序，调用方必须保持 prewrap_ranges 与 output.lines 同一帧映射。
+- Pager 审计债务：MermaidContent 明确不保存 per-diagram render state，所有异步状态由 AgentView worker 层维护，跨模块状态边界清晰但重构成本较高。

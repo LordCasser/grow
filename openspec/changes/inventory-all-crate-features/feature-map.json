@@ -76283,6 +76283,26 @@
         "Placement ownership",
         "media or diagram geometry requires source dimensions, viewport cropping or fallback controls",
         "this layer forwards the context and preserves the result while the lower renderer owns the geometry."
+      ],
+      [
+        "Wrap mapping",
+        "pre-wrap lines occupy one or more post-wrap rows",
+        "the computed end rows point one past each line’s last row."
+      ],
+      [
+        "Multiple diagrams",
+        "nonempty ranges appear in document order",
+        "one blank non-selectable row and one source-carrying affordance are created per range, with later offsets including earlier insertions."
+      ],
+      [
+        "Wrapped diagram",
+        "a diagram body pre-wrap range ends on a line that wraps to multiple rows",
+        "the affordance row follows the final wrapped row."
+      ],
+      [
+        "Continuation semantics",
+        "an inserted row is created",
+        "it is a separator with an empty joiner and is excluded from selection/copy."
       ]
     ],
     "sources": [
@@ -76321,6 +76341,50 @@
       [
         "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
         "ScrollbackPane::render_content"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "DiagramAffordance"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "prewrap_end_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "diagram_insert_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "continuation_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "apply_affordance_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::output_with_wraps"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::caption_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::one"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::prewrap_end_rows_handles_wrapping"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::apply_affordance_rows_inserts_blank_rows_and_reports_source"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::apply_affordance_rows_offset_follows_wrapped_body"
       ]
     ]
   },
@@ -158129,6 +158193,36 @@
         "Quality selection",
         "an affordance requests Open output",
         "the render target derives an Open-quality key and uses the open viewer bounds."
+      ],
+      [
+        "Stable key",
+        "source, theme, width and quality are unchanged",
+        "derive returns equal keys and identical filenames."
+      ],
+      [
+        "Source/theme separation",
+        "source or theme changes",
+        "the derived key and filename differ."
+      ],
+      [
+        "Width bucketing",
+        "terminal widths remain within one eight-column bucket or cross its boundary",
+        "the first case reuses a key and the second produces a different key."
+      ],
+      [
+        "Quality separation",
+        "quality changes between Terminal and Open",
+        "the keys and filenames differ; Open width changes do not affect the key."
+      ],
+      [
+        "Hash collection",
+        "a key is inserted into a HashSet",
+        "the same key is found and a theme-variant key is absent."
+      ],
+      [
+        "Theme darkness",
+        "ThemeKind is GrowDay or another concrete theme",
+        "GrowDay is light and every other supported kind is dark."
       ]
     ],
     "sources": [
@@ -158151,6 +158245,66 @@
       [
         "crates/codegen/pager/src/app/agent_view/mermaid_worker.rs",
         "per_theme_renders_land_in_distinct_files"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MERMAID_WIDTH_BUCKET"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "OPEN_QUALITY_WIDTH_BUCKET"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "RENDER_REVISION"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "width_bucket"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "hash_source"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidRenderQuality"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidCacheKey"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidCacheKey::derive"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidCacheKey::cache_filename"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "theme_is_dark"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::cache_key_sensitivity"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::cache_key_width_bucketing"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::cache_key_usable_in_hash_set"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::theme_is_dark_maps_growday_to_light_only"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::cache_filename_is_stable_and_keyed"
       ]
     ]
   },
@@ -180333,6 +180487,992 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/rewind.rs",
         "find_user_prompt_entry_for_shell_index"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "diagram-rendering",
+    "requirement": "Terminal Mermaid dispatch",
+    "contract": "The pager Mermaid detection layer SHALL inspect the MarkdownRenderView code-block spans, accept a fence when its first whitespace-delimited info token equals `mermaid` case-insensitively, and preserve closed spans in document order. mermaid_blocks SHALL return each clean span body plus its pre-wrap output-line range; mermaid_block_ranges SHALL return only those ranges without cloning sources. MermaidContent SHALL be a source-only detection skeleton with from_view, is_empty, len, and bounds-checked source access; it SHALL not render diagrams or store per-diagram render state.",
+    "scenarios": [
+      [
+        "Fence recognition",
+        "a code-block info string is mermaid, Mermaid, MERMAID, or mermaid followed by options",
+        "the span is included."
+      ],
+      [
+        "Other fence",
+        "the first info token is another language or a mermaidx prefix",
+        "the span is excluded."
+      ],
+      [
+        "Container cleanup",
+        "a Mermaid fence is nested in a blockquote or list",
+        "the returned body is de-prefixed clean source."
+      ],
+      [
+        "Document order",
+        "multiple closed Mermaid spans occur in one view",
+        "blocks and ranges retain source document order."
+      ],
+      [
+        "Streaming fence",
+        "a Mermaid fence is not closed yet",
+        "no block is reported until the closing fence is present."
+      ],
+      [
+        "Content skeleton",
+        "a view contains one detected diagram",
+        "MermaidContent exposes its count and source, returns None out of bounds, and has no render state."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MERMAID_INFO"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "is_mermaid_info"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "mermaid_spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "mermaid_blocks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "mermaid_block_ranges"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidContent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidContent::from_view"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidContent::is_empty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidContent::len"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidContent::source"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::detect"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::detects_mermaid_and_ignores_other_fences"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::detects_multiple_mermaid_blocks_in_order"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::detect_blockquote_fence_yields_clean_source"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::detect_list_nested_fence_yields_clean_source"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::detect_matches_info_first_token_case_insensitively"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::block_ranges_match_block_spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::no_blocks_for_non_mermaid_or_empty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::open_fence_during_stream_is_not_detected"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::mermaid_content_skeleton_detects_source_without_render_state"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Mermaid affordance routing and dropdown geometry contract",
+    "contract": "mermaid_display SHALL map RenderMermaid::Off to SourceOnly and Auto/On to Affordances. mermaid_display_static SHALL force SourceOnly for static_commit and otherwise delegate to mermaid_display. affordance_buttons SHALL lay out Open Image, Copy Image Path, and Copy Source left-to-right with a three-column gap from the supplied start column. affordance_row SHALL anchor the label at column 0, keep all three buttons clickable, and add the rendering diagram hint only when rendering is true after the final button plus the same gap.",
+    "scenarios": [
+      [
+        "Setting display",
+        "render_mermaid is Off, Auto, or On",
+        "the inline-art-only or affordance-row display is selected accordingly."
+      ],
+      [
+        "Static commit",
+        "static_commit is true for any setting",
+        "SourceOnly is returned so a noninteractive reserved row is not committed."
+      ],
+      [
+        "Interactive display",
+        "static_commit is false",
+        "the normal per-setting display is preserved."
+      ],
+      [
+        "Button order",
+        "an affordance row is laid out",
+        "the three fixed labels and action kinds occur in Open, CopyPath, CopySource order with three-column gaps."
+      ],
+      [
+        "Render status",
+        "rendering is false or true",
+        "idle rows have no status; busy rows place `rendering…` after the final button without changing label/button columns."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MERMAID_LABEL"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MERMAID_RENDERING"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "AFFORDANCE_OPEN"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "AFFORDANCE_COPY_PATH"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "AFFORDANCE_COPY_SOURCE"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "AFFORDANCE_GAP"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "MermaidDisplay"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "mermaid_display"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "mermaid_display_static"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "AffordanceKind"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "AffordanceButton"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "AffordanceRow"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "affordance_buttons"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "affordance_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::display_selection_matrix"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::static_commit_forces_source_only"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::affordance_buttons_start_after_the_label_with_a_fixed_gap"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/mermaid_content.rs",
+        "tests::affordance_row_has_label_and_shows_status_only_while_rendering"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The slash suggestion dropdown SHALL count each suggestion as one flat row when its description is empty or cannot receive the minimum description width, otherwise count its Unicode-aware wrapped description lines, and SHALL cap the returned visible row count at MAX_DROPDOWN_ROWS while returning zero for an empty list.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: desired_item_rows delegates to flat_line_count. flat_line_count computes the shared label column, reserves PREFIX_W plus LABEL_DESC_GAP, treats desc_space below 14 as a single row, wraps descriptions with simple_word_wrap otherwise, and stops counting once the cap is reached. The count therefore describes rendered physical lines rather than suggestion count.",
+    "scenarios": [
+      [
+        "Empty suggestions",
+        "the item list is empty",
+        "desired_item_rows returns 0."
+      ],
+      [
+        "Short-item cap",
+        "many short suggestions would exceed MAX_DROPDOWN_ROWS",
+        "the returned row count is exactly MAX_DROPDOWN_ROWS."
+      ],
+      [
+        "Wrapped descriptions",
+        "a description has enough horizontal space to wrap",
+        "the row count is greater than the item count when wrapping adds continuation lines and remains bounded by the cap."
+      ],
+      [
+        "Insufficient description space",
+        "the available description width is below 14 columns or the description is empty",
+        "the suggestion contributes one physical row."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "desired_item_rows"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "flat_line_count"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "MAX_DROPDOWN_ROWS"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "simple_word_wrap"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The slash dropdown SHALL derive a shared label column from the available content width so command labels, optional kind prefixes, and optional bracketed source tags remain aligned and bounded without overflowing the row.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: compute_label_column_w uses the full row width below 52 columns and three-fifths of wider content, then caps the result at LABEL_CAP and at the widest row label. kind_prefix appears only when content_w is at least 18; tag_suffix appears only when content_w is at least 52 and contributes bracket plus spacing width; row_label_width includes both metadata pieces. LABEL_DESC_GAP separates the label column from the description, and PREFIX_W reserves the selection gutter.",
+    "scenarios": [
+      [
+        "Wide metadata",
+        "content width is at least 52 columns",
+        "kind and a bracketed tag may be rendered and the tag is included in the shared label width."
+      ],
+      [
+        "Medium command rows",
+        "content width is at least 18 but below the tag threshold",
+        "the kind prefix and command label remain visible while source metadata is omitted."
+      ],
+      [
+        "Narrow command rows",
+        "content width is below 18",
+        "the kind prefix is hidden so the command label remains available."
+      ],
+      [
+        "Long dynamic labels",
+        "a command or tag exceeds the label budget",
+        "the visible label/tag text is truncated to the computed budget and does not write past the row width."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "compute_label_column_w"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "row_label_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "kind_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "kind_prefix_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "tag_suffix"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "tag_suffix_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "LABEL_CAP"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "LABEL_DESC_GAP"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "PREFIX_W"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "When the slash snapshot is open and the terminal rectangle has usable geometry, the dropdown SHALL render its visible physical lines with selected and hovered row styles, clamp an out-of-range selected index, and return the source suggestion index associated with each rendered line.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: render_dropdown returns a default RenderedDropdown for a closed snapshot, zero-height area, or width below 4. For usable geometry it clamps selection to the last item, builds flat lines and item starts, paints only the portion intersecting the buffer (safe under resize races), and computes row_items by partitioning line starts so continuation lines map to their owning suggestion. Selected rows take precedence over hover styling.",
+    "scenarios": [
+      [
+        "Closed dropdown",
+        "snap.open is false",
+        "no dropdown lines are painted and the returned result is empty with no scrollbar."
+      ],
+      [
+        "Tiny or empty geometry",
+        "the area height is zero or width is below 4",
+        "render_dropdown returns without panicking or hanging."
+      ],
+      [
+        "Selection clamp",
+        "the snapshot selected index is greater than the available item count",
+        "the last suggestion is treated as selected without indexing outside the item list."
+      ],
+      [
+        "Line-to-item mapping",
+        "a suggestion description wraps into continuation lines",
+        "row_items contains the owning suggestion index for every visible physical line."
+      ],
+      [
+        "Resize race",
+        "a computed paint coordinate falls outside the supplied buffer",
+        "the line is skipped or clipped safely rather than writing out of bounds."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "render_dropdown"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "RenderedDropdown"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "build_flat_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "embedded_row_style"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "row_items"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The dropdown SHALL reserve a scrollbar column when the flattened physical-line count exceeds the visible height, choose a scroll offset that keeps the selected line visible with centered bias, and render a styled track/thumb without changing suggestion ownership mapping.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: render_dropdown detects overflow by counting against visible_rows+1, subtracts two columns from row width when needed, and renders the scrollbar in the rightmost usable columns with total physical lines, visible height, and current scroll offset. The offset is zero when all lines fit, advances to keep the selected start near the middle, and bottoms out when the selected region reaches the end. Returned row_items still maps each line to its source item.",
+    "scenarios": [
+      [
+        "No overflow",
+        "all flattened lines fit in the visible rows",
+        "has_scrollbar is false and no scrollbar column is reserved."
+      ],
+      [
+        "Physical-line overflow",
+        "wrapped or numerous suggestions exceed the visible rows",
+        "has_scrollbar is true, row width loses the scrollbar gutter, and the visible mapping has one entry per painted row."
+      ],
+      [
+        "Selection near top",
+        "the selected line is already within the initial centered viewport",
+        "scroll offset remains zero."
+      ],
+      [
+        "Selection near bottom",
+        "the selected line plus the centering bias reaches the end",
+        "the offset is clamped so the final physical line remains visible."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "render_dropdown"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "render_scrollbar_styled"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "RenderedDropdown"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "item_starts"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Each suggestion SHALL be rendered with a selection gutter, optional kind and tag metadata, highlighted fuzzy-match character spans, and a description aligned after the shared label column; wrapped continuation lines SHALL retain the description indentation and visual row background.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: build_item_lines emits prompt_arrow for the selected item, applies selected/hover row background through build_flat_lines, truncates the display label to the label budget, emits kind and tag in the configured accent style, and uses build_highlighted_spans to style matched character indices. Descriptions start at PREFIX_W plus label_col_w plus LABEL_DESC_GAP; continuation lines are padded to that same start. Selected styling takes precedence and tag metadata is right-aligned within the label area.",
+    "scenarios": [
+      [
+        "Selected suggestion",
+        "an item index equals the selected index",
+        "the row shows the selection arrow and selected visual style."
+      ],
+      [
+        "Hovered suggestion",
+        "an unselected item is hovered",
+        "the row uses hover styling without replacing selected styling on another row."
+      ],
+      [
+        "Fuzzy match",
+        "match indices identify characters in the display text",
+        "matching character spans use the theme accent while the remaining spans use normal text styling."
+      ],
+      [
+        "Wrapped description",
+        "description text requires multiple lines",
+        "the first line follows the label and continuation lines begin at the shared description indent."
+      ],
+      [
+        "Tagged command",
+        "a row has a source tag and sufficient width",
+        "the tag is rendered in brackets with accent styling and does not collide with the description."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "build_flat_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "build_item_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "build_highlighted_spans"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "tag_suffix"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "kind_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "PREFIX_W"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "LABEL_DESC_GAP"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The dropdown SHALL wrap description and label text using Unicode display width, normalize embedded newlines, prefer the last fitting word boundary, and fall back to a valid character boundary when a token is wider than the available width.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: simple_word_wrap returns the original text as one element for width zero, replaces newline characters with spaces, checks UnicodeWidthStr for complete fits, chooses a fitting space using UnicodeWidthChar widths, otherwise scans char_indices until the display width limit and splits on a valid UTF-8 boundary, trimming leading/trailing whitespace before continuing. Wide CJK and long unbroken tokens therefore cannot cause a panic or infinite loop.",
+    "scenarios": [
+      [
+        "Zero width",
+        "the requested width is zero",
+        "the function returns the full text as one line without looping."
+      ],
+      [
+        "Newline normalization",
+        "the text contains line breaks",
+        "line breaks are treated as spaces during wrapping."
+      ],
+      [
+        "Word boundary",
+        "a line contains spaces and a word fits before the limit",
+        "the last fitting space is chosen and surrounding whitespace is trimmed."
+      ],
+      [
+        "Long unbroken token",
+        "no space fits before the limit",
+        "the text is split at a valid UTF-8 character boundary using display width."
+      ],
+      [
+        "Wide Unicode",
+        "the text contains CJK or other wide characters",
+        "the computed break respects display columns and rendered buffer writes remain bounded."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "simple_word_wrap"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "UnicodeWidthStr"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "UnicodeWidthChar"
+      ],
+      [
+        "crates/codegen/pager/src/views/slash_dropdown.rs",
+        "build_item_lines"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Btw overlay state, markdown content, and bounded scrolling",
+    "contract": "BtwOverlayState SHALL represent Loading, Done, and Error phases while preserving the question; Done SHALL store rendered MarkdownContent with an initial zero offset. `done` SHALL use the shared markdown renderer, scroll_up SHALL saturate at zero, scroll_down SHALL clamp to a supplied maximum, scroll_offset SHALL return zero for non-Done states, and max_scroll_offset SHALL derive wrapped line count at a nonzero width minus the visible body limit. The full selection model SHALL expose every wrapped Done line regardless of the current viewport offset.",
+    "scenarios": [
+      [
+        "Done construction",
+        "a response is received",
+        "the state contains the original question, rendered Markdown content, and scroll offset zero."
+      ],
+      [
+        "Scroll bounds",
+        "the caller scrolls a Done response up or down",
+        "the offset never underflows and never exceeds the supplied or computed maximum; non-Done states remain offset zero."
+      ],
+      [
+        "Width boundary",
+        "content width is zero or the response fits in the body",
+        "maximum scroll offset is zero and full selection remains empty only for non-Done/zero-width state."
+      ],
+      [
+        "Full selection",
+        "a long Done response is scrolled to a nonzero viewport offset",
+        "full_selection_model still includes all response lines with source joiners and stable block indexes."
+      ],
+      [
+        "Markdown source",
+        "Done content includes formatting syntax",
+        "rendered content is represented by MarkdownContent rather than raw source text."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "done_state_renders_markdown_not_raw_source"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "scroll_offset_shifts_block_line_idx"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState::Loading"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState::Done"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState::Error"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState::done"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState::question"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState::scroll_up"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState::scroll_down"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState::scroll_offset"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState::max_scroll_offset"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BtwOverlayState::full_selection_model"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "MarkdownContent"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "with_wrapped_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "line_plain_text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Btw panel geometry, status rendering, title truncation, and close affordance",
+    "contract": "btw_panel_height SHALL return 0 for no state, 3 rows for Loading/Error, and two borders plus one through DONE_MAX_BODY_LINES wrapped body rows for Done. render_btw_panel SHALL no-op for areas below 12 columns or 3 rows, clear and draw a rounded themed border, render a spinner and Answering… for Loading, a width-truncated themed error for Error, and reserve a right-aligned [Esc] close hint before truncating the `/btw <question>` title. Long titles SHALL use an ellipsis; narrow Done panels SHALL fall back to bare [Esc]; the close hit area SHALL remain positive, inside the panel, and on the top border.",
+    "scenarios": [
+      [
+        "Panel height",
+        "state is None, Loading, Error, or Done with wrapped content",
+        "height follows the state-specific border/body rules and caps Done body at DONE_MAX_BODY_LINES."
+      ],
+      [
+        "Loading/error body",
+        "the panel is rendered in Loading or Error state",
+        "the body shows spinner/status or a width-safe error line, with no Done selection content."
+      ],
+      [
+        "Long title",
+        "the question is wider than the title space",
+        "the title is truncated with an ellipsis while [Esc] remains visible."
+      ],
+      [
+        "Short title",
+        "the question fits",
+        "the full `/btw hi` title and [Esc] hint are visible without an ellipsis."
+      ],
+      [
+        "Narrow Done panel",
+        "the full position/scroll hint cannot fit",
+        "the position indicator is dropped and bare [Esc] remains visible."
+      ],
+      [
+        "Mouse close",
+        "a hit area is supplied even with a long question",
+        "the hit area is on the top border, has positive width, and stays within the panel rectangle."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "long_question_truncates_title_but_keeps_esc_hint"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "short_question_shows_full_title_and_esc_hint"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "done_narrow_panel_falls_back_to_bare_esc"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "long_question_still_registers_esc_hit_area"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "btw_panel_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "DONE_MAX_BODY_LINES"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "render_btw_panel"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "Clear"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BorderType::Rounded"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "braille_spinner_frames"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "spinner_glyph"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "Answering…"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "Error"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "focus_active"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "max_scroll_offset"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "[Esc]"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "title_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "unicode_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "HitArea"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "hit_close"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "title_render_w"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Overlay text selection geometry and complete copy reconstruction",
+    "contract": "A Done panel SHALL populate a ResolvedSelectionModel using the synthetic BTW_OVERLAY_ENTRY_IDX and range id zero, with one selectable line per rendered body line, source joiners, screen coordinates offset below the top border, and visible block geometry marked drag_startable. Loading and Error states SHALL contribute no ranges or visible blocks. The full model SHALL cover scrolled-out lines so text selection and reconstruction can copy the complete selected span with newline/soft-wrap semantics.",
+    "scenarios": [
+      [
+        "Done selection",
+        "a Done response is rendered",
+        "selection ranges use the synthetic overlay entry/range, line indexes are stable, screen rows begin at body row one, and visible geometry is present."
+      ],
+      [
+        "Non-Done selection",
+        "state is Loading or Error",
+        "ranges and visible_blocks remain empty."
+      ],
+      [
+        "Viewport scroll",
+        "Done content has a nonzero scroll offset",
+        "visible line block indexes begin at the offset while the full selection model still starts at zero."
+      ],
+      [
+        "Scrolled-out copy",
+        "a drag spans lines outside the current viewport",
+        "reconstruct_selection_text returns every selected source line in order, including the correct joiner/newline handling."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "done_state_populates_selection_model"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "loading_state_does_not_populate_selection_model"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "error_state_does_not_populate_selection_model"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "full_selection_model_spans_entire_response"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "copy_includes_lines_scrolled_out_of_view"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "ResolvedSelectionModel"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "ResolvedSelectableLine"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "VisibleBlockGeometry"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BTW_OVERLAY_ENTRY_IDX"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "BTW_OVERLAY_RANGE_ID"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "selection_model.content_area"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "selection_model.visible_blocks"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "full_selection_model"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "reconstruct_selection_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "joiner_to_previous"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "selectable_cols"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "drag_startable"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Source-aware Markdown hyperlink, URL, file path, and viewport link overlays",
+    "contract": "Done rendering SHALL feed the same source-aware collect_content_links pipeline used by scrollback, preserving Markdown hyperlinks and plain URL autolinks as OSC-8 overlay destinations, mapping absolute file paths to file:// targets, and resolving relative project/media links through cwd and media_paths. Overlay links SHALL occupy positive body columns, never the title border, map only visible rows after clamped scrolling, and preserve an outer URL when a URL contains a nested URL query.",
+    "scenarios": [
+      [
+        "Markdown hyperlink",
+        "Done content contains `[docs](https://example.com/btw-link)`",
+        "a body link overlay resolves to the exact HTTPS destination with a positive column span."
+      ],
+      [
+        "Plain URL",
+        "Done content contains a bare HTTPS URL",
+        "the URL is auto-linked to the same OSC-8 destination."
+      ],
+      [
+        "File path",
+        "Done content contains an absolute project file path",
+        "the shared collector creates a file:// overlay containing the file name."
+      ],
+      [
+        "Scrolled row",
+        "a link is on the last visible line of a long response",
+        "its screen row is the visible body row after the scroll offset, rather than its absolute source line."
+      ],
+      [
+        "Nested URL",
+        "a URL query contains another HTTPS URL and the content is wrapped/scrolled",
+        "the LinkTarget remains the complete outer URL and stays inside the panel rows."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "done_state_maps_markdown_links_to_overlay"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "done_state_maps_plain_url_autolinks"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "done_state_scans_file_paths_like_scrollback"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "scrolled_links_use_visible_rows_only"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "wrapped_btw_url_keeps_outer_destination_when_scrolled"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "render_btw_panel"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "collect_content_links"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "with_link_content"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "LinkOverlay"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "LinkTarget::Url"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "resolve_link_target"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "cwd"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "media_paths"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "content_skip"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "visible_count"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "screen_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "col_start"
+      ],
+      [
+        "crates/codegen/pager/src/views/btw_overlay.rs",
+        "col_end"
       ]
     ]
   }
