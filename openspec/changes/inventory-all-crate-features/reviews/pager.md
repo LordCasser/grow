@@ -2334,3 +2334,9 @@ Luna/high复用代理第二轮完整读取`app/root/dispatch/tests/session/lifec
 Luna/high复用代理完整读取`views/tasks_pane.rs`共3311行、51项内联测试；主代理复核SHA-256与12项功能需求来源，覆盖任务/Workflow列表、运行状态、选择、停止/取消、过滤、排序和提示投影。未运行Cargo或真实任务运行时。
 
 Luna/high复用代理第二轮完整复核`scrollback/state/mod.rs`共3966行、65项内联测试；该文件已有feature-map登记，本轮补齐独立全量来源与SHA-256核验，未运行Cargo或真实终端。
+
+补充Pager `scrollback/state/mod.rs`第二轮全量核对：3966行、64项内联测试、SHA-256匹配；合并既有8项契约来源并新增`terminal marker stop hook stash identity folding`，未运行Cargo或动态scrollback。
+
+Luna/high复用代理完整读取`app/root/dispatch/router.rs`共1453行、无内联测试；主代理复核SHA-256与12项功能需求来源，覆盖Action路由、Effect分派和边界错误。未运行Cargo或动态dispatch。
+
+Luna/high复用代理完整读取`app/root/dispatch/task_result.rs`共1481行、无内联测试；主代理复核SHA-256、95个TaskResult分支来源与9项功能需求，覆盖任务结果路由、完成/失败投影和副作用边界。未运行Cargo或动态dispatch。

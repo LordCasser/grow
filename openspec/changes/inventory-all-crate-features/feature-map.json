@@ -75719,6 +75719,90 @@
       [
         "crates/codegen/pager/src/scrollback/state/mod.rs",
         "test_get_by_id_is_o1"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::fresh_continuation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::append_entries_from"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::raise_id_floor"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::raise_invalidation_floor"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::invalidation_generations"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::reconcile_minimal_native_frontier_from"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::push_block_if_absent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::remove_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::clear"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_empty_state"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::immutable_ui_events_deduplicate_by_event_id_only"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::immutable_event_index_tracks_removal_clear_and_reinsert"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::minimal_replay_frontier_stops_at_a_divergent_branch"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::minimal_replay_frontier_skips_committed_local_notices"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::minimal_replay_frontier_does_not_skip_durable_notices"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::minimal_replay_frontier_inherits_only_committed_common_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::fresh_continuation_and_append_share_id_space"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::raise_id_floor_skips_ids_allocated_by_discarded_sibling"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::continuation_swaps_never_regress_invalidation_generations"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::fresh_continuation_preserves_view_preferences"
       ]
     ]
   },
@@ -75945,6 +76029,118 @@
       [
         "crates/codegen/pager/src/scrollback/state/mod.rs",
         "test_mark_height_dirty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::push"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::push_block"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::replace_tool_block"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::mark_height_dirty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::set_inline_edit_height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::push_applies_edit_materialize_policy"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::replace_tool_block_edit_policy"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::replace_tool_block_untrusted_rising_edge_expands"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::push_uses_canonical_edit_default_and_explicit_override"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::push_chunk_to_agent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::push_chunk_to_agent_deferred"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::set_execute_output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::push_chunk_to_thinking"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::push_chunk_to_thinking_deferred"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::append_execute_output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::push_chunk_to_execute"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::content_generation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::iter_entries"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::get_by_id"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::index_of_id"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_push_chunk_to_agent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_push_chunk_to_nonexistent_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_push_chunk_to_wrong_type"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_content_generation_bumps_on_content_changes"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_content_generation_unchanged_by_display_toggles"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_content_generation_unchanged_by_scroll_and_resize"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_iter_entries_yields_all_in_order"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_get_by_id_is_o1"
       ]
     ]
   },
@@ -76075,6 +76271,74 @@
       [
         "crates/codegen/pager/src/scrollback/state/mod.rs",
         "sticky_expanded_mode_still_expands_untouched_thinking_on_finish"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::maintain"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::needs_animation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::next_ui_deadline"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::set_last_running"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::set_entry_running"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::finish_running"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::finish_running_with_time"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::set_pending_user_input"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::clear_all_pending_user_input"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::has_pending_user_input"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::bash_execute_expands_on_finish_unless_user_collapsed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::set_pending_user_input_toggles_flag_and_reports_change"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::mark_completed_clears_pending_user_input"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::user_expanded_running_thinking_stays_expanded_on_finish"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::untouched_running_thinking_collapses_on_finish"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::running_thinking_toggled_back_to_truncated_collapses_on_finish"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::sticky_expanded_mode_still_expands_untouched_thinking_on_finish"
       ]
     ]
   },
@@ -76431,6 +76695,46 @@
       [
         "crates/codegen/pager/src/scrollback/state/mod.rs",
         "insert_block_before_rebuilds_turn_indices"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::push_subagent_permission"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::seal_subagent_permission_group"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::append_entries_from"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::permission_updates_rejoin_the_open_primary_turn_group"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::completed_primary_turn_seals_the_permission_group"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::reconnect_merges_permissions_from_the_same_epoch"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::reconnect_terminal_seals_the_original_permission_epoch"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::reconnect_merges_same_epoch_members_before_terminal"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::reconnect_keeps_post_terminal_permissions_in_a_new_group"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::reconnect_merges_before_and_splits_after_terminal"
       ]
     ]
   },
@@ -76573,6 +76877,74 @@
       [
         "crates/codegen/pager/src/scrollback/state/layout.rs",
         "test_push_user_prompt_appends_prompt_descriptor"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::set_appearance"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::invalidate_heights"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::prepare_layout"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::begin_frame"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::invalidate_if_width_changed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::mark_height_dirty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::offscreen_running_entry_needs_no_animation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::finish_flash_is_tracked_and_drained"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::finish_flash_drops_removed_entries"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::evict_offscreen_render_caches_sweeps_far_entries_only"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_cached_height_respects_appearance_vpad"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_cached_height_with_default_appearance_has_vpad"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_dirty_heights_cleared_after_prepare_layout"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_push_then_prepare_layout_updates_total_height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_push_in_batch_still_nullifies_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_push_into_empty_state_with_no_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_mark_height_dirty"
       ]
     ]
   },
@@ -87196,6 +87568,26 @@
       [
         "crates/codegen/pager/src/scrollback/state/types.rs",
         "TurnStatus; NavDirection; Turn; ViewMode; ViewportSnapshot; EntryLayoutInfo; MAX_TRUNCATED_HEADER_HEIGHT; FINISH_FLASH_DURATION_MS; MEASURE_MARGIN_ENTRIES; EVICT_KEEP_MARGIN_ENTRIES; RESUME_WARM_PAGES"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::prepare_layout"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_push_and_selection"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_turn_detection"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_turn_navigation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::test_pinned_prompt_index"
       ]
     ]
   },
@@ -95899,6 +96291,62 @@
       [
         "crates/codegen/pager/src/scrollback/state/selection.rs",
         "display_rank"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::insert_block_before"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::capture_viewport_snapshot"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::restore_viewport_snapshot"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::capture_scroll_bookmark"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::restore_scroll_bookmark"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::insert_block_before_positions_and_keeps_ids_unique"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::insert_block_before_falls_back_to_push_when_the_anchor_is_gone"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::insert_block_before_keeps_the_selection_on_its_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::insert_block_before_never_strands_the_entry_below_the_commit_frontier"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::insert_block_before_rebuilds_turn_indices"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::viewport_snapshot_restore_roundtrip_after_guest_mutate"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::restore_invalidates_stale_peek_width_cache_before_full_prepare"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::prepare_layout_width_change_is_case1_height_only_is_not"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::restore_reverts_follow_autoselect_and_current_turn"
       ]
     ]
   },
@@ -165559,6 +166007,1873 @@
       [
         "crates/codegen/pager/src/scrollback/state/mod.rs",
         "insert_block_before_rebuilds_turn_indices"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Pager terminal marker stop hook stash identity folding",
+    "contract": "Stop hook batches SHALL be accepted only for the newest eligible turn-terminal marker: stamped batches require a matching prompt id, unstamped batches are tail-only, newer terminal markers stop the walk, and a repeated hook name is refused. Accepted hooks attach to the marker, force collapsed presentation unless pinned, and standalone lifecycle hooks form collapsed tool-like rows.",
+    "scenarios": [
+      [
+        "Hook attribution",
+        "a stop or stop_failure batch is stamped, unstamped, interleaved or repeated",
+        "only the attributable latest terminal marker accepts it and the same event name cannot be attached twice."
+      ],
+      [
+        "Hook presentation",
+        "accepted hooks are attached or a lifecycle hook is pushed",
+        "hook data is retained and the marker defaults to collapsed unless display mode is pinned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::attach_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::push_lifecycle_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::latest_turn_marker_accepting"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "ScrollbackState::attach_stop_hooks_to_marker"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::stop_hooks_attach_only_to_turn_terminal_markers"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::stop_hooks_respect_marker_prompt_id"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/mod.rs",
+        "tests::stop_hooks_merge_walks_past_interleaved_tail_blocks"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Quit, update restart, and screen-mode relaunch safety",
+    "contract": "dispatch SHALL unregister active sessions before Quit/RestartForUpdate, mark update restart intent, and allow screen-mode relaunch only when all agents/subagents have no unsettled turn/replay/reload work; blocked relaunches toast, permitted relaunches record session/control handoffs before quitting.",
+    "scenarios": [
+      [
+        "Quit",
+        "quit or update restart is requested",
+        "sessions are unregistered and Quit is emitted."
+      ],
+      [
+        "Relaunch",
+        "work is unsettled or settled",
+        "blocked requests toast; settled requests capture handoffs and quit."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "dispatch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "unregister_all_active_sessions"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::Quit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::RestartForUpdate"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::RelaunchInScreenMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "has_unsettled_relaunch_work"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "collect_control_handoffs"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "ScreenModeRelaunch"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Session lifecycle, worktree, load, picker, and card routing",
+    "contract": "The router SHALL delegate session creation/exit/delete/load/fork/worktree/picker actions, initialize new-worktree dialog state, and toggle session/content card expansion while loading missing card detail with generation/session/cwd context.",
+    "scenarios": [
+      [
+        "Lifecycle",
+        "a session action arrives",
+        "the matching lifecycle handler receives arguments."
+      ],
+      [
+        "Card",
+        "a card is expanded",
+        "expanded state toggles or missing detail emits LoadCardDetail."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::NewSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ExitSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DeleteCurrentSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::NewWorktreeSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenNewWorktreeDialog"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::LoadSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::FetchSessionList"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ShowSessionPicker"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ExpandSessionCard"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "dispatch_new_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "dispatch_load_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "dispatch_pick_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Effect::LoadCardDetail"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Prompt, queue, focus, and scrollback navigation routing",
+    "contract": "dispatch SHALL route prompt/follow-up/slash-preserving/bash/interject/steer/clear/history actions, map shared queue mutations to active-session effects or no-op without a session, switch active panes, open scrollback search, and perform navigation/scroll/fold operations with selection clearing where required.",
+    "scenarios": [
+      [
+        "Prompt",
+        "prompt/queue/navigation action arrives",
+        "specialized handler or scrollback mutation runs."
+      ],
+      [
+        "Shared queue",
+        "active session exists",
+        "matching Queue effect carries session id; otherwise no-op."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SendPrompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SubmitFollowUp"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SendSlashCommandPreservingDraft"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::Interject"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SteerPrompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SendBashCommand"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::QueueRemoveShared"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::QueueReorderShared"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::QueueClearShared"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::QueueEditShared"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::QueueHoldEditShared"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::QueueReleaseEditShared"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::FocusPrompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::FocusScrollback"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenScrollbackSearch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "navigate_clearing_selection"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "with_scrollback"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Scrollback fold, raw, debug, copy, export, and viewer actions",
+    "contract": "The router SHALL mutate selected scrollback fold/raw/expand state, toggle mouse/scroll/fps diagnostics and notices, delegate copy/assistant/export/transcript actions, expand groups before opening a block viewer, and ignore extension modals when plugins are disabled.",
+    "scenarios": [
+      [
+        "Fold",
+        "fold/view action arrives",
+        "scrollback state changes and viewer opens only if no group expansion consumed it."
+      ],
+      [
+        "Debug",
+        "debug action arrives",
+        "state toggles and notices/logging update."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::Collapse"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::Expand"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleFold"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleExpandAll"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ExpandAllThinking"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleRaw"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleMouseCapture"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleScrollDebugHud"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleFpsHud"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleScrollLog"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ShowDebugStatus"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::CopyBlockContent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::CopyAssistantMessage"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ExportConversation"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenTranscriptPager"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenBlockViewer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenExtensionsModal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "dispatch_toggle_mouse_capture"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Extensions, MCP, hooks, plugins, skills, and model controls",
+    "contract": "For active bound sessions, extension/MCP/hook/plugin/skill actions SHALL emit matching effects and loading states; inactive/sessionless actions SHALL no-op; model, effort, and agent changes SHALL defer before binding or enqueue session control after binding, gated by reconnect.",
+    "scenarios": [
+      [
+        "Bound",
+        "active agent has session id",
+        "matching effect includes agent/session/action."
+      ],
+      [
+        "Unbound",
+        "agent/session is absent",
+        "no effect is emitted or control is deferred."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::McpSetupSubmit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ReloadSkills"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::RefreshMcpList"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ExecuteHooksAction"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ExecutePluginsAction"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ExecuteMarketplaceAction"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::UpsertMcpServer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DeleteMcpServer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleSkill"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleMcpServer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleMcpTool"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SwitchModel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::PatchEffort"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SwitchAgent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "enqueue_model_control"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "enqueue_effort_control"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "enqueue_agent_control"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Announcements, task controls, catalog, and status actions",
+    "contract": "The router SHALL persist changed announcement hide/show state, open only the validated current promo CTA, delegate turn/task/subagent/scheduled controls, and route bundle/catalog/session/tutorial/trajectory/context/usage/queue/task/plan actions with active-session guards for trajectory.",
+    "scenarios": [
+      [
+        "Announcement",
+        "hide/show/CTA action arrives",
+        "hidden ids persist only on changes and CTA uses validated slot target."
+      ],
+      [
+        "Trajectory",
+        "no active session exists",
+        "toast is shown and no launch effect is emitted."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::AnnouncementsHide"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::AnnouncementsShow"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::AnnouncementsOpenCta"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "first_session_announcement"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "session_announcement_hide_keys"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "promo_cta_target"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::CancelTurn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::KillBgTask"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::KillSubagent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::CancelScheduledTask"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DemoteToBackground"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::RequestBundleStatus"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ViewCatalogEntry"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenTrajectory"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Effect::LaunchTrajectory"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Behavior, notes, settings, themes, preferences, and modal routes",
+    "contract": "The router SHALL delegate behavior/plan/remember/BTW/recap actions, every settings setter/toggle/preview, and settings/palette/help/reset modal actions to their dedicated handlers so persistence and UI state remain centralized.",
+    "scenarios": [
+      [
+        "Behavior",
+        "mode/note/recap action arrives",
+        "specialized handler runs."
+      ],
+      [
+        "Setting/modal",
+        "setter or modal action arrives",
+        "corresponding setting or modal handler runs."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SetBehaviorThenPrompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SetBehaviorMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::EnterRememberMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SendRememberNote"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SaveRememberNoteFromModal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SendBtw"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SendRecap"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleMultiline"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleCompactMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleVimMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SetTheme"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SetDefaultModel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SetPermissionMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SetScreenMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SetRenderMermaid"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SetContextualHintUndo"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenSettings"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenSettingsFocus"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenCommandPalette"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenHowtoGuides"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenResetConfirm"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ConfirmResetSetting"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Permissions, URLs, links, trust, search, and content session routing",
+    "contract": "Permission actions SHALL delegate; OpenUrl SHALL distinguish file paths from URL opening with failure toasts; OpenLink SHALL resolve OSC8 file/URL targets; link cycling mutates the active agent; trust/deep-search/content-session/delete actions are guarded and stale picker deletion is ignored.",
+    "scenarios": [
+      [
+        "URL",
+        "file/URL/link action arrives",
+        "safe opener or file opener runs with appropriate toast."
+      ],
+      [
+        "Delete",
+        "session picker entry is stale",
+        "no delete effect is emitted."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::PermissionSelect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::PermissionFollowup"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::PermissionCancel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenUrl"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenLink"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenNextLink"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenPrevLink"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "open_url_or_show"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "resolve_link_open_target"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::TrustFolder"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::TriggerDeepSearch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ForceDeepSearch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::PickContentSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DeleteSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "session_picker_entry_matches"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Fork, doctor fixes, memory, external editor, and dashboard entry",
+    "contract": "Fork/new-session answers SHALL apply persistent worktree choices; DoctorFix confirmation SHALL validate session binding, show progress, and emit ApplyDoctorFix or warning; memory/editor actions SHALL require a bound session/empty editor slot; dashboard entry/exit/dispatch actions SHALL delegate.",
+    "scenarios": [
+      [
+        "Doctor",
+        "fix target is stale/current",
+        "warning or ApplyDoctorFix with progress feedback results."
+      ],
+      [
+        "Memory/editor",
+        "session/editor is unavailable/available",
+        "send/editor request is guarded and duplicate editor request is prevented."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::Fork"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ForkAnswered"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ProjectSelected"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::NewSessionAnswered"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "apply_persist_worktree_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DoctorFixConfirmed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "current_doctor_target"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Effect::ApplyDoctorFix"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DoctorFixCancelled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenMemoryModal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::SuspendForEditor"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "pending_editor"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::OpenDashboard"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ExitDashboard"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Dashboard, goal/workflow, task-result, rewind, and jump routing",
+    "contract": "Dashboard actions SHALL delegate attach/dispatch/stop/delete/reorder/overlay/location/permission/question/reply operations and mutate local filter/focus state; TaskComplete SHALL enter task-result handling; goal/workflow toggles update active view state; rewind/jump actions delegate picker/confirmation flows.",
+    "scenarios": [
+      [
+        "Dashboard",
+        "dashboard action arrives",
+        "matching handler/state mutation runs."
+      ],
+      [
+        "Goal/replay",
+        "goal/workflow/rewind/jump action arrives",
+        "view state or specialized flow changes."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardAttach"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardDispatch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardDispatchSlash"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardTogglePin"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardBeginRename"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardCommitRename"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardCancelRename"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardStop"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardDelete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardSetFilter"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardSelectNext"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardReorderUp"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardOverlayStop"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardOpenLocationPicker"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardChangeLocation"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardConfirmWorktree"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardPermissionSelect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardQuestionAnswer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::DashboardPeekReply"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::TaskComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleGoalDetail"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::ToggleWorkflows"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::Rewind"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "Action::JumpShowPicker"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Extension action-result reconciliation",
+    "contract": "dispatch_action_result SHALL clear pending state and show errors for failures, record time-limited success notices, request reload when required, otherwise refresh hooks/plugins/marketplace/MCP lists, and turn ConfirmationRequired into a confirmation modal with confirmed uninstall action.",
+    "scenarios": [
+      [
+        "Failure",
+        "extension result is Err or terminal failure",
+        "pending state clears and modal error is shown."
+      ],
+      [
+        "Success",
+        "result succeeds",
+        "notice and reload/list refresh effects are emitted."
+      ],
+      [
+        "Confirmation",
+        "confirmation is required",
+        "confirmation action/pending row is stored."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "dispatch_action_result"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "OutcomeStatus::Success"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "OutcomeStatus::ConfirmationRequired"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "OutcomeStatus::ValidationError"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "modal_message"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "pending_action"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "pending_entry_index"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "ActionResultNotice"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "RESULT_NOTICE_DURATION"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "PluginsAction::Reload"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "push_marketplace_fetch"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Sleep-inhibitor synchronization after dispatch",
+    "contract": "After every non-early-return action arm, dispatch SHALL call sync_sleep_inhibitor(app) before returning effects; explicit guard returns intentionally bypass this tail.",
+    "scenarios": [
+      [
+        "Normal",
+        "arm completes normally",
+        "sleep inhibitor is synchronized."
+      ],
+      [
+        "Guard",
+        "arm returns early",
+        "defined guard result is returned immediately."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "sync_sleep_inhibitor"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/router.rs",
+        "dispatch"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Task results route session, worktree, fork, picker, roster, search, and dashboard completion states",
+    "contract": "dispatch_task_result SHALL route session/worktree creation and failure, fork readiness/failure, loaded sessions, session titles, session lists, project-picker recents, dashboard location/session lists, session search debounce, card detail, roster, and dashboard task results to their domain handlers. Direct roster/dashboard loading updates SHALL replace the corresponding in-memory collection and clear its loading flag; stale or unknown task targets SHALL produce no effects.",
+    "scenarios": [
+      [
+        "Session lifecycle",
+        "a session/worktree/fork/load result arrives",
+        "the matching lifecycle handler receives every payload including models, cwd, restore metadata and foreground state."
+      ],
+      [
+        "Picker/search",
+        "recents, search debounce or card detail completes",
+        "the session/load handler receives its agent, picker, query, sequence or generation identity."
+      ],
+      [
+        "Roster/dashboard",
+        "roster or dashboard sessions complete or fail",
+        "collections/loading flags update locally and failures are debug-only no-op state cleanup."
+      ],
+      [
+        "Title from disk",
+        "a nonblank title result arrives",
+        "manual titles fill display_name only when absent while generated_session_title is updated."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "dispatch_task_result"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionCreated"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::WorktreeSessionCreated"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::WorktreeForked"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::WorktreeSessionFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::ForkSessionReady"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::ForkSessionFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionTitleFromDisk"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionLoadFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionListLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionListFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::ProjectPickerRecentsLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::DashboardLocationCandidatesLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionSearchDebounceExpired"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RosterLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RosterFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::DashboardSessionsLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::CardDetailLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionAgentNameResolved"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Prompt status results reconcile watchdog state, durable terminal boundaries, and queued follow-ups",
+    "contract": "PromptStatusResolved SHALL ignore results for a different current prompt, adopt server Running timing only once, release locally drained prompts on Queued, finalize durable Terminal results through the agent turn finalizer, and recover Unknown/error outcomes to Idle with a toast and queue drain unless a currently running turn should only refresh liveness. Control completions SHALL honor stale control tokens and authoritative-update-pending semantics; successful behavior transport alone SHALL not commit a mode. Compact, cancel, subagent-kill, background-task, changelog and preferred-model results SHALL update their targeted local state without fabricating duplicate terminal events.",
+    "scenarios": [
+      [
+        "Stale prompt status",
+        "the result prompt id differs from current_prompt_id",
+        "the result is ignored without clearing current status."
+      ],
+      [
+        "Running/queued",
+        "a current prompt is submitting and status is Running or Queued",
+        "turn timing or local submission state is updated once and queue/peek page-flip behavior is preserved."
+      ],
+      [
+        "Terminal/unknown/error",
+        "a matching prompt is terminal, Unknown, or query fails",
+        "durable finalization or Idle recovery occurs; the latter shows the error and drains queued prompts."
+      ],
+      [
+        "Control completion",
+        "SwitchAgent/Behavior/Model result is stale, authoritative-pending, or failed",
+        "stale/authoritative responses are suppressed; compatible failures become terminal notices and deferred controls drain only when safe."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PromptResponse"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PromptStatusResolved"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PreferredModelPersisted"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::CancelComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::KillSubagentComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::CompactComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SwitchModelComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SwitchAgentComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SwitchBehaviorComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::BgTaskKilled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::BgTaskKillFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::ChangelogFetched"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_prompt_response"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "maybe_drain_queue"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_compact_complete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_switch_model_complete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_bg_task_killed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard and image task results apply target ownership, host-image fallback, and stale overlay guards",
+    "contract": "ClipboardAttachmentProbed SHALL apply the local attachment to the original AgentPrompt or dashboard target, drain deferred sends, optionally request a host image only for FullMiss or recoverable AttachmentRead failure from a clipboard key, suppress duplicate X11/failure toasts when that request is emitted, and otherwise report target-specific failures. ImageViewerLoaded SHALL require the current overlay owner id, route root versus child viewers, apply loaded data, or close and toast on failure. Prompt image preview completion remains a no-op.",
+    "scenarios": [
+      [
+        "Clipboard success",
+        "a probe result targets an existing agent/dashboard",
+        "attachment completion is applied to that target and deferred sends are drained."
+      ],
+      [
+        "Host fallback",
+        "clipboard-key completion is FullMiss or AttachmentRead failure",
+        "the wrap host-image request may be emitted and the corresponding local failure/X11 hint is suppressed."
+      ],
+      [
+        "Missing target",
+        "the target agent/dashboard no longer exists",
+        "completion is Dropped and no send effect is created."
+      ],
+      [
+        "Stale image load",
+        "owner_id does not match the active viewer",
+        "the image result is ignored; matching success applies data and matching failure closes with a toast."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "ClipboardPasteCompletion"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "ClipboardAttachmentProbed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "apply_clipboard_paste_result"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "drain_clipboard_target"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "wrap_host_image_request_eligible"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "maybe_show_x11_primary_paste_hint"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "show_clipboard_failure"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "ImageViewerLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "PromptImagePreviewPrepared"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "show_clipboard_toast"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::ClipboardAttachmentProbed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::ImageViewerLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PromptImagePreviewPrepared"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Doctor and session metadata results are gated by target identity while failures reach the correct surface",
+    "contract": "DoctorFixPlanned SHALL validate cwd, session binding epoch and optional session id before delivering a listing, opening a plan question, displaying a local command, or reporting a preparation error; a stale target SHALL produce a cancellation warning. DoctorFixApplied SHALL clear live feedback and deliver formatted success/error text. SessionInfo success SHALL require the current session and metadata revision before applying name/context, while context and failure paths follow their dedicated nonce/modal handling; rename, usage and delete results update scrollback, modal data, rosters, agents and dashboard selection as appropriate.",
+    "scenarios": [
+      [
+        "Stale doctor target",
+        "cwd/session/epoch no longer matches",
+        "the fix is cancelled with a warning and no plan is opened."
+      ],
+      [
+        "Doctor plan",
+        "a valid plan result is Listing, Plan, RunLocally, or error",
+        "the corresponding notice, question, local instruction, or formatted error is delivered."
+      ],
+      [
+        "Metadata revision",
+        "SessionAgentNameResolved or SessionInfoComplete has stale identity/revision",
+        "no agent metadata is applied."
+      ],
+      [
+        "Delete completion",
+        "a session delete completes with Stay, Welcome, or Dashboard",
+        "pickers/rosters/agents are cleaned, unregister effects are emitted, and dashboard neighbor/focus or Welcome transition is selected."
+      ],
+      [
+        "Usage/context",
+        "context or usage succeeds/fails with a nonce",
+        "the dedicated status handler applies only the permitted live/modal projection."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "current_doctor_target"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "deliver_doctor_message"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::DoctorFixPlanned"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::DoctorFixApplied"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionAgentNameResolved"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionInfoComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionInfoFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::ContextInfoComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::ContextInfoFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RenameSessionComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RenameSessionFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::DeleteSessionComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::DeleteSessionFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionUsageComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SessionUsageFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_session_info_complete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_context_info_complete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "apply_session_usage_result"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "remove_session_from_pickers"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "remove_agent_and_cleanup"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Extension, CTA, catalog, bundle, and command-refresh results update only their owning UI projections",
+    "contract": "Extension and catalog task results SHALL clear pending modal actions where applicable, project success/error into TabDataState, retry or advance plugin CTA phases through the dedicated CTA handlers, and preserve session/plugin identity checks defined by those handlers. AvailableCommandsRefreshed SHALL replace command facts only when nonempty and bump generation while refreshing workflow capabilities. Bundle status SHALL replace cache/version/agent/skill facts; catalog entries SHALL open a plain-text block viewer for the active agent or append a load-failure notice.",
+    "scenarios": [
+      [
+        "Extension list",
+        "MCP, hooks, plugins, skills, workflows, marketplace or toggle results arrive",
+        "the matching modal/handler stores Loaded or Error data and clears pending action state as defined."
+      ],
+      [
+        "MCP setup",
+        "setup succeeds or fails for an existing modal/session",
+        "pending fields clear, errors remain in the modal, and success schedules a fresh MCP list fetch when bound."
+      ],
+      [
+        "CTA lifecycle",
+        "install/reload/catalog/debounce/dismiss results arrive",
+        "the corresponding CTA handler or phase timeout runs and unrelated agents remain untouched."
+      ],
+      [
+        "Command facts",
+        "a nonempty command refresh arrives",
+        "the session command list and generation update and workflow capabilities refresh."
+      ],
+      [
+        "Bundle/catalog",
+        "bundle or catalog result arrives",
+        "bundle facts replace in memory and active-agent catalog content opens in a block viewer or a notice records failure."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_mcp_setup_submit_done"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PromptHistoryLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::McpsListLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::McpSetupSubmitDone"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::HooksListLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PluginsListLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::HooksActionResult"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PluginsActionResult"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::MarketplaceActionResult"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::CtaPluginInstallDone"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::CtaPluginReloadDone"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PluginCtaMcpsLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::CtaInstalledDismissTimeout"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::McpToggleDone"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::MarketplaceUpdatesAvailable"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::MarketplaceListLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PluginCtaCatalogLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SkillsListLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SkillsToggleDone"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::WorkflowsListLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::AvailableCommandsRefreshed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::BundleStatusReady"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::BundleStatusFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::CatalogEntryReady"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::CatalogEntryFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::AnnouncementsHiddenPersisted"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "dispatch_action_result"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_hooks_list_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_plugins_list_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_marketplace_list_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_plugin_cta_catalog_loaded"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Interjection, slash-command, recap, note, trajectory, and rewind results preserve optimistic or reviewable state",
+    "contract": "InterjectFailed SHALL requeue the original text, wire blocks, explicit images and constructed chip ranges at the front with requires_review=true when the agent still exists, without mutating the composer. Slash command errors SHALL distinguish already-published/unknown outcomes from rejected requests: unknown outcomes become live feedback, while rejected commands append a terminal notice. Trajectory, recap, memory-note, BTW and interject queue results delegate to their domain handlers; rewind and deep-search results route to their handlers and clear failed state as specified.",
+    "scenarios": [
+      [
+        "Interject failure",
+        "an interjection or image preparation fails",
+        "a new local queue id holds the original payload and explicit image chips for review."
+      ],
+      [
+        "Slash transport ambiguity",
+        "an error lacks proof of rejection",
+        "live feedback says outcome is unknown and no competing terminal is appended."
+      ],
+      [
+        "Slash rejection",
+        "the server rejects invalid request/params/method",
+        "live feedback clears and a command terminal notice explains the sanitized reason."
+      ],
+      [
+        "Rewind/search/note",
+        "deep-search, rewind, BTW, memory-note, trajectory or recap results arrive",
+        "the corresponding handler updates the targeted UI and no unrelated agent receives the result."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::InterjectFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::InterjectQueued"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SlashCommandExecuted"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::TrajectoryLaunched"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::TrajectoryRuntimeEnded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RecapRequested"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::BtwResponse"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::MemoryNoteSaved"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::MemoryNoteRewritten"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::DeepSearchResults"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RewindPointsLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RewindPointsFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RewindPreviewComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RewindPreviewFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RewindExecuteComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::RewindExecuteFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_btw_response"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_memory_note_saved"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_deep_search_results"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_rewind_points_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_rewind_preview_complete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_rewind_preview_failed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "dispatch_rewind_success"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_rewind_execute_failed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "shell::session::control_terminal_was_published"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::InterjectFailed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Prompt and shell suggestion debounce results respect agent mode and generation while preserving pending-tab behavior",
+    "contract": "SuggestionDebounceExpired SHALL delegate generation-gated prompt suggestions. ShellSuggestionsLoaded SHALL only update an existing Bash-mode agent, project the parsed response into the controller, restore the current request text, and consume a pending Tab by emitting shell completion. PromptSuggestionLoaded SHALL update the suggestion controller and visibility gate for the owning agent. Transport/parse failures are handled by their task producer and CancelComplete remains an acknowledgement with no state mutation here.",
+    "scenarios": [
+      [
+        "Shell result",
+        "a Bash agent receives a valid suggestion response",
+        "suggestions load for that agent/request and an armed pending Tab may emit shell completion."
+      ],
+      [
+        "Wrong mode/agent",
+        "the agent is missing or not in Bash mode",
+        "the result is ignored without effects."
+      ],
+      [
+        "Prompt suggestion",
+        "a prompt suggestion result arrives",
+        "the controller loads it for the agent and refresh/log visibility are recomputed."
+      ],
+      [
+        "Debounce",
+        "prompt or CTA debounce expires",
+        "the corresponding generation-aware handler is invoked."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SuggestionDebounceExpired"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PluginCtaDebounceExpired"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::ShellSuggestionsLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::PromptSuggestionLoaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::CancelComplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_suggestion_debounce_expired"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "handle_plugin_cta_debounce_expired"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "shell_completion_tab"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::ShellSuggestionsLoaded"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Setting persistence results rollback typed values or preserve optimistic best-effort state",
+    "contract": "SettingPersisted SHALL only trace success and return no effects. SettingPersistFailed SHALL call apply_setting_rollback with the provided canonical rollback value, scrub the error for a toast, and return any rollback companion effects. SettingPersistFailedBestEffort SHALL keep the optimistic in-memory value, emit no rollback effect, and show only the scrubbed failure toast.",
+    "scenarios": [
+      [
+        "Persist success",
+        "a setting write succeeds",
+        "the result is traced and no UI effect is produced."
+      ],
+      [
+        "Ordinary failure",
+        "a typed setting write fails with rollback value",
+        "the matching setting state is rolled back, a sanitized error toast is shown, and companion effects are returned."
+      ],
+      [
+        "Best effort failure",
+        "a best-effort write fails",
+        "the optimistic state remains and only the sanitized failure toast is shown."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SettingPersisted"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SettingPersistFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "TaskResult::SettingPersistFailedBestEffort"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "apply_setting_rollback"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "scrub_error_for_toast"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Task-result utility helpers unregister sessions, route clipboard notices, and deliver doctor messages safely",
+    "contract": "unregister_session_effect SHALL create one UnregisterActiveSession effect only for Some session ids, while unregister_all_active_sessions SHALL enumerate every bound agent. Clipboard notice helpers SHALL route messages to the owning agent or dashboard. current_doctor_target SHALL accept only matching cwd/session/epoch bindings (or the documented pre-bind transition), and deliver_doctor_message SHALL prefer the requested agent, then active/first agent, else append a startup warning with severity derived from notice tone.",
+    "scenarios": [
+      [
+        "Unregister",
+        "a session id is present or absent",
+        "one exact unregister effect or an empty vector is returned; bulk enumeration covers all bound agents."
+      ],
+      [
+        "Clipboard target",
+        "a paste hint/failure targets an agent or dashboard",
+        "the toast/info message reaches that surface when it still exists."
+      ],
+      [
+        "Doctor destination",
+        "preferred agent exists, active agent exists, or no agent exists",
+        "message is appended to the preferred/active/first scrollback or to startup warnings."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "unregister_session_effect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "unregister_all_active_sessions"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "show_clipboard_toast"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "maybe_show_x11_primary_paste_hint"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "show_clipboard_failure"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "current_doctor_target"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "deliver_doctor_message"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+        "X11_PRIMARY_PASTE_HINT"
       ]
     ]
   }

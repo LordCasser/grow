@@ -5543,3 +5543,15 @@ The agent-modal confirmation suite SHALL verify that MCP-server removal, hook-so
 - **THEN** the prompt is dismissed and no backend action is emitted.
 
 证据：`crates/codegen/pager/src/app/agent_view/modals.rs`。
+### Requirement: Pager terminal marker stop hook stash identity folding
+Stop hook batches SHALL be accepted only for the newest eligible turn-terminal marker: stamped batches require a matching prompt id, unstamped batches are tail-only, newer terminal markers stop the walk, and a repeated hook name is refused. Accepted hooks attach to the marker, force collapsed presentation unless pinned, and standalone lifecycle hooks form collapsed tool-like rows.
+
+#### Scenario: Hook attribution
+- **WHEN** a stop or stop_failure batch is stamped, unstamped, interleaved or repeated
+- **THEN** only the attributable latest terminal marker accepts it and the same event name cannot be attached twice.
+
+#### Scenario: Hook presentation
+- **WHEN** accepted hooks are attached or a lifecycle hook is pushed
+- **THEN** hook data is retained and the marker defaults to collapsed unless display mode is pinned.
+
+证据：`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::attach_hooks`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_lifecycle_hooks`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::latest_turn_marker_accepting`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::attach_stop_hooks_to_marker`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `tests::stop_hooks_attach_only_to_turn_terminal_markers`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `tests::stop_hooks_respect_marker_prompt_id`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `tests::stop_hooks_merge_walks_past_interleaved_tail_blocks`。

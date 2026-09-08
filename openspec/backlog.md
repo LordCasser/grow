@@ -836,3 +836,15 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager scrollback state聚合导航、折叠和过滤状态
 
 第二轮复核确认`scrollback/state/mod.rs`聚合导航、折叠、过滤、选择和布局状态。既有契约来源已补齐，后续需按状态域拆分并补真实终端矩阵；本轮不改scrollback state。
+
+## 待拆分：Pager scrollback state还包含终端marker和stop hook折叠
+
+第二轮核对补出`terminal marker stop hook stash identity folding`契约，说明scrollback state还承担终端marker、stop hook和stash identity折叠。后续需将该生命周期与普通滚动状态分离验证；本轮不改实现。
+
+## 待拆分：Pager router混合Action路由和Effect分派
+
+`app/root/dispatch/router.rs`集中Action路由、Effect分派和边界错误。12条静态契约已登记，后续需按路由表、effect执行和错误策略拆分并补动态验证；本轮不改router。
+
+## 待拆分：Pager task-result dispatch混合结果投影和副作用
+
+`app/root/dispatch/task_result.rs`集中TaskResult分支、完成/失败投影和副作用边界。9条静态契约已登记，后续需按结果协议、状态投影和副作用执行拆分并补动态验证；本轮不改task result。
