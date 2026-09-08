@@ -808,3 +808,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager prompt模块混合编辑、发送和队列状态
 
 `app/agent_view/prompt.rs`同时处理prompt编辑/发送、队列状态、快捷动作和输入投影。静态事实已登记，后续需按编辑模型、提交协议和队列状态拆分并补真实输入验证；本轮不改prompt行为。
+
+## 待拆分：Pager agent viewer混合查看状态、滚动和内容投影
+
+`app/agent_view/viewer.rs`同时处理viewer状态、滚动/布局和内容投影。9条静态契约已登记，后续需按查看模型、布局状态和内容投影拆分并补真实终端验证；本轮不改viewer行为。

@@ -2320,3 +2320,5 @@ Luna/high复用代理完整读取`views/list_pane/render.rs`共1748行、27项�
 Luna/high复用代理完整读取`app/root/dispatch/tests/turn.rs`共1987行、60项内联测试；主代理复核SHA-256与14项功能需求来源，覆盖turn完成/失败、prompt队列、压缩、行为/模型控制和终态通知。未运行Cargo或动态turn链路。
 
 Luna/high复用代理完整读取`app/agent_view/prompt.rs`共1906行、测试来源已核对；主代理复核SHA-256与5项功能需求来源，覆盖prompt编辑/发送、队列状态、快捷动作和输入投影。未运行Cargo或真实终端。
+
+Luna/high复用代理完整读取`app/agent_view/viewer.rs`共1011行、无内联测试；主代理复核SHA-256与9项功能需求来源，覆盖viewer状态、滚动/布局和内容投影。未运行Cargo或真实终端。

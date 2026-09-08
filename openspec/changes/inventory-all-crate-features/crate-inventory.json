@@ -2472,7 +2472,11 @@
       "Agent terminal identity gate and shared teardown",
       "Agent transient toast and sticky status lifecycle",
       "AgentView SHALL clear ephemeral permission, question, Plan approval, cancel-turn, and descendant interaction state when a transport is replayed or a terminal child session disappears. Permissions removed during cleanup SHALL receive a cancelled response, centralized queue transitions SHALL be resolved when the front changes, question/approval prompts SHALL be restored, and Plan approval viewer/comment state SHALL be dropped.",
+      "AgentView SHALL give block viewer modal chrome first ownership, route content scroll/click/drag/move events to BlockViewerPane, and drain drag-release or pending-copy text through the shared clipboard.",
       "AgentView SHALL keep runtime session facts synchronized with ephemeral presentation containers. Permission queue mutations SHALL update pending_permission_count, question replacement/take SHALL update question_pending, and replacement paths SHALL derive facts from the complete resulting queue/view rather than incremental assumptions.",
+      "AgentView SHALL open a line viewer from a file reference, resolve relative paths against the session cwd, retain the originating prompt element, apply an optional initial range, and confirm or cancel while preserving prompt undo semantics.",
+      "AgentView SHALL render copy/view buttons for the selected scrollback entry only when appearance enables selection buttons and the entry is both selectable for the relevant action and not hidden by grouping.",
+      "AgentView SHALL route block viewer keys through modal close and BlockViewerPane handling, toggle raw markdown mode while preserving source-line/scroll anchors, and perform pending metadata/content copies through the shared clipboard.",
       "AgentView lazy Mermaid request and cache-miss lifecycle",
       "AgentView pending action deduplication and completion reduction",
       "Allocator release hook installation and trace attribution",
@@ -2548,6 +2552,8 @@
       "Input diagnostic ring retention and snapshot sanitization",
       "Leader bridge channel swap outbound stale drop and cancellation",
       "Leader mode SHALL resolve flags and policy in the order `--no-leader`, `--leader`, eligibility, local config, release remote setting, then default-off; a requested confinement profile SHALL veto an otherwise enabled leader without fabricating a policy-disable reason, and the result SHALL retain both typed reasons.",
+      "Line viewer keyboard handling SHALL route active ListPane input bars, plan-approval focus, casual plan comments, comment deletion/submission, copying, fullscreen toggling, approval/abandonment, and close behavior according to viewer mode and focus.",
+      "Line viewer mouse handling SHALL prioritize chrome buttons and modal boundaries, update hover state, route list interactions, and support source-line gutter drags that enter plan or casual comment mode with a stable inclusive range.",
       "ListPane SHALL borrow a model item slice, carry focus and overlay style configuration through builder methods, and render only into nonzero areas after splitting bottom input/status rows and scrollbar space from the requested viewport.",
       "ListPane SHALL render content-based items with optional full-width backgrounds, cursor/selection prefixes, NoWrap truncation, or wrapped continuation rows while keeping all writes inside the supplied area.",
       "ListPane SHALL render copy feedback, scrollbar styles, and active or accepted input bars in the reserved bottom area with mode-specific labels, cursor rendering, and matcher status alignment.",
@@ -3462,7 +3468,9 @@
       "Terminal teardown SHALL stop output safely, emit reset sequences in a defined order, restore cursor/mouse/focus/Kitty/native-selection/raw-mode state, and execute from both normal restore and panic paths even when writer draining fails.",
       "Terminal title composition deduplication and control character filtering",
       "Terminal titles SHALL strip control characters, fall back to `grow` when empty, truncate Unicode characters before appending ` - grow`, and write through the locked stderr path; exit and relaunch hints SHALL include the correct resume mode/session, optional sanitized summary lines, width truncation, and tolerate broken output pipes.",
+      "The `/btw` panel SHALL flush completed overlay responses to scrollback as a Btw block, clear lifecycle/focus state on dismissal, and clear only drag state belonging to the BTW sentinel entry.",
       "The active permission view SHALL own keyboard input. FollowupInput SHALL support Esc back to options, Ctrl-C cancellation, multiline Enter routing, submit-to-PermissionFollowup, and prompt editing. Options SHALL support Ctrl-F argument expansion, Tab to scrollback, j/k or arrows, Enter and 1-9 option actions, RejectOnce text entry into followup mode, and left/right scope adjustment for MCP or Bash permissions.",
+      "The agent viewer module SHALL keep ownership boundaries explicit: it coordinates AgentView state, prompt/plan/scrollback mutations, modal hit regions and clipboard calls while delegating list navigation, block viewer geometry, and line viewer storage to their dedicated components.",
       "The app entry module SHALL expose the PagerArgs command surface with stable leader/no-leader conflict handling, resume/continue sentinels, worktree/session-id/fork combinations, no-alt-screen and feature-gated flags, command naming/help ordering, and shell-completion parsing.",
       "The app module SHALL preserve its inline regression matrix for terminal mode transforms, teardown ordering injection, cursor policy, bounded cancellation, control-safe title/hints, leader precedence and confinement messaging, hunk-tracker precedence, and the complete CLI/session option surface. These tests are source evidence for the stated boundaries and do not prove a live terminal, ACP connection, external editor, or process replacement.",
       "The block viewer source SHALL preserve its documented ListPane/viewer boundaries: it delegates navigation and filtering to ListPaneState, handles source-specific construction and patch/text selection locally, and exposes pending actions for callers rather than performing external clipboard/raw-mode/entry mutation itself.",
@@ -3473,6 +3481,7 @@
       "The question modal SHALL expose Navigation, InputMode, and PlanAction focus modes. Navigation SHALL support bounded cursor movement, page/half jumps, option toggles/selections, option-key shortcuts, freeform activation, question tab cycling, clipboard copy of option text, fullscreen, cancellation/skip and pane transfer. InputMode SHALL route prompt editing and Enter/newline, save per-question freeform state on exit, and advance or submit. PlanAction SHALL select ChatAboutThis or SkipInterview explicitly with arrows/Enter and return to navigation on Esc.",
       "The renderer SHALL show Unicode truncation and scroll-position indicators without corrupting existing backgrounds or merging indicators into adjacent text.",
       "The scrollback block module SHALL preserve its inline regression matrix for media placement, block factories and foldability, fullscreen viewer gating, bullet selection metadata, copy projection, and searchable text across all supported block variants. These tests are source evidence for block-state and projection behavior and do not prove terminal rendering or external clipboard integration.",
+      "The shortcuts bar SHALL expose a fold action label derived from the selected scrollback entry: `collapse` when expanded, `expand` when collapsed/truncated, and no label for non-foldable or missing entries.",
       "Theme and quality separation in Mermaid cache keys",
       "Theme commit and preview state separation",
       "Thinking and tool grouping setting invalidation scope",
@@ -3800,6 +3809,10 @@
       {
         "path": "crates/codegen/pager/src/app/agent_view/turn_completion/tests.rs",
         "sha256": "fea31044fd3e698c17647df455e2d481d804bee4536a4cc7edc1a7751a39b46a"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/viewer.rs",
+        "sha256": "233c2e6f1045ee417da369448d519240ad8788920c9064d22e3cd9f1acc372bc"
       },
       {
         "path": "crates/codegen/pager/src/app/bundle.rs",

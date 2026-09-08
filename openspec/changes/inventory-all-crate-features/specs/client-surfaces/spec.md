@@ -15306,3 +15306,199 @@ ToggleMouseCapture SHALL propagate the sticky disabled toast recursively to pare
 - **THEN** ToggleMouseCapture SHALL propagate the sticky disabled toast recursively to parent and active subagent views, and clearing active_subagent on return SHALL preserve the parent sticky notice.
 
 证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `ToggleMouseCapture`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `mouse_capture_is_enabled`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `MOUSE_OFF_STICKY`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `active_subagent`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `sticky_toast`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `subagent_views`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `mouse_reporting_toggle_sticky_survives_subagent_esc_to_parent`。
+### Requirement: AgentView SHALL open a line viewer from a file reference, resolve relative paths against the session cwd, retain the originating prompt element, apply an optional initial range, and confirm or cancel while preserving prompt undo semantics.
+open_line_viewer SHALL resolve the path, associate the newest file-ref element when present, open LineViewerState, apply initial selection, and cancel the undo group if reading fails. confirm_line_viewer SHALL replace the originating element with a cwd-relative `@path` plus an optional visual `:N-M` suffix, preserve display metadata, close the undo group, and consume the viewer. cancel_line_viewer SHALL drop the viewer, cancel undo, restore plan focus, restore any stashed casual prompt, and clear casual comment ranges/IDs.
+
+#### Scenario: Open relative file
+- **WHEN** a relative path and optional range are supplied
+- **THEN** the viewer opens against session cwd, selects the requested range, and records the file-ref element.
+
+#### Scenario: Open failure
+- **WHEN** the file cannot be read
+- **THEN** the viewer stays closed and the textarea undo group is cancelled.
+
+#### Scenario: Confirm path
+- **WHEN** a viewer has an originating element
+- **THEN** the prompt element becomes a cwd-relative file reference, optionally with the visual range, and the undo group closes.
+
+#### Scenario: Cancel
+- **WHEN** viewer or casual comment state is active
+- **THEN** viewer/prompt state is restored and transient comment state is cleared.
+
+证据：`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::open_line_viewer`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::confirm_line_viewer`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::cancel_line_viewer`。
+
+### Requirement: Line viewer keyboard handling SHALL route active ListPane input bars, plan-approval focus, casual plan comments, comment deletion/submission, copying, fullscreen toggling, approval/abandonment, and close behavior according to viewer mode and focus.
+handle_line_viewer_key SHALL give active Search/Filter/Goto/Comment bars first refusal, saving or cancelling comments on Enter/Esc while forwarding other keys to ListPane. Plan approval SHALL reserve Tab/Enter/c/a/q/s semantics for prompt/comment/approve/abandon flows; casual plan preview SHALL offer c/s/Ctrl-Enter. Enter/x/y/Y/Esc/q/Ctrl-C SHALL confirm, delete, copy content/full plan, copy filename, or close, while Esc first clears visual selection or accepted matcher when applicable.
+
+#### Scenario: Input bar
+- **WHEN** ListPane input mode is active
+- **THEN** navigation/editing is delegated; comment Enter/Esc save/cancel instead of closing the viewer.
+
+#### Scenario: Plan focus
+- **WHEN** plan approval is open and Tab/s/c/a/q is pressed
+- **THEN** focus or comment/approve/abandon action changes according to the key.
+
+#### Scenario: Casual plan
+- **WHEN** plan preview has comments and c/s/Ctrl-Enter is pressed
+- **THEN** commenting or send-comments action is entered.
+
+#### Scenario: Copy/confirm
+- **WHEN** y, Y, Enter, or x is pressed
+- **THEN** full/selected content, filename, confirmation, or comment deletion is performed according to viewer kind.
+
+#### Scenario: Close
+- **WHEN** eligible Esc/q/Ctrl-C is pressed
+- **THEN** line viewer is cancelled; Esc clears visual/search state first when that state owns it.
+
+证据：`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::copy_plan_full`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_line_viewer_key`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::cancel_line_viewer`。
+
+### Requirement: Line viewer mouse handling SHALL prioritize chrome buttons and modal boundaries, update hover state, route list interactions, and support source-line gutter drags that enter plan or casual comment mode with a stable inclusive range.
+handle_line_viewer_mouse SHALL handle close/fullscreen/abandon/approve/comment/copy/send hit rectangles before content routing. Outside clicks SHALL close casual viewers but preserve plan-approval modal semantics and focus prompt when clicked. Movement SHALL update button hover and plan row selection. PlanPreview gutter drag SHALL capture source line start/end, create an inclusive range on release, stash the prompt once, clear prompt text, and enter the correct commenting focus; list clicks SHALL enter comment/edit mode only when not already commenting.
+
+#### Scenario: Button click
+- **WHEN** mouse down lands on a cached action button
+- **THEN** the corresponding close, fullscreen, plan, copy, or focus action is returned.
+
+#### Scenario: Outside click
+- **WHEN** a click is outside modal chrome
+- **THEN** casual viewer closes; plan approval remains active except prompt focus handling.
+
+#### Scenario: Hover
+- **WHEN** pointer moves over buttons or plan rows
+- **THEN** hover flags and row selection update and redraw is requested only when changed.
+
+#### Scenario: Gutter drag
+- **WHEN** PlanPreview drag starts/ends on source rows
+- **THEN** an inclusive source range is stashed into plan/casual commenting state and prompt is cleared.
+
+#### Scenario: List click
+- **WHEN** a plan row is clicked while no comment is active
+- **THEN** commenting is entered; existing comment mode is not re-stashed/clobbered.
+
+证据：`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_line_viewer_mouse`。
+
+### Requirement: The `/btw` panel SHALL flush completed overlay responses to scrollback as a Btw block, clear lifecycle/focus state on dismissal, and clear only drag state belonging to the BTW sentinel entry.
+dismiss_btw_panel SHALL take a Done state and append its question/content text to scrollback, otherwise clear the overlay; both paths SHALL clear minimal lifecycle, focus, and BTW drag state. clear_btw_drag_state SHALL inspect pending and active drag anchors and clear pending/head/autoscroll/last mouse only when the sentinel entry index matches BTW_OVERLAY_ENTRY_IDX.
+
+#### Scenario: Done BTW
+- **WHEN** overlay is Done with question and content
+- **THEN** one Btw RenderBlock is appended before transient overlay state is cleared.
+
+#### Scenario: Incomplete BTW
+- **WHEN** overlay is not Done
+- **THEN** no block is appended and overlay state is cleared.
+
+#### Scenario: Mixed drag
+- **WHEN** drag belongs to another entry
+- **THEN** selection/autoscroll state remains unchanged.
+
+#### Scenario: BTW drag
+- **WHEN** pending or active anchor targets sentinel
+- **THEN** all BTW drag state is cleared.
+
+证据：`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::dismiss_btw_panel`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::clear_btw_drag_state`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `BTW_OVERLAY_ENTRY_IDX`。
+
+### Requirement: AgentView SHALL render copy/view buttons for the selected scrollback entry only when appearance enables selection buttons and the entry is both selectable for the relevant action and not hidden by grouping.
+render_selection_buttons SHALL clear hit regions when the feature, selection, entry, or capabilities are unavailable. It SHALL determine copy/view support from block capabilities, place both or single glyph buttons in the selection-box corner for expanded/ungrouped entries or inline at the selected row for collapsed grouped entries, suppress corner buttons when the box is top-clipped, and update hover-aware hit areas with themed styles.
+
+#### Scenario: Feature disabled
+- **WHEN** selection_buttons is false
+- **THEN** both hit regions are cleared and no glyphs are painted.
+
+#### Scenario: Capability gate
+- **WHEN** selected entry has no copy/view support or is hidden by group
+- **THEN** hit regions are cleared.
+
+#### Scenario: Corner buttons
+- **WHEN** expanded/ungrouped selected block supports actions and box is not top-clipped
+- **THEN** copy/view glyphs are painted before the corner border with hit rectangles.
+
+#### Scenario: Inline buttons
+- **WHEN** collapsed selected block belongs to a group
+- **THEN** buttons overlay the selected entry row even if the box is clipped.
+
+#### Scenario: Single action
+- **WHEN** only one capability exists
+- **THEN** only its glyph/hit region is set and the other is cleared.
+
+证据：`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::render_selection_buttons`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `render_char_buttons`。
+
+### Requirement: AgentView SHALL route block viewer keys through modal close and BlockViewerPane handling, toggle raw markdown mode while preserving source-line/scroll anchors, and perform pending metadata/content copies through the shared clipboard.
+handle_block_viewer_key SHALL return Unchanged when no viewer exists or an unconsumed key bubbles. Close signals SHALL drop the viewer. A consumed raw toggle SHALL capture scroll anchor and old source line, toggle the scrollback entry, rebuild items, and restore the nearest source line. Pending copy actions SHALL be processed against the entry and sent to copy_to_clipboard after the viewer borrow ends.
+
+#### Scenario: Close
+- **WHEN** BlockViewerPane reports an eligible close key
+- **THEN** the block viewer is removed.
+
+#### Scenario: Unknown key
+- **WHEN** viewer exists but handle_key returns false
+- **THEN** InputOutcome::Unchanged bubbles to the caller.
+
+#### Scenario: Raw toggle
+- **WHEN** markdown viewer requests raw mode
+- **THEN** source line and screen anchor are captured, entry mode toggles, items rebuild, and cursor maps back.
+
+#### Scenario: Pending copy
+- **WHEN** metadata/content copy is requested
+- **THEN** viewer extracts text and AgentView sends it to the shared clipboard.
+
+证据：`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_block_viewer_key`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `BlockViewerPane::is_close_key`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `BlockViewerPane::handle_key`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `BlockViewerPane::process_pending_copy`。
+
+### Requirement: AgentView SHALL give block viewer modal chrome first ownership, route content scroll/click/drag/move events to BlockViewerPane, and drain drag-release or pending-copy text through the shared clipboard.
+handle_block_viewer_mouse SHALL close or consume modal chrome outcomes before content handling; ScrollUp/Down SHALL scroll by three lines, left-button and move events SHALL route to viewer mouse state, and after routing it SHALL take drag_copy_text or process pending copy only when no drag text exists, then invoke copy_to_clipboard after mutable viewer borrows end.
+
+#### Scenario: Modal chrome
+- **WHEN** click close or outside modal is handled by modal state
+- **THEN** viewer closes or the event is consumed without content routing.
+
+#### Scenario: Scroll
+- **WHEN** wheel is over the block viewer
+- **THEN** viewer scrolls by ±3 lines.
+
+#### Scenario: Text drag release
+- **WHEN** viewer returns drag_copy_text
+- **THEN** text is copied once and pending key copy is not double-processed.
+
+#### Scenario: Key copy after mouse
+- **WHEN** no drag text exists but pending copy is present
+- **THEN** pending text is extracted and copied.
+
+#### Scenario: Content mouse
+- **WHEN** left click/drag/up/move reaches content
+- **THEN** BlockViewerPane updates selection/hover state and the outer action returns Changed.
+
+证据：`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_block_viewer_mouse`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `BlockViewerPane::handle_scroll`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `BlockViewerPane::handle_mouse`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `BlockViewerPane::process_pending_copy`。
+
+### Requirement: The shortcuts bar SHALL expose a fold action label derived from the selected scrollback entry: `collapse` when expanded, `expand` when collapsed/truncated, and no label for non-foldable or missing entries.
+selected_fold_label SHALL resolve the selected entry, return None when absent or !is_foldable, and map DisplayMode::Expanded to `collapse` while every other display mode maps to `expand`.
+
+#### Scenario: Expanded block
+- **WHEN** selected entry is foldable and Expanded
+- **THEN** the label is `collapse`.
+
+#### Scenario: Collapsed/truncated block
+- **WHEN** selected entry is foldable and not Expanded
+- **THEN** the label is `expand`.
+
+#### Scenario: Unsupported selection
+- **WHEN** no entry or entry is not foldable
+- **THEN** None is returned.
+
+证据：`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::selected_fold_label`。
+
+### Requirement: The agent viewer module SHALL keep ownership boundaries explicit: it coordinates AgentView state, prompt/plan/scrollback mutations, modal hit regions and clipboard calls while delegating list navigation, block viewer geometry, and line viewer storage to their dedicated components.
+Methods in this module SHALL only orchestrate caller-owned side effects at the integration seam: LineViewerState/BlockViewerPane handle content state, ListPaneState handles list navigation, AgentView owns prompt/plan/scrollback and shared clipboard, and modal state owns chrome routing. This source contains no inline test module; runtime and downstream component behavior are not proven here.
+
+#### Scenario: Line viewer delegation
+- **WHEN** a key or mouse event targets list content
+- **THEN** ListPaneState/LineViewerState receives the event while AgentView retains plan/prompt decisions.
+
+#### Scenario: Block viewer delegation
+- **WHEN** modal/content event arrives
+- **THEN** modal or BlockViewerPane handles geometry before AgentView performs clipboard/entry mutation.
+
+#### Scenario: No inline tests
+- **WHEN** the source is statically audited
+- **THEN** test_count is zero and no compiled/runtime guarantee is claimed.
+
+证据：`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_line_viewer_key`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_line_viewer_mouse`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_block_viewer_key`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_block_viewer_mouse`。
