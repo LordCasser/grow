@@ -17605,3 +17605,363 @@ WelcomeRenderResult SHALL expose menu rectangles, optional session-picker hit ar
 - **THEN** the result exposes only the hit rectangles and post-flush ownership belonging to that rendered surface.
 
 证据：`crates/codegen/pager/src/views/welcome/mod.rs` — `render_welcome`；`crates/codegen/pager/src/views/welcome/mod.rs` — `WelcomeRenderResult`；`crates/codegen/pager/src/views/welcome/mod.rs` — `menu_rects`；`crates/codegen/pager/src/views/welcome/mod.rs` — `session_picker_hit_areas`；`crates/codegen/pager/src/views/welcome/mod.rs` — `announcement_truncated`；`crates/codegen/pager/src/views/welcome/mod.rs` — `announcement_rect`；`crates/codegen/pager/src/views/welcome/mod.rs` — `promo_cta_rect`；`crates/codegen/pager/src/views/welcome/mod.rs` — `post_flush_escapes`；`crates/codegen/pager/src/views/welcome/mod.rs` — `PickerHitAreas`；`crates/codegen/pager/src/views/welcome/mod.rs` — `picker_close_button`。
+
+
+### Requirement: Rewind wire models and phases preserve mode, conflict, prompt, and draft context
+
+RewindPointInfo, RewindPointsResponse, RewindResponse and RewindConflictInfo SHALL deserialize camelCase payloads with unknown fields rejected. RewindMode SHALL map All, ConversationOnly and FilesOnly to stable wire/display labels. ConflictDisplay SHALL map deleted_externally/created_externally/modified_externally to deleted/added/modified and unknown types to conflict. RewindState constructors SHALL initialize CancelOffer or ModeSelect with anchor, target, file-offer, draft and selected-prompt context.
+
+#### Scenario: Wire payload
+- **WHEN** rewind points/response/conflict JSON is received
+- **THEN** camelCase known fields deserialize and unknown fields are rejected.
+
+#### Scenario: Mode mapping
+- **WHEN** a mode is sent to shell or displayed
+- **THEN** wire_value is all/conversation_only/files_only and display is human-readable.
+
+#### Scenario: Conflict label
+- **WHEN** a conflict type is known or unknown
+- **THEN** the corresponding stable label is produced, with unknown values becoming conflict.
+
+#### Scenario: State setup
+- **WHEN** cancel or mode selection opens
+- **THEN** phase starts at active index zero and retains anchor/draft/target context.
+
+证据：`crates/codegen/pager/src/views/rewind.rs` — `RewindPointInfo`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPointsResponse`；`crates/codegen/pager/src/views/rewind.rs` — `RewindResponse`；`crates/codegen/pager/src/views/rewind.rs` — `RewindConflictInfo`；`crates/codegen/pager/src/views/rewind.rs` — `RewindMode`；`crates/codegen/pager/src/views/rewind.rs` — `RewindMode::wire_value`；`crates/codegen/pager/src/views/rewind.rs` — `RewindMode::display`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPhase`；`crates/codegen/pager/src/views/rewind.rs` — `ConflictDisplay`；`crates/codegen/pager/src/views/rewind.rs` — `ConflictDisplay::from_conflict`；`crates/codegen/pager/src/views/rewind.rs` — `RewindState`；`crates/codegen/pager/src/views/rewind.rs` — `RewindState::new_cancel_offer`；`crates/codegen/pager/src/views/rewind.rs` — `RewindState::new_mode_select`。
+
+
+### Requirement: Rewind keyboard input maps each phase to explicit dismiss, navigation, mode, confirmation, and execution intents
+
+handle_rewind_key SHALL consume release events and route key presses by phase. Picker SHALL support j/k/arrows, Enter selection and Esc dismissal. CancelOffer SHALL map y to cancel-turn-and-proceed, n/Esc to dismissal, and Enter/navigation to cursor actions. ModeSelect SHALL support a/all, b/c conversation-only aliases according to inline/classic row layout, f only for an offered enabled files-only row, navigation, Enter and Esc. Confirm and ConversationOnlyConfirm SHALL map y/Enter to confirmation, Backspace to mode select, and Esc to full dismissal. Loading/Previewing SHALL only accept Esc; Executing SHALL consume input; Error SHALL dismiss on Esc/Enter.
+
+#### Scenario: Picker
+- **WHEN** a point picker is focused
+- **THEN** navigation moves, Enter emits PickerSelect for the selected prompt, and Esc dismisses.
+
+#### Scenario: Inline mode select
+- **WHEN** offer_files_only is false
+- **THEN** b/c select conversation-only, f is consumed, and hidden files-only cannot be reached.
+
+#### Scenario: Classic mode select
+- **WHEN** file changes are offered and available
+- **THEN** a/c/f and Enter produce the selected mode while navigation clamps to offered rows.
+
+#### Scenario: Confirm
+- **WHEN** a confirmation phase is active
+- **THEN** y/Enter confirms, Backspace returns to mode selection, and Esc dismisses directly.
+
+#### Scenario: Passive/error phase
+- **WHEN** loading/previewing/executing/error receives input
+- **THEN** only documented dismiss or no-op consumption occurs.
+
+证据：`crates/codegen/pager/src/views/rewind.rs` — `handle_rewind_key`；`crates/codegen/pager/src/views/rewind.rs` — `RewindInput`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPhase::Picker`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPhase::CancelOffer`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPhase::ModeSelect`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPhase::Confirm`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPhase::ConversationOnlyConfirm`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPhase::Error`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPhase::Loading`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPhase::Previewing`；`crates/codegen/pager/src/views/rewind.rs` — `RewindPhase::Executing`；`crates/codegen/pager/src/views/rewind.rs` — `mode_for_idx`；`crates/codegen/pager/src/views/rewind.rs` — `f_key_ignored_when_files_only_row_hidden`；`crates/codegen/pager/src/views/rewind.rs` — `inline_mode_select_letters_rows_a_b`；`crates/codegen/pager/src/views/rewind.rs` — `esc_dismisses_from_confirm_phase`；`crates/codegen/pager/src/views/rewind.rs` — `backspace_goes_back_to_mode_select_from_confirm`；`crates/codegen/pager/src/views/rewind.rs` — `esc_dismisses_from_conversation_only_confirm`；`crates/codegen/pager/src/views/rewind.rs` — `backspace_goes_back_from_conversation_only_confirm`；`crates/codegen/pager/src/views/rewind.rs` — `esc_dismisses_from_picker_and_other_phases`。
+
+
+### Requirement: Rewind cursor movement and activation clamp to visible options and mirror Enter semantics
+
+move_cursor SHALL clamp picker, cancel, mode and confirmation active indices to the currently offered option range, including omitting disabled/hidden files-only rows. set_rewind_cursor SHALL report only actual changes and apply the same clamps for mouse hover/click. confirm_cursor SHALL translate active rows to CancelTurnThenProceed, Dismissed, SelectMode, Confirm, ConversationOnlyConfirm or BackToModeSelect. rewind_activate SHALL select the current picker point, dismiss errors, or delegate to confirm_cursor for other interactive phases.
+
+#### Scenario: Keyboard clamp
+- **WHEN** cursor moves beyond the first/last option
+- **THEN** active_idx remains within the offered rows.
+
+#### Scenario: Mouse clamp
+- **WHEN** set_rewind_cursor receives an out-of-range index
+- **THEN** the index is clamped and bool reports whether state changed.
+
+#### Scenario: Activation
+- **WHEN** Enter/click activates current phase
+- **THEN** the resulting RewindInput matches the phase’s Enter semantics.
+
+#### Scenario: Empty/passive
+- **WHEN** there are no picker points or phase is noninteractive
+- **THEN** activation is Consumed and no invalid index is produced.
+
+证据：`crates/codegen/pager/src/views/rewind.rs` — `move_cursor`；`crates/codegen/pager/src/views/rewind.rs` — `set_rewind_cursor`；`crates/codegen/pager/src/views/rewind.rs` — `confirm_cursor`；`crates/codegen/pager/src/views/rewind.rs` — `rewind_activate`；`crates/codegen/pager/src/views/rewind.rs` — `set_cursor_moves_and_clamps`；`crates/codegen/pager/src/views/rewind.rs` — `activate_matches_enter_semantics`；`crates/codegen/pager/src/views/rewind.rs` — `cursor_cannot_reach_hidden_files_only_row`。
+
+
+### Requirement: Rewind hit testing and overlay height track visible rows, optional file sections, and bounded lists
+
+rewind_row_at SHALL reject zero/tiny/outside areas and map only selectable rows for Picker, CancelOffer, ModeSelect, Confirm, ConversationOnlyConfirm and Error. Hidden or disabled files-only rows SHALL have no hit target. Confirm hit rows SHALL account for up to five clean/conflict file rows, overflow summary rows, and a separating gap. Loading/Previewing/Executing SHALL expose no rows. rewind_overlay_height SHALL mirror render geometry, shorten inline mode by one row, cap list overlays through ListOverlay, and include screen-independent content plus chrome.
+
+#### Scenario: Picker hit test
+- **WHEN** a pointer lands on title, point, past-last, or outside area
+- **THEN** only point rows return their point index.
+
+#### Scenario: Mode hit test
+- **WHEN** files-only is hidden or disabled
+- **THEN** index 2 has no clickable row; inline mode is one row shorter.
+
+#### Scenario: Confirm rows
+- **WHEN** clean/conflict file lists are empty or populated
+- **THEN** radio rows are located after bounded file/overflow rows and optional gap.
+
+#### Scenario: Passive phase
+- **WHEN** loading/previewing/executing is shown
+- **THEN** no row is selectable and height is the passive two-row panel plus chrome.
+
+证据：`crates/codegen/pager/src/views/rewind.rs` — `rewind_row_at`；`crates/codegen/pager/src/views/rewind.rs` — `rewind_overlay_height`；`crates/codegen/pager/src/views/rewind.rs` — `apply_scrollbar_jump`；`crates/codegen/pager/src/views/rewind.rs` — `picker_row_hit_test_maps_to_point_index`；`crates/codegen/pager/src/views/rewind.rs` — `cancel_offer_rows`；`crates/codegen/pager/src/views/rewind.rs` — `mode_select_skips_disabled_files_row`；`crates/codegen/pager/src/views/rewind.rs` — `mode_select_without_files_only_offer_has_no_third_row`；`crates/codegen/pager/src/views/rewind.rs` — `confirm_radio_rows_track_file_line_count`；`crates/codegen/pager/src/views/rewind.rs` — `error_dismiss_row`；`crates/codegen/pager/src/views/rewind.rs` — `non_interactive_phases_have_no_rows`。
+
+
+### Requirement: Rewind overlay rendering presents phase-specific prompts, files/conflicts, radio focus, and unfocused dimming
+
+render_rewind_overlay SHALL no-op for zero-height or too-narrow areas, paint the panel background/accent bar, render phase-specific loading/picker/cancel/mode/preview/executing/confirm/conversation-only/error text, truncate confirmation prompt previews to available width, cap clean/conflict lists at five with +N more rows, render disabled rows dimmed, highlight the active focused row, and blend the panel when unfocused. key_label SHALL render Esc/Bksp sentinels as readable labels.
+
+#### Scenario: Mode rendering
+- **WHEN** classic or inline mode selection is shown
+- **THEN** titles and a/b/c/f radio labels match whether file-only is offered.
+
+#### Scenario: Confirm rendering
+- **WHEN** files/conflicts or no files are present
+- **THEN** mode-specific title, file/conflict rows, overflow counts, confirm/back controls and warning text render.
+
+#### Scenario: Unfocused panel
+- **WHEN** focused is false
+- **THEN** the rendered overlay is blended toward its background.
+
+#### Scenario: Special keys
+- **WHEN** radio key is Esc or Backspace sentinel
+- **THEN** key_label renders Esc/Bksp rather than control characters.
+
+证据：`crates/codegen/pager/src/views/rewind.rs` — `render_rewind_overlay`；`crates/codegen/pager/src/views/rewind.rs` — `render_radio_row`；`crates/codegen/pager/src/views/rewind.rs` — `key_label`；`crates/codegen/pager/src/views/rewind.rs` — `RewindMode::display`；`crates/codegen/pager/src/views/rewind.rs` — `test_pushed_visible_excludes_gap`；`crates/codegen/pager/src/views/rewind.rs` — `test_pushed_header_small_prompt_uses_full_height`；`crates/codegen/pager/src/views/rewind.rs` — `key_label_renders_special_sentinels`。
+
+
+### Requirement: Doctor fix registry and identifier resolution
+
+The Doctor fix registry SHALL expose canonical diagnostic ids, short handles, labels, and commands for SSH wrapping plus the three tmux options; resolve_fix_id SHALL accept either the short handle or canonical id, human_fix_command SHALL produce the handle command, automatic_fix_choices SHALL enumerate the registry, and unknown ids SHALL return UnknownId.
+
+#### Scenario: Canonical id
+- **WHEN** a canonical or short id names a registered fix
+- **THEN** the same DiagnosticId is returned and its human command is available.
+
+#### Scenario: Registry completeness
+- **WHEN** all registered fixes are enumerated
+- **THEN** each handle and canonical id resolves to its own spec/command.
+
+#### Scenario: Unknown
+- **WHEN** an unregistered id is requested
+- **THEN** resolution fails with FixError::UnknownId and no human command exists.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FIX_REGISTRY`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixSpec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `resolve_fix_id`；`crates/codegen/pager/src/diagnostics/fix.rs` — `human_fix_command`；`crates/codegen/pager/src/diagnostics/fix.rs` — `automatic_fix_choices`；`crates/codegen/pager/src/diagnostics/fix.rs` — `automatic_remediation_for`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ssh_wrap_automatic_remediation`；`crates/codegen/pager/src/diagnostics/fix.rs` — `UnknownId`。
+
+
+### Requirement: Automatic-fix applicability and local-versus-remote availability
+
+Automatic fix listing SHALL derive from report findings and planner applicability; SSH wrapping SHALL be marked RunLocally for SSH/official VS Code Remote contexts, while applicable tmux fixes remain Here even inside an SSH session, and absent automatic remediation or failed planning SHALL omit a choice.
+
+#### Scenario: Local SSH wrap
+- **WHEN** a report finding has SSH automatic remediation on a local terminal
+- **THEN** the SSH fix is listed as Here.
+
+#### Scenario: Remote SSH wrap
+- **WHEN** terminal/report indicates an SSH or official VS Code Remote session
+- **THEN** the SSH fix is listed as RunLocally and no local plan is required.
+
+#### Scenario: Remote tmux
+- **WHEN** a tmux option finding is applicable in an SSH session
+- **THEN** the tmux fix remains available Here.
+
+#### Scenario: No remediation
+- **WHEN** finding has no automatic remediation
+- **THEN** the finding contributes no automatic fix.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `select_fix_plan`；`crates/codegen/pager/src/diagnostics/fix.rs` — `applicable_automatic_fixes`；`crates/codegen/pager/src/diagnostics/fix.rs` — `applicable_automatic_fixes_with`；`crates/codegen/pager/src/diagnostics/fix.rs` — `format_applicable_automatic_fixes`；`crates/codegen/pager/src/diagnostics/fix.rs` — `AutomaticFixAvailability::Here`；`crates/codegen/pager/src/diagnostics/fix.rs` — `AutomaticFixAvailability::RunLocally`；`crates/codegen/pager/src/diagnostics/fix.rs` — `terminal.is_ssh`；`crates/codegen/pager/src/diagnostics/fix.rs` — `terminal.is_official_vscode_remote`；`crates/codegen/pager/src/diagnostics/fix.rs` — `report.facts.ssh`；`crates/codegen/pager/src/diagnostics/fix.rs` — `tmux_evidence_is_applicable`。
+
+
+### Requirement: SSH-wrap planning by shell and execution context
+
+plan_ssh_wrap SHALL reject Windows, official VS Code Remote, SSH sessions, unsupported shells, and unsafe environment paths; for Bash, zsh, and fish it SHALL select the shell-specific config path and exact managed alias, configure a validator when available, preserve SSH behavior caveats, and report an explicit manual one-off command for unsupported/manual use.
+
+#### Scenario: Shell paths
+- **WHEN** Bash, zsh, or fish is selected
+- **THEN** the plan targets .bashrc, .zshrc, or .config/fish/config.fish and uses the exact alias syntax.
+
+#### Scenario: Remote/platform
+- **WHEN** the environment is remote, official VS Code Remote, or Windows
+- **THEN** planning fails with the corresponding safety error before mutation.
+
+#### Scenario: Unsupported shell
+- **WHEN** SHELL is not Bash/zsh/fish
+- **THEN** planning returns UnsupportedShell with the one-off wrap command guidance.
+
+#### Scenario: Caveats
+- **WHEN** an SSH plan succeeds
+- **THEN** the plan records new-shell activation, command bypass, ControlPersist/ssh -f/~^Z limitations, and customization review.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `plan_ssh_wrap`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ShellKind::from_shell_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ShellKind::config_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ShellKind::alias`；`crates/codegen/pager/src/diagnostics/fix.rs` — `validator_for`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixPayload::SshWrap`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixError::PlatformUnsupported`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixError::NotApplicable`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixError::RemoteSession`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixError::UnsupportedShell`；`crates/codegen/pager/src/diagnostics/fix.rs` — `SSH_WRAP_ONE_OFF`。
+
+
+### Requirement: Tmux fix applicability, scopes, physical paths, and managed blocks
+
+plan_tmux_option SHALL require a tmux-backed, non-screen Byobu, tmux-report, finding, and positive evidence gate; it SHALL choose the physical .tmux.conf or validated BYOBU_CONFIG_DIR/.tmux.conf path, create an independent managed item with the option’s correct scope/value, and allow each option to coexist in one managed namespace.
+
+#### Scenario: Option specs
+- **WHEN** clipboard, DCS passthrough, or extended keys is selected with matching evidence
+- **THEN** the plan uses the exact option line and independent terminal diagnostic id.
+
+#### Scenario: Physical path
+- **WHEN** plain tmux or Byobu tmux is active
+- **THEN** the requested path is a concrete .tmux.conf path without ~; missing Byobu config returns ByobuConfigUnavailable.
+
+#### Scenario: Managed coexistence
+- **WHEN** multiple tmux fixes are applied sequentially
+- **THEN** one grow doctor namespace contains one block per option and each outcome requires reload.
+
+#### Scenario: Non-applicable evidence
+- **WHEN** multiplexer/backend/support/finding/value gates fail
+- **THEN** planning returns TmuxNotApplicable.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `plan_tmux_option`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TMUX_CLIPBOARD_SPEC`；`crates/codegen/pager/src/diagnostics/fix.rs` — `DCS_PASSTHROUGH_SPEC`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TMUX_EXTENDED_KEYS_SPEC`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TmuxOptionScope::Server`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TmuxOptionScope::Window`；`crates/codegen/pager/src/diagnostics/fix.rs` — `tmux_config_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `tmux_evidence_is_applicable`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TmuxNotApplicable`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ByobuConfigUnavailable`；`crates/codegen/pager/src/diagnostics/fix.rs` — `planned_tmux_change`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ManagedItem`。
+
+
+### Requirement: Safe directory, preview, quoting, and reload instructions
+
+Fix path handling SHALL accept only non-root absolute directories without dot components, control characters, or tilde; preview paths SHALL render CommonMark-safe code spans and symlink requested/target/backup paths, shell_quote_path SHALL reject newline/CR/NUL, and reload_instruction SHALL emit a safely quoted tmux source-file command or a detach/reattach fallback.
+
+#### Scenario: Unsafe directory
+- **WHEN** HOME or BYOBU_CONFIG_DIR is relative, root-only, dotted, control-containing, or tilde-based
+- **THEN** SafeAbsoluteDirectory::parse rejects it with UnsafeDirectory.
+
+#### Scenario: Quoting
+- **WHEN** a tmux path contains spaces, quotes, backticks, or newline
+- **THEN** the reload command shell-quotes/escapes valid paths, uses a sufficient CommonMark delimiter, and falls back for unsafe newline paths.
+
+#### Scenario: Preview
+- **WHEN** a planned change uses requested, symlink target, or backup paths
+- **THEN** format_fix_preview renders each path safely and explains the target/backup/write state.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `SafeAbsoluteDirectory::parse`；`crates/codegen/pager/src/diagnostics/fix.rs` — `preview_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `markdown_code_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `commonmark_code_span`；`crates/codegen/pager/src/diagnostics/fix.rs` — `shell_quote_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `reload_instruction`；`crates/codegen/pager/src/diagnostics/fix.rs` — `format_fix_preview`；`crates/codegen/pager/src/diagnostics/fix.rs` — `requested_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `target_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `backup_path_hint`；`crates/codegen/pager/src/diagnostics/fix.rs` — `will_write`。
+
+
+### Requirement: Tmux scanner parsing and direct assignment safety
+
+The direct tmux scanner SHALL ignore comments, user options, option lookalikes, conditional/native blocks, local or targeted window assignments, and unrelated commands; recognize supported server/window scopes and separators; classify healthy values as Healthy; and fail closed with ExistingCustomization for conflicting, ambiguous, unterminated, targeted-server, prefixed-command, or malformed assignments.
+
+#### Scenario: Healthy assignments
+- **WHEN** a direct assignment uses an allowed scope/value for the spec
+- **THEN** scan_direct_tmux_option returns Healthy.
+
+#### Scenario: Conflict
+- **WHEN** a direct assignment sets an unhealthy value
+- **THEN** the scanner returns ExistingCustomization and persistent verification is false.
+
+#### Scenario: Ignored/local
+- **WHEN** the text is comment, @user option, conditional/block, lookalike, local window, or unrelated command
+- **THEN** the target remains Absent.
+
+#### Scenario: Ambiguous syntax
+- **WHEN** command/option prefixes, extra/missing args, unterminated quote/escape, or target ambiguity is present
+- **THEN** the scanner fails closed with an ExistingCustomization detail.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `scan_direct_tmux_option`；`crates/codegen/pager/src/diagnostics/fix.rs` — `tmux_top_level_commands`；`crates/codegen/pager/src/diagnostics/fix.rs` — `tokenize_tmux_command`；`crates/codegen/pager/src/diagnostics/fix.rs` — `classify_tmux_assignment`；`crates/codegen/pager/src/diagnostics/fix.rs` — `command_may_target`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TmuxAssignment::NotTarget`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TmuxAssignment::Healthy`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TmuxAssignment::Conflict`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TmuxAssignment::Ambiguous`；`crates/codegen/pager/src/diagnostics/fix.rs` — `DirectOptionState::Absent`；`crates/codegen/pager/src/diagnostics/fix.rs` — `DirectOptionState::Healthy`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TmuxCommandToken`。
+
+
+### Requirement: SSH customization conflict detection and managed-state verification
+
+SSH planning and managed_alias_configured SHALL detect direct POSIX aliases/functions and fish aliases/functions for the exact ssh name while ignoring comments, near-name tokens, and Grow-managed blocks; existing customizations SHALL be preserved, and a later unmanaged conflict SHALL make a managed alias unconfigured.
+
+#### Scenario: Existing customization
+- **WHEN** a non-comment alias or function defines exact ssh
+- **THEN** planning returns ExistingCustomization without changing the file.
+
+#### Scenario: Whitespace/boundary
+- **WHEN** declarations vary in shell whitespace or use ssh_wrap/sshuttle
+- **THEN** exact ssh forms are found while near-name forms are ignored.
+
+#### Scenario: Managed-only
+- **WHEN** the file contains only a matching Grow managed alias and comments
+- **THEN** it is considered configured/idempotent.
+
+#### Scenario: Later conflict
+- **WHEN** a matching managed block is followed by an unmanaged ssh alias/function
+- **THEN** managed_alias_configured returns false.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `detect_ssh_customization`；`crates/codegen/pager/src/diagnostics/fix.rs` — `detect_posix_ssh_customization`；`crates/codegen/pager/src/diagnostics/fix.rs` — `detect_fish_ssh_customization`；`crates/codegen/pager/src/diagnostics/fix.rs` — `is_posix_ssh_alias_declaration`；`crates/codegen/pager/src/diagnostics/fix.rs` — `is_posix_ssh_function_declaration`；`crates/codegen/pager/src/diagnostics/fix.rs` — `token_is_exact_name`；`crates/codegen/pager/src/diagnostics/fix.rs` — `after_shell_keyword`；`crates/codegen/pager/src/diagnostics/fix.rs` — `managed_alias_configured`；`crates/codegen/pager/src/diagnostics/fix.rs` — `SSH_WRAP_ALIAS_POSIX`；`crates/codegen/pager/src/diagnostics/fix.rs` — `SSH_WRAP_ALIAS_FISH`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ExistingCustomization`。
+
+
+### Requirement: Validator discovery and validated-source conflict policy
+
+Validator discovery SHALL prefer an executable explicit shell path, resolve basename-only shells through PATH, reject non-executable explicit paths without substitution, and managed planning SHALL inspect the exact validated source snapshot, fail closed on non-UTF-8 content, and reject stale plans before conflict policy or mutation.
+
+#### Scenario: Validator path
+- **WHEN** SHELL is an executable path or basename
+- **THEN** the explicit executable is used directly; basename resolves to the first executable PATH candidate.
+
+#### Scenario: Invalid explicit shell
+- **WHEN** SHELL names a non-executable path
+- **THEN** resolution returns None rather than substituting another same-basename binary.
+
+#### Scenario: Stale source
+- **WHEN** the config changes after planning
+- **THEN** apply_fix returns Managed/TmuxManaged StalePlan and leaves the changed content intact.
+
+#### Scenario: Non-UTF8
+- **WHEN** source bytes are invalid UTF-8
+- **THEN** planning returns Managed UnsafePath before alias conflict handling.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `validator_for`；`crates/codegen/pager/src/diagnostics/fix.rs` — `resolve_validator_program`；`crates/codegen/pager/src/diagnostics/fix.rs` — `find_on_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `find_on_path_in`；`crates/codegen/pager/src/diagnostics/fix.rs` — `executable_file`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ManagedConfigError::StalePlan`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ManagedConfigError::UnsafePath`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ManagedConfig::plan`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ManagedConfig::verify_unchanged`。
+
+
+### Requirement: Transactional apply, idempotence, outcomes, and persistent verification
+
+apply_fix SHALL apply managed SSH/tmux plans transactionally, verify the requested postcondition, return Applied or AlreadyConfigured with changed/backup paths and activation semantics, preserve the planned shell on SSH outcomes, and verify persistent tmux state while treating SSH persistence as requiring the shell-aware alias check.
+
+#### Scenario: SSH apply
+- **WHEN** a valid SSH plan is applied
+- **THEN** the alias is verified, outcome status/changed path/shell are recorded, and activation is SatisfiedNow.
+
+#### Scenario: Tmux apply
+- **WHEN** a tmux plan is applied or already healthy
+- **THEN** the option is verified, status is Applied/AlreadyConfigured, and activation is RequiresReload.
+
+#### Scenario: Idempotent
+- **WHEN** the requested setting is already exact
+- **THEN** no write/backup is reported and verification succeeds.
+
+#### Scenario: Postcondition failure
+- **WHEN** the config changes unexpectedly or the managed result cannot be verified
+- **THEN** apply returns the specific postcondition/stale error and does not claim success.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `apply_fix`；`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_outcome`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixOutcome::new`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixStatus::Applied`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixStatus::AlreadyConfigured`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixActivation::SatisfiedNow`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixActivation::RequiresReload`；`crates/codegen/pager/src/diagnostics/fix.rs` — `verify_persistent_fix`；`crates/codegen/pager/src/diagnostics/fix.rs` — `managed_alias_is_configured`；`crates/codegen/pager/src/diagnostics/fix.rs` — `PostconditionFailed`；`crates/codegen/pager/src/diagnostics/fix.rs` — `TmuxPostconditionFailed`。
+
+
+### Requirement: Diagnostic report filtering and user-facing fix messages
+
+configured_report SHALL remove only the exact SSH-wrap finding when configured, format_fix_success SHALL describe the specific applied/already-configured option, backup, and reload/new-shell activation, and format_applicable_automatic_fixes SHALL render local versus remote commands or a no-fixes message.
+
+#### Scenario: Unconfigured report
+- **WHEN** configured is false
+- **THEN** the SSH-wrap finding remains.
+
+#### Scenario: Configured report
+- **WHEN** the verified planned alias is configured
+- **THEN** the exact SSH-wrap finding is removed.
+
+#### Scenario: Success message
+- **WHEN** an outcome is Applied or AlreadyConfigured
+- **THEN** the message includes path, backup when present, and activation/reload guidance.
+
+#### Scenario: Preview
+- **WHEN** a plan targets a new, existing, or symlinked file
+- **THEN** the preview explains text, physical target, backup behavior, caveats, and tmux reload limits.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `configured_report`；`crates/codegen/pager/src/diagnostics/fix.rs` — `format_fix_success`；`crates/codegen/pager/src/diagnostics/fix.rs` — `format_applicable_automatic_fixes`；`crates/codegen/pager/src/diagnostics/fix.rs` — `format_fix_preview`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixOutcome::status`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixOutcome::changed_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `FixOutcome::backup_path`；`crates/codegen/pager/src/diagnostics/fix.rs` — `reload_instruction`。
+
+
+### Requirement: Shell alias expansion and explicit bypass behavior
+
+The generated Bash, zsh, and fish aliases SHALL expand `ssh -p 2222 host` to the exact argv `wrap ssh -p 2222 host`, while `command ssh ...` SHALL bypass the alias and invoke the underlying ssh executable directly.
+
+#### Scenario: Wrapped invocation
+- **WHEN** a supported shell sources the generated alias and invokes ssh
+- **THEN** grow receives argv wrap, ssh, and the original options/host in order.
+
+#### Scenario: Explicit bypass
+- **WHEN** a command uses command ssh
+- **THEN** the underlying ssh executable runs without the grow wrapper.
+
+#### Scenario: Alias syntax
+- **WHEN** fish is available
+- **THEN** fish alias behavior matches POSIX expansion and does not leave an ssh environment variable.
+
+证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ShellKind::alias`；`crates/codegen/pager/src/diagnostics/fix.rs` — `SSH_WRAP_ALIAS_POSIX`；`crates/codegen/pager/src/diagnostics/fix.rs` — `SSH_WRAP_ALIAS_FISH`；`crates/codegen/pager/src/diagnostics/fix.rs` — `grow wrap ssh`；`crates/codegen/pager/src/diagnostics/fix.rs` — `command ssh`；`crates/codegen/pager/src/diagnostics/fix_tests.rs` — `shell_aliases_expand_to_exact_argv_and_bypass_is_explicit`。

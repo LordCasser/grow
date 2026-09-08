@@ -3640,7 +3640,23 @@
       "Grouped session picker headers, repo pinning, and row indentation",
       "Resume picker row construction, expansion, and shortcut surface",
       "Announcement, promo CTA, startup warning, and tip rendering",
-      "Session picker hit areas and render-result ownership contract"
+      "Session picker hit areas and render-result ownership contract",
+      "Rewind wire models and phases preserve mode, conflict, prompt, and draft context",
+      "Rewind keyboard input maps each phase to explicit dismiss, navigation, mode, confirmation, and execution intents",
+      "Rewind cursor movement and activation clamp to visible options and mirror Enter semantics",
+      "Rewind hit testing and overlay height track visible rows, optional file sections, and bounded lists",
+      "Rewind overlay rendering presents phase-specific prompts, files/conflicts, radio focus, and unfocused dimming",
+      "Doctor fix registry and identifier resolution",
+      "Automatic-fix applicability and local-versus-remote availability",
+      "SSH-wrap planning by shell and execution context",
+      "Tmux fix applicability, scopes, physical paths, and managed blocks",
+      "Safe directory, preview, quoting, and reload instructions",
+      "Tmux scanner parsing and direct assignment safety",
+      "SSH customization conflict detection and managed-state verification",
+      "Validator discovery and validated-source conflict policy",
+      "Transactional apply, idempotence, outcomes, and persistent verification",
+      "Diagnostic report filtering and user-facing fix messages",
+      "Shell alias expansion and explicit bypass behavior"
     ],
     "reviewed_files": [
       {
@@ -5646,6 +5662,18 @@
       {
         "path": "crates/codegen/pager/src/views/welcome/mod.rs",
         "sha256": "40e606a2fbec0c4344ca2d5b7028841bb74b8412370da7676a15040f3f2d47af"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "sha256": "6a7c79397e19e2b2d38992b9725d0919aac851fab3bdab01acfcd2a576c6d60c"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/rewind.rs",
+        "sha256": "86cc45a40c38b4d1207d485cc38b93aae059743b477687fd9d6b715e8a7ad6bc"
+      },
+      {
+        "path": "crates/codegen/pager/src/diagnostics/fix.rs",
+        "sha256": "951ba8ac3fbbbfac0d71a4f7f95cdb361877eac23200cac2b8f47dd28458dcca"
       }
     ],
     "review": "reviews/pager.md"

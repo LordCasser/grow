@@ -2358,3 +2358,9 @@ Luna/high复用代理完整读取`app/root/dispatch/tests/session/load.rs`共168
 合并 Pager `crates/codegen/pager/src/scrollback/sticky.rs`：1429 行、31 项内联测试、SHA-256 `e757db7e4b3194b35a49976626812155ac7cf5bb34364c61faa56c27b0c61313`；从源码事实提取 5 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
 
 合并 Pager `crates/codegen/pager/src/views/welcome/mod.rs`：1426 行、16 项内联测试、SHA-256 `40e606a2fbec0c4344ca2d5b7028841bb74b8412370da7676a15040f3f2d47af`；从源码事实提取 10 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
+
+合并 Pager `crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs`：1610 行、47 项内联测试、SHA-256 `6a7c79397e19e2b2d38992b9725d0919aac851fab3bdab01acfcd2a576c6d60c`；从源码事实提取 4 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
+
+合并 Pager `crates/codegen/pager/src/views/rewind.rs`：1533 行、18 项内联测试、SHA-256 `86cc45a40c38b4d1207d485cc38b93aae059743b477687fd9d6b715e8a7ad6bc`；从源码事实提取 5 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
+
+合并 Pager `crates/codegen/pager/src/diagnostics/fix.rs`：1526 行、30 项内联测试、SHA-256 `951ba8ac3fbbbfac0d71a4f7f95cdb361877eac23200cac2b8f47dd28458dcca`；从源码事实提取 11 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。

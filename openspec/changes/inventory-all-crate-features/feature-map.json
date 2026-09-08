@@ -53367,6 +53367,51 @@
         "Successful install without session",
         "安装成功但当前Agent session已None",
         "直接Installed并安排dismiss，不reload或fetch catalog。"
+      ],
+      [
+        "Catalog sanitation",
+        "a successful featured catalog contains component names with an escape sequence and a description longer than the tested limit",
+        "the stored component name has the escape removed and the description is reduced to the tested 120-character safe text."
+      ],
+      [
+        "Candidate admission",
+        "catalog sources include featured and non-featured entries with installed, update_available and not_installed statuses",
+        "only the featured not_installed entries remain, preserving source/plugin order and reporting a featured source."
+      ],
+      [
+        "Catalog failure and refresh",
+        "catalog loading fails or a successful refresh no longer contains the just-installed plugin",
+        "the prior cache is preserved on failure, and an Installed phase remains Installed when its refreshed candidate list is empty."
+      ],
+      [
+        "Phase gates",
+        "the feature flag, featured-source flag, candidate match, dismissal predicate or prompt text varies",
+        "the phase is Hidden for disabled, absent-source, dismissed or unmatched input, and Matched carries the selected plugin name and relative path for a keyword/domain hit."
+      ],
+      [
+        "Impression edge",
+        "the previous and next phases are Hidden, Installing or Matched for the same or different plugin",
+        "only a new Matched appearance or a changed Matched name emits an impression name."
+      ],
+      [
+        "Install success",
+        "an Installing CTA receives a matching successful outcome with reload required, MCP expected, or neither",
+        "the phase and emitted effect follow the tested AwaitingReload, AwaitingMcps or Installed branch."
+      ],
+      [
+        "Install failure and correlation",
+        "the install result is transport-error, non-success, stale phase or a different plugin name",
+        "the phase becomes Error with the preserved/sanitized message only for the accepted current install; stale or mismatched results are ignored."
+      ],
+      [
+        "Install path fallback",
+        "a candidate has a custom relative_path or the requested plugin is absent from candidates",
+        "the candidate path wins and an unknown name falls back to plugins/<name>."
+      ],
+      [
+        "Flag and source suppression",
+        "the feature flag is off or the featured source is absent even though text matches",
+        "the recomputed phase is Hidden."
       ]
     ],
     "sources": [
@@ -53393,6 +53438,98 @@
       [
         "crates/codegen/pager/src/app/agent_view/cta.rs",
         "ctrl_slash_installs_matched_plugin / ctrl_slash_ignored_when_cta_hidden"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_catalog_loaded_sanitizes_components_at_ingestion"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_catalog_keeps_featured_not_installed_only"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_catalog_err_preserves_cache"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_catalog_reload_empty_candidates_preserves_installed_checkmark"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_catalog_load_recomputes_match_for_typed_draft"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_phase_hidden_when_feature_disabled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_phase_hidden_when_official_source_absent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_phase_hidden_when_dismissed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_phase_hidden_when_no_keyword_match"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_phase_matched_when_keyword_hits"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_phase_matched_on_pasted_domain_url"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_phase_hidden_for_github_homepage_url"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_impression_edge_only_on_new_appearance"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_install_error_category_maps_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_install_done_ok_no_reload_enters_awaiting_mcps"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_install_done_ok_requires_reload_enters_awaiting_reload"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_install_done_err_sets_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_install_done_non_success_sets_error_with_sanitized_message"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_install_done_ignored_when_not_installing"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_install_done_ignored_for_different_plugin"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_install_relative_path_prefers_candidate_then_falls_back"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::dismissed_plugin_suppressed_on_next_recompute"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::flag_off_or_source_absent_hides_regardless_of_text"
       ]
     ]
   },
@@ -53421,6 +53558,41 @@
         "Catalog arrives during installation",
         "当前Installing且catalog成功",
         "更新候选缓存，但保留Installing阶段。"
+      ],
+      [
+        "Debounce generation",
+        "a PluginCtaDebounceExpired result has a stale or current generation",
+        "stale input has no effect, while the current disabled case becomes Hidden."
+      ],
+      [
+        "In-flight preservation",
+        "debounce recomputation is requested while the CTA is Installing, AwaitingReload, AwaitingMcps, Error or Installed",
+        "the existing phase remains unchanged and no effect is emitted."
+      ],
+      [
+        "Reload completion",
+        "AwaitingReload receives a matching successful, non-success, transport-error, stale-plugin or stale-phase result",
+        "success enters AwaitingMcps and fetches MCPs when expected; failures enter Error; stale results do nothing."
+      ],
+      [
+        "MCP readiness polling",
+        "AwaitingMcps receives initializing, unavailable, unrelated-only, empty, or terminal server lists",
+        "nonterminal cases remain AwaitingMcps and retry under the tested conditions, while eligible absent/no-auth cases settle Installed."
+      ],
+      [
+        "Polling timeout",
+        "a target MCP remains initializing at CTA_MCP_POLL_MAX_ATTEMPTS",
+        "the phase settles to Installed without another retry and schedules the installed dismiss effect."
+      ],
+      [
+        "Installed timeout",
+        "CtaInstalledDismissTimeout names the current Installed plugin or a stale phase/plugin",
+        "the matching phase becomes Hidden; a stale timeout leaves the phase unchanged."
+      ],
+      [
+        "MCP load error and correlation",
+        "MCP loading returns an error or a result targets the wrong plugin/current phase",
+        "a matching error becomes Error, while wrong plugin or wrong phase results are ignored."
       ]
     ],
     "sources": [
@@ -53443,6 +53615,78 @@
       [
         "crates/codegen/pager/src/app/agent_view/cta.rs",
         "notify_plugin_cta_text_changed / notify_skips_debounce_when_no_candidates / notify_skips_debounce_when_source_absent / notify_emits_debounce_when_candidates_present"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_debounce_ignores_stale_generation"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_debounce_sets_hidden_when_feature_disabled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::plugin_cta_debounce_preserves_in_flight_states"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_reload_done_ok_enters_awaiting_mcps"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_reload_done_non_success_sets_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_reload_done_err_sets_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_reload_done_ignored_for_stale_phase_or_plugin"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_mcps_loaded_initializing_keeps_waiting_and_retries"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_mcps_loaded_unavailable_keeps_waiting"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_mcps_loaded_no_plugin_servers_yet_keeps_waiting"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_mcps_loaded_absent_servers_settles_without_full_poll"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_mcps_loaded_empty_list_keeps_waiting_not_absent_settle"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_mcps_loaded_skips_wait_when_not_expecting_mcp"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_mcps_loaded_times_out_to_installed_after_budget"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_installed_dismiss_timeout_hides_when_unchanged"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_installed_dismiss_timeout_ignored_when_phase_moved_on"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_mcps_loaded_err_sets_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "tests::cta_mcps_loaded_ignored_for_stale_phase_or_plugin"
       ]
     ]
   },
@@ -162636,6 +162880,21 @@
         "Observed",
         "the tested dispatch scenario is exercised",
         "Successful CTA install/reload with expects_mcp=false SHALL settle to Installed, dismiss the installed CTA, avoid MCP fetch, and refresh the catalog after install."
+      ],
+      [
+        "MCP-bearing install path",
+        "a matched Figma candidate is connected and install succeeds without reload",
+        "the CTA enters AwaitingMcps and emits the MCP fetch effect."
+      ],
+      [
+        "Ready MCP settle",
+        "the awaited plugin server is Ready",
+        "the CTA becomes Installed, no extra MCP fetch/retry or modal is produced, and dismiss/catalog refresh effects are scheduled."
+      ],
+      [
+        "Skills-only settle",
+        "the candidate has no MCP servers and install succeeds",
+        "the CTA becomes Installed directly, emits no MCP fetch, schedules dismissal and leaves extensions_modal absent."
       ]
     ],
     "sources": [
@@ -162670,6 +162929,42 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
         "cta_reload_done_skills_only_settles_installed_without_fetch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::figma_candidate"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::left_click"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::isolate_grow_home"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::app_matched"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::connect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::app_awaiting_mcps"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::no_reload_path_enters_awaiting_mcps_directly"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::no_auth_path_settles_installed_without_modal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::skills_only_install_settles_installed_without_fetch"
       ]
     ]
   },
@@ -168240,6 +168535,21 @@
         "Update dispatch",
         "marketplace listing contains an update-available plugin and its update action fails",
         "one matching update action is observed, the task result carries the tested agent id, and no success notification is sent."
+      ],
+      [
+        "Install error projection",
+        "the matched CTA install returns a transport error",
+        "the owning CTA enters Error with the plugin name and exact install message."
+      ],
+      [
+        "Reload error projection",
+        "an install requiring reload is followed by a reload transport error",
+        "the owning CTA enters Error with the plugin name and exact reload message."
+      ],
+      [
+        "MCP error projection",
+        "an AwaitingMcps CTA receives a transport error",
+        "the owning CTA enters Error with the plugin name and exact MCP message and the extensions modal remains absent."
       ]
     ],
     "sources": [
@@ -168382,6 +168692,18 @@
       [
         "crates/codegen/pager/src/app/root/effects/tests.rs",
         "tests::check_marketplace_updates_dispatches_update_and_skips_failed_notifications"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::install_error_settles_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::reload_error_settles_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
+        "cta_e2e::mcps_error_settles_error"
       ]
     ]
   },
@@ -172089,6 +172411,1180 @@
       [
         "crates/codegen/pager/src/views/welcome/mod.rs",
         "picker_close_button"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Rewind wire models and phases preserve mode, conflict, prompt, and draft context",
+    "contract": "RewindPointInfo, RewindPointsResponse, RewindResponse and RewindConflictInfo SHALL deserialize camelCase payloads with unknown fields rejected. RewindMode SHALL map All, ConversationOnly and FilesOnly to stable wire/display labels. ConflictDisplay SHALL map deleted_externally/created_externally/modified_externally to deleted/added/modified and unknown types to conflict. RewindState constructors SHALL initialize CancelOffer or ModeSelect with anchor, target, file-offer, draft and selected-prompt context.",
+    "scenarios": [
+      [
+        "Wire payload",
+        "rewind points/response/conflict JSON is received",
+        "camelCase known fields deserialize and unknown fields are rejected."
+      ],
+      [
+        "Mode mapping",
+        "a mode is sent to shell or displayed",
+        "wire_value is all/conversation_only/files_only and display is human-readable."
+      ],
+      [
+        "Conflict label",
+        "a conflict type is known or unknown",
+        "the corresponding stable label is produced, with unknown values becoming conflict."
+      ],
+      [
+        "State setup",
+        "cancel or mode selection opens",
+        "phase starts at active index zero and retains anchor/draft/target context."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPointInfo"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPointsResponse"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindResponse"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindConflictInfo"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindMode"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindMode::wire_value"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindMode::display"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPhase"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "ConflictDisplay"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "ConflictDisplay::from_conflict"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindState"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindState::new_cancel_offer"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindState::new_mode_select"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Rewind keyboard input maps each phase to explicit dismiss, navigation, mode, confirmation, and execution intents",
+    "contract": "handle_rewind_key SHALL consume release events and route key presses by phase. Picker SHALL support j/k/arrows, Enter selection and Esc dismissal. CancelOffer SHALL map y to cancel-turn-and-proceed, n/Esc to dismissal, and Enter/navigation to cursor actions. ModeSelect SHALL support a/all, b/c conversation-only aliases according to inline/classic row layout, f only for an offered enabled files-only row, navigation, Enter and Esc. Confirm and ConversationOnlyConfirm SHALL map y/Enter to confirmation, Backspace to mode select, and Esc to full dismissal. Loading/Previewing SHALL only accept Esc; Executing SHALL consume input; Error SHALL dismiss on Esc/Enter.",
+    "scenarios": [
+      [
+        "Picker",
+        "a point picker is focused",
+        "navigation moves, Enter emits PickerSelect for the selected prompt, and Esc dismisses."
+      ],
+      [
+        "Inline mode select",
+        "offer_files_only is false",
+        "b/c select conversation-only, f is consumed, and hidden files-only cannot be reached."
+      ],
+      [
+        "Classic mode select",
+        "file changes are offered and available",
+        "a/c/f and Enter produce the selected mode while navigation clamps to offered rows."
+      ],
+      [
+        "Confirm",
+        "a confirmation phase is active",
+        "y/Enter confirms, Backspace returns to mode selection, and Esc dismisses directly."
+      ],
+      [
+        "Passive/error phase",
+        "loading/previewing/executing/error receives input",
+        "only documented dismiss or no-op consumption occurs."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "handle_rewind_key"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindInput"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPhase::Picker"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPhase::CancelOffer"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPhase::ModeSelect"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPhase::Confirm"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPhase::ConversationOnlyConfirm"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPhase::Error"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPhase::Loading"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPhase::Previewing"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindPhase::Executing"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "mode_for_idx"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "f_key_ignored_when_files_only_row_hidden"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "inline_mode_select_letters_rows_a_b"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "esc_dismisses_from_confirm_phase"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "backspace_goes_back_to_mode_select_from_confirm"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "esc_dismisses_from_conversation_only_confirm"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "backspace_goes_back_from_conversation_only_confirm"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "esc_dismisses_from_picker_and_other_phases"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Rewind cursor movement and activation clamp to visible options and mirror Enter semantics",
+    "contract": "move_cursor SHALL clamp picker, cancel, mode and confirmation active indices to the currently offered option range, including omitting disabled/hidden files-only rows. set_rewind_cursor SHALL report only actual changes and apply the same clamps for mouse hover/click. confirm_cursor SHALL translate active rows to CancelTurnThenProceed, Dismissed, SelectMode, Confirm, ConversationOnlyConfirm or BackToModeSelect. rewind_activate SHALL select the current picker point, dismiss errors, or delegate to confirm_cursor for other interactive phases.",
+    "scenarios": [
+      [
+        "Keyboard clamp",
+        "cursor moves beyond the first/last option",
+        "active_idx remains within the offered rows."
+      ],
+      [
+        "Mouse clamp",
+        "set_rewind_cursor receives an out-of-range index",
+        "the index is clamped and bool reports whether state changed."
+      ],
+      [
+        "Activation",
+        "Enter/click activates current phase",
+        "the resulting RewindInput matches the phase’s Enter semantics."
+      ],
+      [
+        "Empty/passive",
+        "there are no picker points or phase is noninteractive",
+        "activation is Consumed and no invalid index is produced."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "move_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "set_rewind_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "confirm_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "rewind_activate"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "set_cursor_moves_and_clamps"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "activate_matches_enter_semantics"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "cursor_cannot_reach_hidden_files_only_row"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Rewind hit testing and overlay height track visible rows, optional file sections, and bounded lists",
+    "contract": "rewind_row_at SHALL reject zero/tiny/outside areas and map only selectable rows for Picker, CancelOffer, ModeSelect, Confirm, ConversationOnlyConfirm and Error. Hidden or disabled files-only rows SHALL have no hit target. Confirm hit rows SHALL account for up to five clean/conflict file rows, overflow summary rows, and a separating gap. Loading/Previewing/Executing SHALL expose no rows. rewind_overlay_height SHALL mirror render geometry, shorten inline mode by one row, cap list overlays through ListOverlay, and include screen-independent content plus chrome.",
+    "scenarios": [
+      [
+        "Picker hit test",
+        "a pointer lands on title, point, past-last, or outside area",
+        "only point rows return their point index."
+      ],
+      [
+        "Mode hit test",
+        "files-only is hidden or disabled",
+        "index 2 has no clickable row; inline mode is one row shorter."
+      ],
+      [
+        "Confirm rows",
+        "clean/conflict file lists are empty or populated",
+        "radio rows are located after bounded file/overflow rows and optional gap."
+      ],
+      [
+        "Passive phase",
+        "loading/previewing/executing is shown",
+        "no row is selectable and height is the passive two-row panel plus chrome."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "rewind_row_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "rewind_overlay_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "apply_scrollbar_jump"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "picker_row_hit_test_maps_to_point_index"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "cancel_offer_rows"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "mode_select_skips_disabled_files_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "mode_select_without_files_only_offer_has_no_third_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "confirm_radio_rows_track_file_line_count"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "error_dismiss_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "non_interactive_phases_have_no_rows"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Rewind overlay rendering presents phase-specific prompts, files/conflicts, radio focus, and unfocused dimming",
+    "contract": "render_rewind_overlay SHALL no-op for zero-height or too-narrow areas, paint the panel background/accent bar, render phase-specific loading/picker/cancel/mode/preview/executing/confirm/conversation-only/error text, truncate confirmation prompt previews to available width, cap clean/conflict lists at five with +N more rows, render disabled rows dimmed, highlight the active focused row, and blend the panel when unfocused. key_label SHALL render Esc/Bksp sentinels as readable labels.",
+    "scenarios": [
+      [
+        "Mode rendering",
+        "classic or inline mode selection is shown",
+        "titles and a/b/c/f radio labels match whether file-only is offered."
+      ],
+      [
+        "Confirm rendering",
+        "files/conflicts or no files are present",
+        "mode-specific title, file/conflict rows, overflow counts, confirm/back controls and warning text render."
+      ],
+      [
+        "Unfocused panel",
+        "focused is false",
+        "the rendered overlay is blended toward its background."
+      ],
+      [
+        "Special keys",
+        "radio key is Esc or Backspace sentinel",
+        "key_label renders Esc/Bksp rather than control characters."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "render_rewind_overlay"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "render_radio_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "key_label"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "RewindMode::display"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "test_pushed_visible_excludes_gap"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "test_pushed_header_small_prompt_uses_full_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/rewind.rs",
+        "key_label_renders_special_sentinels"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Doctor fix registry and identifier resolution",
+    "contract": "The Doctor fix registry SHALL expose canonical diagnostic ids, short handles, labels, and commands for SSH wrapping plus the three tmux options; resolve_fix_id SHALL accept either the short handle or canonical id, human_fix_command SHALL produce the handle command, automatic_fix_choices SHALL enumerate the registry, and unknown ids SHALL return UnknownId.",
+    "scenarios": [
+      [
+        "Canonical id",
+        "a canonical or short id names a registered fix",
+        "the same DiagnosticId is returned and its human command is available."
+      ],
+      [
+        "Registry completeness",
+        "all registered fixes are enumerated",
+        "each handle and canonical id resolves to its own spec/command."
+      ],
+      [
+        "Unknown",
+        "an unregistered id is requested",
+        "resolution fails with FixError::UnknownId and no human command exists."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FIX_REGISTRY"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixSpec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "resolve_fix_id"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "human_fix_command"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "automatic_fix_choices"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "automatic_remediation_for"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ssh_wrap_automatic_remediation"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "UnknownId"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Automatic-fix applicability and local-versus-remote availability",
+    "contract": "Automatic fix listing SHALL derive from report findings and planner applicability; SSH wrapping SHALL be marked RunLocally for SSH/official VS Code Remote contexts, while applicable tmux fixes remain Here even inside an SSH session, and absent automatic remediation or failed planning SHALL omit a choice.",
+    "scenarios": [
+      [
+        "Local SSH wrap",
+        "a report finding has SSH automatic remediation on a local terminal",
+        "the SSH fix is listed as Here."
+      ],
+      [
+        "Remote SSH wrap",
+        "terminal/report indicates an SSH or official VS Code Remote session",
+        "the SSH fix is listed as RunLocally and no local plan is required."
+      ],
+      [
+        "Remote tmux",
+        "a tmux option finding is applicable in an SSH session",
+        "the tmux fix remains available Here."
+      ],
+      [
+        "No remediation",
+        "finding has no automatic remediation",
+        "the finding contributes no automatic fix."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "select_fix_plan"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "applicable_automatic_fixes"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "applicable_automatic_fixes_with"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "format_applicable_automatic_fixes"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "AutomaticFixAvailability::Here"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "AutomaticFixAvailability::RunLocally"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "terminal.is_ssh"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "terminal.is_official_vscode_remote"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "report.facts.ssh"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "tmux_evidence_is_applicable"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "SSH-wrap planning by shell and execution context",
+    "contract": "plan_ssh_wrap SHALL reject Windows, official VS Code Remote, SSH sessions, unsupported shells, and unsafe environment paths; for Bash, zsh, and fish it SHALL select the shell-specific config path and exact managed alias, configure a validator when available, preserve SSH behavior caveats, and report an explicit manual one-off command for unsupported/manual use.",
+    "scenarios": [
+      [
+        "Shell paths",
+        "Bash, zsh, or fish is selected",
+        "the plan targets .bashrc, .zshrc, or .config/fish/config.fish and uses the exact alias syntax."
+      ],
+      [
+        "Remote/platform",
+        "the environment is remote, official VS Code Remote, or Windows",
+        "planning fails with the corresponding safety error before mutation."
+      ],
+      [
+        "Unsupported shell",
+        "SHELL is not Bash/zsh/fish",
+        "planning returns UnsupportedShell with the one-off wrap command guidance."
+      ],
+      [
+        "Caveats",
+        "an SSH plan succeeds",
+        "the plan records new-shell activation, command bypass, ControlPersist/ssh -f/~^Z limitations, and customization review."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "plan_ssh_wrap"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ShellKind::from_shell_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ShellKind::config_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ShellKind::alias"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "validator_for"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixPayload::SshWrap"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::PlatformUnsupported"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::NotApplicable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::RemoteSession"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::UnsupportedShell"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SSH_WRAP_ONE_OFF"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Tmux fix applicability, scopes, physical paths, and managed blocks",
+    "contract": "plan_tmux_option SHALL require a tmux-backed, non-screen Byobu, tmux-report, finding, and positive evidence gate; it SHALL choose the physical .tmux.conf or validated BYOBU_CONFIG_DIR/.tmux.conf path, create an independent managed item with the option’s correct scope/value, and allow each option to coexist in one managed namespace.",
+    "scenarios": [
+      [
+        "Option specs",
+        "clipboard, DCS passthrough, or extended keys is selected with matching evidence",
+        "the plan uses the exact option line and independent terminal diagnostic id."
+      ],
+      [
+        "Physical path",
+        "plain tmux or Byobu tmux is active",
+        "the requested path is a concrete .tmux.conf path without ~; missing Byobu config returns ByobuConfigUnavailable."
+      ],
+      [
+        "Managed coexistence",
+        "multiple tmux fixes are applied sequentially",
+        "one grow doctor namespace contains one block per option and each outcome requires reload."
+      ],
+      [
+        "Non-applicable evidence",
+        "multiplexer/backend/support/finding/value gates fail",
+        "planning returns TmuxNotApplicable."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "plan_tmux_option"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TMUX_CLIPBOARD_SPEC"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "DCS_PASSTHROUGH_SPEC"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TMUX_EXTENDED_KEYS_SPEC"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TmuxOptionScope::Server"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TmuxOptionScope::Window"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "tmux_config_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "tmux_evidence_is_applicable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TmuxNotApplicable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ByobuConfigUnavailable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "planned_tmux_change"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ManagedItem"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Safe directory, preview, quoting, and reload instructions",
+    "contract": "Fix path handling SHALL accept only non-root absolute directories without dot components, control characters, or tilde; preview paths SHALL render CommonMark-safe code spans and symlink requested/target/backup paths, shell_quote_path SHALL reject newline/CR/NUL, and reload_instruction SHALL emit a safely quoted tmux source-file command or a detach/reattach fallback.",
+    "scenarios": [
+      [
+        "Unsafe directory",
+        "HOME or BYOBU_CONFIG_DIR is relative, root-only, dotted, control-containing, or tilde-based",
+        "SafeAbsoluteDirectory::parse rejects it with UnsafeDirectory."
+      ],
+      [
+        "Quoting",
+        "a tmux path contains spaces, quotes, backticks, or newline",
+        "the reload command shell-quotes/escapes valid paths, uses a sufficient CommonMark delimiter, and falls back for unsafe newline paths."
+      ],
+      [
+        "Preview",
+        "a planned change uses requested, symlink target, or backup paths",
+        "format_fix_preview renders each path safely and explains the target/backup/write state."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SafeAbsoluteDirectory::parse"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "preview_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "markdown_code_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "commonmark_code_span"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "shell_quote_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "reload_instruction"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "format_fix_preview"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "requested_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "target_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "backup_path_hint"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "will_write"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Tmux scanner parsing and direct assignment safety",
+    "contract": "The direct tmux scanner SHALL ignore comments, user options, option lookalikes, conditional/native blocks, local or targeted window assignments, and unrelated commands; recognize supported server/window scopes and separators; classify healthy values as Healthy; and fail closed with ExistingCustomization for conflicting, ambiguous, unterminated, targeted-server, prefixed-command, or malformed assignments.",
+    "scenarios": [
+      [
+        "Healthy assignments",
+        "a direct assignment uses an allowed scope/value for the spec",
+        "scan_direct_tmux_option returns Healthy."
+      ],
+      [
+        "Conflict",
+        "a direct assignment sets an unhealthy value",
+        "the scanner returns ExistingCustomization and persistent verification is false."
+      ],
+      [
+        "Ignored/local",
+        "the text is comment, @user option, conditional/block, lookalike, local window, or unrelated command",
+        "the target remains Absent."
+      ],
+      [
+        "Ambiguous syntax",
+        "command/option prefixes, extra/missing args, unterminated quote/escape, or target ambiguity is present",
+        "the scanner fails closed with an ExistingCustomization detail."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "scan_direct_tmux_option"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "tmux_top_level_commands"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "tokenize_tmux_command"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "classify_tmux_assignment"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "command_may_target"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TmuxAssignment::NotTarget"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TmuxAssignment::Healthy"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TmuxAssignment::Conflict"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TmuxAssignment::Ambiguous"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "DirectOptionState::Absent"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "DirectOptionState::Healthy"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TmuxCommandToken"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "SSH customization conflict detection and managed-state verification",
+    "contract": "SSH planning and managed_alias_configured SHALL detect direct POSIX aliases/functions and fish aliases/functions for the exact ssh name while ignoring comments, near-name tokens, and Grow-managed blocks; existing customizations SHALL be preserved, and a later unmanaged conflict SHALL make a managed alias unconfigured.",
+    "scenarios": [
+      [
+        "Existing customization",
+        "a non-comment alias or function defines exact ssh",
+        "planning returns ExistingCustomization without changing the file."
+      ],
+      [
+        "Whitespace/boundary",
+        "declarations vary in shell whitespace or use ssh_wrap/sshuttle",
+        "exact ssh forms are found while near-name forms are ignored."
+      ],
+      [
+        "Managed-only",
+        "the file contains only a matching Grow managed alias and comments",
+        "it is considered configured/idempotent."
+      ],
+      [
+        "Later conflict",
+        "a matching managed block is followed by an unmanaged ssh alias/function",
+        "managed_alias_configured returns false."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "detect_ssh_customization"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "detect_posix_ssh_customization"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "detect_fish_ssh_customization"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "is_posix_ssh_alias_declaration"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "is_posix_ssh_function_declaration"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "token_is_exact_name"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "after_shell_keyword"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "managed_alias_configured"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SSH_WRAP_ALIAS_POSIX"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SSH_WRAP_ALIAS_FISH"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ExistingCustomization"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Validator discovery and validated-source conflict policy",
+    "contract": "Validator discovery SHALL prefer an executable explicit shell path, resolve basename-only shells through PATH, reject non-executable explicit paths without substitution, and managed planning SHALL inspect the exact validated source snapshot, fail closed on non-UTF-8 content, and reject stale plans before conflict policy or mutation.",
+    "scenarios": [
+      [
+        "Validator path",
+        "SHELL is an executable path or basename",
+        "the explicit executable is used directly; basename resolves to the first executable PATH candidate."
+      ],
+      [
+        "Invalid explicit shell",
+        "SHELL names a non-executable path",
+        "resolution returns None rather than substituting another same-basename binary."
+      ],
+      [
+        "Stale source",
+        "the config changes after planning",
+        "apply_fix returns Managed/TmuxManaged StalePlan and leaves the changed content intact."
+      ],
+      [
+        "Non-UTF8",
+        "source bytes are invalid UTF-8",
+        "planning returns Managed UnsafePath before alias conflict handling."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "validator_for"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "resolve_validator_program"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "find_on_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "find_on_path_in"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "executable_file"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ManagedConfigError::StalePlan"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ManagedConfigError::UnsafePath"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ManagedConfig::plan"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ManagedConfig::verify_unchanged"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Transactional apply, idempotence, outcomes, and persistent verification",
+    "contract": "apply_fix SHALL apply managed SSH/tmux plans transactionally, verify the requested postcondition, return Applied or AlreadyConfigured with changed/backup paths and activation semantics, preserve the planned shell on SSH outcomes, and verify persistent tmux state while treating SSH persistence as requiring the shell-aware alias check.",
+    "scenarios": [
+      [
+        "SSH apply",
+        "a valid SSH plan is applied",
+        "the alias is verified, outcome status/changed path/shell are recorded, and activation is SatisfiedNow."
+      ],
+      [
+        "Tmux apply",
+        "a tmux plan is applied or already healthy",
+        "the option is verified, status is Applied/AlreadyConfigured, and activation is RequiresReload."
+      ],
+      [
+        "Idempotent",
+        "the requested setting is already exact",
+        "no write/backup is reported and verification succeeds."
+      ],
+      [
+        "Postcondition failure",
+        "the config changes unexpectedly or the managed result cannot be verified",
+        "apply returns the specific postcondition/stale error and does not claim success."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "apply_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixOutcome::new"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixStatus::Applied"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixStatus::AlreadyConfigured"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixActivation::SatisfiedNow"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixActivation::RequiresReload"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "verify_persistent_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "managed_alias_is_configured"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "PostconditionFailed"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TmuxPostconditionFailed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Diagnostic report filtering and user-facing fix messages",
+    "contract": "configured_report SHALL remove only the exact SSH-wrap finding when configured, format_fix_success SHALL describe the specific applied/already-configured option, backup, and reload/new-shell activation, and format_applicable_automatic_fixes SHALL render local versus remote commands or a no-fixes message.",
+    "scenarios": [
+      [
+        "Unconfigured report",
+        "configured is false",
+        "the SSH-wrap finding remains."
+      ],
+      [
+        "Configured report",
+        "the verified planned alias is configured",
+        "the exact SSH-wrap finding is removed."
+      ],
+      [
+        "Success message",
+        "an outcome is Applied or AlreadyConfigured",
+        "the message includes path, backup when present, and activation/reload guidance."
+      ],
+      [
+        "Preview",
+        "a plan targets a new, existing, or symlinked file",
+        "the preview explains text, physical target, backup behavior, caveats, and tmux reload limits."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "configured_report"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "format_fix_success"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "format_applicable_automatic_fixes"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "format_fix_preview"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixOutcome::status"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixOutcome::changed_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixOutcome::backup_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "reload_instruction"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Shell alias expansion and explicit bypass behavior",
+    "contract": "The generated Bash, zsh, and fish aliases SHALL expand `ssh -p 2222 host` to the exact argv `wrap ssh -p 2222 host`, while `command ssh ...` SHALL bypass the alias and invoke the underlying ssh executable directly.",
+    "scenarios": [
+      [
+        "Wrapped invocation",
+        "a supported shell sources the generated alias and invokes ssh",
+        "grow receives argv wrap, ssh, and the original options/host in order."
+      ],
+      [
+        "Explicit bypass",
+        "a command uses command ssh",
+        "the underlying ssh executable runs without the grow wrapper."
+      ],
+      [
+        "Alias syntax",
+        "fish is available",
+        "fish alias behavior matches POSIX expansion and does not leave an ssh environment variable."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "fix_spec"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ShellKind::alias"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SSH_WRAP_ALIAS_POSIX"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SSH_WRAP_ALIAS_FISH"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "grow wrap ssh"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "command ssh"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "shell_aliases_expand_to_exact_argv_and_bypass_is_explicit"
       ]
     ]
   }

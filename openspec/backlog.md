@@ -870,3 +870,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：render_content has a large argument surface and performs delegation, selection post-paint and selection-box derivation in one method; splitting those responsibilities would be a separate refactor.
 - Pager 审计债务：The pane relies on runtime expect calls for prepared caches and paint-range bounds; callers must preserve the prepare_layout invariant.
 - Pager 审计债务：Sticky header rendering uses a reusable scratch buffer only for clipped headers while other content allocation and delegated work remain outside this file; frame-level allocation/performance is not established here.
+- Pager 审计债务：The nested end-to-end module mutates internal CTA state directly to arrange phases, which keeps scenarios deterministic but leaves a gap between public user actions and some reducer preconditions.
+- Pager 审计债务：Test setup is duplicated across many top-level cases; shared builders could reduce fixture drift, but that refactor is outside this audit.
+- Pager 审计债务：isolate_grow_home uses a process-global OnceLock and unsafe environment mutation, so test isolation depends on the first caller and process-wide environment state.
+- Pager 审计债务：MCP polling and dismissal behavior is verified through synthetic TaskResult dispatches rather than a controllable scheduler or clock, leaving timing contracts partially indirect.
+- Pager 审计债务：The suite contains both focused dispatch checks and nested composed flows with overlapping success/error coverage; the ownership boundary between unit and end-to-end evidence could be made clearer.
