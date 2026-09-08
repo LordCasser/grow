@@ -1085,3 +1085,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The contract is inferred from hard-coded text substrings and one control byte rather than a structured read-block identity and exact collapsed/expanded state assertion.
 - Pager 审计债务：The test creates a must_use AgentTurnExpectation but does not await or assert it, allowing the UI text path to be the only synchronization barrier for tool-call correctness.
 - Pager 审计债务：The broad scenario couples filesystem fixture creation, inference scripting, permission/trust bootstrap, read-header projection, keyboard expansion, panic detection, and shutdown, so failures have coarse diagnosis boundaries.
+- Pager 审计债务：The regression is #[ignore], so minimal Escape cancellation is outside default automated coverage.
+- Pager 审计债务：Timing and literal text assertions leave the cancellation contract indirectly specified and diagnosis coarse.
+- Pager 审计债务：The regression is #[ignore], so minimal Escape cancellation is outside default automated coverage.
+- Pager 审计债务：Timing and literal text assertions leave the cancellation contract indirectly specified and diagnosis coarse.
+- Pager 审计债务：端到端设置 modal 流程仍依赖 UI 文案 sentinel，且打开、关闭、健康检查和清理集中在一个 PTY 场景中；可补充结构化 modal/focus probe 和更细粒度测试。

@@ -8122,7 +8122,7 @@ styled_file_ref SHALL construct a Ratatui line containing an optional gray @ pre
 
 ### Requirement: Pager composable scrollback wrapper façade
 
-The scrollback wrapper façade SHALL expose Accented, BlockRenderer, EntryRenderer and Padded as composable Renderable decorators, with group_header_chrome_prefix_width restricted to crate scope. The embedded composition check SHALL verify that standard padding around a foreground accent and a stub block preserves a three-row desired height, paints the accent at column two and begins content at column three on the content row. It does not prove every wrapper option or terminal rendering. 
+The scrollback wrapper façade SHALL expose Accented, BlockRenderer, EntryRenderer and Padded as composable Renderable decorators, with group_header_chrome_prefix_width restricted to crate scope. The embedded composition check SHALL verify that standard padding around a foreground accent and a stub block preserves a three-row desired height, paints the accent at column two and begins content at column three on the content row. It does not prove every wrapper option or terminal rendering.
 
 #### Scenario: Composition
 - **WHEN** a standard Padded wraps an Accented BlockRenderer for a one-line stub
@@ -31884,3 +31884,196 @@ The ignored PTY test SHALL fail with the current screen if the palette does not 
 - **THEN** quit_minimal sends the confirmation chords and waits for exit or invokes its harness kill fallback.
 
 证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs` — `quit_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_exit_code`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`。
+
+
+### Requirement: Paced minimal running-turn fixture
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Start mock content
+- **WHEN** the test enters its async PTY case
+- **THEN** ContentController::start creates the content-backed test fixture or the test fails at start content.
+
+#### Scenario: Keep response streaming
+- **WHEN** the content controller receives the constructed response
+- **THEN** the response begins with MOCK_RESPONSE_SENTINEL and is emitted with a 50 ms per-chunk delay.
+
+#### Scenario: Minimal readiness gate
+- **WHEN** spawn_minimal returns a harness
+- **THEN** wait_minimal_ready waits for the shared minimal idle sentinel before any prompt is submitted.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_esc_cancels_running_turn.rs` — `minimal_esc_cancels_running_turn`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::start`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_chunk_delay`。
+
+
+### Requirement: Esc cancels an active minimal turn
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Submit running turn
+- **WHEN** minimal has reached its idle readiness state
+- **THEN** the shared PROMPT followed by carriage return is injected and the response sentinel must become visible within 30 seconds.
+
+#### Scenario: Cancel with Escape
+- **WHEN** MOCK_RESPONSE_SENTINEL is visible in the live screen
+- **THEN** keys::ESC is injected into the PTY as the cancellation input.
+
+#### Scenario: Commit cancellation marker
+- **WHEN** Escape cancellation has been processed
+- **THEN** full_text must contain `Turn cancelled by user` within 15 seconds, including content committed above the pinned live viewport.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager-pty-harness/src/pty.rs` — `keys::ESC`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_full_text`。
+
+
+### Requirement: Cancellation leaves minimal healthy and requests cleanup
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: No panic marker
+- **WHEN** the cancellation marker appears in full_text
+- **THEN** the current visible screen must not contain `panicked`; failure includes screen_contents in the diagnostic.
+
+#### Scenario: Shutdown
+- **WHEN** the panic assertion passes
+- **THEN** quit_minimal is called to send the shared Ctrl+Q confirmation and poll for exit with its fallback kill path.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::contains_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: Minimal slash dropdown fixture reaches idle readiness
+
+The implementation SHALL satisfy the following tested behavior: minimal_slash_dropdown_dismisses_with_esc calls ContentController::start, spawn_minimal(&content), and wait_minimal_ready(&mut harness). No model response is configured or submitted; this case isolates prompt slash overlay behavior after the minimal prompt is ready.
+
+#### Scenario: Isolated minimal startup
+- **WHEN** the ignored test starts
+- **THEN** a mock-backed minimal pager is spawned through the shared fixture.
+
+#### Scenario: Readiness gate
+- **WHEN** the pager process is running
+- **THEN** wait_minimal_ready observes the minimal idle prompt before slash input.
+
+#### Scenario: No turn dependency
+- **WHEN** the readiness gate passes
+- **THEN** the test opens the slash dropdown without submitting a model prompt or requiring a response.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_dropdown_dismisses_with_esc.rs` — `minimal_slash_dropdown_dismisses_with_esc`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::start`。
+
+
+### Requirement: Minimal slash input opens the model suggestion dropdown
+
+The implementation SHALL satisfy the following tested behavior: The test injects `/mod` one byte at a time via inject_keys_paced, which drains 50 ms between bytes, then waits up to ten seconds for `Switch the active model` on the visible screen. The description is chosen as a dropdown-only sentinel: it should not appear in typed prompt text or the normal `minimal · /help` status line.
+
+#### Scenario: Paced slash prefix
+- **WHEN** minimal is idle and `/mod` is injected byte by byte
+- **THEN** the prompt receives discrete slash input without bulk paste coalescing.
+
+#### Scenario: Dropdown discovery
+- **WHEN** the slash prefix narrows suggestions
+- **THEN** the screen contains `Switch the active model` within ten seconds.
+
+#### Scenario: Overlay growth
+- **WHEN** the dropdown description is visible
+- **THEN** the test treats the prompt-anchored suggestion surface as open above the prompt.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_dropdown_dismisses_with_esc.rs` — `minimal_slash_dropdown_dismisses_with_esc`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `inject_keys_paced`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_text`。
+
+
+### Requirement: Slash dropdown Esc is consumed before idle clear or rewind policy
+
+The implementation SHALL satisfy the following tested behavior: After the suggestion sentinel appears, the test injects keys::ESC, pumps 400 ms, captures screen_contents, and requires the model description `Switch the active model` and the idle-clear text `press again to clear` to be absent. The source documents the intended pane-level ownership precedence; it does not directly assert a rewind picker sentinel or inspect the internal consumed action.
+
+#### Scenario: Dismiss dropdown
+- **WHEN** `Switch the active model` is visible and Esc is injected
+- **THEN** the model suggestion description is absent after a 400 ms update.
+
+#### Scenario: Prevent idle clear
+- **WHEN** the same Esc reaches the slash surface
+- **THEN** `press again to clear` is absent, so the idle clear confirmation was not armed by fall-through.
+
+#### Scenario: Single-key precedence
+- **WHEN** the dropdown owns Esc
+- **THEN** the test expects dismissal to complete through the slash handler before lower-level idle/rewind policy.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_dropdown_dismisses_with_esc.rs` — `minimal_slash_dropdown_dismisses_with_esc`；`crates/codegen/pager-pty-harness/src/pty.rs` — `keys::ESC`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::update`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: Slash dismissal keeps minimal pager healthy and cleans up
+
+The implementation SHALL satisfy the following tested behavior: The test asserts !harness.contains_text("panicked") using the captured screen, then calls quit_minimal(&mut harness). The helper owns Ctrl-Q confirmation, exit polling, and kill fallback; this file does not assert the exit code or terminal restoration bytes.
+
+#### Scenario: No panic
+- **WHEN** the dropdown dismissal assertions complete
+- **THEN** the screen contains no `panicked` marker.
+
+#### Scenario: Minimal cleanup
+- **WHEN** all assertions pass
+- **THEN** quit_minimal is invoked to close the prompt-focused minimal pager.
+
+#### Scenario: Ignored test gate
+- **WHEN** the ordinary PTY target discovers the test
+- **THEN** the `#[ignore]` attribute keeps it out of default execution unless explicitly selected.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_dropdown_dismisses_with_esc.rs` — `minimal_slash_dropdown_dismisses_with_esc`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::contains_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: Minimal settings modal PTY fixture and readiness gate
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Isolated content fixture
+- **WHEN** minimal_settings_modal_opens_and_closes starts
+- **THEN** ContentController::start succeeds and supplies the mock content backend.
+
+#### Scenario: Minimal process
+- **WHEN** spawn_minimal returns
+- **THEN** the pager runs with minimal/no-leader arguments and query responses are enabled.
+
+#### Scenario: Readiness gate
+- **WHEN** the child process has started
+- **THEN** wait_minimal_ready observes the minimal idle status before slash input.
+
+
+### Requirement: Minimal `/settings` opens the full settings editor inline
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Paced settings command
+- **WHEN** minimal is idle and `/settings` is injected one byte at a time then submitted
+- **THEN** the slash input reaches the settings command path instead of being paste-coalesced.
+
+#### Scenario: Inline settings render
+- **WHEN** OpenSettings is dispatched while the active view is minimal
+- **THEN** the real settings modal is mounted in the shared inline app-modal host.
+
+#### Scenario: Appearance category
+- **WHEN** the settings editor has rendered
+- **THEN** the `Appearance` category header is visible within ten seconds.
+
+
+### Requirement: Esc closes the minimal settings editor and restores idle prompt state
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Settings dismissal
+- **WHEN** the `Appearance` header is visible and Esc is injected
+- **THEN** the settings modal receives the close input.
+
+#### Scenario: Prompt restoration
+- **WHEN** settings dismissal has been processed
+- **THEN** MINIMAL_IDLE_SENTINEL returns within ten seconds.
+
+#### Scenario: No stale editor
+- **WHEN** the idle sentinel is visible after Esc
+- **THEN** the current screen no longer contains `Appearance`.
+
+
+### Requirement: Minimal settings modal liveness, panic absence and cleanup
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: No visible panic
+- **WHEN** settings has closed and the minimal idle prompt is visible
+- **THEN** the current screen contains no `panicked` marker, with the screen dump available on failure.
+
+#### Scenario: Minimal cleanup
+- **WHEN** all settings open/close assertions pass
+- **THEN** quit_minimal sends confirmation chords and waits for exit or uses its harness kill fallback.

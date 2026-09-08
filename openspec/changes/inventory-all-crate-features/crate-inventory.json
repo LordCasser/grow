@@ -4240,7 +4240,18 @@
       "Minimal command-palette PTY fixture and readiness gate",
       "Minimal `/help` opens the inline command palette with registered entries",
       "Command palette Esc dismissal returns minimal input to idle",
-      "Minimal command palette liveness, panic absence and cleanup"
+      "Minimal command palette liveness, panic absence and cleanup",
+      "Paced minimal running-turn fixture",
+      "Esc cancels an active minimal turn",
+      "Cancellation leaves minimal healthy and requests cleanup",
+      "Minimal slash dropdown fixture reaches idle readiness",
+      "Minimal slash input opens the model suggestion dropdown",
+      "Slash dropdown Esc is consumed before idle clear or rewind policy",
+      "Slash dismissal keeps minimal pager healthy and cleans up",
+      "Minimal settings modal PTY fixture and readiness gate",
+      "Minimal `/settings` opens the full settings editor inline",
+      "Esc closes the minimal settings editor and restores idle prompt state",
+      "Minimal settings modal liveness, panic absence and cleanup"
     ],
     "reviewed_files": [
       {
@@ -6798,6 +6809,18 @@
       {
         "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs",
         "sha256": "394fabfa1f591572d1ece0dde66a97d3b77b9b2acae2694abf87e406f24b8bec"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_esc_cancels_running_turn.rs",
+        "sha256": "4fc9c91204b74f176ca7fe84ecccb948d8f448522cb96e503e0ea344015cf035"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_dropdown_dismisses_with_esc.rs",
+        "sha256": "eb7402b751eda42a11b01c0f2c6712e51c070f1ac255ee3297fd2e01adf7d1ee"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_settings_modal_opens_and_closes.rs",
+        "sha256": "851bfa4f568e1185cc3ccec1d51626aa791dc86076a98d45a1a50139413a7a66"
       }
     ],
     "review": "reviews/pager.md"

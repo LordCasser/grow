@@ -2636,3 +2636,9 @@ Luna/high复用代理完整读取`app/root/dispatch/tests/session/load.rs`共168
 合并 Pager `crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_survives_quit.rs`：56 行、1 项内联测试、SHA-256 `d1fa59e145bd38d2836e2995615f15fbd494a61d451c441a06783a10d6d46d17`；从源码事实提取 4 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
 
 合并 Pager `crates/codegen/pager/tests/pty_e2e/minimal/minimal_help_opens_command_palette.rs`：49 行、1 项内联测试、SHA-256 `394fabfa1f591572d1ece0dde66a97d3b77b9b2acae2694abf87e406f24b8bec`；从源码事实提取 4 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
+
+合并 Pager `crates/codegen/pager/tests/pty_e2e/minimal/minimal_esc_cancels_running_turn.rs`：45 行、1 项内联测试、SHA-256 `4fc9c91204b74f176ca7fe84ecccb948d8f448522cb96e503e0ea344015cf035`；从源码事实提取 3 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
+
+合并 Pager `crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_dropdown_dismisses_with_esc.rs`：43 行、1 项内联测试、SHA-256 `eb7402b751eda42a11b01c0f2c6712e51c070f1ac255ee3297fd2e01adf7d1ee`；从源码事实提取 4 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
+
+合并 Pager `crates/codegen/pager/tests/pty_e2e/minimal/minimal_settings_modal_opens_and_closes.rs`：43 行、1 项内联测试、SHA-256 `851bfa4f568e1185cc3ccec1d51626aa791dc86076a98d45a1a50139413a7a66`；从源码事实提取 4 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
