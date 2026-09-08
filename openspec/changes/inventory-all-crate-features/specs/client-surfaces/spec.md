@@ -32175,3 +32175,215 @@ The implementation SHALL satisfy the following tested behavior:
 #### Scenario: PTY suite placement
 - **WHEN** the minimal family is compiled
 - **THEN** it remains part of the pager PTY integration suite and is not declared as a separate Cargo test crate.
+
+
+### Requirement: Leader PTY suite reuses canonical harness and flow helpers
+
+The implementation SHALL satisfy the following tested behavior: common.rs re-exports LeaderCluster, PtyHarness, inference_request_count, keys, submit_turn, and wait_for_labels_absent from pager_pty_harness, and re-exports std::time::Duration. The module itself defines no drive or seed helper; the file documentation identifies pager_pty_harness::flows as the canonical implementation shared with the ordinary pty_e2e target.
+
+#### Scenario: Shared leader cluster type
+- **WHEN** a leader PTY test imports crate::common::*
+- **THEN** LeaderCluster is available without each test importing pager-pty-harness directly.
+
+#### Scenario: Shared PTY operations
+- **WHEN** a leader test drives a client
+- **THEN** PtyHarness and keys are available through this suite-local façade.
+
+#### Scenario: Canonical flow helper
+- **WHEN** a leader test counts inference or submits a turn
+- **THEN** the implementation comes from pager_pty_harness::flows, shared with pty_e2e.
+
+#### Scenario: Suite-local dependency
+- **WHEN** a leader test needs a timeout duration
+- **THEN** Duration is available through the common module without duplicating imports.
+
+
+### Requirement: Leader PTY suite fixes default geometry and stable text sentinels
+
+The implementation SHALL satisfy the following tested behavior: DEFAULT_ROWS is 50 and DEFAULT_COLS is 120. WELCOME_SCREEN_SENTINEL is the exact string `Quit` and is intended to match the welcome menu label. PROMPT is the exact string `go`; MOCK_RESPONSE_SENTINEL is `MOCKRESPONSE` and is used as the mock server response marker. All are pub(crate) constants for the leader test modules.
+
+#### Scenario: Default leader geometry
+- **WHEN** a leader test uses the suite constants
+- **THEN** its PTY is requested at 50 rows by 120 columns unless the test explicitly overrides the helper.
+
+#### Scenario: Welcome readiness
+- **WHEN** a leader test waits for the initial menu
+- **THEN** it searches for the case-sensitive `Quit` substring.
+
+#### Scenario: Content-driven prompt
+- **WHEN** a leader test submits the standard fixture prompt
+- **THEN** the mock receives or renders the `go` prompt marker.
+
+#### Scenario: Mock response marker
+- **WHEN** a leader test constructs a response sentinel
+- **THEN** the stable `MOCKRESPONSE` prefix is available for screen/history assertions.
+
+
+### Requirement: Leader PTY suite uses contention-aware startup and streaming deadlines
+
+The implementation SHALL satisfy the following tested behavior: LEADER_TIMEOUT is Duration::from_secs(240) and is documented as the cold leader-client bring-up budget after historical 60-to-120-to-240 second increases under full-suite contention. STREAM_TIMEOUT is Duration::from_secs(120) for streamed turns under the same contention rationale. The comments state that the leader cases run in their own serialized target and that the timeout may be reduced after a green soak week tracked by the leader test-infra plan.
+
+#### Scenario: Cold leader startup
+- **WHEN** a leader test waits for a freshly spawned client or welcome screen
+- **THEN** it can use a 240-second deadline for multi-process bring-up.
+
+#### Scenario: Streaming turn
+- **WHEN** a leader test waits for a streamed response or replay
+- **THEN** it can use a 120-second deadline rather than the ordinary single-client budget.
+
+#### Scenario: Serialized target operation
+- **WHEN** leader tests run as their own target
+- **THEN** the constants still preserve the historical contention-aware budgets until a later soak justifies reduction.
+
+
+### Requirement: Leader turn sentinel generation stays short and uniquely indexed
+
+The implementation SHALL satisfy the following tested behavior: turn_sentinel accepts a u8 and formats MOCK_RESPONSE_SENTINEL, `_T`, and the decimal n with format!, so turn_sentinel(1) is `MOCKRESPONSE_T1`. The source comment explicitly chooses the short marker to avoid wrapping at 120 columns because leader tests use occurrence counts for replay uniqueness.
+
+#### Scenario: First turn marker
+- **WHEN** a test calls turn_sentinel(1)
+- **THEN** the result is `MOCKRESPONSE_T1`.
+
+#### Scenario: Distinct indexed marker
+- **WHEN** a test calls turn_sentinel with different u8 values
+- **THEN** the decimal suffix changes while the common mock prefix remains stable.
+
+#### Scenario: No-wrap occurrence guard
+- **WHEN** the marker is rendered at the default 120-column width
+- **THEN** its short form is intended to remain on one line for exactly-once substring counts.
+
+
+### Requirement: Leader PTY tests run as an isolated integration target
+
+The implementation SHALL satisfy the following tested behavior: The target module documentation states that each case starts two or three full pager processes plus a leader subprocess, that interleaving with the approximately 45-test pty_e2e suite caused the LEADER_TIMEOUT 60-to-240-second flake history, and that the dedicated [[test]] target receives its own Bazel test action serialized from the main PTY pool. Cargo.toml registers name = leader_pty_e2e with path = tests/leader_pty_e2e/mod.rs.
+
+#### Scenario: Dedicated integration target
+- **WHEN** the pager test package discovers the leader PTY suite
+- **THEN** it loads tests/leader_pty_e2e/mod.rs as the leader_pty_e2e target rather than merging the modules into pty_e2e.
+
+#### Scenario: Multi-process contention boundary
+- **WHEN** a leader test starts its pager clients and leader subprocess
+- **THEN** the suite is scheduled through its separate target boundary so its process pool does not contend with the ordinary PTY pool by default.
+
+#### Scenario: Isolated execution
+- **WHEN** the leader target is selected independently
+- **THEN** the leader suite can be invoked without selecting the ordinary pty_e2e target.
+
+
+### Requirement: Leader PTY suite exposes an explicit ignored-test invocation
+
+The implementation SHALL satisfy the following tested behavior: The module documentation provides `cargo test -p pager --test leader_pty_e2e -- --ignored --test-threads=1 --nocapture`. The command selects the dedicated package target, opts into ignored tests, limits test execution to one worker, and requests uncaptured output.
+
+#### Scenario: Default opt-out
+- **WHEN** the target is run without the `--ignored` selector
+- **THEN** the ignored leader end-to-end cases are not selected by the documented gate.
+
+#### Scenario: Explicit leader run
+- **WHEN** an operator runs the documented command
+- **THEN** the leader_pty_e2e target is selected, ignored tests are included, execution uses one test thread, and output is not captured.
+
+#### Scenario: Deterministic process scheduling
+- **WHEN** multiple leader cases are selected in one invocation
+- **THEN** libtest runs them with the requested single worker, reducing concurrent multi-process bring-up inside the target.
+
+
+### Requirement: Leader PTY target registers its shared façade and four test modules
+
+The implementation SHALL satisfy the following tested behavior: The module tree declares `mod common;`, `mod leader_n_clients_shared_session;`, `mod leader_reattach_cancellation_roundtrips_durable_log;`, `mod leader_reattach_completion_roundtrips_durable_log;`, and `mod leader_two_clients_shared_session;`. The declarations make the files available as private child modules under the target root and do not re-export them.
+
+#### Scenario: Target module tree
+- **WHEN** the integration target is compiled
+- **THEN** the common façade and all four named leader test modules are compiled as children of the target root.
+
+#### Scenario: Shared helper dependency
+- **WHEN** a child leader test imports `crate::common::*`
+- **THEN** the target root has registered the `common` module before the child tests use it.
+
+#### Scenario: Complete named suite
+- **WHEN** the target is invoked
+- **THEN** the four registered leader cases are available to the test harness under their module paths.
+
+
+### Requirement: Leader PTY tests reuse ordinary PTY binary and harness plumbing
+
+The implementation SHALL satisfy the following tested behavior: The module documentation states that binary resolution and harness plumbing are identical to the pty_e2e target and directs readers to that target's mod.rs; it also states that the shared helpers needed by leader tests live in the same directory's common.rs. The target root itself adds no alternate binary-discovery or harness implementation.
+
+#### Scenario: Common helper access
+- **WHEN** a leader child module needs cluster or PTY operations
+- **THEN** it obtains the shared helper façade from `crate::common` rather than defining a second target-local harness.
+
+#### Scenario: Binary resolution parity
+- **WHEN** the leader target starts its pager subprocesses
+- **THEN** it follows the same binary-resolution contract documented for the ordinary pty_e2e target.
+
+#### Scenario: No duplicate root plumbing
+- **WHEN** the leader target root is inspected
+- **THEN** it contains module declarations and documentation only, with no alternate process-spawn or binary-discovery implementation.
+
+
+### Requirement: Session dispatch test module tree
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Register fork tests
+- **WHEN** the session test module is compiled
+- **THEN** the private fork child module is included in the session dispatch test tree.
+
+#### Scenario: Register lifecycle and load tests
+- **WHEN** the session module is expanded
+- **THEN** the lifecycle and load child modules are compiled with the shared parent test scope.
+
+#### Scenario: Register modal and deferred tests
+- **WHEN** the session module is expanded
+- **THEN** the modal and take_deferred child modules are compiled with the shared parent test scope.
+
+
+### Requirement: Git-ancestor AppView fixture
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Derive baseline app
+- **WHEN** a session test needs a git-aware fixture
+- **THEN** test_app_git starts from the shared test_app AppView baseline.
+
+#### Scenario: Anchor cwd in repository
+- **WHEN** the baseline app has been created
+- **THEN** app.cwd is replaced with PathBuf::from(env!("CARGO_MANIFEST_DIR")).
+
+#### Scenario: Satisfy git pre-check
+- **WHEN** worktree dispatch logic checks the fixture
+- **THEN** app.cwd_has_git_ancestor is true before the helper returns.
+
+
+### Requirement: Extension fetch effect counter
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Count matching extension effects
+- **WHEN** the helper receives an effects slice containing any of the five listed variants
+- **THEN** each matching element contributes one to the returned count.
+
+#### Scenario: Ignore unrelated effects
+- **WHEN** the slice contains an Effect variant outside the five pattern arms
+- **THEN** that element contributes zero to the returned count.
+
+#### Scenario: Ignore payload details
+- **WHEN** a listed effect has any agent/session payload values
+- **THEN** the wildcard pattern counts the variant without inspecting those values.
+
+
+### Requirement: Git-backed new-session agent fixture
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Create single-agent baseline
+- **WHEN** a new-session dispatch test requests the fixture
+- **THEN** new_session_test_app starts from test_app_with_agent with AgentId(0) present.
+
+#### Scenario: Expose main branch
+- **WHEN** the baseline agent exists
+- **THEN** the AgentId(0) AgentView current_branch is set to Some("main").
+
+#### Scenario: Mark cwd as git-backed
+- **WHEN** the helper returns
+- **THEN** app.cwd_has_git_ancestor is true for worktree/new-session pre-checks.

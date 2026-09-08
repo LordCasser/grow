@@ -217804,5 +217804,531 @@
       }
     ],
     "sources": []
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Leader PTY suite reuses canonical harness and flow helpers",
+    "contract": "The implementation SHALL satisfy the following tested behavior: common.rs re-exports LeaderCluster, PtyHarness, inference_request_count, keys, submit_turn, and wait_for_labels_absent from pager_pty_harness, and re-exports std::time::Duration. The module itself defines no drive or seed helper; the file documentation identifies pager_pty_harness::flows as the canonical implementation shared with the ordinary pty_e2e target.",
+    "scenarios": [
+      [
+        "Shared leader cluster type",
+        "a leader PTY test imports crate::common::*",
+        "LeaderCluster is available without each test importing pager-pty-harness directly."
+      ],
+      [
+        "Shared PTY operations",
+        "a leader test drives a client",
+        "PtyHarness and keys are available through this suite-local façade."
+      ],
+      [
+        "Canonical flow helper",
+        "a leader test counts inference or submits a turn",
+        "the implementation comes from pager_pty_harness::flows, shared with pty_e2e."
+      ],
+      [
+        "Suite-local dependency",
+        "a leader test needs a timeout duration",
+        "Duration is available through the common module without duplicating imports."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "pager_pty_harness re-exports"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "std::time::Duration re-export"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "LeaderCluster"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/flows.rs",
+        "inference_request_count"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/flows.rs",
+        "submit_turn"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/flows.rs",
+        "wait_for_labels_absent"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "keys"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Leader PTY suite fixes default geometry and stable text sentinels",
+    "contract": "The implementation SHALL satisfy the following tested behavior: DEFAULT_ROWS is 50 and DEFAULT_COLS is 120. WELCOME_SCREEN_SENTINEL is the exact string `Quit` and is intended to match the welcome menu label. PROMPT is the exact string `go`; MOCK_RESPONSE_SENTINEL is `MOCKRESPONSE` and is used as the mock server response marker. All are pub(crate) constants for the leader test modules.",
+    "scenarios": [
+      [
+        "Default leader geometry",
+        "a leader test uses the suite constants",
+        "its PTY is requested at 50 rows by 120 columns unless the test explicitly overrides the helper."
+      ],
+      [
+        "Welcome readiness",
+        "a leader test waits for the initial menu",
+        "it searches for the case-sensitive `Quit` substring."
+      ],
+      [
+        "Content-driven prompt",
+        "a leader test submits the standard fixture prompt",
+        "the mock receives or renders the `go` prompt marker."
+      ],
+      [
+        "Mock response marker",
+        "a leader test constructs a response sentinel",
+        "the stable `MOCKRESPONSE` prefix is available for screen/history assertions."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "DEFAULT_ROWS"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "DEFAULT_COLS"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "WELCOME_SCREEN_SENTINEL"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "PROMPT"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "MOCK_RESPONSE_SENTINEL"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Leader PTY suite uses contention-aware startup and streaming deadlines",
+    "contract": "The implementation SHALL satisfy the following tested behavior: LEADER_TIMEOUT is Duration::from_secs(240) and is documented as the cold leader-client bring-up budget after historical 60-to-120-to-240 second increases under full-suite contention. STREAM_TIMEOUT is Duration::from_secs(120) for streamed turns under the same contention rationale. The comments state that the leader cases run in their own serialized target and that the timeout may be reduced after a green soak week tracked by the leader test-infra plan.",
+    "scenarios": [
+      [
+        "Cold leader startup",
+        "a leader test waits for a freshly spawned client or welcome screen",
+        "it can use a 240-second deadline for multi-process bring-up."
+      ],
+      [
+        "Streaming turn",
+        "a leader test waits for a streamed response or replay",
+        "it can use a 120-second deadline rather than the ordinary single-client budget."
+      ],
+      [
+        "Serialized target operation",
+        "leader tests run as their own target",
+        "the constants still preserve the historical contention-aware budgets until a later soak justifies reduction."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "LEADER_TIMEOUT"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "STREAM_TIMEOUT"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "timeout rationale module comments"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Leader turn sentinel generation stays short and uniquely indexed",
+    "contract": "The implementation SHALL satisfy the following tested behavior: turn_sentinel accepts a u8 and formats MOCK_RESPONSE_SENTINEL, `_T`, and the decimal n with format!, so turn_sentinel(1) is `MOCKRESPONSE_T1`. The source comment explicitly chooses the short marker to avoid wrapping at 120 columns because leader tests use occurrence counts for replay uniqueness.",
+    "scenarios": [
+      [
+        "First turn marker",
+        "a test calls turn_sentinel(1)",
+        "the result is `MOCKRESPONSE_T1`."
+      ],
+      [
+        "Distinct indexed marker",
+        "a test calls turn_sentinel with different u8 values",
+        "the decimal suffix changes while the common mock prefix remains stable."
+      ],
+      [
+        "No-wrap occurrence guard",
+        "the marker is rendered at the default 120-column width",
+        "its short form is intended to remain on one line for exactly-once substring counts."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "turn_sentinel"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "MOCK_RESPONSE_SENTINEL"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "DEFAULT_COLS"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Leader PTY tests run as an isolated integration target",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The target module documentation states that each case starts two or three full pager processes plus a leader subprocess, that interleaving with the approximately 45-test pty_e2e suite caused the LEADER_TIMEOUT 60-to-240-second flake history, and that the dedicated [[test]] target receives its own Bazel test action serialized from the main PTY pool. Cargo.toml registers name = leader_pty_e2e with path = tests/leader_pty_e2e/mod.rs.",
+    "scenarios": [
+      [
+        "Dedicated integration target",
+        "the pager test package discovers the leader PTY suite",
+        "it loads tests/leader_pty_e2e/mod.rs as the leader_pty_e2e target rather than merging the modules into pty_e2e."
+      ],
+      [
+        "Multi-process contention boundary",
+        "a leader test starts its pager clients and leader subprocess",
+        "the suite is scheduled through its separate target boundary so its process pool does not contend with the ordinary PTY pool by default."
+      ],
+      [
+        "Isolated execution",
+        "the leader target is selected independently",
+        "the leader suite can be invoked without selecting the ordinary pty_e2e target."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/mod.rs",
+        "module documentation: multi-process leader clusters and isolated target rationale"
+      ],
+      [
+        "crates/codegen/pager/Cargo.toml",
+        "[[test]] name = leader_pty_e2e, path = tests/leader_pty_e2e/mod.rs"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Leader PTY suite exposes an explicit ignored-test invocation",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The module documentation provides `cargo test -p pager --test leader_pty_e2e -- --ignored --test-threads=1 --nocapture`. The command selects the dedicated package target, opts into ignored tests, limits test execution to one worker, and requests uncaptured output.",
+    "scenarios": [
+      [
+        "Default opt-out",
+        "the target is run without the `--ignored` selector",
+        "the ignored leader end-to-end cases are not selected by the documented gate."
+      ],
+      [
+        "Explicit leader run",
+        "an operator runs the documented command",
+        "the leader_pty_e2e target is selected, ignored tests are included, execution uses one test thread, and output is not captured."
+      ],
+      [
+        "Deterministic process scheduling",
+        "multiple leader cases are selected in one invocation",
+        "libtest runs them with the requested single worker, reducing concurrent multi-process bring-up inside the target."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/mod.rs",
+        "module documentation: exact cargo test invocation"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_cancellation_roundtrips_durable_log.rs",
+        "ignored Tokio integration test declaration"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_completion_roundtrips_durable_log.rs",
+        "ignored Tokio integration test declaration"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Leader PTY target registers its shared façade and four test modules",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The module tree declares `mod common;`, `mod leader_n_clients_shared_session;`, `mod leader_reattach_cancellation_roundtrips_durable_log;`, `mod leader_reattach_completion_roundtrips_durable_log;`, and `mod leader_two_clients_shared_session;`. The declarations make the files available as private child modules under the target root and do not re-export them.",
+    "scenarios": [
+      [
+        "Target module tree",
+        "the integration target is compiled",
+        "the common façade and all four named leader test modules are compiled as children of the target root."
+      ],
+      [
+        "Shared helper dependency",
+        "a child leader test imports `crate::common::*`",
+        "the target root has registered the `common` module before the child tests use it."
+      ],
+      [
+        "Complete named suite",
+        "the target is invoked",
+        "the four registered leader cases are available to the test harness under their module paths."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/mod.rs",
+        "mod common"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/mod.rs",
+        "mod leader_n_clients_shared_session"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/mod.rs",
+        "mod leader_reattach_cancellation_roundtrips_durable_log"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/mod.rs",
+        "mod leader_reattach_completion_roundtrips_durable_log"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/mod.rs",
+        "mod leader_two_clients_shared_session"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Leader PTY tests reuse ordinary PTY binary and harness plumbing",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The module documentation states that binary resolution and harness plumbing are identical to the pty_e2e target and directs readers to that target's mod.rs; it also states that the shared helpers needed by leader tests live in the same directory's common.rs. The target root itself adds no alternate binary-discovery or harness implementation.",
+    "scenarios": [
+      [
+        "Common helper access",
+        "a leader child module needs cluster or PTY operations",
+        "it obtains the shared helper façade from `crate::common` rather than defining a second target-local harness."
+      ],
+      [
+        "Binary resolution parity",
+        "the leader target starts its pager subprocesses",
+        "it follows the same binary-resolution contract documented for the ordinary pty_e2e target."
+      ],
+      [
+        "No duplicate root plumbing",
+        "the leader target root is inspected",
+        "it contains module declarations and documentation only, with no alternate process-spawn or binary-discovery implementation."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/mod.rs",
+        "module documentation: identical binary resolution and harness plumbing"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/mod.rs",
+        "module documentation: shared helpers live in directory common.rs"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/mod.rs",
+        "ordinary PTY target binary resolution and harness plumbing reference"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "suite-local helper façade"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Session dispatch test module tree",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ",
+    "scenarios": [
+      {
+        "name": "Register fork tests",
+        "when": "the session test module is compiled",
+        "then": "the private fork child module is included in the session dispatch test tree."
+      },
+      {
+        "name": "Register lifecycle and load tests",
+        "when": "the session module is expanded",
+        "then": "the lifecycle and load child modules are compiled with the shared parent test scope."
+      },
+      {
+        "name": "Register modal and deferred tests",
+        "when": "the session module is expanded",
+        "then": "the modal and take_deferred child modules are compiled with the shared parent test scope."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs",
+        "use super::*"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs",
+        "mod fork"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs",
+        "mod lifecycle"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs",
+        "mod load"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs",
+        "mod modal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs",
+        "mod take_deferred"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Git-ancestor AppView fixture",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ",
+    "scenarios": [
+      {
+        "name": "Derive baseline app",
+        "when": "a session test needs a git-aware fixture",
+        "then": "test_app_git starts from the shared test_app AppView baseline."
+      },
+      {
+        "name": "Anchor cwd in repository",
+        "when": "the baseline app has been created",
+        "then": "app.cwd is replaced with PathBuf::from(env!(\"CARGO_MANIFEST_DIR\"))."
+      },
+      {
+        "name": "Satisfy git pre-check",
+        "when": "worktree dispatch logic checks the fixture",
+        "then": "app.cwd_has_git_ancestor is true before the helper returns."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs",
+        "test_app_git"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "test_app"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/mod.rs",
+        "AppView::cwd"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/mod.rs",
+        "AppView::cwd_has_git_ancestor"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Extension fetch effect counter",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ",
+    "scenarios": [
+      {
+        "name": "Count matching extension effects",
+        "when": "the helper receives an effects slice containing any of the five listed variants",
+        "then": "each matching element contributes one to the returned count."
+      },
+      {
+        "name": "Ignore unrelated effects",
+        "when": "the slice contains an Effect variant outside the five pattern arms",
+        "then": "that element contributes zero to the returned count."
+      },
+      {
+        "name": "Ignore payload details",
+        "when": "a listed effect has any agent/session payload values",
+        "then": "the wildcard pattern counts the variant without inspecting those values."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs",
+        "count_extension_fetches"
+      ],
+      [
+        "crates/codegen/pager/src/app/actions.rs",
+        "Effect::FetchHooksList"
+      ],
+      [
+        "crates/codegen/pager/src/app/actions.rs",
+        "Effect::FetchPluginsList"
+      ],
+      [
+        "crates/codegen/pager/src/app/actions.rs",
+        "Effect::FetchMarketplaceList"
+      ],
+      [
+        "crates/codegen/pager/src/app/actions.rs",
+        "Effect::FetchMcpsList"
+      ],
+      [
+        "crates/codegen/pager/src/app/actions.rs",
+        "Effect::FetchSkillsList"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Git-backed new-session agent fixture",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ",
+    "scenarios": [
+      {
+        "name": "Create single-agent baseline",
+        "when": "a new-session dispatch test requests the fixture",
+        "then": "new_session_test_app starts from test_app_with_agent with AgentId(0) present."
+      },
+      {
+        "name": "Expose main branch",
+        "when": "the baseline agent exists",
+        "then": "the AgentId(0) AgentView current_branch is set to Some(\"main\")."
+      },
+      {
+        "name": "Mark cwd as git-backed",
+        "when": "the helper returns",
+        "then": "app.cwd_has_git_ancestor is true for worktree/new-session pre-checks."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs",
+        "new_session_test_app"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "test_app_with_agent"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/mod.rs",
+        "AgentView::current_branch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/mod.rs",
+        "AppView::cwd_has_git_ancestor"
+      ],
+      [
+        "crates/codegen/pager/src/app/session.rs",
+        "AgentId"
+      ]
+    ]
   }
 ]

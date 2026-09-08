@@ -2445,7 +2445,7 @@
     },
     "source_files": 472,
     "source_lines": 397498,
-    "status": "pending",
+    "status": "reviewed",
     "requirements": [
       "ACP connection initialization capability defaults and eager authentication",
       "ACP edit hunk extraction precedence and patch serialization",
@@ -4257,7 +4257,19 @@
       "Second Ctrl-C exits minimal pager",
       "Minimal PTY cases are grouped under a dedicated module",
       "Minimal PTY integration registers the complete child test module inventory",
-      "Minimal PTY children share the family harness and exercise the built pager-minimal hook"
+      "Minimal PTY children share the family harness and exercise the built pager-minimal hook",
+      "Leader PTY suite reuses canonical harness and flow helpers",
+      "Leader PTY suite fixes default geometry and stable text sentinels",
+      "Leader PTY suite uses contention-aware startup and streaming deadlines",
+      "Leader turn sentinel generation stays short and uniquely indexed",
+      "Leader PTY tests run as an isolated integration target",
+      "Leader PTY suite exposes an explicit ignored-test invocation",
+      "Leader PTY target registers its shared façade and four test modules",
+      "Leader PTY tests reuse ordinary PTY binary and harness plumbing",
+      "Session dispatch test module tree",
+      "Git-ancestor AppView fixture",
+      "Extension fetch effect counter",
+      "Git-backed new-session agent fixture"
     ],
     "reviewed_files": [
       {
@@ -6835,6 +6847,18 @@
       {
         "path": "crates/codegen/pager/tests/pty_e2e/minimal/mod.rs",
         "sha256": "5f895789ae44c76d9b04e04f389b43d6a1732482570a740a9879ab52c08be808"
+      },
+      {
+        "path": "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "sha256": "fc5879ed50dbf81b730880a7bbf175183f116aa57b66f99c09a81f2c2c38b211"
+      },
+      {
+        "path": "crates/codegen/pager/tests/leader_pty_e2e/mod.rs",
+        "sha256": "2b317cc13c367125bf6d0eb3905d9aeaa42f81e4d0f7010b8a78b0dee0578c22"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/session/mod.rs",
+        "sha256": "77b745b61587b54e4c9f3e2754014a9940dca06ec614ec0dd9fce8b4cdd32909"
       }
     ],
     "review": "reviews/pager.md"
