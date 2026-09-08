@@ -25213,3 +25213,336 @@ When SendBtw is dispatched without an active session, the dispatcher SHALL emit 
 - **THEN** dispatch returns no effects, the toast is exactly `No active session`, and scrollback length remains zero.
 
 证据：`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `btw_no_session_feedback_is_mode_specific`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `dispatch_send_btw`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `ScreenMode::Minimal`；`crates/codegen/pager/src/app/root/dispatch/tests/mod.rs` — `last_system_text`；`crates/codegen/pager/src/app/root/mod.rs` — `ScreenMode::Minimal`。
+
+
+### Requirement: Group headers consume block-viewer dispatch
+
+The implementation SHALL satisfy the following tested behavior: When the selected scrollback entry is a truncated group header, dispatching OpenBlockViewer toggles the group and returns without creating a block viewer; the selection is cleared and a subsequent selection reports the expanded header as collapse. Dispatching the same action on that collapse header returns the group to the truncated expand state.
+
+#### Scenario: Expand selected group header
+- **WHEN** a selected group header represents hidden tool-call entries and OpenBlockViewer is dispatched
+- **THEN** the block viewer remains absent, selection becomes None, and the group can be selected again with fold label collapse.
+
+#### Scenario: Collapse selected group header
+- **WHEN** the expanded group's collapse header is selected and OpenBlockViewer is dispatched again
+- **THEN** the block viewer remains absent and the group is truncated again with fold label expand.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/router.rs` — `Action::OpenBlockViewer`；`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `dispatch_open_block_viewer`；`crates/codegen/pager/src/scrollback/state/selection.rs` — `toggle_group_expansion`；`crates/codegen/pager/src/scrollback/state/selection.rs` — `is_selected_group_header`；`crates/codegen/pager/src/scrollback/state/selection.rs` — `selected_group_header_fold_label`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `tests::open_block_viewer_on_group_header_toggles_group`。
+
+
+### Requirement: Search, directory, notice, and failed-tool viewer projection
+
+The implementation SHALL satisfy the following tested behavior: Selected matched Search blocks open a block viewer with ViewerKind::Grep and no effects. Selected ListDir blocks open a PlainText viewer and no effects. Command notices with details, coordination notices with details, and Other tool calls carrying an error each report normal fullscreen eligibility and open a block viewer when dispatched.
+
+#### Scenario: Grep search
+- **WHEN** a matched Search block is selected and OpenBlockViewer is dispatched
+- **THEN** effects are empty and the block viewer kind is Grep.
+
+#### Scenario: List directory
+- **WHEN** a ListDir block with output is selected and OpenBlockViewer is dispatched
+- **THEN** effects are empty and the block viewer kind is PlainText.
+
+#### Scenario: Detailed notice or failed tool
+- **WHEN** a command/coordination notice has details or an Other tool call has an error
+- **THEN** the block is normal-fullscreen-viewable and dispatch leaves a block viewer present.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `dispatch_open_block_viewer`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_grep`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_list_dir`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_plain_text`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::has_normal_fullscreen_viewer`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `tests::open_block_viewer_opens_grep_search_block`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `tests::open_block_viewer_opens_list_dir_block`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `tests::enter_opens_command_coordination_notice_and_failed_tool_details`。
+
+
+### Requirement: Markdown image references use the normal block viewer
+
+The implementation SHALL satisfy the following tested behavior: AgentMessage blocks containing local PNG or JPEG Markdown image references are treated as normal fullscreen-viewable blocks. With a Kitty graphics protocol guard installed, OpenBlockViewer returns no effects, sets block_viewer, and leaves image_viewer absent.
+
+#### Scenario: PNG reference
+- **WHEN** an AgentMessage contains a local PNG Markdown image reference and Kitty is available
+- **THEN** the normal block viewer opens and the image viewer remains absent.
+
+#### Scenario: JPEG reference
+- **WHEN** an AgentMessage contains a local JPEG Markdown image reference and Kitty is available
+- **THEN** the normal markdown block viewer opens with no effects.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `dispatch_open_block_viewer`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_markdown`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::has_normal_fullscreen_viewer`；`crates/codegen/pager/src/terminal/image.rs` — `set_protocol_for_test`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `tests::open_block_viewer_prefers_markdown_viewer_over_image_refs`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `tests::open_block_viewer_uses_markdown_viewer_for_agent_message_with_image_ref`。
+
+
+### Requirement: Image-only media follows native and no-graphics branches
+
+The implementation SHALL satisfy the following tested behavior: An Other tool call whose output identifies a saved local image supports fullscreen but has no normal fullscreen viewer. With Kitty, OpenBlockViewer returns no effects and leaves both in-app viewers absent after native-open handling. With GraphicsProtocol::None, the same dispatch returns no effects, leaves both viewers absent, and does not open an image viewer.
+
+#### Scenario: Native image open
+- **WHEN** an image-only tool block is selected while Kitty graphics are available
+- **THEN** the block viewer and image viewer remain absent after the native-open path.
+
+#### Scenario: No graphics protocol
+- **WHEN** an image-only tool block is selected while GraphicsProtocol is None
+- **THEN** the dispatch returns no effects and the image viewer is absent.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `dispatch_open_block_viewer`；`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `guard_image_support`；`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `open_media_natively`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::supports_fullscreen`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::has_normal_fullscreen_viewer`；`crates/codegen/pager/src/terminal/image.rs` — `GraphicsProtocol::None`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `tests::open_block_viewer_opens_image_only_blocks_natively`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `tests::open_block_viewer_skips_image_viewer_when_no_graphics`。
+
+
+### Requirement: Plugin groups seed once and preserve user expansion
+
+The implementation SHALL satisfy the following tested behavior: A successful PluginsListLoaded result for an open Plugins modal stores Loaded data and seeds one collapsed group per plugin origin key on first delivery. A later delivery preserves a manually removed collapsed key, including when the modal data is first reset to Loading, and both deliveries leave effects empty through the test dispatcher.
+
+#### Scenario: Initial plugin load
+- **WHEN** an open Plugins modal receives two successful plugin entries from UserGrow and ConfigPath
+- **THEN** plugins_data becomes Loaded with two entries and the collapsed keys are origin:config and origin:user.
+
+#### Scenario: Post-action refetch
+- **WHEN** the user removes origin:user and a second successful delivery arrives
+- **THEN** only origin:config remains collapsed.
+
+#### Scenario: Reload preservation
+- **WHEN** plugins_data is set to Loading and another successful delivery arrives
+- **THEN** origin:user stays expanded and origin:config stays collapsed.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `handle_plugins_list_loaded`；`crates/codegen/pager/src/views/extensions_modal.rs` — `ExtensionsModalState::seed_plugin_groups_once`；`crates/codegen/pager/src/views/extensions_modal.rs` — `ExtensionsModalState::plugins_collapsed_groups`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `tests::plugins_list_loaded_seeds_all_groups_collapsed_on_first_load`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `tests::plugins_list_delivery_seeds_once_then_always_preserves`。
+
+
+### Requirement: WebFetchToolCallBlock SHALL retain URL, optional HTTP metadata, error/output, and execution timing while exposing deterministic constructors, completion/error mutation, success, elapsed-time, and copy projections.
+
+new SHALL retain the supplied URL and initialize status_code, content_type, bytes, error, output, started_at, and elapsed_ms to None. with_error and with_output SHALL replace their respective fields with Some values. is_success SHALL be true exactly when error is None; copy_text SHALL clone output or return an empty string. set_error SHALL capture start.elapsed milliseconds when elapsed_ms is unset and started_at exists, then assign the supplied Option (including clearing an error); finish SHALL return once elapsed_ms exists and otherwise capture started_at elapsed milliseconds when present. elapsed_ms SHALL return the stored value or a live started_at elapsed value when completion has not been recorded.
+
+#### Scenario: Initial block
+- **WHEN** a WebFetchToolCallBlock is constructed with a URL
+- **THEN** the URL is retained and all response, error, and timing fields are unset.
+
+#### Scenario: Output/error builders
+- **WHEN** with_output or with_error is applied
+- **THEN** the corresponding optional field contains the supplied text and success follows whether error is present.
+
+#### Scenario: Completion timing
+- **WHEN** a block has started_at and finish is called repeatedly
+- **THEN** the first captured elapsed duration is retained and later finish calls do not replace it.
+
+#### Scenario: Error timing
+- **WHEN** set_error is called before elapsed_ms is captured
+- **THEN** elapsed time is finalized from started_at before the supplied optional error is stored.
+
+#### Scenario: Copy projection
+- **WHEN** output is present or absent
+- **THEN** copy_text returns the exact output or an empty string without rendering.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::new`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::with_error`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::with_output`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::is_success`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::copy_text`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::set_error`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::finish`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::elapsed_ms`。
+
+
+### Requirement: WebFetchToolCallBlock SHALL render a Fetch header with width-aware URL presentation, expose only the URL as the selectable header value, and project available status/content-type/byte metadata in stable human-readable order.
+
+header_line SHALL use the literal `Fetch ` prefix, bold the prefix using primary or muted text style, and style the URL with the command color when unmuted or muted text when muted. With max_width it SHALL pass the remaining width after the prefix through truncate_str using saturating subtraction; without max_width it SHALL retain the full URL. header_block_line SHALL select the URL span (excluding the prefix), assign TOOL_HEADER_RANGE, and expose the full URL as selection_text. metadata_line SHALL omit absent fields, return None when all three are absent, and otherwise emit an indented line in status, content_type, size order with muted labels/separators and primary values; byte counts SHALL format as B below 1024, one-decimal KB below 1 MiB, and one-decimal MB at or above 1 MiB.
+
+#### Scenario: Collapsed header
+- **WHEN** the block is rendered with a content width and collapsed muting policy
+- **THEN** the header contains Fetch plus a URL truncated to the available post-prefix width and carries muted or primary styles accordingly.
+
+#### Scenario: Expanded header
+- **WHEN** the header is rendered without a maximum width
+- **THEN** the full URL is retained and the URL span is the sole selectable/copyable header target.
+
+#### Scenario: Metadata ordering
+- **WHEN** one or more status_code, content_type, and bytes values are present
+- **THEN** the metadata line lists present values in status, content_type, size order with comma separators.
+
+#### Scenario: Byte formatting
+- **WHEN** bytes is below 1024, below 1 MiB, or at least 1 MiB
+- **THEN** the size value uses B, one-decimal KB, or one-decimal MB respectively.
+
+#### Scenario: No metadata
+- **WHEN** all metadata options are None
+- **THEN** metadata_line returns no line.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::header_line`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::header_block_line`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::metadata_line`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::format_bytes`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `TOOL_HEADER_RANGE`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `Selectable::Spans`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `selection_range`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `selection_text`。
+
+
+### Requirement: WebFetchToolCallBlock SHALL render collapsed headers separately from full modes, include metadata and a bounded panel preview for successful output, and distinguish short truncated previews from larger expanded previews while preserving the full stored content for copy.
+
+output SHALL return one selectable, width-aware header line in Collapsed mode. In Truncated and Expanded modes it SHALL wrap the unmuted full header using wrap_header_flush and mark URL spans selectable, then append an optional blank separator and metadata line. When output exists it SHALL add a blank line, top panel padding, indented primary content lines, and bottom panel padding; Truncated SHALL show at most TRUNCATED_INLINE_LINES (3) content lines and Expanded at most MAX_INLINE_LINES (10). If more lines exist, it SHALL append a dim `... (N more lines, press Enter to view)` row with N equal to total_lines minus the mode cap. When output is absent and error is absent, full modes SHALL show `  (no content)`; an error with no output SHALL suppress that success placeholder. Truncated and Expanded share the same header/metadata/panel structure, differing only in inline cap.
+
+#### Scenario: Collapsed output
+- **WHEN** DisplayMode::Collapsed is requested
+- **THEN** only the width-aware Fetch header is returned, with URL selection metadata and no content preview.
+
+#### Scenario: Truncated preview
+- **WHEN** successful output has more than three lines and mode is Truncated
+- **THEN** the first three lines are shown in the panel, followed by a dim nine-more-lines style notice for a twelve-line payload.
+
+#### Scenario: Expanded preview
+- **WHEN** successful output has more than ten lines and mode is Expanded
+- **THEN** the first ten lines are shown, followed by a dim remaining-lines notice.
+
+#### Scenario: Short output
+- **WHEN** output exists within the mode cap
+- **THEN** all available lines are shown with indentation and panel background, without an overflow notice.
+
+#### Scenario: No content
+- **WHEN** output is absent and the block has no error in a full mode
+- **THEN** the renderer shows the muted no-content placeholder.
+
+#### Scenario: Failed empty output
+- **WHEN** output is absent and error is present
+- **THEN** the renderer does not emit the no-content success placeholder.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `BlockContent::output`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `DisplayMode::Collapsed`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `DisplayMode::Truncated`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `DisplayMode::Expanded`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `MAX_INLINE_LINES`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `TRUNCATED_INLINE_LINES`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `wrap_header_flush`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `BlockLine::separator`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `BlockLine::with_panel_background`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::output`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `tests::truncated_caps_inline_content_tighter_than_expanded`。
+
+
+### Requirement: WebFetchToolCallBlock SHALL expose neutral block geometry, mode-sensitive accents and bullets, success/output-gated foldability, a collapsed default, a two-state fold cycle, and an unmuted header preamble.
+
+accent SHALL be None in Collapsed mode, static error color for errors in non-collapsed modes, animated running color for successful running blocks, and static tool color otherwise. bullet SHALL always be static error color when error exists; for successful blocks it SHALL be None when collapsed and otherwise follow accent. has_vpad_for, background, and has_raw_mode SHALL always report false/None. is_foldable SHALL require both no error and Some output. default_display_mode SHALL be Collapsed. next_fold_mode SHALL map Collapsed to Expanded and every other mode to Collapsed, ignoring running state. preamble SHALL always return the full unmuted header as Text.
+
+#### Scenario: Collapsed success styling
+- **WHEN** a successful block is queried in Collapsed mode
+- **THEN** accent and bullet are absent while geometry remains neutral.
+
+#### Scenario: Running styling
+- **WHEN** a successful block is running in a non-collapsed mode
+- **THEN** accent is animated with the running color and bullet follows that accent.
+
+#### Scenario: Error styling
+- **WHEN** error is present
+- **THEN** accent/bullet use the static error color in applicable modes, and the block is not foldable.
+
+#### Scenario: Fold eligibility
+- **WHEN** output and error combinations vary
+- **THEN** only success with output is foldable.
+
+#### Scenario: Fold cycle
+- **WHEN** current mode is Collapsed, Truncated, or Expanded
+- **THEN** Collapsed advances to Expanded and any non-collapsed mode returns to Collapsed.
+
+#### Scenario: Preamble
+- **WHEN** a caller asks for the preamble
+- **THEN** a Text containing the unmuted full Fetch header is returned.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::bullet`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::background`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::preamble`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `AccentStyle::static_color`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `AccentStyle::animated`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `BlockBackground::None`。
+
+
+### Requirement: The Pager WebFetch block SHALL keep transport and content acquisition outside its presentation boundary while exposing a bounded inline preview and full stored output for surrounding copy/viewer flows.
+
+The block only stores and renders data supplied by its caller: URL, response metadata, output, error, and timing. It SHALL not validate URLs, perform HTTP, apply SSRF/domain policy, cache or persist content, convert HTML/media, or manage streaming/network lifecycle. Its source comment and fold implementation treat fetch as one-shot; the display contract therefore uses the same full-mode structure for Truncated and Expanded with only a local inline-line cap. The preview cap affects rendered lines and overflow text but does not mutate output or copy_text.
+
+#### Scenario: Caller-owned fetch
+- **WHEN** a caller supplies a completed or pending response snapshot
+- **THEN** the block renders the snapshot without initiating network or persistence work.
+
+#### Scenario: One-shot completion
+- **WHEN** a fetch block is folded or unfolded
+- **THEN** running state does not alter next_fold_mode and no streaming-specific renderer is invoked.
+
+#### Scenario: Preview versus copy
+- **WHEN** stored output exceeds the inline cap and copy_text is requested
+- **THEN** the UI shows a bounded preview while copy_text still returns the complete stored output.
+
+#### Scenario: Out-of-scope policy
+- **WHEN** URL safety, HTTP failure classification, caching, or media handling is needed
+- **THEN** those concerns remain owned by upstream web-fetch tooling rather than this block.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::output`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::copy_text`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `WebFetchToolCallBlock::next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `MAX_INLINE_LINES`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `TRUNCATED_INLINE_LINES`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `Web fetch tool call — fetching a URL and returning markdown content`；`crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs` — `No special running-state handling: fetch completes in one shot (no streaming).`。
+
+
+### Requirement: Rewind picker selection anchors and centers the corresponding scrollback prompt
+
+When rewind_state is a Picker with a valid selected point, sync_rewind_anchor_to_picker SHALL resolve that point's shell prompt index to the matching user-prompt entry, store the entry index as anchor_entry_idx, and center scrollback on it. When prompt metadata is absent, the resolver SHALL use positional user-prompt order while skipping interjections; when the picker/state/selection or target entry is unavailable, it SHALL leave scrollback unscrolled and use anchor index zero when a picker target cannot be resolved.
+
+#### Scenario: Explicit prompt metadata
+- **WHEN** the selected picker row points to a prompt index and scrollback user prompts carry matching indices
+- **THEN** anchor_entry_idx follows the selected row (charlie, bravo, alpha) and the target entry is centered.
+
+#### Scenario: Legacy metadata fallback
+- **WHEN** selected rows have no prompt_index metadata
+- **THEN** positional resolution maps each row to the corresponding user prompt and still updates the anchor.
+
+#### Scenario: Interjection-safe fallback
+- **WHEN** scrollback contains an interjection rendered like a prompt
+- **THEN** the shell-index lookup skips the interjection so later prompt anchors remain aligned.
+
+#### Scenario: Unavailable target
+- **WHEN** rewind state is absent, phase is not Picker, selection is out of range, or no matching entry exists
+- **THEN** the method returns without scrolling; when a picker target exists but lookup fails, anchor_entry_idx falls back to zero.
+
+证据：`crates/codegen/pager/src/app/agent_view/rewind.rs` — `AgentView::sync_rewind_anchor_to_picker`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `find_user_prompt_entry_for_shell_index`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `ScrollbackState::scroll_to_entry_center`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `RewindPhase::Picker`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `anchor_tracks_each_picker_row_when_prompt_index_is_set`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `anchor_tracks_each_picker_row_when_prompt_index_is_missing`；`crates/codegen/pager/src/app/root/dispatch/rewind.rs` — `find_user_prompt_entry_for_shell_index`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `primary_path_returns_correct_idx_for_each_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `fallback_path_skips_interjections`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `shell_prompt_index_at_resolves_interjection_to_enclosing_turn`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `shell_prompt_index_at_counting_fallback_skips_interjections`；`crates/codegen/pager/src/app/root/dispatch/tests/rewind.rs` — `fallback_path_returns_correct_idx_when_prompt_index_is_none`。
+
+
+### Requirement: Rewind dim origin is phase-aware
+
+rewind_dim_from_entry SHALL return the rewind anchor entry for Picker, ModeSelect, Previewing, Confirm, ConversationOnlyConfirm, and Executing phases so the renderer can dim content from that entry. It SHALL return None when rewind is absent or in Loading, CancelOffer, or Error phases.
+
+#### Scenario: Active rewind phase
+- **WHEN** rewind_state exists in a phase with an anchored preview or execution
+- **THEN** the stored anchor_entry_idx is returned as the dim origin.
+
+#### Scenario: Non-dimming phase
+- **WHEN** rewind is Loading, offering cancellation, or displaying an Error
+- **THEN** no dim origin is returned.
+
+#### Scenario: No rewind
+- **WHEN** rewind_state is absent
+- **THEN** the method returns None.
+
+证据：`crates/codegen/pager/src/app/agent_view/rewind.rs` — `AgentView::rewind_dim_from_entry`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `RewindPhase::Picker`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `RewindPhase::ModeSelect`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `RewindPhase::Previewing`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `RewindPhase::Confirm`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `RewindPhase::ConversationOnlyConfirm`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `RewindPhase::Executing`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `RewindPhase::Loading`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `RewindPhase::CancelOffer`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `RewindPhase::Error`；`crates/codegen/pager/src/app/agent_view/render.rs` — `rewind_dim_from_entry`。
+
+
+### Requirement: Pending permission and question marks are rebuilt from tracker ownership
+
+sync_pending_user_input_marks SHALL clear every existing scrollback pending-user-input flag on each call, then mark the entry owned by every queued permission tool call and the active question_view tool call when the session tracker resolves them. Unknown tool-call ids SHALL remain unmarked. The method SHALL be callable by full-TUI rendering and the minimal commit path so asynchronous queue changes cannot leave stale marks.
+
+#### Scenario: Recompute from permissions
+- **WHEN** permission_queue contains a request whose tool-call id maps through the session tracker
+- **THEN** stale marks are cleared and the mapped scrollback entry is marked pending.
+
+#### Scenario: Recompute from question
+- **WHEN** question_view exists and its tool-call id maps through the session tracker
+- **THEN** the mapped question entry is marked pending in addition to permission entries.
+
+#### Scenario: Stale or unknown state
+- **WHEN** a previous mark exists but no current queue/question maps to it, or a tool-call id is unknown
+- **THEN** the old mark is removed and no unmapped entry is marked.
+
+#### Scenario: Render/commit integration
+- **WHEN** a full render frame or minimal commit pass runs
+- **THEN** the same synchronization method refreshes pending state before rendering/committing.
+
+证据：`crates/codegen/pager/src/app/agent_view/rewind.rs` — `AgentView::sync_pending_user_input_marks`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `permission_queue`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `question_view`；`crates/codegen/pager/src/acp/tracker.rs` — `SessionTracker::pending_tool_entry_id`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::clear_all_pending_user_input`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::set_pending_user_input`；`crates/codegen/pager/src/app/agent_view/render.rs` — `AgentView::draw`；`crates/codegen/pager/src/app/agent_view/render.rs` — `sync_pending_user_input_marks`；`crates/codegen/pager/src/minimal/api.rs` — `sync_pending_user_input_marks`。
+
+
+### Requirement: Rewind keyboard input moves the cursor and maps terminal actions to app actions
+
+handle_rewind_key SHALL return Unchanged when no rewind state exists. For MoveUp/MoveDown it SHALL move the phase cursor by one within the phase bounds, resync the picker anchor, and return Changed. ConfirmCursor and all non-movement RewindInput values SHALL be mapped through rewind_input_to_outcome to the corresponding Rewind action; consumed or movement sentinel inputs SHALL return Changed, while an underlying non-rewind state remains Unchanged.
+
+#### Scenario: No overlay
+- **WHEN** rewind_state is absent and a key arrives
+- **THEN** InputOutcome::Unchanged is returned.
+
+#### Scenario: Cursor movement
+- **WHEN** the overlay handler returns MoveUp or MoveDown
+- **THEN** the phase cursor changes, picker anchor synchronization runs, and InputOutcome::Changed is returned.
+
+#### Scenario: Confirm and navigation
+- **WHEN** the overlay handler returns ConfirmCursor, Dismissed, mode selection, confirmation, back, error dismissal, conversation-only confirmation, or picker selection
+- **THEN** the corresponding Action variant is returned in InputOutcome::Action.
+
+#### Scenario: Consumed input
+- **WHEN** the overlay handler returns Consumed or another sentinel that has no app action
+- **THEN** the event is consumed as InputOutcome::Changed.
+
+证据：`crates/codegen/pager/src/app/agent_view/rewind.rs` — `AgentView::handle_rewind_key`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `AgentView::rewind_input_to_outcome`；`crates/codegen/pager/src/views/rewind.rs` — `handle_rewind_key`；`crates/codegen/pager/src/views/rewind.rs` — `move_cursor`；`crates/codegen/pager/src/views/rewind.rs` — `confirm_cursor`；`crates/codegen/pager/src/views/rewind.rs` — `RewindInput`；`crates/codegen/pager/src/app/actions.rs` — `Action::RewindDismiss`；`crates/codegen/pager/src/app/actions.rs` — `Action::RewindPickerSelect`；`crates/codegen/pager/src/app/root/mod.rs` — `InputOutcome`。
+
+
+### Requirement: Rewind mouse hit testing updates hover and activates the clicked row
+
+handle_rewind_mouse SHALL return Unchanged without rewind state, outside the prompt area, outside a selectable row, or for non-hover/non-left-click mouse events. A valid Moved event SHALL update the phase cursor and return Changed only when the cursor changes. A valid left click SHALL set the cursor, activate the selected row with Enter-equivalent semantics, synchronize the picker anchor for Picker phases, and map the resulting RewindInput to the corresponding InputOutcome.
+
+#### Scenario: No target row
+- **WHEN** rewind state is absent or rewind_row_at rejects the prompt area/coordinates
+- **THEN** InputOutcome::Unchanged is returned and state is untouched.
+
+#### Scenario: Hover move
+- **WHEN** a Moved event lands on a selectable row
+- **THEN** the row cursor is updated and Changed is returned only for an actual cursor change.
+
+#### Scenario: Left click
+- **WHEN** Down(Left) lands on a selectable row
+- **THEN** the cursor is set, the row is activated, picker anchors are synchronized when applicable, and the mapped action/Changed outcome is returned.
+
+#### Scenario: Other mouse button/event
+- **WHEN** the event is neither Moved nor Down(Left)
+- **THEN** InputOutcome::Unchanged is returned.
+
+证据：`crates/codegen/pager/src/app/agent_view/rewind.rs` — `AgentView::handle_rewind_mouse`；`crates/codegen/pager/src/views/rewind.rs` — `rewind_row_at`；`crates/codegen/pager/src/views/rewind.rs` — `set_rewind_cursor`；`crates/codegen/pager/src/views/rewind.rs` — `rewind_activate`；`crates/codegen/pager/src/views/rewind.rs` — `RewindInput`；`crates/codegen/pager/src/app/agent_view/rewind.rs` — `AgentView::rewind_input_to_outcome`；`crates/codegen/pager/src/app/agent_view/input.rs` — `Event::Mouse`。

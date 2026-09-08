@@ -3944,7 +3944,22 @@
       "Minimal BTW responses are correlated per request and agent and stale results are ignored",
       "Minimal BTW completion dismisses into exactly one transcript block",
       "Fullscreen BTW late success preserves existing empty-question completion behavior",
-      "BTW missing-session feedback is mode-specific and effect-free"
+      "BTW missing-session feedback is mode-specific and effect-free",
+      "Group headers consume block-viewer dispatch",
+      "Search, directory, notice, and failed-tool viewer projection",
+      "Markdown image references use the normal block viewer",
+      "Image-only media follows native and no-graphics branches",
+      "Plugin groups seed once and preserve user expansion",
+      "WebFetchToolCallBlock SHALL retain URL, optional HTTP metadata, error/output, and execution timing while exposing deterministic constructors, completion/error mutation, success, elapsed-time, and copy projections.",
+      "WebFetchToolCallBlock SHALL render a Fetch header with width-aware URL presentation, expose only the URL as the selectable header value, and project available status/content-type/byte metadata in stable human-readable order.",
+      "WebFetchToolCallBlock SHALL render collapsed headers separately from full modes, include metadata and a bounded panel preview for successful output, and distinguish short truncated previews from larger expanded previews while preserving the full stored content for copy.",
+      "WebFetchToolCallBlock SHALL expose neutral block geometry, mode-sensitive accents and bullets, success/output-gated foldability, a collapsed default, a two-state fold cycle, and an unmuted header preamble.",
+      "The Pager WebFetch block SHALL keep transport and content acquisition outside its presentation boundary while exposing a bounded inline preview and full stored output for surrounding copy/viewer flows.",
+      "Rewind picker selection anchors and centers the corresponding scrollback prompt",
+      "Rewind dim origin is phase-aware",
+      "Pending permission and question marks are rebuilt from tracker ownership",
+      "Rewind keyboard input moves the cursor and maps terminal actions to app actions",
+      "Rewind mouse hit testing updates hover and activates the clicked row"
     ],
     "reviewed_files": [
       {
@@ -6238,6 +6253,18 @@
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/tests/notes.rs",
         "sha256": "b036ba7407b38e011a1226c72a446b409e309aee9c0963183b9ccb79f68227fe"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs",
+        "sha256": "f44847a856b8f8bf6fe8575b7ea57f9935a0147900fa5d3631ee08db5a6873d0"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/web_fetch.rs",
+        "sha256": "d303d0a515ff61d1e51509f8afb9fdb4e752310a3c0f3102d9d739b27ab55ed9"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/rewind.rs",
+        "sha256": "8c6e0ae4550e4dbfb990cc8eabae0f7fc54b8e23e2fbcfc34a7f81f7463c8714"
       }
     ],
     "review": "reviews/pager.md"
