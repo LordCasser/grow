@@ -1041,3 +1041,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The 40 ms frame delay is passed through an environment variable and the test infers the race from final text; there is no explicit writer-drain or frame-order observation seam.
 - Pager 审计债务：Visual correctness is represented by hard-coded substrings, occurrence counts, and a column-zero bracket heuristic rather than a structured live-region or terminal-frame contract.
 - Pager 审计债务：The scenario combines inference setup, minimal startup, paced editing, slash command dispatch, external pager lifecycle, repaint settling, and shutdown in one large end-to-end test, so failures have a broad diagnosis surface.
+- Pager 审计债务：The model mixes raw evidence, compatibility projections, user findings, and remediation references in one report graph; consumers must understand which fields are authoritative for a given surface.
+- Pager 审计债务：DiagnosticReport::issue_count contains a special clipboard fallback keyed to two concrete IDs, coupling aggregate counting to finding identity constants and making future delivery dispositions easy to double-count or omit.
+- Pager 审计债务：Probe names are unrestricted static strings and live-TUI classification is a string match, so adding or renaming a probe has no compiler-checked relationship to probe collection.
+- Pager 审计债务：ClipboardFacts retains the legacy optional fix string beside named findings, leaving two remediation representations that can diverge unless view consumers keep them synchronized.
+- Pager 审计债务：The large aggregate structs have no local constructors or invariants; callers assemble public fields directly and can create contradictory combinations that remain Eq/PartialEq-valid.

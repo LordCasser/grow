@@ -4126,7 +4126,21 @@
       "Clamped and rounded fill decomposition at eighth-cell resolution",
       "Shared per-cell sequence and styled span contract",
       "Bounded ratatui buffer rendering with track and fill styles",
-      "Context usage hover bar composition through the shared progress renderer"
+      "Context usage hover bar composition through the shared progress renderer",
+      "Runtime facts and stable diagnostic identity",
+      "Diagnostic report counting and finding disposition",
+      "Terminal, multiplexer, color, keyboard, and newline fact schema",
+      "Clipboard route and environment fact schema",
+      "Probe notes and live-TUI requirement classification",
+      "Shared overlay operations SHALL return an OverlayAction that distinguishes an ignored key from a state change and from focus transfer to scrollback or prompt.",
+      "Toggleable overlay panes SHALL expose explicit visible, hidden, show, and hide state operations over independent visibility, focus, and fullscreen flags.",
+      "The shared overlay shortcut SHALL cycle hidden panes to visible-and-focused, visible-unfocused panes to focused, and visible-focused panes to hidden.",
+      "Overlay navigation SHALL provide one-level Esc/q dismissal, Tab transfer to scrollback, Space transfer to prompt, and Ctrl-F fullscreen toggling.",
+      "Focused overlay input SHALL route Ctrl-F through handle_overlay_key and route Tab, Esc, plain q, and Space through handle_overlay_nav_key, returning None for content-specific keys.",
+      "Overlay routing SHALL keep the app-level Ctrl-Q quit binding available and SHALL apply the implementation's explicit modifier rules for fullscreen and prompt-transfer keys.",
+      "Pager dashboard module façade and public ownership boundary",
+      "Dashboard feature flag precedence and default behavior",
+      "Session switch hint command selection by screen mode and dashboard availability"
     ],
     "reviewed_files": [
       {
@@ -6576,6 +6590,18 @@
       {
         "path": "crates/codegen/pager/src/views/progress_bar.rs",
         "sha256": "7c9d89af405d2a0094d81a235093f682de41fa53f8d4a95020901c40ce3b871f"
+      },
+      {
+        "path": "crates/codegen/pager/src/diagnostics/model.rs",
+        "sha256": "7212def162d059d15a704bc83d7561155e7a398809f25f05c831c22e8e25f2a7"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/overlay.rs",
+        "sha256": "55fbd152f5f5200a75be30022eb4e97c1edb6def67e54b53e578af4e1aabd40f"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "sha256": "61100832d4702198cced85c8bf6e5f83e838a4d0a166f4f1647b4e1a7a08ab7d"
       }
     ],
     "review": "reviews/pager.md"

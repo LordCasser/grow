@@ -74123,6 +74123,31 @@
         "No-op guards",
         "fewer than two visible agents, a non-agent view, disabled dashboard, or hidden current agent is encountered",
         "no arbitrary view switch or dashboard materialization occurs."
+      ],
+      [
+        "Rendered order",
+        "agents have different activity order or pinned rows",
+        "the returned IDs follow build_rows/render order, with pinned top-level rows first when configured."
+      ],
+      [
+        "Filter projection",
+        "DashboardState.filter hides rows",
+        "only top-level rows still visible under that filter are returned."
+      ],
+      [
+        "Subagent exclusion",
+        "visible rows include child rows beneath a top-level agent",
+        "child IDs do not appear in the cycle order."
+      ],
+      [
+        "Overflow exclusion",
+        "a parent has a synthetic more-placeholder row",
+        "the placeholder is skipped and only the parent top-level ID remains eligible."
+      ],
+      [
+        "No visible attachable rows",
+        "the filter hides all top-level rows or the map has no matching rows",
+        "the result is empty so the caller can treat cycling as a no-op."
       ]
     ],
     "sources": [
@@ -74173,6 +74198,26 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/dashboard.rs",
         "dashboard_overlay_cycle_non_overlay_noop_when_current_agent_hidden"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "overlay_cycle_order"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "build_rows"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "render::cached_home"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "DashboardRowId::TopLevel"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "is_more_placeholder"
       ]
     ]
   },
@@ -211014,6 +211059,753 @@
       [
         "crates/codegen/pager/src/views/context_bar.rs",
         "gateway_chat_suppresses_context_bar_even_with_tokens"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "local-diagnostics",
+    "requirement": "Runtime facts and stable diagnostic identity",
+    "contract": "The implementation SHALL satisfy the following tested behavior: RuntimeFact<T> represents Available(T), NoReply, or Unavailable and derives clone/debug/equality semantics. DiagnosticId stores static domain and item strings, DiagnosticId::new is a const constructor, and Display formats the identifier as `domain.item`; the identifier also derives Hash for map/set use. The model defines stable crate-local IDs for notification protocol fallback, focus tracking unavailable, sandbox profile conflict, clipboard delivery unverified/unavailable, newline fallback, iTerm2 clipboard permission, and VS Code SSH non-ASCII caveats.",
+    "scenarios": [
+      [
+        "Runtime response available",
+        "a probe produced a value",
+        "the value can be represented as RuntimeFact::Available(value)."
+      ],
+      [
+        "Runtime response missing",
+        "a probe did not answer or cannot run",
+        "the model distinguishes RuntimeFact::NoReply from RuntimeFact::Unavailable."
+      ],
+      [
+        "Stable identifier formatting",
+        "a DiagnosticId has domain `terminal` and item `ssh-wrap`",
+        "Display yields `terminal.ssh-wrap`, while equality and hashing use both fields."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "RuntimeFact"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "DiagnosticId"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "DiagnosticId::new"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "DiagnosticId::fmt"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "NOTIFICATION_PROTOCOL_FALLBACK_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "FOCUS_TRACKING_UNAVAILABLE_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "SANDBOX_PROFILE_CONFLICT_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "CLIPBOARD_DELIVERY_UNVERIFIED_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "CLIPBOARD_DELIVERY_UNAVAILABLE_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "NEWLINE_FALLBACK_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "ITERM2_CLIPBOARD_PERMISSION_ID"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "VSCODE_SSH_NON_ASCII_ID"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "local-diagnostics",
+    "requirement": "Diagnostic report counting and finding disposition",
+    "contract": "The implementation SHALL satisfy the following tested behavior: DiagnosticReport groups DiagnosticFacts, DiagnosticFinding values, and ProbeNote values. issue_count counts findings whose disposition is Issue and adds one implicit issue when ClipboardFacts::delivery is not confirmed unless a clipboard-delivery-unverified or clipboard-delivery-unavailable finding is already present. recommendation_count counts findings whose disposition is Recommendation. DiagnosticFinding carries a stable id, disposition, message, optional ManualRemediation, optional AutomaticRemediation, and optional note; FindingDisposition has Issue and Recommendation variants.",
+    "scenarios": [
+      [
+        "Explicit issues",
+        "a report contains Issue findings",
+        "issue_count includes each such finding exactly once."
+      ],
+      [
+        "Unconfirmed clipboard without named finding",
+        "clipboard delivery is not confirmed and neither clipboard delivery ID appears in findings",
+        "issue_count adds one implicit clipboard issue."
+      ],
+      [
+        "Named clipboard delivery finding",
+        "clipboard delivery is not confirmed but an unverified or unavailable clipboard finding exists",
+        "issue_count does not add a second implicit issue for the same delivery condition."
+      ],
+      [
+        "Recommendations",
+        "a report contains Recommendation findings",
+        "recommendation_count equals the number of those findings."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "DiagnosticReport"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "DiagnosticReport::issue_count"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "DiagnosticReport::recommendation_count"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "DiagnosticFinding"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "FindingDisposition"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "ManualRemediation"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "AutomaticRemediation"
+      ],
+      [
+        "crates/codegen/pager-render/src/clipboard/trust.rs",
+        "ClipboardDelivery::is_confirmed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "local-diagnostics",
+    "requirement": "Terminal, multiplexer, color, keyboard, and newline fact schema",
+    "contract": "The implementation SHALL satisfy the following tested behavior: DiagnosticFacts stores terminal identity, xtversion RuntimeFact, multiplexer and optional Byobu backend, SSH state, TmuxFacts, ColorFacts, optional KeyboardFact, optional NewlineFact, and ClipboardFacts. TmuxFacts separately records extended_keys and set_clipboard option facts, allow_passthrough support and option facts; TmuxOptionFact distinguishes Available(String), Unsupported, Unavailable, and Error, while TmuxSupportFact has Supported, Unsupported, Unavailable, and Error. ColorFacts stores a RuntimeFact<ColorLevel>, available ThemeKind values, and total theme count. KeyboardFact stores ModifierDelivery and HostOs. NewlineFact distinguishes VTE with optional version, XtermJs with terminal identity, and unavailable Kitty keyboard protocol.",
+    "scenarios": [
+      [
+        "Terminal snapshot",
+        "a diagnostic snapshot is converted into facts",
+        "the report can retain terminal, multiplexer, SSH, color, keyboard, and newline evidence in their typed fields."
+      ],
+      [
+        "Tmux option result",
+        "a tmux query returns a string, unsupported, unavailable, or error",
+        "TmuxOptionFact preserves the corresponding state and string only for Available."
+      ],
+      [
+        "Tmux passthrough capability",
+        "the support probe returns one of its four outcomes",
+        "TmuxSupportFact preserves Supported, Unsupported, Unavailable, or Error independently of the option value."
+      ],
+      [
+        "Newline fallback",
+        "the terminal cannot provide the preferred keyboard path",
+        "NewlineFact identifies VTE version evidence, xterm.js terminal evidence, or NoKittyKeyboardProtocol."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "DiagnosticFacts"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "TmuxFacts"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "TmuxOptionFact"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "TmuxSupportFact"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "ColorFacts"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "KeyboardFact"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "NewlineFact"
+      ],
+      [
+        "crates/codegen/pager/src/terminal.rs",
+        "TerminalName"
+      ],
+      [
+        "crates/codegen/pager/src/terminal.rs",
+        "MultiplexerKind"
+      ],
+      [
+        "crates/codegen/pager/src/terminal.rs",
+        "ByobuBackend"
+      ],
+      [
+        "crates/codegen/pager/src/terminal.rs",
+        "ModifierDelivery"
+      ],
+      [
+        "crates/codegen/pager/src/theme/color_support.rs",
+        "ColorLevel"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "local-diagnostics",
+    "requirement": "Clipboard route and environment fact schema",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ClipboardFacts records native, tmux, OSC 52, and wrap-sink route booleans; the native tool name and NativeClipboardPreflight; Osc52Capability; DisplayServer; container-no-display state; DataControlFact; ClipboardDelivery; and an optional compatibility fix string. DataControlFact distinguishes Available, Missing, Unavailable, Error, and NotApplicable. The fix field is explicitly a compact compatibility projection while detailed policy and remediation are carried by named findings.",
+    "scenarios": [
+      [
+        "Clipboard route projection",
+        "diagnostic collection determines native, tmux, OSC 52, or wrap paths",
+        "the route booleans and supporting capability fields remain available in ClipboardFacts."
+      ],
+      [
+        "Data-control result",
+        "Wayland data-control probing returns an observed, missing, unavailable, or error state, or the platform is irrelevant",
+        "DataControlFact preserves Available, Missing, Unavailable, Error, or NotApplicable."
+      ],
+      [
+        "Compatibility fix projection",
+        "legacy consumers need a compact clipboard fix value",
+        "ClipboardFacts::fix may hold an optional string while detailed remediation remains in findings."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "ClipboardFacts"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "DataControlFact"
+      ],
+      [
+        "crates/codegen/pager-render/src/clipboard/trust.rs",
+        "NativeClipboardPreflight"
+      ],
+      [
+        "crates/codegen/pager-render/src/clipboard/trust.rs",
+        "Osc52Capability"
+      ],
+      [
+        "crates/codegen/pager-render/src/clipboard/trust.rs",
+        "ClipboardDelivery"
+      ],
+      [
+        "crates/codegen/pager/src/host.rs",
+        "DisplayServer"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view.rs",
+        "facts"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "local-diagnostics",
+    "requirement": "Probe notes and live-TUI requirement classification",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ProbeNote stores a static probe name, ProbeStatus, and optional message. ProbeStatus distinguishes Unsupported, Unavailable, and Error. probe_requires_live_tui returns true only when status is Unavailable and the probe is exactly runtime.fullscreen-active, runtime.kitty-flags-pushed, or runtime.xtversion; all other probe names and statuses return false.",
+    "scenarios": [
+      [
+        "Unavailable live evidence",
+        "one of the three runtime probes is unavailable",
+        "probe_requires_live_tui returns true."
+      ],
+      [
+        "Unavailable non-live evidence",
+        "a different probe is unavailable",
+        "probe_requires_live_tui returns false."
+      ],
+      [
+        "Unsupported or error",
+        "a listed live probe has Unsupported or Error status",
+        "probe_requires_live_tui returns false even though a ProbeNote can preserve the status and optional message."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "ProbeNote"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "ProbeStatus"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/model.rs",
+        "probe_requires_live_tui"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view.rs",
+        "probe_notes"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/view.rs",
+        "runtime_probe_note"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Shared overlay operations SHALL return an OverlayAction that distinguishes an ignored key from a state change and from focus transfer to scrollback or prompt.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: OverlayAction::Ignored means no state change and an unconsumed key; Changed means the caller should redraw; FocusScrollback and FocusPrompt mean the overlay relinquishes focus to the indicated surface. OverlayAction::consumed returns false only for Ignored and true for every other variant.",
+    "scenarios": [
+      [
+        "Ignored remains available to content handling",
+        "A structural router does not recognize the key",
+        "It returns None or OverlayAction::Ignored and the caller can pass the key to pane-specific handling."
+      ],
+      [
+        "State change requests redraw",
+        "A toggle, hide, escape, or fullscreen operation changes overlay state",
+        "It returns OverlayAction::Changed and the caller treats the event as consumed and redraws."
+      ],
+      [
+        "Tab transfers to scrollback",
+        "A focused overlay handles Tab",
+        "It returns FocusScrollback and consumed() is true."
+      ],
+      [
+        "Space transfers to prompt",
+        "A focused overlay handles Space",
+        "It returns FocusPrompt and consumed() is true."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayAction"
+      ],
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayAction::consumed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Toggleable overlay panes SHALL expose explicit visible, hidden, show, and hide state operations over independent visibility, focus, and fullscreen flags.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: OverlayState contains public visible, focused, and fullscreen booleans and derives Default, Clone, Copy, and Debug. visible() creates visible=true with focus and fullscreen false; hidden() is the all-false default. show() sets visible=true without changing focus or fullscreen. hide() clears all three flags and returns Changed, allowing external lifecycle cleanup such as session end.",
+    "scenarios": [
+      [
+        "Visible but unfocused initialization",
+        "A pane should appear automatically while the prompt remains active",
+        "OverlayState::visible() yields visible=true, focused=false, fullscreen=false."
+      ],
+      [
+        "Hidden initialization",
+        "A pane starts closed",
+        "OverlayState::hidden() yields all flags false."
+      ],
+      [
+        "Auto-show preserves other state",
+        "An external caller invokes show()",
+        "visible becomes true while focused and fullscreen are left as they were."
+      ],
+      [
+        "Lifecycle cleanup hides entirely",
+        "A session-end or clear path invokes hide()",
+        "visible, focused, and fullscreen all become false and Changed is returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayState"
+      ],
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayState::visible"
+      ],
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayState::hidden"
+      ],
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayState::show"
+      ],
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayState::hide"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The shared overlay shortcut SHALL cycle hidden panes to visible-and-focused, visible-unfocused panes to focused, and visible-focused panes to hidden.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: OverlayState::toggle always returns Changed. If visible is false it sets visible and focused true; if visible is true but focused is false it sets focused true; otherwise it clears visible, focused, and fullscreen. The hide branch explicitly exits fullscreen so closing a focused pane leaves no fullscreen residue.",
+    "scenarios": [
+      [
+        "Open and focus hidden pane",
+        "toggle() is called while visible=false",
+        "The pane becomes visible and focused and reports Changed."
+      ],
+      [
+        "Focus already visible pane",
+        "toggle() is called while visible=true and focused=false",
+        "The pane remains visible and becomes focused."
+      ],
+      [
+        "Close focused pane",
+        "toggle() is called while visible=true and focused=true",
+        "The pane becomes hidden, unfocused, and non-fullscreen."
+      ],
+      [
+        "Repeated shortcut is consumed",
+        "Any of the three states receives its pane shortcut",
+        "toggle() always returns a consumed Changed action."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayState::toggle"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Overlay navigation SHALL provide one-level Esc/q dismissal, Tab transfer to scrollback, Space transfer to prompt, and Ctrl-F fullscreen toggling.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: tab_out clears fullscreen and focused while retaining visible and returns FocusScrollback. escape clears only fullscreen when already fullscreen, preserving visible and focus; otherwise it hides and unfocuses the pane and returns Changed. space clears fullscreen and focus while retaining visible and returns FocusPrompt. toggle_fullscreen flips fullscreen and returns Changed without inspecting visibility or focus.",
+    "scenarios": [
+      [
+        "Leave fullscreen to the overlay",
+        "escape() is called with fullscreen=true",
+        "fullscreen becomes false while visible and focused remain true."
+      ],
+      [
+        "Dismiss non-fullscreen overlay",
+        "escape() is called with fullscreen=false",
+        "visible and focused become false and Changed is returned."
+      ],
+      [
+        "Tab out",
+        "tab_out() is called from an overlay",
+        "fullscreen and focused clear, visible remains unchanged, and focus is assigned to scrollback."
+      ],
+      [
+        "Return to prompt",
+        "space() is called from an overlay",
+        "fullscreen and focused clear, visible remains true, and focus is assigned to the prompt."
+      ],
+      [
+        "Toggle fullscreen",
+        "toggle_fullscreen() is called",
+        "fullscreen flips and Changed is returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayState::tab_out"
+      ],
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayState::escape"
+      ],
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayState::space"
+      ],
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "OverlayState::toggle_fullscreen"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Focused overlay input SHALL route Ctrl-F through handle_overlay_key and route Tab, Esc, plain q, and Space through handle_overlay_nav_key, returning None for content-specific keys.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: handle_overlay_key recognizes KeyCode::Char('f') whenever the modifiers contain CONTROL, even if additional modifiers are present, and returns the fullscreen toggle action; all other keys return None. handle_overlay_nav_key recognizes Tab and Esc regardless of modifiers, q only when modifiers are exactly NONE, and Space regardless of modifiers; each returns its corresponding OverlayState action. The caller is responsible for invoking the navigation router only when no input bar is open, as documented by the split API.",
+    "scenarios": [
+      [
+        "Ctrl-F works with an input bar",
+        "handle_overlay_key receives Char('f') with CONTROL",
+        "It toggles fullscreen and consumes the key without delegating to content."
+      ],
+      [
+        "Non-structural key reaches pane content",
+        "handle_overlay_key receives an unrecognized key",
+        "It returns None and does not mutate OverlayState."
+      ],
+      [
+        "Navigation keys transfer or dismiss",
+        "handle_overlay_nav_key receives Tab, Esc, plain q, or Space",
+        "It returns the matching state action and consumes the key."
+      ],
+      [
+        "Ctrl-Q stays application-owned",
+        "handle_overlay_nav_key receives q with CONTROL",
+        "It returns None so the app-level quit shortcut remains available."
+      ],
+      [
+        "Input-bar ownership is caller-selected",
+        "An input bar is active",
+        "The caller can omit handle_overlay_nav_key while still allowing handle_overlay_key to process Ctrl-F."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "handle_overlay_key"
+      ],
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "handle_overlay_nav_key"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Overlay routing SHALL keep the app-level Ctrl-Q quit binding available and SHALL apply the implementation's explicit modifier rules for fullscreen and prompt-transfer keys.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: q is accepted only with KeyModifiers::NONE, preventing Ctrl-Q from being consumed by an overlay. Ctrl-F uses contains(KeyModifiers::CONTROL), so additional modifier bits do not prevent fullscreen handling. Space matches by key code without a modifier guard, so modified Space is also routed to FocusPrompt. Tab and Esc likewise match by key code alone. These are source-level routing rules and do not assert terminal key normalization.",
+    "scenarios": [
+      [
+        "Plain q closes",
+        "q arrives with no modifiers",
+        "handle_overlay_nav_key calls escape()."
+      ],
+      [
+        "Modified q is delegated",
+        "q arrives with any modifier such as CONTROL",
+        "handle_overlay_nav_key returns None."
+      ],
+      [
+        "Control-containing f toggles",
+        "f arrives with CONTROL plus optional additional modifiers",
+        "handle_overlay_key toggles fullscreen."
+      ],
+      [
+        "Modified Space follows key-code match",
+        "Space arrives with a modifier",
+        "handle_overlay_nav_key still calls space()."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "handle_overlay_key"
+      ],
+      [
+        "crates/codegen/pager/src/views/overlay.rs",
+        "handle_overlay_nav_key"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager dashboard module façade and public ownership boundary",
+    "contract": "The dashboard façade SHALL expose the six named submodules layout, peek, peek_tail, render, row and state, and SHALL re-export the documented render entrypoints, row model/classifier/sort helpers, and state types/parsers/loaders from their owning submodules. The façade SHALL keep concrete dashboard behavior in those submodules; importing through views::dashboard provides the stable public boundary without introducing a second implementation of rendering, row construction or state persistence.",
+    "scenarios": [
+      [
+        "Submodule ownership",
+        "a caller imports dashboard layout, peek, rendering, row or state functionality",
+        "the corresponding named submodule remains available through the dashboard module façade."
+      ],
+      [
+        "Render re-exports",
+        "a caller needs the dashboard widget or overlay chrome helpers",
+        "render_dashboard, DashboardOverlayChrome, HeaderPromoCta, popup_rect, render_dashboard_session_header, render_dashboard_session_overlay and render_popup_overlay are available from views::dashboard."
+      ],
+      [
+        "Row re-exports",
+        "a caller builds or classifies visible dashboard rows",
+        "DashboardRow, RowBadge, build_rows, build_rows_with_roster, classify_subagent, classify_top_level, roster_activity_to_state and sort_rows resolve through the façade."
+      ],
+      [
+        "State re-exports",
+        "a caller manipulates dashboard identity, filter, grouping, persisted state or parsing",
+        "the documented DashboardState, row/filter/grouping/location/pending-dispatch types plus load_persisted, parse_filter and parse_row_state_token resolve through the façade."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "pub mod layout"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "pub mod peek"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "pub mod peek_tail"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "pub mod render"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "pub mod row"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "pub mod state"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "pub use render"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "pub use row"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "pub use state"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "views::dashboard"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Dashboard feature flag precedence and default behavior",
+    "contract": "dashboard_enabled SHALL return false when the process environment contains GROW_AGENT_DASHBOARD exactly equal to the string `0`, before consulting persistence. Otherwise it SHALL return the persisted [dashboard].enabled value from state::load_persisted_enabled, and SHALL default to true when that loader returns None. Other environment values SHALL not disable the dashboard through this override.",
+    "scenarios": [
+      [
+        "Environment disable",
+        "GROW_AGENT_DASHBOARD is exactly `0`",
+        "dashboard_enabled returns false without relying on persisted configuration."
+      ],
+      [
+        "Persisted disable",
+        "the environment override is absent or has another value and persisted enabled is false",
+        "dashboard_enabled returns false from the persisted setting."
+      ],
+      [
+        "Default enabled",
+        "the environment does not equal `0` and persisted loading returns None",
+        "dashboard_enabled returns true."
+      ],
+      [
+        "Nonzero environment value",
+        "GROW_AGENT_DASHBOARD has a value other than `0`",
+        "the environment branch does not disable the feature and persistence/default resolution continues."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "dashboard_enabled"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "GROW_AGENT_DASHBOARD"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "state::load_persisted_enabled"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/state.rs",
+        "load_persisted_enabled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/dashboard.rs",
+        "dispatch_open_dashboard"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/dashboard.rs",
+        "dashboard_overlay_cycle_non_overlay_noop_when_dashboard_disabled"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Session switch hint command selection by screen mode and dashboard availability",
+    "contract": "session_switch_hint_command SHALL return Some(`/resume`) in minimal mode regardless of the dashboard feature flag, because the dashboard is refused there but the session picker remains available. Outside minimal mode it SHALL return Some(`/agents`) only when dashboard_enabled is true; when the dashboard is disabled it SHALL return None so session-created and fork banners fall back to a plain session-id form.",
+    "scenarios": [
+      [
+        "Minimal mode",
+        "minimal is true and the dashboard environment override is disabled",
+        "the hint is `/resume` and does not advertise `/agents`."
+      ],
+      [
+        "Enabled non-minimal mode",
+        "minimal is false and dashboard_enabled is true",
+        "the hint is `/agents`."
+      ],
+      [
+        "Disabled non-minimal mode",
+        "minimal is false and dashboard_enabled is false",
+        "the helper returns None."
+      ],
+      [
+        "Banner integration",
+        "session-created or fork-marker code receives the returned option",
+        "minimal banners advertise `/resume`, enabled non-minimal banners may advertise `/agents`, and disabled banners omit the refused command."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "session_switch_hint_command"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "tests::switch_hint_minimal_is_resume_even_with_dashboard_disabled"
+      ],
+      [
+        "crates/codegen/pager/src/views/dashboard/mod.rs",
+        "tests::switch_hint_non_minimal_follows_dashboard_flag"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs",
+        "session_created_banner_advertises_resume_in_minimal_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
+        "build_child_fork_marker_omits_dashboard_tip_when_disabled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
+        "build_child_fork_marker_minimal_mode_advertises_resume"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
+        "build_child_fork_marker_worktree_format"
       ]
     ]
   }
