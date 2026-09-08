@@ -36,3 +36,7 @@ Removed the ignored SkillSlashRewrite selector and all production/test arguments
 
 ### R10 Pager integration follow-up
 Pager test-target compilation found one remaining extension-modal SkillInfo fixture. Removed its obsolete fields; fresh views::extensions_modal regressions passed 142/142. A whole-crates scan found no remaining SkillInfo literal containing model/effort. The entire Pager library test target now compiles.
+
+## Final integration
+Nine approved candidates removed in separate commits; R1 and R7 retained. Candidate statuses and developer links reconciled. Two preexisting historical Markdown whitespace findings normalized. Strict all validation passed before archive; targeted regression counts above are actual runs, not claims of full-suite coverage.
+Post-archive validation: current specs/active changes 17/17 (including release preparation); archived changes 272/272 passed.

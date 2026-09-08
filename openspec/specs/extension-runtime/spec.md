@@ -271,3 +271,17 @@ HookRegistry 反序列化 SHALL 验证每个 Hook 的 event 与所属 map 键一
 #### Scenario: 跨来源 shell 去重
 - **WHEN** 相同 tab 或 LF 命令来自不同 source_dir
 - **THEN** 按 shell 命令既有 first-wins 规则只保留首项。
+
+### Requirement: Skill metadata omits inactive sampling overrides
+Skill discovery and RPC metadata SHALL NOT expose unused model or effort override fields. Session model selection and reasoning effort SHALL remain independent.
+
+#### Scenario: Skill metadata advertisement
+- **WHEN** a skill is discovered and advertised through RPC
+- **THEN** no skill-level model/effort override is advertised.
+
+### Requirement: Skill inventory has one runtime owner
+SkillManager SHALL remain the source for merged startup/discovered skill listings and slash advertisement without a parallel AvailableSkills resource snapshot.
+
+#### Scenario: Dynamic discovery retains startup skills
+- **WHEN** a new skill is discovered after registry initialization
+- **THEN** SkillManager retains both startup and discovered skills in its active listing.

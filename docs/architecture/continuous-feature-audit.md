@@ -112,7 +112,7 @@ CARGO_BUILD_JOBS=2 RUST_MIN_STACK=16777216 cargo test --locked --offline \
 
 | 路径 | 当前证据 | 后续动作 |
 | --- | --- | --- |
-| `shell/unstable` | 空 feature，默认关闭，未发现 cfg 使用点或脚本启用点 | 已列为 R2 低优先级删除候选，等待确认 |
+| `shell/unstable` | 空 feature，默认关闭，未发现 cfg 使用点或脚本启用点 | R2 已获批准并删除；Cargo 元数据回归确认其他 feature 未变 |
 | `shell/test-support`、`pager/test-support` | 明确服务测试与 bench，默认生产构建不启用 | 不按闲置产品功能删除 |
 | `shell/dhat-heap`、`tools/dhat-heap` | 可选堆分析依赖 | 核对启用后采集入口 |
 | `cli/distro-pm` | 下游包管理器构建关闭自更新 | 核对更新入口是否一致遵守 |

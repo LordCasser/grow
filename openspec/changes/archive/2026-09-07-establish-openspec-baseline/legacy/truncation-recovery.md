@@ -497,7 +497,7 @@ the same conversation state -- no special prompt injection.
 **Before**: Every `max_tokens` truncation emitted `StopFailure { error: "max_output_tokens" }`
 to external hook scripts.
 
-**After**: 
+**After**:
 - Successful auto-continue: **no StopFailure emitted**. The turn completes normally.
 - A compacted input that still exceeds the context window emits
   `StopFailure { error: "context_window_exceeded" }`.

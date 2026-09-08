@@ -630,3 +630,10 @@ The credential helper refresh margin SHALL trigger proactive refresh without its
 #### Scenario: Proactive refresh fails
 - **WHEN** refreshing a near-expiry cached token fails
 - **THEN** the prior token is unavailable for sending even if its original expiry is still in the future.
+
+### Requirement: Retired inert configuration surfaces are not exposed
+Shell SHALL NOT expose the empty unstable Cargo feature or the unconsumed ZDR-access setting/resolver. Removing these inert surfaces SHALL NOT introduce a new access policy.
+
+#### Scenario: Shell feature and setting inventory
+- **WHEN** inspecting supported Shell build features and remote setting types
+- **THEN** the empty unstable feature and unused zdr_access_enabled field are absent.

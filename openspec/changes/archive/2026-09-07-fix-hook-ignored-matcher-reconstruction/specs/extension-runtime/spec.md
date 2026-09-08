@@ -21,4 +21,3 @@ Tested 事件恢复时因无效模式产生的 Never 匹配器 SHALL 在事件�
 #### Scenario: 无效匹配器遇到无字段事件
 - **WHEN** Tested 事件的 Hook 模式编译失败且事件未提供匹配值
 - **THEN** 匹配判断返回 false，执行计划跳过该 Hook。
-
