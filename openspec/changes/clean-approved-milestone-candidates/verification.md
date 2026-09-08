@@ -33,3 +33,6 @@ Shell test-target compilation found three remaining SkillInfo fixture literals. 
 
 ## R11
 Removed the ignored SkillSlashRewrite selector and all production/test arguments. Fresh shell session::slash_commands regression passed 98/98; expansion and out-of-band rejection assertions retained. No selector references remain.
+
+### R10 Pager integration follow-up
+Pager test-target compilation found one remaining extension-modal SkillInfo fixture. Removed its obsolete fields; fresh views::extensions_modal regressions passed 142/142. A whole-crates scan found no remaining SkillInfo literal containing model/effort. The entire Pager library test target now compiles.

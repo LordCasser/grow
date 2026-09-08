@@ -4355,8 +4355,6 @@ mod tests {
             plugin_root: None,
             plugin_data: None,
             allowed_tools: None,
-            model: None,
-            effort: None,
             user_invocable: false,
             disable_model_invocation: false,
             has_user_specified_description: false,
