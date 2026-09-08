@@ -703,25 +703,6 @@ impl ParamKindNames {
             .unwrap_or(canonical)
     }
 }
-/// Available skills for description template rendering.
-///
-/// Stored in Resources so `build_description_context()` can populate the
-/// `skills` field of `DescriptionContext`. Inserted by `with_backend()`
-/// before any tools are registered.
-#[derive(Debug, Clone)]
-pub struct AvailableSkills(pub Vec<crate::implementations::skills::types::SkillInfo>);
-impl AvailableSkills {
-    /// Check if a skill with the given name is available for model invocation.
-    ///
-    /// Returns `false` for skills with `disable_model_invocation = true` (model
-    /// cannot auto-invoke) or `user_invocable = false` (not shown in skill tool),
-    /// since the model would be unable to successfully invoke them.
-    pub fn has_skill(&self, name: &str) -> bool {
-        self.0
-            .iter()
-            .any(|s| s.name == name && s.enabled && !s.disable_model_invocation && s.user_invocable)
-    }
-}
 /// Session folder for logs and output files.
 #[derive(Debug, Clone)]
 pub struct SessionFolder(pub PathBuf);

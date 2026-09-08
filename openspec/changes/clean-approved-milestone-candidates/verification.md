@@ -12,3 +12,6 @@ Removed unused resolver, its sole module/exports and RemoteSettings field. Repos
 
 ## R4
 Removed only unused internal ID formatter selector/branch and seven exclusive formatter tests. Freshly rebuilt tools ask_user_question group passed 59/59; normal notes, IDs and duplicate-label validation remain covered. An earlier cached run was discarded after restoring file timestamps; only the rebuilt 59-test run is counted.
+
+## R5
+SkillManager owns active listings/slash advertisement; duplicate AvailableSkills type and writes removed. Migrated startup+dynamic preservation assertions to SkillManager. Fresh tools skill-filter regressions passed 200/200, including manager, discovery and registry coverage.

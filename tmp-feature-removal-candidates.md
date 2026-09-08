@@ -52,6 +52,8 @@
 - 拟删除范围：该资源类型、has_skill、仅维护副本的写入与仅验证该副本的测试；执行前复核泛型资源和外部调用。不要顺带删除 SkillManager、动态发现合并、SkillInput/SkillOutput、slash 或预加载功能。
 - 状态：等待用户确认，尚未删除。证据见 OpenSpec audit-skill-runtime-consumers。
 
+- 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R5 验证记录。
+
 ## R6 · 未找到注册实现的旧 Skill 工具协议
 
 - 位置：tools/src/implementations/skills/skill.rs 的 SkillInput/SkillOutput；ToolInput::Skill、ToolOutput::Skill 及仅处理这些值的匹配分支（均在 crates/codegen）。

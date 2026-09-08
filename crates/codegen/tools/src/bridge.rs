@@ -403,8 +403,7 @@ impl ToolBridge {
     /// If the tracker has a pending change (discovery, baseline update, /clear),
     /// this method:
     /// 1. Computes runtime and display projections internally.
-    /// 2. Writes the runtime projection into `AvailableSkills` in Resources.
-    /// 3. Returns `SkillUpdateEffects` with conversation/UI side-effects
+    /// 2. Returns `SkillUpdateEffects` with conversation/UI side-effects
     ///    for the session to execute (system-reminder injection, slash
     ///    command refresh, prompt finalization).
     ///
@@ -415,10 +414,7 @@ impl ToolBridge {
         let registry = &*self.registry;
         let mut res = registry.resources.lock().await;
         let tracker = res.get_mut::<crate::types::skill_discovery_tracker::SkillManager>()?;
-        let (runtime_skills, effects) = tracker.take_pending()?;
-
-        // Write the runtime projection directly -- the shell never sees this.
-        res.insert(crate::types::resources::AvailableSkills(runtime_skills));
+        let (_, effects) = tracker.take_pending()?;
 
         Some(effects)
     }
@@ -539,7 +535,7 @@ impl ToolBridge {
     }
     /// Get the shared resources handle for direct access.
     /// Used by the skill reconciliation helper which needs to update
-    /// `AvailableSkills` in the Resources directly.
+    /// the SkillManager state directly.
     pub async fn shared_resources(&self) -> crate::types::resources::SharedResources {
         self.registry.resources.clone()
     }

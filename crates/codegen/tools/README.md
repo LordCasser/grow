@@ -1,5 +1,5 @@
 
-SkillManager baseline reconciliation compares full visible SkillInfo data and order, so same-path metadata changes update AvailableSkills. Identical reloads still skip reconciliation; untriggered conditional skills remain held until activation.
+SkillManager baseline reconciliation compares full visible SkillInfo data and order, so same-path metadata changes update SkillManager projections. Identical reloads still skip reconciliation; untriggered conditional skills remain held until activation.
 
 A refreshed skill baseline takes ownership of matching canonical paths, replacing stale dynamic copies before applying conditional gates. Dynamic discoveries outside that baseline remain available with their existing precedence.
 

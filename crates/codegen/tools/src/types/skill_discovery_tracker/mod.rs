@@ -50,8 +50,7 @@ pub struct SkillListingSnapshot {
 
 /// Conversation/UI side-effects the session must perform after a skill update.
 ///
-/// The tools layer handles all skill-domain logic (projections, dedup,
-/// writing `AvailableSkills`). This struct carries only the effects that
+/// The tools layer handles all skill-domain logic (projections and dedup). This struct carries only the effects that
 /// require session capabilities: injecting a `<system-reminder>` message
 /// and refreshing slash command advertisement. Slash command data is read
 /// from `bridge.slash_skills()`, not from this struct.
@@ -374,8 +373,7 @@ impl SkillManager {
     /// Returns `(runtime_skills, effects)` if there is a pending change,
     /// or `None` if nothing changed.
     ///
-    /// `runtime_skills` must be written into `AvailableSkills` by the
-    /// caller (the bridge's `apply_pending_skill_update` method).
+    /// `runtime_skills` contains the merged projection.
     ///
     /// `effects` contains only conversation/UI side-effects the session
     /// must perform.

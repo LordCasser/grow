@@ -1032,9 +1032,6 @@ impl ToolRegistryBuilder {
             ctx.notification_handle,
         ));
         let startup_skills = ctx.skills;
-        resources.insert(crate::types::resources::AvailableSkills(
-            startup_skills.clone(),
-        ));
         {
             let mut mgr = crate::types::skill_discovery_tracker::SkillManager::new();
             mgr.seed(Some(cwd.clone()), None, startup_skills, None, None);
@@ -4565,9 +4562,7 @@ mod tests {
     /// Startup skills passed via `SessionContext.skills` must survive a
     /// dynamic discovery. Before the fix, `SkillManager` was seeded with
     /// `startup_skills: vec![]`, so `take_pending()` would compute
-    /// `dedup_by_canonical_path(discovered, [])` and overwrite
-    /// `AvailableSkills` with only the new discoveries, dropping boot
-    /// skills.
+    /// `dedup_by_canonical_path(discovered, [])` and drop boot skills from its merged listing.
     #[tokio::test]
     async fn test_startup_skills_survive_dynamic_discovery() {
         let tmp = TempDir::new().unwrap();
@@ -4591,10 +4586,11 @@ mod tests {
         {
             let res = toolset.resources.lock().await;
             let skills = res
-                .get::<crate::types::resources::AvailableSkills>()
-                .unwrap();
-            assert_eq!(skills.0.len(), 1);
-            assert_eq!(skills.0[0].name, "boot-skill");
+                .get::<crate::types::skill_discovery_tracker::SkillManager>()
+                .unwrap()
+                .slash_skills();
+            assert_eq!(skills.len(), 1);
+            assert_eq!(skills[0].name, "boot-skill");
         }
         {
             let mut res = toolset.resources.lock().await;
@@ -4613,16 +4609,15 @@ mod tests {
             let mgr = res
                 .get_mut::<crate::types::skill_discovery_tracker::SkillManager>()
                 .unwrap();
-            if let Some((runtime_skills, _effects)) = mgr.take_pending() {
-                res.insert(crate::types::resources::AvailableSkills(runtime_skills));
-            }
+            let _ = mgr.take_pending();
         }
         {
             let res = toolset.resources.lock().await;
             let skills = res
-                .get::<crate::types::resources::AvailableSkills>()
-                .expect("AvailableSkills should exist after flush");
-            let names: Vec<&str> = skills.0.iter().map(|s| s.name.as_str()).collect();
+                .get::<crate::types::skill_discovery_tracker::SkillManager>()
+                .expect("SkillManager should exist after flush")
+                .slash_skills();
+            let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
             assert!(
                 names.contains(&"boot-skill"),
                 "boot skill must survive dynamic discovery, got: {:?}",
@@ -4633,7 +4628,7 @@ mod tests {
                 "dynamic skill must be present after flush, got: {:?}",
                 names
             );
-            assert_eq!(skills.0.len(), 2, "should have exactly 2 skills");
+            assert_eq!(skills.len(), 2, "should have exactly 2 skills");
         }
     }
     /// generate_schema strips the boilerplate root `title` (struct name) and

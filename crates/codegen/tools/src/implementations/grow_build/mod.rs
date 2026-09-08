@@ -7,7 +7,7 @@
 //!
 //! The [`register_all()`] function is the single entry-point for wiring up
 //! the standard toolset. It inserts shared resources (`Terminal`,
-//! `AvailableSkills`, `BashParams`) and registers every built-in tool.
+//!  `BashParams`) and registers every built-in tool.
 pub mod ask_user_question;
 pub mod bash;
 pub mod coordination;
