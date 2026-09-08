@@ -1,4 +1,4 @@
 # Tasks
-- [ ] Inspect existing history and session search paths.
-- [ ] Specify query, result preview and selection behavior.
-- [ ] Implement and test user-visible historical conversation search.
+- [x] Inspect existing history and session search paths.
+- [x] Specify query, result preview and selection behavior.
+- [x] Implement and test user-visible historical conversation search.

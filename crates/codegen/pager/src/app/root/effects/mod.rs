@@ -3622,6 +3622,7 @@ pub(crate) fn execute(
                         + std::time::Duration::from_secs(30);
                     let retry_interval = std::time::Duration::from_secs(3);
                     let mut results = Vec::new();
+                    let mut error = None;
                     loop {
                         let params = serde_json::json!({
                         "query": query,
@@ -3637,6 +3638,7 @@ pub(crate) fn execute(
                         let remaining = deadline
                             .saturating_duration_since(tokio::time::Instant::now());
                         if remaining.is_zero() {
+                            error = Some("Search timed out while the index was loading".into());
                             break;
                         }
                         let result = tokio::time::timeout(
@@ -3646,33 +3648,26 @@ pub(crate) fn execute(
                             .await;
                         match result {
                             Ok(Ok(resp)) => {
-                                let wrapper: serde_json::Value = serde_json::from_str(
-                                        resp.0.get(),
-                                    )
-                                    .unwrap_or_default();
-                                let payload = wrapper.get("result").unwrap_or(&wrapper);
-                                if let Some(hits) = payload.get("results") {
-                                    results = serde_json::from_value::<
-                                        Vec<
-                                            shell::extensions::session_search::SearchSessionHit,
-                                        >,
-                                    >(hits.clone())
-                                        .unwrap_or_default();
-                                }
-                                let bootstrapping = payload
-                                    .get("bootstrapping")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false);
+                                let bootstrapping = match decode_deep_search_response(resp.0.get()) {
+                                    Ok((hits, bootstrapping)) => {
+                                        results = hits;
+                                        bootstrapping
+                                    }
+                                    Err(message) => {
+                                        error = Some(message);
+                                        break;
+                                    }
+                                };
                                 if !bootstrapping {
                                     break;
                                 }
                             }
                             Ok(Err(e)) => {
-                                tracing::warn!("deep search failed: {e}");
+                                error = Some(sanitize_user_error(&e.to_string()));
                                 break;
                             }
                             Err(_) => {
-                                tracing::warn!("deep search timed out");
+                                error = Some("Search timed out".into());
                                 break;
                             }
                         }
@@ -3681,6 +3676,7 @@ pub(crate) fn execute(
                     TaskResult::DeepSearchResults {
                         results,
                         seq,
+                        error,
                     }
                 });
         }
@@ -4102,5 +4098,24 @@ fn build_interject_params(
         "content": content,
     })
 }
+fn decode_deep_search_response(raw: &str) -> Result<(Vec<shell::extensions::session_search::SearchSessionHit>, bool), String> {
+    let wrapper: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|_| "Invalid history search response".to_string())?;
+    if let Some(error) = wrapper.get("error").filter(|value| !value.is_null()) {
+        let message = error.as_str()
+            .or_else(|| error.get("message").and_then(|value| value.as_str()))
+            .unwrap_or("History search request failed");
+        return Err(sanitize_user_error(message));
+    }
+    let payload = wrapper.get("result").unwrap_or(&wrapper);
+    let hits = payload.get("results")
+        .ok_or_else(|| "History search response missing results".to_string())?;
+    let results = serde_json::from_value(hits.clone())
+        .map_err(|_| "Invalid history search results".to_string())?;
+    let bootstrapping = payload.get("bootstrapping")
+        .and_then(|value| value.as_bool()).unwrap_or(false);
+    Ok((results, bootstrapping))
+}
+
 #[cfg(test)]
 mod tests;

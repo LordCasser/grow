@@ -156,9 +156,13 @@ Model and effort form one Sampling target; Agent and Behavior are separate contr
 
 Toggle multiline input. When it's on, `Enter` inserts a newline and `Shift+Enter` (or `Alt+Enter`) sends the message. Mid-turn, a bare `Enter` on an empty composer still steers the top queued prompt into the active turn.
 
-### `/history`
+### `/history [query]`
 
-Open prompt-history search: fuzzy-search this session's prompts newest-first, then press `Enter` or `Tab` to drop a match back into the prompt.
+Search past conversations, including assistant answers. `/history deployment error` opens the session picker and immediately searches conversation content; matching content includes a snippet. Select a session to resume it. Bare `/history` opens recent sessions with search focused. Typing uses the existing debounced search; at least two query bytes are needed for content search. Disabled indexing and failed requests show a diagnostic.
+
+Use `/history --prompts` for the original prompt-history overlay: fuzzy-search this session's prompts newest-first, then press `Enter` or `Tab` to insert a match into the prompt.
+
+Contract: [historical conversation search](../../../../../openspec/changes/implement-history-conversation-search/specs/client-surfaces/spec.md).
 
 For quick recall, press `↑` on an empty prompt instead. The panel opens with your most recent prompt already filled in; `↑`/`↓` step through entries (each lands in the input), `↓` past the newest entry closes the panel, and typing edits the recalled prompt in place.
 

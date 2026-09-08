@@ -520,15 +520,6 @@ impl HistorySearchState {
         self.selected = (current as isize + delta * half).clamp(0, max_idx as isize) as usize;
     }
 
-    /// Selected entry (returns `None` — use `selected_text()` instead).
-    pub fn selected(&self) -> Option<&HistoryEntry> {
-        // We can't return &HistoryEntry from Arc<[HistoryMatchResult]>.
-        // Callers should use selected_text(). This returns None to satisfy
-        // the type signature used by accept logic — the accept path uses
-        // selected_text() via a separate check.
-        None
-    }
-
     /// Text of the currently selected entry.
     pub fn selected_text(&self) -> Option<&str> {
         self.snapshot

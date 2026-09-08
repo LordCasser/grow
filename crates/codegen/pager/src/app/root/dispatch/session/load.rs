@@ -458,6 +458,8 @@ pub(in crate::app::root::dispatch) fn dispatch_trigger_deep_search(
     force: bool,
 ) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
+    app.session_picker_deep_search_seq += 1;
+    let seq = app.session_picker_deep_search_seq;
     if let Some(agent) = get_active_agent_mut(app)
         && let Some(ActiveModal::SessionPicker {
             state,
@@ -468,10 +470,9 @@ pub(in crate::app::root::dispatch) fn dispatch_trigger_deep_search(
         }) = agent.active_modal.as_mut()
     {
         let query = state.query().trim().to_string();
-        *deep_search_seq += 1;
-        let seq = *deep_search_seq;
+        *deep_search_seq = seq;
+        *content_results = None;
         if query.len() < 2 {
-            *content_results = None;
             *content_loading = false;
             return vec![];
         }
@@ -482,8 +483,7 @@ pub(in crate::app::root::dispatch) fn dispatch_trigger_deep_search(
         return vec![Effect::DebounceSessionSearch { query, seq }];
     }
     let query = app.session_picker_state.query().trim().to_string();
-    app.session_picker_deep_search_seq += 1;
-    let seq = app.session_picker_deep_search_seq;
+    app.session_picker_content_results = None;
     if query.len() < 2 {
         app.session_picker_content_results = None;
         app.session_picker_content_loading = false;
@@ -725,9 +725,8 @@ pub(in crate::app::root::dispatch) fn handle_session_search_debounce_expired(
 /// The deep-search seq of the surface that can still consume results: an
 /// open modal SessionPicker (its own counter), else the welcome-screen
 /// picker only while the welcome view is showing. `None` when neither
-/// surface is live — dismissing a modal bumps the WELCOME counter, which
-/// can collide with (not invalidate) a modal-armed seq, so those expiries
-/// are dropped by liveness rather than counter arithmetic.
+/// surface is live. Both surfaces allocate identities from the shared counter,
+/// so reopening a modal cannot accept a prior modal's completion.
 fn live_deep_search_seq(app: &AppView) -> Option<u64> {
     use crate::views::modal::ActiveModal;
     if let Some(agent) = get_active_agent(app)
@@ -772,8 +771,15 @@ pub(in crate::app::root::dispatch) fn handle_deep_search_results(
     app: &mut AppView,
     results: Vec<shell::extensions::session_search::SearchSessionHit>,
     seq: u64,
+    error: Option<String>,
 ) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
+    if live_deep_search_seq(app) != Some(seq) {
+        return vec![];
+    }
+    if let Some(error) = error {
+        app.show_toast(&format!("History search failed: {error}"));
+    }
     if let Some(agent) = get_active_agent_mut(app)
         && let Some(ActiveModal::SessionPicker {
             content_results,
@@ -796,9 +802,13 @@ pub(in crate::app::root::dispatch) fn handle_deep_search_results(
 }
 pub(in crate::app::root::dispatch) fn dispatch_show_session_picker(
     app: &mut AppView,
+    query: String,
 ) -> Vec<Effect> {
     use crate::views::modal::ActiveModal;
+    app.session_picker_deep_search_seq += 1;
+    let seq = app.session_picker_deep_search_seq;
     with_active_agent(app, |agent| {
+        agent.active_pane = crate::app::agent_view::ActivePane::Prompt;
         agent.active_modal = Some(ActiveModal::SessionPicker {
             state: crate::views::picker::PickerState::default(),
             entries: None,
@@ -807,12 +817,25 @@ pub(in crate::app::root::dispatch) fn dispatch_show_session_picker(
             window: crate::views::modal_window::ModalWindowState::new(),
             content_results: None,
             content_loading: false,
-            deep_search_seq: 0,
+            deep_search_seq: seq,
             entries_query: None,
             pending_delete: None,
         });
     });
-    dispatch_fetch_session_list(app)
+    let mut effects = dispatch_fetch_session_list(app);
+    if let Some(agent) = get_active_agent_mut(app)
+        && let Some(ActiveModal::SessionPicker { state, .. }) = agent.active_modal.as_mut()
+    {
+        state.set_query(&query);
+        state.search_active = true;
+    } else {
+        app.session_picker_state.set_query(&query);
+        app.session_picker_state.search_active = true;
+    }
+    if !query.is_empty() {
+        effects.extend(dispatch_trigger_deep_search(app, true));
+    }
+    effects
 }
 /// The picker (modal `/resume` or welcome screen) was dismissed without a
 /// pick. Its own fields die with it, but a still-current in-flight

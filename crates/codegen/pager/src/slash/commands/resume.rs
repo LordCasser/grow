@@ -19,6 +19,6 @@ impl SlashCommand for ResumeCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Action(Action::ShowSessionPicker)
+        CommandResult::Action(Action::ShowSessionPicker { query: String::new() })
     }
 }

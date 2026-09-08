@@ -1333,7 +1333,7 @@ fn build_mode_debounce_expiry_searches_current_and_drops_stale() {
     );
 }
 /// Modal `/resume` surface: the debounce expiry validates against the
-/// MODAL's deep-search seq (the welcome counter still sits at 0 here).
+/// MODAL's current deep-search identity.
 #[test]
 fn build_mode_modal_debounce_expiry_validates_modal_seq() {
     use crate::views::modal::ActiveModal;
@@ -1392,11 +1392,9 @@ fn build_mode_picker_close_invalidates_armed_debounce() {
         "expiry armed before the close must not search, got {effects:?}"
     );
 }
-/// Modal-armed debounce + modal close: the dismissal bump lands on the
-/// WELCOME counter and collides with the carried modal seq (both 1 here) —
-/// the expiry must still be dropped because no picker surface is live.
+/// Modal close invalidates its request identity and drops delayed work.
 #[test]
-fn build_mode_modal_close_drops_armed_debounce_despite_seq_collision() {
+fn build_mode_modal_close_invalidates_armed_debounce() {
     use crate::views::modal::ActiveModal;
     let mut app = test_app_with_agent();
     open_session_picker_with(&mut app, vec![make_picker_entry("local-cl-1", "/r")]);
@@ -1409,16 +1407,16 @@ fn build_mode_modal_close_drops_armed_debounce_despite_seq_collision() {
     }
     let _ = dispatch(Action::TriggerDeepSearch, &mut app);
     assert_eq!(
-        app.session_picker_deep_search_seq, 0,
-        "modal arm must not touch the welcome counter"
+        app.session_picker_deep_search_seq, 1,
+        "modal requests use the shared identity sequence"
     );
     get_active_agent_mut(&mut app)
         .expect("active agent")
         .active_modal = None;
     let _ = dispatch(Action::SessionPickerClosed, &mut app);
     assert_eq!(
-        app.session_picker_deep_search_seq, 1,
-        "collision precondition: welcome counter equals the armed modal seq"
+        app.session_picker_deep_search_seq, 2,
+        "closing invalidates the last request identity"
     );
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionSearchDebounceExpired {
@@ -1627,4 +1625,46 @@ fn build_mode_rapid_plain_fetches_keep_last_write_wins() {
         Some("build-second"),
         "later plain response wins (pre-existing behavior)"
     );
+}
+
+#[test]
+fn history_picker_queries_content_and_reopen_rejects_old_completions() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    let first = dispatch(Action::ShowSessionPicker { query: "deployment error".into() }, &mut app);
+    let first_seq = first.iter().find_map(|effect| match effect {
+        Effect::DeepSearchSessions { query, seq } if query == "deployment error" => Some(*seq),
+        _ => None,
+    }).expect("query immediately searches conversation content");
+    let second = dispatch(Action::ShowSessionPicker { query: "deployment error".into() }, &mut app);
+    let second_seq = second.iter().find_map(|effect| match effect {
+        Effect::DeepSearchSessions { seq, .. } => Some(*seq), _ => None,
+    }).unwrap();
+    assert!(second_seq > first_seq);
+    dispatch(Action::TaskComplete(TaskResult::DeepSearchResults {
+        results: vec![], seq: first_seq, error: Some("old request".into()),
+    }), &mut app);
+    let agent = get_active_agent_mut(&mut app).unwrap();
+    assert!(agent.toast.is_none());
+    assert!(matches!(agent.active_modal.as_ref(), Some(ActiveModal::SessionPicker {
+        content_loading: true, content_results: None, state, ..
+    }) if state.query() == "deployment error" && state.search_active));
+    dispatch(Action::TaskComplete(TaskResult::DeepSearchResults {
+        results: vec![], seq: second_seq, error: Some("session search is off (config)".into()),
+    }), &mut app);
+    let agent = get_active_agent_mut(&mut app).unwrap();
+    assert!(agent.toast.as_ref().unwrap().0.message.contains("session search is off"));
+    assert!(matches!(agent.active_modal.as_ref(), Some(ActiveModal::SessionPicker { content_loading: false, .. })));
+}
+
+#[test]
+fn history_picker_without_query_focuses_search_without_empty_request() {
+    use crate::views::modal::ActiveModal;
+    let mut app = test_app_with_agent();
+    get_active_agent_mut(&mut app).unwrap().active_pane = ActivePane::Scrollback;
+    let effects = dispatch(Action::ShowSessionPicker { query: String::new() }, &mut app);
+    assert_eq!(get_active_agent_mut(&mut app).unwrap().active_pane, ActivePane::Prompt);
+    assert!(!effects.iter().any(|effect| matches!(effect, Effect::DeepSearchSessions { .. })));
+    assert!(matches!(get_active_agent_mut(&mut app).unwrap().active_modal.as_ref(),
+        Some(ActiveModal::SessionPicker { state, .. }) if state.query().is_empty() && state.search_active));
 }

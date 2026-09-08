@@ -1418,8 +1418,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::DeepSearchResults { results, seq } => {
-            handle_deep_search_results(app, results, seq)
+        TaskResult::DeepSearchResults { results, seq, error } => {
+            handle_deep_search_results(app, results, seq, error)
         }
         TaskResult::RewindPointsLoaded {
             agent_id, points, ..

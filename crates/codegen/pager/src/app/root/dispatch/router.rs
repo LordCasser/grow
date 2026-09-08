@@ -210,7 +210,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             new_session_id,
         } => dispatch_startup_fork_session(app, parent_session_id, parent_cwd, new_session_id),
         Action::FetchSessionList => dispatch_fetch_session_list(app),
-        Action::ShowSessionPicker => dispatch_show_session_picker(app),
+        Action::ShowSessionPicker { query } => dispatch_show_session_picker(app, query),
         Action::SessionPickerClosed => dispatch_session_picker_closed(app),
         Action::PickSession(index) => dispatch_pick_session(app, index),
         Action::PickSessionInWorktree(index) => dispatch_pick_session_in_worktree(app, index),

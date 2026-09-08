@@ -71,8 +71,8 @@ pub enum Action {
     ExpandSessionCard {
         session_id: String,
     },
-    /// Open the session picker overlay (from within an active session via /resume).
-    ShowSessionPicker,
+    /// Open the existing session picker with an optional initial content query.
+    ShowSessionPicker { query: String },
     /// The session picker overlay was dismissed without a pick: invalidate any
     /// in-flight list/search request so a late response can't fall
     /// through to the welcome picker fields.
@@ -2511,6 +2511,7 @@ pub enum TaskResult {
     DeepSearchResults {
         results: Vec<shell::extensions::session_search::SearchSessionHit>,
         seq: u64,
+        error: Option<String>,
     },
     /// `grow/session/fork` completed (no-worktree path). The pager adopts
     /// the new session id and emits [`Effect::LoadSession`] to start the

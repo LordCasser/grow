@@ -1326,3 +1326,14 @@ async fn announcements_persistence_effect_reports_real_io_result() {
         }
     }
 }
+
+#[test]
+fn history_search_decodes_failures_without_fabricating_empty_results() {
+    assert!(super::decode_deep_search_response(r#"{"error":{"message":"session search is off (config)"}}"#)
+        .unwrap_err().contains("session search is off"));
+    assert!(super::decode_deep_search_response("{}").is_err());
+    assert!(super::decode_deep_search_response(r#"{"result":{"results":"bad"}}"#).is_err());
+    let (hits, pending) = super::decode_deep_search_response(r#"{"result":{"results":[],"bootstrapping":true}}"#).unwrap();
+    assert!(hits.is_empty());
+    assert!(pending);
+}
