@@ -1008,3 +1008,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The FixedHeight/Variable mode contract is enforced by a runtime panic in extend_heights rather than a type-level API that makes invalid incremental updates impossible.
 - Pager 审计债务：Prefix sums use usize while source heights are u16 without checked accumulation, leaving extreme aggregate-height behavior implicit.
 - Pager 审计债务：The cached width is metadata only in this module; correctness depends on ListPaneState to invalidate the cache whenever width or wrapping inputs change.
+- Pager 审计债务：The dialog shell is painted cell by cell with manual border glyphs and repeated theme/style literals instead of a reusable popup chrome primitive.
+- Pager 审计债务：dialog_width_for casts the aggregate Unicode display-width calculation to u16 before clamping, leaving extreme-width behavior implicit.
+- Pager 审计债务：Rendering couples directly to NewWorktreeDialogState::viewport and its byte range/display-column representation, so the view contract depends on editor internals without a local invariant check.
+- Pager 审计债务：The Unicode cursor test asserts only that some highlighted cell exists, allowing a misplaced cursor to pass while still meeting the test predicate.

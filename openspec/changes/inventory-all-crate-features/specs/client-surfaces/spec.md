@@ -27360,3 +27360,294 @@ WorkflowBlock SHALL disable vertical padding, raw mode, and folding, default to 
 - **THEN** the tasks surface labels it Workflow, includes the current phase and active-agent count, and counts the run once.
 
 证据：`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::is_selectable`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::has_bullet`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::is_groupable`；`crates/codegen/pager/src/scrollback/blocks/workflow.rs` — `WorkflowBlock::preamble`；`crates/codegen/pager/src/app/status_blocks.rs` — `tasks_block_text`；`crates/codegen/pager/src/app/status_blocks.rs` — `tasks_block_text_labels_workflow_runs`；`crates/codegen/pager/src/views/tasks_pane.rs` — `TaskEntry::from_workflow_run`；`crates/codegen/pager/src/views/tasks_pane.rs` — `workflows_section_lists_runs`；`crates/codegen/pager/src/views/tasks_pane.rs` — `workflow_children_are_excluded_and_run_counts_once`。
+
+
+### Requirement: New-worktree dialog width calculation
+
+The implementation SHALL satisfy the following tested behavior: dialog_width_for computes max_width as area_width.saturating_sub(4), computes needed from the display width of LABEL_PREFIX plus the label plus one cursor cell plus INNER_PAD, then returns needed.max(MIN_DIALOG_WIDTH).min(max_width). The source tests observe 50 for an empty label in width 120, 36 for an empty label in width 40, growth above 50 for a long label in width 120, and a width-56 clamp for a 100-character label in width 60.
+
+#### Scenario: Minimum width
+- **WHEN** an empty label is measured in a 120-column area
+- **THEN** dialog_width_for returns MIN_DIALOG_WIDTH, which is 50.
+
+#### Scenario: Available-area clamp
+- **WHEN** an empty label is measured in a 40-column area
+- **THEN** the returned width is area width minus four, namely 36.
+
+#### Scenario: Content growth and clamp
+- **WHEN** a long label is measured first in width 120 and then a 100-character label in width 60
+- **THEN** the first width grows above 50 and the second is clamped to 56.
+
+证据：`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `dialog_width_for`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `MIN_DIALOG_WIDTH`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `INNER_PAD`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `LABEL_PREFIX`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `tests::empty_dialog_uses_minimum_width`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `tests::dialog_grows_with_long_label`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `tests::dialog_clamps_to_terminal_width`。
+
+
+### Requirement: Centered dialog shell and action hints
+
+The implementation SHALL satisfy the following tested behavior: For areas at least five rows high and 20 columns wide, render_new_worktree_dialog centers a fixed five-row dialog horizontally and vertically, fills it with theme.bg_dark, draws a gray_dim rounded border, renders a bold text_primary New Worktree title, and renders enter = create and esc = cancel hints using the theme accent and gray styles. In smaller areas it returns before drawing the full shell and may draw a dim [Esc] to close hint when both dimensions permit it.
+
+#### Scenario: Wide dialog shell
+- **WHEN** a 100-by-20 area is rendered with a long label
+- **THEN** the rendered buffer contains the complete label and the New Worktree title.
+
+证据：`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `render_new_worktree_dialog`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `DIALOG_HEIGHT`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `Theme::current`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `tests::long_name_fully_visible_on_wide_terminal`。
+
+
+### Requirement: Cursor-following input viewport
+
+The implementation SHALL satisfy the following tested behavior: The input row computes the display width of LABEL_PREFIX, subtracts it from the inner width with saturating arithmetic, passes the remaining width to NewWorktreeDialogState::viewport, slices the label using viewport.visible_byte_range, renders that slice after the prefix, and places the cursor using viewport.cursor_display_column whenever input_width is positive. The narrow render test observes the cursor-side tail of a label in a 40-column area.
+
+#### Scenario: Narrow cursor-side view
+- **WHEN** a label longer than the available input width is rendered in a 40-column area
+- **THEN** the end of the label remains visible in the rendered text, with either the viewport indicator or the tail present.
+
+证据：`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `render_new_worktree_dialog`；`crates/codegen/pager/src/app/root/mod.rs` — `NewWorktreeDialogState::label`；`crates/codegen/pager/src/app/root/mod.rs` — `NewWorktreeDialogState::viewport`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `tests::long_name_end_visible_on_narrow_terminal`。
+
+
+### Requirement: Unicode display-width cursor painting
+
+The implementation SHALL satisfy the following tested behavior: The renderer uses unicode_width::UnicodeWidthStr for the prefix width and uses the viewport cursor display column to locate a live cursor cell. The cursor cell receives fg theme.bg_dark and bg theme.text_primary, while the visible label is rendered from a byte-aligned viewport range. The inline Unicode test constructs CJK, a combining mark, and an emoji ZWJ sequence, places the cursor after the combining-mark sequence, and checks that a text_primary background cell is present.
+
+#### Scenario: Middle Unicode cursor
+- **WHEN** a narrow dialog contains CJK text, a combining mark, and an emoji ZWJ sequence with the cursor in the middle
+- **THEN** the rendered buffer contains a cell whose background is Theme::current().text_primary.
+
+证据：`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `UnicodeWidthStr`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `render_new_worktree_dialog`；`crates/codegen/pager/src/app/root/mod.rs` — `NewWorktreeDialogState::set_cursor_byte`；`crates/codegen/pager/src/views/new_worktree_dialog.rs` — `tests::narrow_dialog_keeps_middle_unicode_cursor_visible`。
+
+
+### Requirement: AgentStatusBar SHALL collect pre-styled named Line items in push order, right-align the complete group within a nonzero area, paint the base background, place dim separators only between items, and return item hit rectangles keyed by id.
+
+new SHALL retain a borrowed Theme, empty item list, and right_pad=0. push SHALL compute each Line display width once as u16 and retain the static id and line. render SHALL return an empty map for zero width/height or no items; otherwise fill the area with theme.bg_base, compute total item width plus three-cell separators between items only, start at the right-aligned x after right_pad, paint each item and separator left-to-right, and return Rect{x:item start,y:area.y,width:item width,height:1} per id. Duplicate ids overwrite the earlier map entry while visual items remain in push order.
+
+#### Scenario: Empty area
+- **WHEN** area width or height is zero
+- **THEN** render returns no hit areas and performs no visible layout.
+
+#### Scenario: No items
+- **WHEN** status bar has not received pushes
+- **THEN** render returns an empty map.
+
+#### Scenario: Single item
+- **WHEN** one item is pushed
+- **THEN** it is right-aligned without leading/trailing separators and its hit rect covers its width.
+
+#### Scenario: Multiple items
+- **WHEN** several items are pushed
+- **THEN** items retain push order, separators appear only between them, and each id maps to its screen rect.
+
+#### Scenario: Themed background
+- **WHEN** a nonempty bar is rendered
+- **THEN** the entire supplied area receives theme.bg_base before items are painted.
+
+#### Scenario: Duplicate id
+- **WHEN** two items share an id
+- **THEN** both visual entries remain but the returned HashMap contains the last inserted rect for that id.
+
+证据：`crates/codegen/pager/src/views/agent_status.rs` — `AgentStatusBar`；`crates/codegen/pager/src/views/agent_status.rs` — `StatusEntry`；`crates/codegen/pager/src/views/agent_status.rs` — `AgentStatusBar::new`；`crates/codegen/pager/src/views/agent_status.rs` — `AgentStatusBar::push`；`crates/codegen/pager/src/views/agent_status.rs` — `AgentStatusBar::separator`；`crates/codegen/pager/src/views/agent_status.rs` — `AgentStatusBar::render`；`crates/codegen/pager/src/views/agent_status.rs` — `SEPARATOR`；`crates/codegen/pager/src/views/agent_status.rs` — `HashMap`；`crates/codegen/pager/src/views/agent_status.rs` — `Rect`。
+
+
+### Requirement: format_tokens_compact SHALL format signed token counts with compact k/M suffixes, and format_elapsed_compact SHALL floor milliseconds to seconds and choose seconds/minutes/hours units.
+
+format_tokens_compact SHALL preserve a negative sign using unsigned_abs, return raw decimal tokens below 1,000, format thousands as one-decimal k with `.0k` removed, and format millions as one-decimal M with `.0M` removed. format_elapsed_compact SHALL divide milliseconds by 1000, emit `<secs>s` below 60 seconds, `<minutes>m` below 60 minutes, and `<hours>h` at or above one hour, using floor division and omitting remainder.
+
+#### Scenario: Small token count
+- **WHEN** absolute tokens are below 1000
+- **THEN** the exact signed decimal count is returned.
+
+#### Scenario: Thousands
+- **WHEN** tokens are 1500 or exactly 1000
+- **THEN** the result is 1.5k or 1k without a trailing .0.
+
+#### Scenario: Millions
+- **WHEN** tokens are one million or more
+- **THEN** the result uses M with one decimal unless the decimal is zero.
+
+#### Scenario: Negative tokens
+- **WHEN** tokens is negative
+- **THEN** the minus sign precedes the compact magnitude.
+
+#### Scenario: Elapsed seconds
+- **WHEN** milliseconds are below 60 seconds
+- **THEN** whole floored seconds with s are returned.
+
+#### Scenario: Elapsed minutes/hours
+- **WHEN** milliseconds reach 60 minutes or 60 minutes
+- **THEN** whole floored minutes or hours with m/h are returned.
+
+证据：`crates/codegen/pager/src/views/agent_status.rs` — `format_tokens_compact`；`crates/codegen/pager/src/views/agent_status.rs` — `format_elapsed_compact`；`crates/codegen/pager/src/views/agent_status.rs` — `format_tokens_compact::unsigned_abs`；`crates/codegen/pager/src/views/agent_status.rs` — `compact_formatting_is_stable`。
+
+
+### Requirement: goal_status_line SHALL build a compact styled Goal chip with phase-specific label, optional budget/incomplete marker, live elapsed time, hover affordance, and a frame-driven spinner only while active.
+
+goal_phase_label SHALL map Paused/Blocked through GoalDisplayStatus::stopped_label, BudgetLimited to Budget, Complete to Done, and Active to Active. goal_status_line SHALL render `[<goal>]  <tokens>  <elapsed>`; token usage SHALL use format_tokens_compact, prefix ≥ when usage_incomplete, include `/budget` only for a positive token_budget, and otherwise show tokens alone. Elapsed SHALL use goal.live_elapsed_ms_at(frame_stamp.now()) and format_elapsed_compact. The chip label SHALL use warning foreground/background for statuses whose uses_warning_chip is true, otherwise accent_plan on base; hovered adds BOLD and UNDERLINED. Active goals prepend the frame-selected dot spinner, while stopped goals do not. context_used and active_subagent_tokens are accepted but ignored by this projection.
+
+#### Scenario: Paused/blocked phase
+- **WHEN** goal status is Paused or Blocked
+- **THEN** the chip uses stopped_label text and no active spinner.
+
+#### Scenario: Budget/completed phase
+- **WHEN** goal is BudgetLimited or Complete
+- **THEN** phase text is Budget or Done.
+
+#### Scenario: Active phase
+- **WHEN** goal status is Active
+- **THEN** the label includes a frame-driven dot spinner and Active.
+
+#### Scenario: Budget display
+- **WHEN** positive budget is present
+- **THEN** tokens render as used/budget tokens, with ≥ before used when usage_incomplete.
+
+#### Scenario: No usable budget
+- **WHEN** budget is None or zero
+- **THEN** only used tokens are displayed.
+
+#### Scenario: Hovered chip
+- **WHEN** hovered is true
+- **THEN** the label style adds bold and underline.
+
+#### Scenario: Warning chip
+- **WHEN** status uses warning chip
+- **THEN** label is rendered with warning background/base foreground instead of normal accent plan.
+
+#### Scenario: Elapsed projection
+- **WHEN** frame stamp and live elapsed state are supplied
+- **THEN** elapsed text is derived from live_elapsed_ms_at at that frame.
+
+证据：`crates/codegen/pager/src/views/agent_status.rs` — `goal_phase_label`；`crates/codegen/pager/src/views/agent_status.rs` — `goal_status_line`；`crates/codegen/pager/src/views/agent_status.rs` — `format_tokens_compact`；`crates/codegen/pager/src/views/agent_status.rs` — `format_elapsed_compact`；`crates/codegen/pager/src/views/agent_status.rs` — `GoalDisplayStatus::stopped_label`；`crates/codegen/pager/src/views/agent_status.rs` — `GoalDisplayStatus::uses_warning_chip`；`crates/codegen/pager/src/views/agent_status.rs` — `GoalDisplayState::live_elapsed_ms_at`；`crates/codegen/pager/src/views/agent_status.rs` — `dot_spinner_frames`；`crates/codegen/pager/src/views/agent_status.rs` — `spinner_glyph`。
+
+
+### Requirement: mcp_status_line SHALL return no chip for a zero-total startup seed and otherwise render a frame-driven braille spinner with connected/total counts in dim base-background styling.
+
+mcp_status_line SHALL return None when progress.total==0. For total>0 it SHALL obtain braille_spinner_frames, derive spinner_glyph from the supplied FrameStamp, use theme.gray_dim over theme.bg_base, and return a Line containing `<spinner> ` followed by `MCP (<connected>/<total>)`.
+
+#### Scenario: Startup seed
+- **WHEN** progress.total is zero
+- **THEN** no top-bar MCP chip is returned; startup visibility remains owned by the turn-status surface.
+
+#### Scenario: Connecting servers
+- **WHEN** total is positive and connected is less than total
+- **THEN** a braille spinner and MCP connected/total count are returned.
+
+#### Scenario: Fully connected
+- **WHEN** connected equals total
+- **THEN** the same compact MCP count format is returned with the current spinner frame.
+
+#### Scenario: Frame update
+- **WHEN** different FrameStamp is supplied
+- **THEN** spinner glyph selection is delegated to motion spinner logic while counts remain unchanged.
+
+证据：`crates/codegen/pager/src/views/agent_status.rs` — `mcp_status_line`；`crates/codegen/pager/src/views/agent_status.rs` — `McpInitProgress`；`crates/codegen/pager/src/views/agent_status.rs` — `braille_spinner_frames`；`crates/codegen/pager/src/views/agent_status.rs` — `spinner_glyph`；`crates/codegen/pager/src/views/agent_status.rs` — `MCP`；`crates/codegen/pager/src/views/agent_status.rs` — `McpInitProgress::total`；`crates/codegen/pager/src/views/agent_status.rs` — `McpInitProgress::connected`。
+
+
+### Requirement: The agent status view SHALL remain a composable presentation layer: it owns item layout, compact formatting, and spinner projection while callers own status data, hit dispatch, frame scheduling, and interaction side effects.
+
+The implementation SHALL satisfy the following tested behavior: AgentStatusBar borrows Theme and consumes prebuilt Line values; it does not fetch or mutate Goal/MCP state, persist settings, or dispatch hits. goal_status_line ignores context_used and active_subagent_tokens, and mcp_status_line only projects supplied progress. render returns geometry for caller hit-testing but does not handle clicks. The single inline test proves formatting examples only; status layout, Buffer clipping, hover styles, spinners, and integration routing remain source-level contracts.
+
+#### Scenario: Caller-owned status
+- **WHEN** goal or MCP model state changes
+- **THEN** callers provide GoalDisplayState/McpInitProgress snapshots and this module only formats them.
+
+#### Scenario: Hit-test handoff
+- **WHEN** a caller receives render map
+- **THEN** it uses returned Rects to route interaction; AgentStatusBar itself has no click handler.
+
+#### Scenario: Frame handoff
+- **WHEN** a spinner-bearing line is rendered
+- **THEN** the caller supplies FrameStamp; this module does not schedule redraws.
+
+#### Scenario: Audit boundary
+- **WHEN** the source is inspected with one inline test
+- **THEN** only token/elapsed formatting examples are runtime-tested; full layout and integration are unproven here.
+
+证据：`crates/codegen/pager/src/views/agent_status.rs` — `AgentStatusBar::render`；`crates/codegen/pager/src/views/agent_status.rs` — `goal_status_line`；`crates/codegen/pager/src/views/agent_status.rs` — `mcp_status_line`；`crates/codegen/pager/src/views/agent_status.rs` — `format_tokens_compact`；`crates/codegen/pager/src/views/agent_status.rs` — `format_elapsed_compact`；`crates/codegen/pager/src/views/agent_status.rs` — `compact_formatting_is_stable`。
+
+
+### Requirement: Goal detail overlay rendering and live goal projection contract
+
+render_goal_detail SHALL return None without painting when the screen is narrower than 20 columns or shorter than 8 rows. Otherwise it SHALL clear and center a rounded, bordered Long-term Goal panel whose width is screen.width-4 clamped to 36..100 and height is screen.height-4 clamped to 10..22, render a hover-sensitive [×] close target, and render status, objective, usage, elapsed, updated timestamp, optional status message, and lifecycle action hint. Usage SHALL show compact token counts, an optional budget, and ≥ when usage_incomplete; elapsed SHALL be derived from live_elapsed_ms_at(frame_stamp.now()); updated text and user text SHALL be sanitized before display. Content SHALL be clipped by a saturated max-scroll derived from inner height.
+
+#### Scenario: Too-small terminal
+- **WHEN** render_goal_detail is called with width < 20 or height < 8
+- **THEN** the function returns None and does not paint a goal panel.
+
+#### Scenario: Panel layout
+- **WHEN** a renderable terminal and GoalDisplayState are supplied
+- **THEN** the panel is cleared, centered with the documented clamps, uses rounded borders and Long-term Goal title, exposes the close rect, and paints the scrollable content region.
+
+#### Scenario: Goal metrics
+- **WHEN** the goal has a budget or no budget, complete/active/other status, partial usage, live elapsed time, timestamp, or status message
+- **THEN** the rendered lines show the matching status color family, compact usage form, optional ≥/budget, live elapsed, sanitized Updated value, and wrapped optional status message.
+
+#### Scenario: Content overflow
+- **WHEN** content exceeds the panel inner height or renderer scroll is beyond the available range
+- **THEN** scroll is clamped to lines.len minus inner.height and Paragraph renders only the visible slice.
+
+证据：`crates/codegen/pager/src/views/goal_detail.rs` — `centered_area`；`crates/codegen/pager/src/views/goal_detail.rs` — `render_goal_detail`；`crates/codegen/pager/src/views/goal_detail.rs` — `GoalDetailRenderOutput`；`crates/codegen/pager/src/app/acp_handler/tests/goals.rs` — `goal_update_maps_only_the_long_term_goal_projection`；`crates/codegen/pager/src/app/acp_handler/tests/goals.rs` — `goal_controls_outside_goal_behavior_keep_state_without_duplicate_history`。
+
+
+### Requirement: Goal status labels and lifecycle action hints contract
+
+status_label SHALL map Active, Paused, Blocked, BudgetLimited, and Complete to Active, Paused, Blocked, Budget limited, and Complete. goal_actions_hint SHALL advertise pause only for Active, restart for Paused or Blocked, budget/edit/clear for BudgetLimited, and edit/clear for Complete, using the exact slash-command strings rendered by the overlay.
+
+#### Scenario: Active controls
+- **WHEN** the goal status is Active
+- **THEN** the hint is /goal edit · pause · budget · clear and does not advertise restart.
+
+#### Scenario: Paused or blocked controls
+- **WHEN** the goal status is Paused or Blocked
+- **THEN** the hint is /goal edit · restart · budget · clear and does not advertise pause.
+
+#### Scenario: Budget-limited controls
+- **WHEN** the goal status is BudgetLimited
+- **THEN** the hint is /goal budget · edit · clear and does not advertise restart.
+
+#### Scenario: Completed controls
+- **WHEN** the goal status is Complete
+- **THEN** the hint is exactly /goal edit · clear.
+
+证据：`crates/codegen/pager/src/views/goal_detail.rs` — `status_label`；`crates/codegen/pager/src/views/goal_detail.rs` — `goal_actions_hint`；`crates/codegen/pager/src/views/goal_detail.rs` — `tests::goal_action_hint_only_offers_valid_lifecycle_controls`。
+
+
+### Requirement: Goal detail text wrapping and control-character sanitization contract
+
+wrapped_lines SHALL sanitize input with strip_control_chars(input, true), preserve newline and tab controls, preserve empty lines, wrap each logical line with textwrap at width.max(1), and apply the requested style. strip_control_chars SHALL remove control characters, retaining only newline and tab when keep_newlines is true and retaining none when false.
+
+#### Scenario: Multiline objective
+- **WHEN** objective or status message contains newlines, tabs, empty lines, and other control characters
+- **THEN** logical lines are preserved, empty lines remain blank, newline/tab are retained for wrapping, and other controls are removed before styled output.
+
+#### Scenario: Zero width
+- **WHEN** wrapped_lines receives width 0
+- **THEN** wrapping uses width 1 rather than panicking or passing zero to textwrap.
+
+#### Scenario: Timestamp sanitization
+- **WHEN** Updated contains control characters
+- **THEN** render_goal_detail calls strip_control_chars with keep_newlines false so no newline/tab/control can alter the metadata row.
+
+#### Scenario: Direct sanitization
+- **WHEN** strip_control_chars is called with either keep_newlines value
+- **THEN** the returned string retains ordinary Unicode and only the controls allowed by that flag.
+
+证据：`crates/codegen/pager/src/views/goal_detail.rs` — `wrapped_lines`；`crates/codegen/pager/src/views/goal_detail.rs` — `strip_control_chars`；`crates/codegen/pager/src/views/goal_detail.rs` — `render_goal_detail`。
+
+
+### Requirement: Goal detail elapsed and Unicode-width truncation contract
+
+format_elapsed SHALL floor milliseconds to whole seconds and format durations as Nh Mm when hours are present, Nm Ns when only minutes are present, or Ns otherwise. truncate_to_width SHALL return unchanged text when Unicode display width fits, emit an ellipsis-only result for width 1, emit empty text for width 0, and otherwise retain complete characters up to width-1 before appending an ellipsis; character widths SHALL use UnicodeWidthChar with zero-width fallback.
+
+#### Scenario: Elapsed formatting
+- **WHEN** duration is below one minute, between one minute and one hour, or at least one hour
+- **THEN** the output uses seconds, minutes plus seconds, or hours plus minutes respectively, with millisecond remainder discarded.
+
+#### Scenario: Exact width fit
+- **WHEN** input Unicode display width is at most requested width
+- **THEN** truncate_to_width returns the original string.
+
+#### Scenario: Narrow width
+- **WHEN** input is wider than width and width is 0 or 1
+- **THEN** the result is empty for width 0 and an ellipsis for width 1.
+
+#### Scenario: Wide Unicode text
+- **WHEN** input exceeds width greater than 1 and includes multi-column or zero-width characters
+- **THEN** complete characters fit within width-1 display columns and a final ellipsis is appended without splitting a character.
+
+证据：`crates/codegen/pager/src/views/goal_detail.rs` — `format_elapsed`；`crates/codegen/pager/src/views/goal_detail.rs` — `truncate_to_width`；`crates/codegen/pager/src/views/workflows.rs` — `render_workflow_detail`；`crates/codegen/pager/src/views/workflows.rs` — `render_workflows`。

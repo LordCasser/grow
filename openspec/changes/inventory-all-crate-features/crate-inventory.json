@@ -4033,7 +4033,20 @@
       "Workflow block state model and run identity are stable across lifecycle updates",
       "Workflow block output renders status, objective, phase trail, and active agents",
       "Workflow block accents and bullets distinguish run status",
-      "Workflow blocks remain compact selectable groupable lifecycle entries with an objective preamble"
+      "Workflow blocks remain compact selectable groupable lifecycle entries with an objective preamble",
+      "New-worktree dialog width calculation",
+      "Centered dialog shell and action hints",
+      "Cursor-following input viewport",
+      "Unicode display-width cursor painting",
+      "AgentStatusBar SHALL collect pre-styled named Line items in push order, right-align the complete group within a nonzero area, paint the base background, place dim separators only between items, and return item hit rectangles keyed by id.",
+      "format_tokens_compact SHALL format signed token counts with compact k/M suffixes, and format_elapsed_compact SHALL floor milliseconds to seconds and choose seconds/minutes/hours units.",
+      "goal_status_line SHALL build a compact styled Goal chip with phase-specific label, optional budget/incomplete marker, live elapsed time, hover affordance, and a frame-driven spinner only while active.",
+      "mcp_status_line SHALL return no chip for a zero-total startup seed and otherwise render a frame-driven braille spinner with connected/total counts in dim base-background styling.",
+      "The agent status view SHALL remain a composable presentation layer: it owns item layout, compact formatting, and spinner projection while callers own status data, hit dispatch, frame scheduling, and interaction side effects.",
+      "Goal detail overlay rendering and live goal projection contract",
+      "Goal status labels and lifecycle action hints contract",
+      "Goal detail text wrapping and control-character sanitization contract",
+      "Goal detail elapsed and Unicode-width truncation contract"
     ],
     "reviewed_files": [
       {
@@ -6399,6 +6412,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/blocks/workflow.rs",
         "sha256": "baa73648ffed392c0af3dd54c4bda04f344e41f314169ac7776e77c4da1e4c0a"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/new_worktree_dialog.rs",
+        "sha256": "13edfbb2ee1d0c6a189f902208b4df34b63d4b2854c01eee2a22e33e954c025c"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/agent_status.rs",
+        "sha256": "d3771f4d9e86035f75f7810b406faeccda1aebaf41960a4d7b0640ef44526b26"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/goal_detail.rs",
+        "sha256": "d0069a7f2f450a86984b201a9a66cde1564ae22e4844f9780fab6729234a640c"
       }
     ],
     "review": "reviews/pager.md"
