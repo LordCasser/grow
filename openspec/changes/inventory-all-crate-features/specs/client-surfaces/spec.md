@@ -13922,3 +13922,233 @@ handle_mouse_event SHALL consume left-button content clicks, scrollbar clicks an
 - **THEN** normal line scrolling and follow overscroll rules apply.
 
 证据：`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::handle_mouse_event`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::handle_scroll_event`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::apply_scrollbar_click`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::set_scroll_offset_and_center`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_and_center`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scroll_lines`；`crates/codegen/pager/src/views/list_pane/state/methods.rs` — `ListPaneState::scrollbar_area`。
+### Requirement: The pager SHALL keep process-wide input ownership flags coherent: the `/gboom` game may push and pop an additional Kitty keyboard layer exactly once, mouse capture state SHALL be observable, minimal mode SHALL be tracked separately from styling toggles, and Esc cancellation plus opt-in mouse-reporting behavior SHALL be derived from explicit mode/config inputs.
+push_gboom_keyboard_flags SHALL no-op when Kitty flags are unavailable or already pushed, otherwise push disambiguation, event-type, and all-keys escape reporting; pop SHALL balance one pushed layer. Minimal and mouse-reporting atomics SHALL use acquire/release ordering, test overrides SHALL be isolated to test support, and esc_cancels_turn SHALL return true for minimal or non-vim mode.
+
+#### Scenario: Game keyboard layer
+- **WHEN** Kitty keyboard protocol is active and the game opens repeatedly
+- **THEN** one extra layer is pushed once and later popped once.
+
+#### Scenario: Minimal behavior gate
+- **WHEN** effective screen mode is Minimal
+- **THEN** minimal_mode_active is true while style/render toggles are set by the central mode seam.
+
+#### Scenario: Esc policy
+- **WHEN** minimal or non-vim fullscreen is active
+- **THEN** a bare Esc is treated as turn cancellation; fullscreen vim keeps the mid-turn swallow.
+
+#### Scenario: Mouse toggle gate
+- **WHEN** the opt-in setting was seeded
+- **THEN** the cached flag is available to command routing and the off hint remains stable.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `GBOOM_KEYBOARD_PUSHED`；`crates/codegen/pager/src/app/mod.rs` — `push_gboom_keyboard_flags`；`crates/codegen/pager/src/app/mod.rs` — `pop_gboom_keyboard_flags`；`crates/codegen/pager/src/app/mod.rs` — `MOUSE_CAPTURE_ENABLED`；`crates/codegen/pager/src/app/mod.rs` — `MINIMAL_AUTO_SET_FOR_MOUSE_LEAK`；`crates/codegen/pager/src/app/mod.rs` — `minimal_auto_set_for_mouse_leak`；`crates/codegen/pager/src/app/mod.rs` — `MINIMAL_SHOW_SWITCH_BACK_TO_FULLSCREEN`；`crates/codegen/pager/src/app/mod.rs` — `minimal_show_switch_back_to_fullscreen`；`crates/codegen/pager/src/app/mod.rs` — `set_minimal_show_switch_back_to_fullscreen_for_test`；`crates/codegen/pager/src/app/mod.rs` — `MINIMAL_MODE_ACTIVE`；`crates/codegen/pager/src/app/mod.rs` — `minimal_mode_active`；`crates/codegen/pager/src/app/mod.rs` — `set_minimal_mode_active_for_test`；`crates/codegen/pager/src/app/mod.rs` — `esc_cancels_turn`；`crates/codegen/pager/src/app/mod.rs` — `MOUSE_REPORTING_TOGGLE_ENABLED`；`crates/codegen/pager/src/app/mod.rs` — `mouse_reporting_toggle_enabled`；`crates/codegen/pager/src/app/mod.rs` — `MOUSE_OFF_HINT`。
+
+### Requirement: ScreenMode SHALL distinguish fullscreen, inline, and minimal modes with stable metadata labels; startup SHALL install minimal/native or regular themes before terminal initialization, then resolve a regular theme if a minimal request is downgraded by probing.
+ScreenMode::is_fullscreen/is_minimal/meta_label SHALL be pure projections with labels fullscreen, inline, and minimal. apply_screen_mode_globals SHALL centralize minimal behavior gates, engage_startup_theme SHALL select native lock or initial theme, and finish_theme_after_probe SHALL only resolve the deferred regular theme when requested minimal becomes nonminimal.
+
+#### Scenario: Mode label
+- **WHEN** diagnostics asks for a screen-mode label
+- **THEN** the stable wire label is returned.
+
+#### Scenario: Minimal startup
+- **WHEN** minimal is requested
+- **THEN** native theme lock and minimal behavior globals are engaged before terminal init.
+
+#### Scenario: Probe downgrade
+- **WHEN** minimal was requested but effective mode is inline
+- **THEN** regular theme resolution without OSC11 is applied after the probe.
+
+#### Scenario: Normal startup
+- **WHEN** inline or fullscreen is requested
+- **THEN** the regular initial theme is selected and no downgrade repair runs.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `ScreenMode`；`crates/codegen/pager/src/app/mod.rs` — `ScreenMode::is_fullscreen`；`crates/codegen/pager/src/app/mod.rs` — `ScreenMode::is_minimal`；`crates/codegen/pager/src/app/mod.rs` — `ScreenMode::meta_label`；`crates/codegen/pager/src/app/mod.rs` — `apply_screen_mode_globals`；`crates/codegen/pager/src/app/mod.rs` — `engage_startup_theme`；`crates/codegen/pager/src/app/mod.rs` — `finish_theme_after_probe`。
+
+### Requirement: Leader mode SHALL resolve flags and policy in the order `--no-leader`, `--leader`, eligibility, local config, release remote setting, then default-off; a requested confinement profile SHALL veto an otherwise enabled leader without fabricating a policy-disable reason, and the result SHALL retain both typed reasons.
+resolve_leader_mode SHALL return use_leader, policy_disable_reason only for definitive config/remote false, and disabled_by_confinement only when confinement removed an otherwise enabled leader. resolve_use_leader SHALL expose the decision pair, and the sandbox warning SHALL state the requested profile without claiming enforcement while tolerating write failure.
+
+#### Scenario: CLI precedence
+- **WHEN** both leader flags are present
+- **THEN** no-leader wins and no policy reclaim reason is reported.
+
+#### Scenario: Config policy
+- **WHEN** eligible mode has local use_leader=false
+- **THEN** leader is disabled with policy_disable_reason=config.
+
+#### Scenario: Confinement veto
+- **WHEN** leader would otherwise be enabled and a profile is requested
+- **THEN** leader is disabled and disabled_by_confinement names that profile.
+
+#### Scenario: Unknown remote
+- **WHEN** remote leader mode is absent or unknown
+- **THEN** the default remains off without treating uncertainty as policy disable.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `resolve_leader_mode`；`crates/codegen/pager/src/app/mod.rs` — `LeaderMode`；`crates/codegen/pager/src/app/mod.rs` — `resolve_use_leader`；`crates/codegen/pager/src/app/mod.rs` — `warn_leader_disabled_by_sandbox`；`crates/codegen/pager/src/app/mod.rs` — `print_leader_disabled_by_sandbox`。
+
+### Requirement: Startup configuration SHALL choose the first nonblank hunk-tracker mode from CLI, environment, and config, refuse to connect when no valid LLM configuration exists on noninteractive stdin, provide a validated editable template on an interactive terminal, and bound connection attempts by cancellation or timeout.
+resolve_hunk_tracker_mode SHALL trim and skip blank values in precedence order. ensure_llm_configured SHALL validate first, fail fast when stdin is not a terminal, otherwise create the config parent/template as needed, resolve VISUAL over EDITOR, open the file, reload effective config, and revalidate. bounded_connect SHALL prioritize cancellation, return the connect result, or report a target-specific timeout.
+
+#### Scenario: Hunk precedence
+- **WHEN** CLI, env, and config values contain blanks or values
+- **THEN** the first trimmed nonblank value wins or None is returned.
+
+#### Scenario: Headless missing config
+- **WHEN** LLM validation fails and stdin is not a terminal
+- **THEN** startup returns an actionable error without creating or opening a config file.
+
+#### Scenario: Interactive missing config
+- **WHEN** validation fails on a terminal
+- **THEN** the template is created if absent, the selected editor runs, and the reloaded config must validate.
+
+#### Scenario: Connect timeout/cancel
+- **WHEN** a connect future stalls or the token is cancelled
+- **THEN** bounded_connect returns a typed error for the target without stranding startup.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `resolve_hunk_tracker_mode`；`crates/codegen/pager/src/app/mod.rs` — `LLM_CONFIG_TEMPLATE`；`crates/codegen/pager/src/app/mod.rs` — `validate_llm_config`；`crates/codegen/pager/src/app/mod.rs` — `ensure_llm_configured`；`crates/codegen/pager/src/app/mod.rs` — `bounded_connect`。
+
+### Requirement: The pager run entry point SHALL load and validate effective configuration before redirecting native stderr, materialize session startup intent, resolve leader/permission/screen mode, initialize terminal state, connect with bounded cancellation, fall back from a failed leader to the embedded agent, run the root event loop, restore terminal ownership, and preserve update/relaunch/exit outcomes.
+run SHALL honor trust and startup intent before event-loop launch, pass resolved ConnectFlags and TerminalState into root::event_loop::run, use a 30-second connection bound, retry embedded connection only for a noncancelled leader failure, flush logs and restore terminal on connect failure, and after the event loop restore terminal before update restart, mode relaunch, resume hint, or error propagation.
+
+#### Scenario: Configuration gate
+- **WHEN** effective config cannot load or has no LLM
+- **THEN** run returns before terminal ownership is taken.
+
+#### Scenario: Leader fallback
+- **WHEN** leader connection fails while cancellation is not requested
+- **THEN** the same connect flags are used for one embedded-agent retry and the result records fallback.
+
+#### Scenario: Cancellation
+- **WHEN** connection or event loop cancellation occurs
+- **THEN** terminal/log cleanup runs and cancellation is not mistaken for successful startup.
+
+#### Scenario: Exit outcome
+- **WHEN** event loop returns update, relaunch, exit info, or error
+- **THEN** terminal restoration precedes the corresponding return, exec attempt, hint, or error.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `run`。
+
+### Requirement: Terminal initialization SHALL enable raw input, select alternate or inline viewport according to ScreenMode, configure focus/paste/mouse reporting and negotiated Kitty flags, apply tri-state cursor blink policy without clobbering inherited terminal style, and downgrade minimal to inline when the inline viewport probe cannot provide minimal semantics.
+init_terminal SHALL drain stale input, optionally clear a relaunching minimal screen, enter alternate screen only for fullscreen, enable mouse capture only outside minimal, enable focus and bracketed paste, push negotiated Kitty flags, build the writer-backed PagerTerminal, and return the effective mode. A failed minimal inline probe SHALL retry full-height inline with mouse capture; other inline failure SHALL use a fixed viewport after scrolling up.
+
+#### Scenario: Cursor default
+- **WHEN** cursor_blink is None
+- **THEN** no cursor style escape is forced.
+
+#### Scenario: Cursor explicit
+- **WHEN** cursor_blink is true or false
+- **THEN** blinking or steady block style is selected and teardown knows to restore it.
+
+#### Scenario: Minimal probe failure
+- **WHEN** minimal inline viewport setup fails
+- **THEN** minimal downgrades to inline and enables mouse capture for the fallback.
+
+#### Scenario: Kitty negotiation
+- **WHEN** terminal capability detection returns no flags or flags
+- **THEN** none are pushed in the former case, otherwise the negotiated layer is pushed and recorded.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `CursorStylePolicy`；`crates/codegen/pager/src/app/mod.rs` — `cursor_style_policy`；`crates/codegen/pager/src/app/mod.rs` — `init_terminal`；`crates/codegen/pager/src/app/mod.rs` — `drain_pending_events`；`crates/codegen/pager/src/app/mod.rs` — `drain_pending_events_with_timeout`；`crates/codegen/pager/src/app/mod.rs` — `configure_windows_console`；`crates/codegen/pager/src/app/mod.rs` — `CURSOR_STYLE_FORCED`。
+
+### Requirement: On Windows conhost, native minimal selection SHALL preserve unrelated console-input bits while clearing app mouse reporting, enabling QuickEdit and its extended-flags gate, and enabling window-resize events; the original stdin mode SHALL be captured once and restored at teardown.
+native_selection_mode SHALL be idempotent and mask only ENABLE_MOUSE_INPUT while asserting ENABLE_EXTENDED_FLAGS, ENABLE_QUICK_EDIT_MODE, and ENABLE_WINDOW_INPUT. The Windows implementation SHALL no-op for redirected stdin, snapshot the first mode, avoid replacing the saved mode on repeated toggles, and restore at most once.
+
+#### Scenario: Native drag selection
+- **WHEN** conhost input mode is active
+- **THEN** QuickEdit is enabled and app mouse reporting is off.
+
+#### Scenario: Stale capture state
+- **WHEN** a prior crossterm capture mode remains
+- **THEN** the transform recovers QuickEdit while preserving unrelated bits.
+
+#### Scenario: Repeated enable
+- **WHEN** native selection is enabled multiple times
+- **THEN** the transformed mode is stable and the original snapshot remains the teardown target.
+
+#### Scenario: Non-console stdin
+- **WHEN** stdin is redirected
+- **THEN** enable/restore performs no console mutation.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `win_native_selection`；`crates/codegen/pager/src/app/mod.rs` — `win_native_selection::native_selection_mode`；`crates/codegen/pager/src/app/mod.rs` — `win_native_selection::enable_native_selection`；`crates/codegen/pager/src/app/mod.rs` — `win_native_selection::restore_stdin_mode`；`crates/codegen/pager/src/app/mod.rs` — `win_native_selection::tests::asserts_quick_edit_and_resize_clears_mouse_input`。
+
+### Requirement: Terminal teardown SHALL stop output safely, emit reset sequences in a defined order, restore cursor/mouse/focus/Kitty/native-selection/raw-mode state, and execute from both normal restore and panic paths even when writer draining fails.
+restore_terminal_with SHALL clear fullscreen content when possible, compute inline cursor placement, drain and join the writer before teardown, always invoke teardown, drain residual events, disable raw mode, mark signal restoration, disable crash escape restore, and restore native stderr. emit_terminal_teardown_sequences SHALL clear progress, end synchronized updates before resets, disable mouse/paste and focus, pop game and Kitty layers, restore forced cursor style, leave fullscreen or move/show/write an inline final row, and best-effort restore Windows input.
+
+#### Scenario: Writer failure
+- **WHEN** the drain callback returns an error
+- **THEN** teardown still runs and the error is returned.
+
+#### Scenario: Fullscreen restore
+- **WHEN** normal fullscreen teardown begins
+- **THEN** a final clear is queued and drained before LeaveAlternateScreen.
+
+#### Scenario: Inline restore
+- **WHEN** inline teardown begins
+- **THEN** cursor is moved to the bounded final row, shown, and a newline is flushed.
+
+#### Scenario: Panic
+- **WHEN** the panic hook runs while terminal state is owned
+- **THEN** the same escape restoration, raw-mode disable, signal mark, stderr restore, and process-scope cleanup execute.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `drain_writer_thread_before_teardown`；`crates/codegen/pager/src/app/mod.rs` — `emit_terminal_teardown_sequences`；`crates/codegen/pager/src/app/mod.rs` — `restore_terminal_with`；`crates/codegen/pager/src/app/mod.rs` — `restore_terminal`；`crates/codegen/pager/src/app/mod.rs` — `set_panic_hook`；`crates/codegen/pager/src/app/mod.rs` — `disable_mouse_paste_raw`。
+
+### Requirement: Terminal titles SHALL strip control characters, fall back to `grow` when empty, truncate Unicode characters before appending ` - grow`, and write through the locked stderr path; exit and relaunch hints SHALL include the correct resume mode/session, optional sanitized summary lines, width truncation, and tolerate broken output pipes.
+terminal_title_string SHALL remove every control character, cap the visible title prefix at 74 Unicode characters, and use `grow` for empty results. set_terminal_title SHALL emit SetTitle with the sanitized value. print_exit_resume_hint SHALL print optional title/prompt/response summaries and minimal/fullscreen resume commands with best-effort writes; print_relaunch_failure_hint SHALL print the mode-specific resume command and never panic on write failure.
+
+#### Scenario: Unsafe title
+- **WHEN** metadata contains BEL, ESC, or only controls
+- **THEN** the emitted title contains no control characters and empty input becomes `grow - grow` internally.
+
+#### Scenario: Resume hint
+- **WHEN** a session exits with minimal or fullscreen mode
+- **THEN** the command uses the matching `--minimal --resume` or `--resume` form.
+
+#### Scenario: Summary width
+- **WHEN** summary fields exceed terminal width
+- **THEN** each line is Unicode-truncated to its available width.
+
+#### Scenario: Broken stderr
+- **WHEN** writer returns EIO/EPIPE
+- **THEN** hints and sandbox notices return without panicking.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `set_terminal_title`；`crates/codegen/pager/src/app/mod.rs` — `terminal_title_string`；`crates/codegen/pager/src/app/mod.rs` — `print_exit_resume_hint`；`crates/codegen/pager/src/app/mod.rs` — `print_relaunch_failure_hint`。
+
+### Requirement: The app entry module SHALL expose the PagerArgs command surface with stable leader/no-leader conflict handling, resume/continue sentinels, worktree/session-id/fork combinations, no-alt-screen and feature-gated flags, command naming/help ordering, and shell-completion parsing.
+The re-exported PagerArgs parser SHALL accept documented short/long aliases and preserve session-startup intent boundaries: resume without an ID means most-recent sentinel, continue conflicts with resume, session-id combined with resume/continue requires fork, and the optional chat flag is rejected when its feature is absent. CLI help SHALL retain the Grow TUI header and argument/option/command ordering.
+
+#### Scenario: Leader flags
+- **WHEN** --leader and --no-leader are both supplied
+- **THEN** clap rejects the conflict.
+
+#### Scenario: Resume sentinel
+- **WHEN** --resume has no ID
+- **THEN** resume_most_recent is true and session_to_resume is None.
+
+#### Scenario: Session identity
+- **WHEN** --session-id is combined with resume/continue
+- **THEN** startup intent rejects it unless --fork-session is present.
+
+#### Scenario: Command surface
+- **WHEN** the root parser or completions subcommand is requested
+- **THEN** the command name is grow, help order is stable, and shell completion parses.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `try_parse_pager`；`crates/codegen/pager/src/app/mod.rs` — `cli_leader_and_no_leader_conflict`；`crates/codegen/pager/src/app/mod.rs` — `cli_leader_flag_parses`；`crates/codegen/pager/src/app/mod.rs` — `cli_no_leader_flag_parses`；`crates/codegen/pager/src/app/mod.rs` — `cli_resume_no_id_sets_empty_sentinel`；`crates/codegen/pager/src/app/mod.rs` — `cli_continue_conflicts_with_resume`；`crates/codegen/pager/src/app/mod.rs` — `cli_session_id_with_resume_requires_fork`；`crates/codegen/pager/src/app/mod.rs` — `cli_session_id_with_resume_and_fork_ok`；`crates/codegen/pager/src/app/mod.rs` — `cli_no_alt_screen_flag_parses`；`crates/codegen/pager/src/app/mod.rs` — `cli_command_name_is_grow`；`crates/codegen/pager/src/app/mod.rs` — `cli_help_output_header`；`crates/codegen/pager/src/app/mod.rs` — `cli_completions_parses`。
+
+### Requirement: The app module SHALL preserve its inline regression matrix for terminal mode transforms, teardown ordering injection, cursor policy, bounded cancellation, control-safe title/hints, leader precedence and confinement messaging, hunk-tracker precedence, and the complete CLI/session option surface. These tests are source evidence for the stated boundaries and do not prove a live terminal, ACP connection, external editor, or process replacement.
+The 74 inline test functions SHALL exercise pure policy helpers, parser projections, failure-tolerant output writers, Windows bit transforms, and injected teardown callbacks. Feature-gated release tests cover remote leader settings only when enabled; Unix pipe tests cover closed-output handling only on Unix.
+
+#### Scenario: Pure policy tests
+- **WHEN** mode, title, hunk, leader, or CLI helpers are exercised
+- **THEN** the pinned precedence, sanitization, sentinel, and feature-gate outcomes remain stable.
+
+#### Scenario: Async timeout tests
+- **WHEN** bounded_connect receives a pending future or cancelled token
+- **THEN** timeout and cancellation errors are distinguishable.
+
+#### Scenario: Teardown failure test
+- **WHEN** the injected writer drain fails
+- **THEN** the teardown callback still runs.
+
+#### Scenario: Platform conditional tests
+- **WHEN** Unix, Windows, or release-dist gates are active
+- **THEN** only the applicable platform/policy evidence is claimed.
+
+证据：`crates/codegen/pager/src/app/mod.rs` — `tests module (74 #[test]/#[tokio::test] functions: asserts_quick_edit_and_resize_clears_mouse_input, preserves_unrelated_bits, idempotent, recovers_from_stale_crossterm_capture_mode, restore_runs_teardown_even_when_writer_failed, cursor_blink_config_maps_to_policy, llm_config_template_explains_both_credential_options, bounded_connect_times_out_when_the_target_stalls, bounded_connect_returns_err_on_cancel, terminal_title_strips_control_characters, hunk_tracker_mode_nothing_set_is_none, hunk_tracker_mode_empty_env_is_none, hunk_tracker_mode_precedence_cli_over_env_over_config, hunk_tracker_mode_trims_and_passes_off_through, no_leader_flag_wins_over_leader_flag_and_config, leader_flag_enables, not_eligible_returns_false, config_toml_enables, config_toml_disables, default_is_false, cli_flag_overrides_config, sandbox_confinement_refuses_leader_even_with_leader_flag_and_config_on, matrix_reports_the_profile_only_when_the_sandbox_takes_leader_mode_away, sandbox_notice_names_the_profile_without_promising_enforcement, sandbox_confinement_preserves_config_off_reclaim_reason, cli_leader_and_no_leader_conflict, cli_leader_flag_parses, cli_no_leader_flag_parses, cli_neither_leader_flag_defaults_false, no_leader_flag_overrides_config_for_tui_fallback, cli_top_level_leader_with_agent_subcommand_parses_flag, cli_top_level_no_leader_with_agent_subcommand_parses_flag, remote_settings_none_falls_through_to_default, remote_settings_leader_mode_true_enables_leader, remote_settings_leader_mode_false_disables_leader, remote_settings_unknown_leader_mode_is_not_policy_disable, config_toml_overrides_remote_settings, cli_resume_parses_session_id, cli_short_r_parses_session_id, cli_continue_flag_parses, cli_continue_short_c_parses, cli_resume_no_id_sets_empty_sentinel, cli_short_r_no_id_sets_empty_sentinel, cli_resume_with_id_is_not_most_recent, cli_no_resume_is_not_most_recent, cli_continue_conflicts_with_resume, cli_no_session_flags_defaults, cli_chat_flag_rejected_without_feature, cli_worktree_flag_parses, cli_worktree_short_w_parses, cli_worktree_with_label, cli_worktree_long_with_label, cli_worktree_with_empty_string, cli_worktree_with_resume_parses, cli_worktree_label_with_resume, cli_worktree_default_none, cli_session_id_parses, cli_session_id_short_s_parses, cli_session_id_with_resume_requires_fork, cli_session_id_with_continue_requires_fork, cli_session_id_with_resume_and_fork_ok, cli_session_id_default_none, cli_no_alt_screen_flag_parses, cli_no_alt_screen_default_false, cli_command_name_is_grow, cli_help_output_header, cli_completions_parses, print_exit_resume_hint_writes_expected_lines, print_exit_resume_hint_includes_minimal_flag, print_exit_resume_hint_includes_session_summary, print_exit_resume_hint_truncates_summary_to_width, print_relaunch_failure_hint_writes_expected_lines, print_hints_survive_eio, print_hints_survive_closed_pipe`。
