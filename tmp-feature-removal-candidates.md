@@ -92,6 +92,8 @@
 - 拟删除范围：仅两个 helper 和常量及专属说明；保留严格 YAML 解析、合法纯 Markdown 回退与错误回归。
 - 状态：等待用户确认；当前保留并显式标注 dead_code 原因，未删除。
 
+- 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R9 验证记录。
+
 ## R10 · 未接入采样的技能 model/effort 字段
 
 - 位置：ParsedFrontmatter、SkillInfo、workspace-types rpc/skills 的 model/effort 及对应解析/测试。

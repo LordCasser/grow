@@ -21,3 +21,6 @@ Removed unregistered SkillInput/SkillOutput and exclusive protocol/normalization
 
 ## R8
 Removed unused permission policy/effect/result helpers and exclusive tests/fixtures. Shared PersistSetting, NotifySessionPermissionMode, rollback and queue behavior retained. Fresh pager modes regressions passed 37/37 after final fixture cleanup; regular AllowOnce negative permission-change regression passed 1/1. Old protocol symbols absent; only existing nonfatal linker warning.
+
+## R9
+Removed only two uncalled private YAML repair helpers and RECOVERABLE_KEYS. Fresh tools discovery regressions passed 41/41, preserving strict metadata rejection and valid Markdown fallback. No remaining helper symbols; git diff --check passed.
