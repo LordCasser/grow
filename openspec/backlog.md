@@ -890,3 +890,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The same grouping/order logic is shared by map and rendering, but the contract is maintained by convention rather than one returned grouped model.
 - Pager 审计债务：build_content_entry_data_at repeatedly calls filtered_indices.contains, making content-row construction linear in hit count times filtered-entry count for the common path.
 - Pager 审计债务：Relative-time strings are computed during row-data construction and depend on the sampled clock, which can make snapshot stability and cross-surface rendering harder without an injected time source.
+- Pager 审计债务：helpers.rs 将图片物料化、prompt 日志、MCP/CTA、session restore、错误清理、timeline 读取、picker/roster、全部设置写入、permission 通知、task kill 解析和 active-session 注册集中在一个 1030 行模块，职责边界高度耦合。
+- Pager 审计债务：persist_setting 通过字符串 SettingKey 的大型 match 维护键到 writer 的重复类型映射；新增设置需要同时更新 registry、setter、rollback 与此处分派，编译器不会保证穷尽同步。
+- Pager 审计债务：permission persistence 和通用 setting rollback 没有 request generation/revision 判定，旧完成结果可能覆盖较新的乐观状态；这是既有 delta 明确记录的未版本化语义。
+- Pager 审计债务：多处 JSON 解析采用 wrapped-result/top-level fallback 或缺省值，兼容性便利会把协议漂移和字段缺失压低为静默空数据。
+- Pager 审计债务：生产 helpers 没有同文件测试，行为证据分散在 effects/tests.rs、dispatch tests 与调用方，重构时容易出现契约与局部实现脱节。

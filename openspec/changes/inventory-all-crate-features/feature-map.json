@@ -53593,6 +53593,31 @@
         "MCP load error and correlation",
         "MCP loading returns an error or a result targets the wrong plugin/current phase",
         "a matching error becomes Error, while wrong plugin or wrong phase results are ignored."
+      ],
+      [
+        "Retry delay",
+        "a RetryPluginCtaMcps effect waits before fetching again",
+        "the configured delay is 1,000 milliseconds."
+      ],
+      [
+        "Installed dismissal",
+        "a DismissCtaInstalled effect waits before producing its timeout result",
+        "the configured delay is 4,000 milliseconds."
+      ],
+      [
+        "Wrapped MCP response",
+        "the response JSON has a result member containing a valid MCP list",
+        "the list is converted into PluginCtaMcpsLoaded."
+      ],
+      [
+        "Bare MCP response",
+        "the response JSON itself is a valid MCP list",
+        "the top-level value is converted into PluginCtaMcpsLoaded."
+      ],
+      [
+        "MCP failure",
+        "transport or deserialization fails",
+        "PluginCtaMcpsLoaded carries an error and the supplied agent/plugin identifiers."
       ]
     ],
     "sources": [
@@ -53687,6 +53712,18 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/cta_e2e.rs",
         "tests::cta_mcps_loaded_ignored_for_stale_phase_or_plugin"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "CTA_MCP_RETRY_DELAY_MS"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "CTA_INSTALLED_DISMISS_MS"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "fetch_plugin_cta_mcps"
       ]
     ]
   },
@@ -57161,6 +57198,26 @@
         "Permission mode",
         "SessionFlags uses each supported permission mode",
         "metadata contains ask, auto or always-approve respectively."
+      ],
+      [
+        "Explicit profile",
+        "agent_override is Some",
+        "agentProfile contains the supplied JSON value."
+      ],
+      [
+        "Ask-user disabled",
+        "ask_user is false",
+        "metadata contains askUserQuestion=false."
+      ],
+      [
+        "Ask-user enabled",
+        "ask_user is true",
+        "askUserQuestion is absent."
+      ],
+      [
+        "Permission mode",
+        "permission_mode is any supported mode",
+        "metadata contains its canonical string."
       ]
     ],
     "sources": [
@@ -57239,6 +57296,36 @@
         "Result routing",
         "permission persistence returns Ok or Err under either policy",
         "the route returns SettingPersisted, SettingPersistFailed, or SettingPersistFailedBestEffort with permission_mode key."
+      ],
+      [
+        "Unknown setting",
+        "an unsupported registry key reaches persist_setting",
+        "an error names the unknown key."
+      ],
+      [
+        "Wrong value kind",
+        "a recognized key receives a different SettingValue variant",
+        "an error names the key and expected kind."
+      ],
+      [
+        "Permission rollback",
+        "WithRollback persistence fails",
+        "no ACP notification is sent and the failed result carries the previous canonical value."
+      ],
+      [
+        "Permission best effort",
+        "BestEffort persistence succeeds or fails",
+        "a session-bound notification is attempted in both cases and failure uses the dedicated best-effort result."
+      ],
+      [
+        "Sessionless permission",
+        "session_id is None",
+        "no ACP notification is emitted."
+      ],
+      [
+        "Hint persistence",
+        "a hint key/value is submitted",
+        "the blocking writer is spawned and completion is CancelComplete even when the writer logs an error."
       ]
     ],
     "sources": [
@@ -57349,6 +57436,14 @@
       [
         "crates/codegen/pager/src/app/root/effects/tests.rs",
         "tests::route_permission_mode_result_err_best_effort_routes_to_dedicated_variant"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "kind_mismatch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "persist_hint"
       ]
     ]
   },
@@ -58145,12 +58240,35 @@
         "Control RPC acknowledgement",
         "模型、agent或behavior控制RPC返回成功",
         "completion仍携带原control token及AuthoritativeUpdatePending或Superseded，不把transport成功等同于状态提交。"
+      ],
+      [
+        "Prompt success",
+        "an ACP prompt response is Ok",
+        "an agent response complete event is logged for the session."
+      ],
+      [
+        "Prompt failure",
+        "an ACP prompt response is Err",
+        "an agent response failed event is logged with the error text."
+      ],
+      [
+        "Effect marker",
+        "EffectMeta is constructed",
+        "it carries no fields or additional behavior."
       ]
     ],
     "sources": [
       [
         "crates/codegen/pager/src/app/actions.rs",
         "Action / Effect / Effect::prompt_rpc_identity / TaskResult / ControlRpcOutcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "log_prompt_result"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "EffectMeta"
       ]
     ]
   },
@@ -93646,6 +93764,36 @@
         "Title hydration",
         "a local summary has a manual title or display title",
         "SessionTitleFromDisk returns the title and whether it was manual; read/join failures become None."
+      ],
+      [
+        "Scope repo",
+        "_meta.grow/listScope is repo",
+        "ListScope::Repo is returned."
+      ],
+      [
+        "Scope all",
+        "_meta.grow/listScope is all",
+        "ListScope::All is returned."
+      ],
+      [
+        "Scope default",
+        "metadata is absent or has another value",
+        "ListScope::Cwd is returned."
+      ],
+      [
+        "Prompt preview",
+        "the first prompt record has a multiline text",
+        "only its first nonempty trimmed line is returned."
+      ],
+      [
+        "Timeline unavailable",
+        "storage returns an error or no timeline",
+        "the prompt helper returns None and stats return (0,0)."
+      ],
+      [
+        "Stats",
+        "timeline events include started turns and tools",
+        "the respective counts are returned."
       ]
     ],
     "sources": [
@@ -93708,6 +93856,22 @@
       [
         "crates/codegen/pager/src/app/root/effects/mod.rs",
         "format_session_info"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "parse_session_list_scope"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "extract_first_user_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "count_timeline_stats"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "load_timeline"
       ]
     ]
   },
@@ -94048,6 +94212,36 @@
         "Placeholder text",
         "ACP content only contains a textual image placeholder and the image list is empty",
         "the original content remains unchanged."
+      ],
+      [
+        "Image count",
+        "the explicit image slice contains more than 16 items",
+        "the helper returns an error before reading or encoding."
+      ],
+      [
+        "File source",
+        "an image has no encoded bytes or its saved path is absent, nonregular, empty, or over the raw limit",
+        "the helper returns an error."
+      ],
+      [
+        "Aggregate budget",
+        "preflighted images make the estimated encoded bytes plus per-image allowance exceed 64 MiB",
+        "the helper returns an aggregate-limit error before the encoding loop."
+      ],
+      [
+        "Changed file",
+        "a file read returns a byte count different from its preflighted metadata length",
+        "the helper returns a reattach error."
+      ],
+      [
+        "No attachments",
+        "the image slice is empty",
+        "the incoming ACP blocks are returned unchanged."
+      ],
+      [
+        "Clipboard timeout",
+        "the off-thread clipboard probe exceeds the configured timeout",
+        "the effect layer uses the 10-second timeout constant."
       ]
     ],
     "sources": [
@@ -94086,6 +94280,10 @@
       [
         "crates/codegen/pager/src/app/root/effects/tests.rs",
         "tests::failed_image_loader_never_guesses_from_placeholder_text"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "CLIPBOARD_PROBE_TIMEOUT_SECS"
       ]
     ]
   },
@@ -94371,6 +94569,11 @@
         "Debounce expiry",
         "the fixed timer elapses",
         "the matching generation is returned for stale-result handling elsewhere."
+      ],
+      [
+        "Debounce expiry",
+        "the session-search debounce effect runs",
+        "the fixed delay is 250 milliseconds before completion."
       ]
     ],
     "sources": [
@@ -94393,6 +94596,10 @@
       [
         "crates/codegen/pager/src/app/root/effects/mod.rs",
         "Effect::FetchPromptSuggestion)"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "SESSION_SEARCH_DEBOUNCE_MS"
       ]
     ]
   },
@@ -163778,6 +163985,36 @@
         "Subagent malformed response",
         "outcome is missing, unknown, top-level, errored or malformed",
         "RpcFailed is returned."
+      ],
+      [
+        "Task outcome",
+        "a valid typed task-kill result contains an outcome under result",
+        "the corresponding KillOutcome is returned."
+      ],
+      [
+        "Task malformed",
+        "result is absent, null, errored, or not parseable",
+        "None is returned."
+      ],
+      [
+        "Subagent cancelled",
+        "the result outcome is Cancelled",
+        "StoppedLive is returned."
+      ],
+      [
+        "Subagent already finished",
+        "the result outcome is AlreadyFinished",
+        "NothingLive retains its status."
+      ],
+      [
+        "Subagent not found",
+        "the result outcome is NotFound",
+        "NothingLive has no status."
+      ],
+      [
+        "Subagent malformed",
+        "result or outcome is missing or unknown",
+        "RpcFailed is returned."
       ]
     ],
     "sources": [
@@ -165288,6 +165525,31 @@
         "Resume hint",
         "a worktree resume detail is disk-full and a title is missing or mismatched",
         "the sanitized detail is composed first and the title hint is appended only when a title exists."
+      ],
+      [
+        "Disk full",
+        "the raw message contains a fast-worktree, ENOSPC, quota, or out-of-disk marker",
+        "the canonical no-space message is returned."
+      ],
+      [
+        "Authentication prefix",
+        "the message begins with Authentication required or Authentication failed",
+        "that prefix is removed."
+      ],
+      [
+        "Protocol jargon",
+        "the message contains ACP, JSON-RPC, acp_send, ExtRequest, ExtNotification, or known service names",
+        "the corresponding user-facing replacement is applied."
+      ],
+      [
+        "Long error",
+        "the replaced result exceeds 200 Unicode characters",
+        "the first 180 characters and three dots are returned."
+      ],
+      [
+        "Unrelated text",
+        "the message contains no known marker",
+        "the original message is returned."
       ]
     ],
     "sources": [
@@ -165338,6 +165600,10 @@
       [
         "crates/codegen/pager/src/app/root/effects/tests.rs",
         "tests::worktree_resume_failure_sanitizes_detail_before_hint"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "is_disk_full_error"
       ]
     ]
   },
@@ -165711,6 +165977,21 @@
         "Dormant roster projection",
         "a picker entry has title, cwd, model, worktree label, timestamp and origin data",
         "the resulting roster row is dormant/nonresident and preserves the tested identity and metadata fields."
+      ],
+      [
+        "Dormant entry",
+        "a picker entry supplies identity, location and timestamps",
+        "the roster row preserves those fields with Dormant activity and resident=false."
+      ],
+      [
+        "Activity fallback",
+        "last_active_at is absent",
+        "updated_at supplies last_change_unix_ms."
+      ],
+      [
+        "Blank summary",
+        "the summary is empty or whitespace",
+        "the roster title is None."
       ]
     ],
     "sources": [
@@ -167834,6 +168115,26 @@
         "Rate limit fallback",
         "a rate-limit error has no usable detail",
         "the canonical rate-limit user message is returned."
+      ],
+      [
+        "MCP request",
+        "a session id is supplied",
+        "the extension request method is the shell LIST constant and its parameters decode to that sessionId."
+      ],
+      [
+        "Wrapped detail",
+        "InvalidParams data contains a message-bearing detail",
+        "the detail text is returned directly."
+      ],
+      [
+        "Rate-limit fallback",
+        "a rate-limit error has no usable detail",
+        "the rate-limit user message is returned and sanitized."
+      ],
+      [
+        "Technical error",
+        "an ordinary ACP error contains protocol or internal service jargon",
+        "the replacement and truncation rules of sanitize_user_error are applied."
       ]
     ],
     "sources": [
@@ -169151,6 +169452,16 @@
         "MCP error projection",
         "an AwaitingMcps CTA receives a transport error",
         "the owning CTA enters Error with the plugin name and exact MCP message and the extensions modal remains absent."
+      ],
+      [
+        "Success status",
+        "the marketplace outcome status is Success",
+        "the helper returns true."
+      ],
+      [
+        "Failure status",
+        "the marketplace outcome status is not Success",
+        "the helper returns false."
       ]
     ],
     "sources": [
@@ -169722,6 +170033,21 @@
         "I/O failure",
         "the registry root cannot be used as a directory",
         "the helper returns without propagating a panic."
+      ],
+      [
+        "Removed",
+        "the active-session registry removes the requested id",
+        "the helper returns without a warning."
+      ],
+      [
+        "Lock contention",
+        "try_unregister_in reports false",
+        "the helper returns and records that crash collection will reap the entry later."
+      ],
+      [
+        "I/O error",
+        "try_unregister_in returns an error",
+        "the helper warns and does not propagate a panic."
       ]
     ],
     "sources": [
@@ -169772,6 +170098,10 @@
       [
         "crates/codegen/pager/src/app/root/effects/tests.rs",
         "tests::unregister_best_effort_swallows_io_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "unregister_active_session_best_effort"
       ]
     ]
   },
@@ -170343,6 +170673,31 @@
         "Legacy foreground",
         "only grow/runningPromptId is present",
         "no foreground identity is adopted."
+      ],
+      [
+        "Full restore",
+        "all restore fields contain recognized values",
+        "the three values are returned."
+      ],
+      [
+        "Absent restore",
+        "the result or _meta lacks the restore object",
+        "restored is false and summary/degree are None."
+      ],
+      [
+        "Unknown degree",
+        "restoreDegree or degree is not recognized by the target type",
+        "the degree is None."
+      ],
+      [
+        "Structured foreground",
+        "grow/foreground contains the structured snapshot",
+        "the snapshot is returned."
+      ],
+      [
+        "Legacy foreground",
+        "only a runningPromptId-style field is present",
+        "no foreground snapshot is returned."
       ]
     ],
     "sources": [
@@ -170727,6 +171082,36 @@
         "Missing canonical title",
         "a Build row has updatedAt but no canonical title",
         "the row is excluded."
+      ],
+      [
+        "Fresh canonical row",
+        "sessionId/title/updatedAt are valid and updatedAt is within 30 days",
+        "one SessionPickerEntry is emitted."
+      ],
+      [
+        "Missing timestamp",
+        "updatedAt is absent or invalid",
+        "the row is dropped."
+      ],
+      [
+        "Expired row",
+        "updatedAt is older than the 30-day cutoff",
+        "the row is dropped."
+      ],
+      [
+        "Missing title",
+        "canonical title is absent or invalid",
+        "the row is dropped."
+      ],
+      [
+        "Created fallback",
+        "createdAt is absent or invalid",
+        "created_at equals updated_at."
+      ],
+      [
+        "Skill title",
+        "title contains supported skill XML wrappers",
+        "summary uses extracted display text, then empty summaries are filtered."
       ]
     ],
     "sources": [
@@ -177580,6 +177965,1130 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
         "RenderBlock::Notice"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "AgentView SHALL resolve a session plan artifact under the session cwd namespace, prefer nonblank approval-carried plan content for previews, and fall back to the session plan.md file when the approval payload is absent.",
+    "contract": "plan_file_path SHALL require a session_id and derive sessions_cwd_dir(cwd)/session_id/plan.md. plan_body_for_preview SHALL return nonblank plan_approval_view.plan_content first, otherwise read the derived file best effort and reject blank content. plan_preview_available SHALL reflect whether a usable body exists. is_plan_viewer SHALL recognize only LineViewerKind::PlanPreview; is_casual_commenting SHALL additionally require no plan approval view, a plan viewer, and a casual_commenting_range.",
+    "scenarios": [
+      [
+        "Approval content",
+        "approval state carries nonblank plan_content",
+        "that content is returned without reading the session file."
+      ],
+      [
+        "Artifact fallback",
+        "approval content is absent/blank and session identity exists",
+        "plan.md under the session cwd namespace is read best effort and nonblank content is returned."
+      ],
+      [
+        "Missing plan",
+        "no approval content, no readable nonblank artifact, or no session id",
+        "preview availability is false."
+      ],
+      [
+        "Viewer identity",
+        "line viewer kind is PlanPreview or another kind",
+        "is_plan_viewer is true only for PlanPreview."
+      ],
+      [
+        "Casual state",
+        "approval view is absent, PlanPreview is open and casual range is armed",
+        "is_casual_commenting is true; approval view or missing range makes it false."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::plan_file_path"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::is_plan_viewer"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::is_casual_commenting"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::plan_preview_available"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::plan_body_for_preview"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::long_cwd_plan_uses_the_session_storage_namespace"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "AgentView SHALL expose plan chip and prompt auto-flag visibility from independent plan and permission state, with plan chip visibility requiring usable preview content.",
+    "contract": "auto_flag_visible SHALL return true only for session auto permission mode without AlwaysApprove, ignoring effective_plan because plan behavior does not hide permission state. should_show_plan_chip SHALL return true only when plan_mode_active or appearance.show_plan_chip is enabled and plan_preview_available is true; exiting plan mode hides the chip by default and a config override cannot show it without content.",
+    "scenarios": [
+      [
+        "Auto permission",
+        "session permission mode is Auto and AlwaysApprove is inactive",
+        "the auto flag is visible regardless of effective plan state."
+      ],
+      [
+        "Always approve",
+        "AlwaysApprove is active",
+        "the auto flag is hidden even if plan mode is effective."
+      ],
+      [
+        "Plan mode",
+        "plan mode is active but no usable plan body exists",
+        "the plan chip remains hidden."
+      ],
+      [
+        "Configured chip",
+        "show_plan_chip is true but no usable plan body exists",
+        "the chip remains hidden rather than showing an empty action."
+      ],
+      [
+        "Input mode evidence",
+        "persisted simple/vim mode or pane transitions are exercised by this module's tests",
+        "the tests assert mode/pane routing separately from the plan chip predicate."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::auto_flag_visible"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::should_show_plan_chip"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::auto_flag_visible_precedence"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::plan_chip_hidden_after_exit_by_default"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::plan_chip_visible_while_plan_mode_active"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::plan_chip_visible_when_config_overrides"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::new_agent_respects_persisted_simple_mode_for_mode_and_pane"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::set_input_mode_vim_empty_prompt_switches_to_scrollback_and_j_selects_next"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::set_input_mode_vim_nonempty_prompt_keeps_pane"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::set_input_mode_simple_from_scrollback_leaves_pane_unchanged"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::set_input_mode_reconciles_pane_orthogonal_to_active_modal_field"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::scrollback_j_with_vim_mode_off_forwards_to_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::scrollback_j_with_vim_mode_on_selects_next"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::scrollback_arrow_down_works_in_both_modes"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "AgentView SHALL open a fullscreen plan line viewer from available inline or file content, configure action/feedback controls by approval context, rebuild visible comments, and restore approval focus when reopening.",
+    "contract": "show_plan_preview_if_available SHALL call show_plan_preview only when plan_preview_available. show_plan_preview SHALL open markdown content or the plan path, toast No plan written yet. when neither is possible, mark the viewer PlanPreview, title it plan.md, make it fullscreen, enable action buttons only outside approval and feedback controls only inside approval, and rebuild approval comments or casual plan_comments when present. reopen_plan_approval SHALL stash the prompt, clear prompt text, focus Preview, reopen the viewer, and if the viewer cannot open focus Prompt; an opened viewer receives feedback_active=true.",
+    "scenarios": [
+      [
+        "Available preview",
+        "inline approval content or a readable plan artifact exists",
+        "a fullscreen plan.md viewer opens in PlanPreview mode."
+      ],
+      [
+        "Unavailable preview",
+        "no content and no session path are available",
+        "the agent stays without a viewer and shows No plan written yet."
+      ],
+      [
+        "Approval controls",
+        "the viewer opens during plan approval",
+        "action buttons are disabled and feedback_active is enabled."
+      ],
+      [
+        "Casual controls",
+        "the viewer opens without plan approval",
+        "plan action buttons are enabled and existing casual comments are overlaid."
+      ],
+      [
+        "Reopen",
+        "plan approval is reopened after prompt input",
+        "the prompt is stashed, preview focus/viewer is restored when possible, and prompt focus is used when it is not."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::plan_body_for_preview"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::inline_plan_content"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::show_plan_preview_if_available"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::show_plan_preview"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::reopen_plan_approval"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::approving_with_comments_carries_feedback_in_the_approval_response"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Plan approval actions SHALL send approved, abandoned, or revision feedback responses while restoring the stashed prompt and clearing transient viewer/comment state.",
+    "contract": "approve_plan and abandon_plan SHALL no-op with Changed when no approval view exists; otherwise they take the view, serialize nonblank formatted comments for approval when present, send the appropriate response, update next_comment_id, restore stashed_prompt, clear line_viewer and casual comment state, log PlanSubmit build/abandon, and return Changed. send_plan_feedback SHALL format supplied feedback with comments, fall back to raw nonblank feedback if formatted text is empty, add a minimal-mode user prompt row for nonblank sent text, send cancellation feedback, restore prompt, clear viewer/undo state, show Plan revision sent., log PlanSubmit revise and return Changed.",
+    "scenarios": [
+      [
+        "Approve without comments",
+        "approval exists and no comments/feedback require revision",
+        "Approved is sent, prompt/viewer state is restored/cleared and build telemetry is logged."
+      ],
+      [
+        "Approve with comments",
+        "approval has comments and the user approves",
+        "feedback is included in the typed approval response."
+      ],
+      [
+        "Abandon",
+        "approval exists and abandon is selected",
+        "Abandoned is sent and approval transient state is cleaned."
+      ],
+      [
+        "Revision",
+        "nonblank revision text or formatted comments are submitted",
+        "cancelled/revision response carries feedback and Plan revision sent. is shown."
+      ],
+      [
+        "Empty revision",
+        "prompt is empty and there are no comments",
+        "approval remains open and an actionable toast asks for revision notes or a to approve."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::approve_plan"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::abandon_plan"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::send_plan_feedback"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::empty_enter_on_revise_prompt_does_not_approve"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::enter_with_revision_text_requests_changes"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::empty_enter_with_pending_comments_still_requests_changes"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::a_on_empty_revise_prompt_approves"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::approving_with_comments_carries_feedback_in_the_approval_response"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The plan approval key handler SHALL prioritize file-search dismissal, focus navigation, comment save/cancel, direct approval, revision submission, and prompt editing in the documented order.",
+    "contract": "handle_plan_feedback_key SHALL treat bare Tab as Prompt/Commenting to Preview or Preview to Prompt and discard an in-progress comment when leaving it. Esc SHALL clear file search first, restore a stashed comment prompt or clear text while returning from Commenting to Preview, and otherwise focus Preview. Bare a SHALL approve only when not commenting, prompt text is blank, file search is hidden and no comments exist. route_enter SHALL handle newline, comment save, empty-revision toast, revision submission and non-prompt no-op; remaining keys route through prompt.handle_key and open pending viewer requests.",
+    "scenarios": [
+      [
+        "Tab navigation",
+        "Tab is pressed in prompt/commenting or preview focus",
+        "focus moves between prompt and preview, with comment draft discarded when leaving commenting."
+      ],
+      [
+        "Esc priority",
+        "file search is visible, commenting is active, or another plan focus is active",
+        "file search clears first; otherwise comment prompt restores/clears and focus returns to preview."
+      ],
+      [
+        "Direct approve",
+        "bare a is pressed with empty prompt, hidden file search and no comments",
+        "approve_plan is invoked."
+      ],
+      [
+        "Enter revision",
+        "Enter is submitted from prompt with text or pending comments",
+        "send_plan_feedback is invoked; empty text with no comments produces the revision-notes toast."
+      ],
+      [
+        "Prompt routing",
+        "a non-submit key edits the prompt or opens a pending viewer request",
+        "InputOutcome::Changed is returned and the requested line viewer opens."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::handle_plan_feedback_key"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::discard_in_progress_comment"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::empty_enter_on_revise_prompt_does_not_approve"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::enter_with_revision_text_requests_changes"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::empty_enter_with_pending_comments_still_requests_changes"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::a_on_empty_revise_prompt_approves"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::a_with_pending_comments_does_not_approve"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Plan approval commenting SHALL capture selected source ranges, edit or append PlanComment records, rebuild the preview, and restore the prior feedback prompt on save or cancel.",
+    "contract": "enter_plan_commenting SHALL edit the comment under the selected physical line when one exists, otherwise capture selected_line_range; visual multi-selection exits while retaining its start identity. It stashes the prompt, records commenting_range/editing_comment_id, focuses Commenting and clears prompt. save_plan_comment SHALL ignore blank text or missing approval/range, update an existing comment or allocate the next id, focus Preview, rebuild comments, and restore stashed feedback or clear prompt. delete_plan_comment_at_cursor SHALL remove only the comment represented by the selected physical line and rebuild; missing viewer/selection/comment is a no-op.",
+    "scenarios": [
+      [
+        "Edit existing",
+        "cursor is on an approval comment line",
+        "the comment text/range is loaded into the prompt and editing mode is entered."
+      ],
+      [
+        "Create comment",
+        "cursor has a selected source range without a comment",
+        "the range is captured and a new commenting prompt is opened."
+      ],
+      [
+        "Save",
+        "a nonblank comment is submitted",
+        "the record is created or updated, preview is rebuilt, and the stashed prompt returns."
+      ],
+      [
+        "Blank save",
+        "comment text is blank",
+        "no comment mutation occurs and the handler reports Changed."
+      ],
+      [
+        "Delete",
+        "cursor is on a comment line",
+        "that comment is removed and the viewer is rebuilt; unrelated comments remain."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::enter_plan_commenting"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::save_plan_comment"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::delete_plan_comment_at_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "tests::approving_with_comments_carries_feedback_in_the_approval_response"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Casual plan preview commenting SHALL support new/edit comment drafts, prompt restoration, visual selection normalization, cancellation, deletion, and prompt key routing outside the approval modal.",
+    "contract": "enter_casual_plan_commenting SHALL edit a selected existing plan_comments record or capture a selected source range, exit visual mode while preserving the range start, stash the prompt once, set casual_commenting_range/editing_comment_id and clear prompt. save_casual_plan_comment SHALL treat blank text as cancel, create/update the comment, restore the stashed prompt, rebuild the viewer and return Changed. cancel_casual_plan_commenting SHALL clear casual state and restore/clear prompt. handle_casual_plan_feedback_key SHALL prioritize file-search Esc, then cancel Esc/Tab, Enter save, and other keys through prompt.handle_key. delete_casual_plan_comment_at_cursor SHALL return Unchanged for missing targets and otherwise remove the selected comment and rebuild.",
+    "scenarios": [
+      [
+        "New casual comment",
+        "a source line/range is selected in a PlanPreview",
+        "a stashed prompt and new comment range are created with an empty editor."
+      ],
+      [
+        "Edit casual comment",
+        "cursor is on an existing casual comment",
+        "its text/range is loaded and edit mode is entered."
+      ],
+      [
+        "Save/cancel",
+        "nonblank text is submitted or Esc/Tab is pressed",
+        "save creates/updates and restores the prompt; cancel drops draft state without saving."
+      ],
+      [
+        "Delete",
+        "cursor is on a casual comment row",
+        "the selected comment is removed and viewer annotations rebuild; missing target returns Unchanged."
+      ],
+      [
+        "Input precedence",
+        "file search, Enter, Tab, Esc or ordinary prompt editing is active",
+        "file search clears first, then save/cancel actions run, otherwise prompt editing handles the key."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::enter_casual_plan_commenting"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::save_casual_plan_comment"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::cancel_casual_plan_commenting"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::handle_casual_plan_feedback_key"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::delete_casual_plan_comment_at_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::enter_casual_commenting_for_test"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Sending casual plan comments SHALL format comments with available inline or artifact plan content, clear local comment state and viewer, and submit one prompt action.",
+    "contract": "send_casual_plan_comments SHALL show No comments to send. and return Changed when empty. For nonempty comments it SHALL prefer inline approval content, otherwise read plan.md best effort, format comments with optional plan content, clear comments and reset ids, cancel the line viewer, show Plan feedback sent., and return Action::SendPrompt containing Plan feedback text.",
+    "scenarios": [
+      [
+        "Empty send",
+        "no casual comments exist",
+        "no prompt action is emitted and the no-comments toast is shown."
+      ],
+      [
+        "Inline context",
+        "approval view has nonblank plan content",
+        "that content is passed to format_plan_comments."
+      ],
+      [
+        "Artifact context",
+        "inline content is absent but plan.md is readable",
+        "artifact text is used as the formatting context."
+      ],
+      [
+        "Send cleanup",
+        "comments are nonempty and send is requested",
+        "comments/id/viewer state clears, success toast appears and one SendPrompt action is returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "AgentView::send_casual_plan_comments"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Diagnostic fix identity, registry, and availability projection",
+    "contract": "Fix identifiers SHALL resolve from canonical `terminal.<name>` and short handles, human_fix_command SHALL emit the canonical doctor command and reject unknown IDs, and applicable automatic fixes SHALL be filtered by finding remediation and planner availability. A local planner failure SHALL classify a fix as unavailable, while a remote SSH session SHALL classify tmux fixes as runnable here and SSH wrapping as runnable locally.",
+    "scenarios": [
+      [
+        "Canonical identity",
+        "a known canonical ID, short handle, or generated doctor command is supplied",
+        "all known forms resolve to the same DiagnosticId and the generated command is `grow doctor fix <handle>`."
+      ],
+      [
+        "Unknown identity",
+        "an unknown diagnostic ID is supplied",
+        "human_fix_command returns None and resolve_fix_id returns UnknownId."
+      ],
+      [
+        "Finding metadata",
+        "a report has or lacks automatic_remediation",
+        "only findings with automatic remediation appear in the applicable list."
+      ],
+      [
+        "Planner availability",
+        "planning succeeds locally, fails locally, or the terminal is SSH remote",
+        "availability is Here, omitted, or RunLocally according to the planner result and fix locality policy."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "canonical_and_short_ids_resolve_to_canonical_id"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "applicable_fix_listing_uses_report_metadata_and_planner_availability"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "tmux_fix_registry_resolves_every_short_and_canonical_id"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "tmux_fix_is_available_here_in_remote_sessions_while_ssh_wrap_stays_local_only"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "resolve_fix_id"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "human_fix_command"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "automatic_fix_choices"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "applicable_automatic_fixes_with"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "AutomaticFixAvailability"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixRequest::new_for_test"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ssh_wrap_automatic_remediation"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "automatic_remediation_for"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Tmux plan paths, managed blocks, safety validation, and preview rendering",
+    "contract": "Tmux planning SHALL emit one exact independent managed block for each supported option, target the physical `.tmux.conf` under a validated absolute HOME or Byobu directory, and reject unsafe relative, traversal, root, tilde, or newline-containing directories. Preview and reload guidance SHALL shell-quote paths, escape Markdown backticks, expose requested/actual/backup paths for symlinks, and explain that tmux changes require reload or re-running doctor; unavailable Byobu configuration SHALL return ByobuConfigUnavailable.",
+    "scenarios": [
+      [
+        "Independent option plan",
+        "a supported tmux clipboard, passthrough, or extended-keys fix is requested",
+        "the plan contains the exact option line and its own managed markers without an SSH-wrap block."
+      ],
+      [
+        "Unsafe directory",
+        "HOME or Byobu directory is relative, traversal-based, root, tilde-based, or contains a newline",
+        "planning returns UnsafeDirectory before producing a change."
+      ],
+      [
+        "Safe reload text",
+        "a config path contains spaces, quotes, backticks, or newlines",
+        "reload text uses safe shell quoting and Markdown code delimiters, or falls back to detach/reattach for unsafe newline paths."
+      ],
+      [
+        "Symlink preview",
+        "the requested tmux config is a symlink with backticks in requested, target, or backup paths",
+        "the preview renders all paths safely and distinguishes requested from actual file."
+      ],
+      [
+        "Byobu path",
+        "Byobu supplies a custom config directory or no config is available",
+        "the physical custom path is used, or planning returns ByobuConfigUnavailable."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "tmux_specs_plan_exact_independent_managed_items"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "safe_absolute_directory_rejects_hostile_home_and_byobu_values"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "reload_instruction_shell_quotes_and_markdown_escapes_paths"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "full_preview_safely_renders_backtick_requested_symlink_target_and_backup_paths"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "tmux_plain_byobu_and_custom_config_paths_are_physical"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "plan_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SafeAbsoluteDirectory::parse"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "reload_instruction"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "shell_quote_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "markdown_code_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "format_fix_preview"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::UnsafeDirectory"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::ByobuConfigUnavailable"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TMUX_CLIPBOARD_SPEC"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "DCS_PASSTHROUGH_SPEC"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "TMUX_EXTENDED_KEYS_SPEC"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Tmux scanner, managed configuration transaction, and idempotence contract",
+    "contract": "Tmux scanning SHALL recognize healthy or conflicting direct top-level assignments across supported server/window scopes, command separators, environment prefixes, and native command spellings; it SHALL ignore comments, user options, option-name variants, conditionals, and non-global target assignments. Ambiguous or conflicting forms SHALL fail closed as ExistingCustomization. Managed writes SHALL coexist in one Grow block with one item block per option, repair noncanonical managed content even when a healthy direct line exists, reject stale plans, and return AlreadyConfigured without a backup when the exact setting is already present.",
+    "scenarios": [
+      [
+        "Scanner healthy forms",
+        "a supported option is assigned using accepted scopes, prefixes, separators, or native passthrough spellings",
+        "scan_direct_tmux_option returns Healthy."
+      ],
+      [
+        "Scanner ignored forms",
+        "the text is a comment, user option, near-name option, conditional, or local target assignment",
+        "the scanner returns Absent."
+      ],
+      [
+        "Scanner conflict and ambiguity",
+        "a direct option has a bad value, malformed continuation, extra token, missing value, or target ambiguity",
+        "the scanner returns ExistingCustomization."
+      ],
+      [
+        "Managed coexistence",
+        "each of the three tmux fixes is applied sequentially",
+        "all option blocks remain exactly once inside one Grow managed block and each outcome requires reload."
+      ],
+      [
+        "Persistent conflict",
+        "an unmanaged direct conflict occurs after a managed block",
+        "persistent verification reports the option as not configured."
+      ],
+      [
+        "Repair precedence",
+        "a noncanonical managed block conflicts with a healthy direct assignment",
+        "planning and apply repair the managed item to the canonical healthy line."
+      ],
+      [
+        "Stale and idempotent apply",
+        "the file changes after planning, or already contains the exact setting",
+        "apply returns StalePlan for the changed file; an exact setting returns AlreadyConfigured without backup and verifies persistent state."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "tmux_managed_items_coexist_and_each_apply_is_one_transaction"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "tmux_scanner_handles_server_scopes_separators_prefixes_and_native_blocks"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "conflicting_direct_form_after_managed_block_fails_persistent_verification"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "healthy_direct_does_not_suppress_repair_of_noncanonical_managed_item"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "tmux_applicability_uses_exact_positive_probe_gates"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "tmux_stale_plan_and_idempotence_reuse_managed_writer_safety"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "scan_direct_tmux_option"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "tmux_option_configured"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "plan_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "apply_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "verify_persistent_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "format_fix_success"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixStatus::Applied"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixStatus::AlreadyConfigured"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixActivation::RequiresReload"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ManagedConfigError::StalePlan"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::ExistingCustomization"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::TmuxNotApplicable"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "SSH shell planning, platform gates, and exact customization conflict detection",
+    "contract": "SSH-wrap planning SHALL select Bash, zsh, or fish config paths and emit the exact shell-specific managed alias plus operational caveats; it SHALL refuse remote sessions, official VS Code remote sessions, unsupported shells, and (on Windows) automatic shell selection. Conflict detection SHALL preserve existing exact ssh aliases/functions, accept shell whitespace variants, and match only the exact `ssh` name while ignoring `ssh_wrap`, `sshuttle`, and other near-name declarations.",
+    "scenarios": [
+      [
+        "Supported shell plan",
+        "Bash, zsh, or fish is requested",
+        "the plan targets `.bashrc`, `.zshrc`, or `.config/fish/config.fish`, emits the matching alias block, and includes command bypass, ssh forwarding, ControlPersist, and suspend caveats."
+      ],
+      [
+        "Environment gate",
+        "the terminal is SSH remote, official VS Code remote, unsupported shell, or Windows",
+        "planning returns the corresponding refusal instead of creating a plan."
+      ],
+      [
+        "Existing customization",
+        "an exact alias or function already defines ssh",
+        "planning returns ExistingCustomization and leaves the original file unchanged."
+      ],
+      [
+        "Whitespace and boundary",
+        "supported declarations use varied whitespace or near-name tokens",
+        "exact ssh aliases/functions are detected while near-name declarations are ignored."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "bash_zsh_and_fish_plans_use_exact_paths_and_aliases"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "remote_vscode_and_unsupported_shell_are_refused"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "windows_is_manual_only_before_shell_selection"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "existing_alias_and_function_conflicts_are_preserved"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "alias_and_fish_function_scanners_accept_shell_whitespace"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "posix_function_scanner_requires_exact_ssh_name_boundary"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "plan_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ShellKind::config_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ShellKind::alias"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "detect_ssh_customization"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "detect_posix_ssh_customization"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "detect_fish_ssh_customization"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "is_posix_ssh_alias_declaration"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "is_posix_ssh_function_declaration"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "token_is_exact_name"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "after_shell_keyword"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SSH_WRAP_ALIAS_POSIX"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SSH_WRAP_ALIAS_FISH"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::RemoteSession"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::UnsupportedShell"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::PlatformUnsupported"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Validated shell discovery, source snapshot integrity, and fail-closed decoding",
+    "contract": "Validator discovery SHALL use an executable explicit shell path as-is, resolve basename-only shell names through PATH to the first executable candidate, and return no validator for a non-executable explicit path rather than substituting a same-basename PATH binary. SSH configuration conflict scanning SHALL use the exact validated source snapshot, reject stale plans before mutation, and fail closed on non-UTF-8 source bytes.",
+    "scenarios": [
+      [
+        "Explicit executable",
+        "SHELL is an executable custom path",
+        "resolve_validator_program returns that exact path."
+      ],
+      [
+        "Basename lookup",
+        "SHELL is a basename and PATH contains non-executable then executable candidates",
+        "the first executable candidate is returned."
+      ],
+      [
+        "Invalid explicit path",
+        "SHELL names a non-executable path",
+        "resolution returns None and does not substitute PATH."
+      ],
+      [
+        "Snapshot replacement",
+        "the source changes after plan creation",
+        "apply returns Managed StalePlan and preserves the replacement content."
+      ],
+      [
+        "Invalid encoding",
+        "the existing source contains non-UTF-8 bytes",
+        "planning returns Managed UnsafePath before conflict handling."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "conflict_scan_uses_the_exact_validated_source_snapshot"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "non_utf8_source_fails_closed_before_conflict_policy"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "validator_prefers_custom_executable_shell_and_uses_path_for_basename_only"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "find_on_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "find_on_path_in"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "resolve_validator_program"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "validator_for"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "executable_file"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ManagedConfig::plan"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ManagedConfig::verify_unchanged"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixError::Managed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "SSH managed outcomes, planned-shell verification, and diagnostic report filtering",
+    "contract": "SSH managed alias detection SHALL ignore comments and the exact Grow-managed alias as configured, but a later unmanaged exact ssh customization SHALL make the file unconfigured. Applying a valid plan SHALL report Applied with the requested ID, changed path, planned shell, and verified managed state; stale plans SHALL preserve user content. configured_report SHALL remove only the SSH-wrap finding when the exact planned alias is verified, while an unconfigured report retains it and a healthy report can still produce an idempotent plan.",
+    "scenarios": [
+      [
+        "Managed-only source",
+        "the source contains comments and the exact Grow-managed alias",
+        "apply returns AlreadyConfigured without a backup."
+      ],
+      [
+        "Later conflict",
+        "an unmanaged exact ssh alias/function follows a managed block",
+        "managed_alias_configured returns false."
+      ],
+      [
+        "Apply outcome",
+        "a Bash plan is applied to an unchanged source",
+        "the outcome is Applied, retains SSH_WRAP_ID and Bash, points to the changed path, and verifies the alias."
+      ],
+      [
+        "Stale outcome",
+        "the source changes after planning",
+        "apply returns StalePlan and leaves the changed source intact."
+      ],
+      [
+        "Planned shell",
+        "the process SHELL is absent or belongs to another family after a Bash plan",
+        "outcome verification continues to use Bash and configured_report removes SSH-wrap only for that verified outcome."
+      ],
+      [
+        "Report filtering",
+        "configured is false or true",
+        "the SSH-wrap finding remains or is removed respectively; healthy reports still allow idempotent planning."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "comments_and_managed_alias_do_not_create_false_conflicts"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "managed_alias_with_later_unmanaged_conflict_is_not_configured"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "stale_plan_is_rejected_and_apply_verifies_postcondition"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "ssh_wrap_outcome_verifies_with_planned_shell_not_process_shell"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "configured_report_reaches_pass_state_only_for_exact_managed_alias"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "managed_alias_configured"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "apply_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixOutcome::new"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixOutcome::shell"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixOutcome::changed_path"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixOutcome::managed_alias_is_configured"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "configured_report"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "verify_persistent_fix"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixStatus::Applied"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "FixStatus::AlreadyConfigured"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ManagedConfigError::StalePlan"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Shell alias runtime expansion and explicit bypass",
+    "contract": "The generated POSIX and fish SSH aliases SHALL expand `ssh -p 2222 host` into the exact argv sequence `wrap`, `ssh`, `-p`, `2222`, `host`; `command ssh host` SHALL bypass the alias and invoke the underlying executable. The fish alias SHALL not export an `ssh` environment variable, and runtime cases SHALL be skipped only when the shell is unavailable.",
+    "scenarios": [
+      [
+        "Bash expansion",
+        "bash is available and the generated alias is sourced",
+        "grow receives wrap/ssh/options/host as separate arguments in order."
+      ],
+      [
+        "Zsh expansion",
+        "zsh is available and the generated alias is sourced",
+        "zsh produces the same exact argv."
+      ],
+      [
+        "Explicit bypass",
+        "bash defines the alias but invokes command ssh",
+        "the fake underlying ssh executable runs and records bypass."
+      ],
+      [
+        "Fish expansion",
+        "fish is available and the fish alias is sourced",
+        "fish produces the same exact argv and no ssh environment variable is present."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "shell_aliases_expand_to_exact_argv_and_bypass_is_explicit"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SSH_WRAP_ALIAS_POSIX"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "SSH_WRAP_ALIAS_FISH"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "ShellKind::alias"
+      ],
+      [
+        "crates/codegen/pager/src/diagnostics/fix.rs",
+        "find_on_path"
       ]
     ]
   }

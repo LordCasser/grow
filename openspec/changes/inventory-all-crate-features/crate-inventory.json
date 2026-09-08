@@ -3700,7 +3700,22 @@
       "Child fork marker copy and navigation guidance",
       "Fork and new-session persistence modes without cancelling the old turn",
       "Fork question answer translation",
-      "Displaced local fork modal notice"
+      "Displaced local fork modal notice",
+      "AgentView SHALL resolve a session plan artifact under the session cwd namespace, prefer nonblank approval-carried plan content for previews, and fall back to the session plan.md file when the approval payload is absent.",
+      "AgentView SHALL expose plan chip and prompt auto-flag visibility from independent plan and permission state, with plan chip visibility requiring usable preview content.",
+      "AgentView SHALL open a fullscreen plan line viewer from available inline or file content, configure action/feedback controls by approval context, rebuild visible comments, and restore approval focus when reopening.",
+      "Plan approval actions SHALL send approved, abandoned, or revision feedback responses while restoring the stashed prompt and clearing transient viewer/comment state.",
+      "The plan approval key handler SHALL prioritize file-search dismissal, focus navigation, comment save/cancel, direct approval, revision submission, and prompt editing in the documented order.",
+      "Plan approval commenting SHALL capture selected source ranges, edit or append PlanComment records, rebuild the preview, and restore the prior feedback prompt on save or cancel.",
+      "Casual plan preview commenting SHALL support new/edit comment drafts, prompt restoration, visual selection normalization, cancellation, deletion, and prompt key routing outside the approval modal.",
+      "Sending casual plan comments SHALL format comments with available inline or artifact plan content, clear local comment state and viewer, and submit one prompt action.",
+      "Diagnostic fix identity, registry, and availability projection",
+      "Tmux plan paths, managed blocks, safety validation, and preview rendering",
+      "Tmux scanner, managed configuration transaction, and idempotence contract",
+      "SSH shell planning, platform gates, and exact customization conflict detection",
+      "Validated shell discovery, source snapshot integrity, and fail-closed decoding",
+      "SSH managed outcomes, planned-shell verification, and diagnostic report filtering",
+      "Shell alias runtime expansion and explicit bypass"
     ],
     "reviewed_files": [
       {
@@ -5754,6 +5769,18 @@
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
         "sha256": "b6c779fcf0aeb14c0e1f094b88ec87135064ebb2503e92c612f8f67432063f4c"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "sha256": "6c47e2ff403f518b42661ab003ae046dfce15b5faf3b88aaa299989da588e5dc"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/plan.rs",
+        "sha256": "bd997745775a5f8548a668e62bbedacb44ce2413358f61baf5101cc72d45d411"
+      },
+      {
+        "path": "crates/codegen/pager/src/diagnostics/fix_tests.rs",
+        "sha256": "9e08059fb8d8e1e436a652fd5542b29328dc6a91f4c79e88ad4e7f127b6f897f"
       }
     ],
     "review": "reviews/pager.md"
