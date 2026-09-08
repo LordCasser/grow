@@ -4790,6 +4790,10 @@
         "sha256": "7fa3954661288d559a53cb6fc009d65e39a34f8e0b5ac3ece77dd47d21c974ef"
       },
       {
+        "path": "crates/codegen/pager/src/views/workflows.rs",
+        "sha256": "2f8d5b1495636bbdbffddbca259fc6edde4d502b06801f11a27be1114ac78f30"
+      },
+      {
         "path": "crates/codegen/pager/src/worktree_cmd/display.rs",
         "sha256": "18fb3bfed2302435be742c06d645d919260bc0e171046179cbe747b743f549d8"
       },

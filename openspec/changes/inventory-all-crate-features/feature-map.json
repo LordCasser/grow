@@ -78634,6 +78634,46 @@
       [
         "crates/codegen/pager/src/views/dashboard/row.rs",
         "roster_idle_and_dormant_classify_as_inactive"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "render_workflows"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "render_list"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "buf_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "render_to_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "workspace_list_separates_definitions_and_runs_with_provenance"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "workspace_list_surfaces_registry_diagnostics"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "narrow_detail_layout_is_panic_free"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "multiple_runs_render_as_list_until_entered"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "render_records_row_hit_rects_per_mode"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "empty_state_offers_starters"
       ]
     ]
   },
@@ -79017,6 +79057,90 @@
       [
         "crates/codegen/pager/src/views/dashboard/row.rs",
         "cluster_keeps_subagents_with_parent"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::reset"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::normalize"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::select_run"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::select_definition"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::selected_definition"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::select_previous_list_item"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::select_next_list_item"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::select_phase"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::ensure_run_visible"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::ensure_definition_visible"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::ensure_phase_visible"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::handle_scroll"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowsViewState::detail_run"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "ensure_selection_visible"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "list_navigation_crosses_definition_and_run_sections"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "run_and_phase_viewports_keep_stable_selection_visible"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "wheel_routes_by_panel"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "zero_delta_wheel_does_not_pin_phase"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "roster_wheel_pans_toward_older_rows_and_clamps"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "detail_run_dropped_when_missing"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "stale_selection_clamps"
       ]
     ]
   },
@@ -86618,6 +86742,26 @@
       [
         "crates/codegen/pager/src/app/agent_view/render.rs",
         "prompt_status_shows_the_active_plan_phase"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "footer_shortcuts"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "modal_config"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "run_footer_has_controls_but_no_definition_publish_action"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "budget_limited_run_disables_bare_resume_and_explains_raised_cap_path"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "failed_run_offers_resume_but_not_stop"
       ]
     ]
   },
@@ -92731,6 +92875,90 @@
       [
         "crates/codegen/pager/src/views/tasks_pane.rs",
         "TaskEntry::from_workflow_run"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowRunSnapshot::effective_active_phase"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "WorkflowRunSnapshot::done_agents"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "phase_rail"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "default_phase_index"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "span_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "status_glyph_and_style"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "agent_glyph_and_style"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "fmt_tokens"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "plural"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "strip_control"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "render_detail"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "make_run"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "run_with_lagging_current_phase"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "single_run_auto_enters_detail_with_phase_rail_and_roster"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "undeclared_current_phase_is_selectable_and_filters_its_agents"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "phase_selection_filters_roster"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "detail_header_omits_agent_budget"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "default_selection_follows_phase_with_running_agents"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "pinned_phase_unpins_when_run_progresses"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "rail_marks_running_phase_and_roster_streams_live_status"
+      ],
+      [
+        "crates/codegen/pager/src/views/workflows.rs",
+        "admitted_agent_count_never_decreases"
       ]
     ]
   },
