@@ -162,7 +162,9 @@ fn sync_managed_parent(root: &cap_std::fs::Dir, parent: &Path) -> io::Result<()>
     } else {
         root.open_dir(parent)?
     };
-    directory.into_std_file().sync_all()
+    // Linux directory capabilities may use O_PATH, which cannot be fsynced.
+    // Reopen dot for reading relative to the pinned capability.
+    directory.open(".")?.sync_all()
 }
 
 #[cfg(not(unix))]
@@ -202,6 +204,19 @@ fn ensure_real_parent_dirs(root: &cap_std::fs::Dir, parent: &Path) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_transaction_publishes_complete_generation() {
+        let home = tempfile::tempdir().unwrap();
+        extract_builtin_files_transaction(home.path()).unwrap();
+        for (name, content) in BUILTIN_FILES {
+            assert_eq!(std::fs::read_to_string(home.path().join(name)).unwrap(), *content);
+        }
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(".metadata_version")).unwrap(),
+            version::VERSION,
+        );
+    }
 
     #[test]
     fn version_bump_reextracts_managed_files_without_touching_user_content() {

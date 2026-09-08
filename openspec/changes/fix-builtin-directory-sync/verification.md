@@ -1,0 +1,4 @@
+# Verification
+Before fix: isolated harness compiled the unchanged production portion of builtin.rs with repository-locked direct dependencies and asserted one transaction publishes every builtin plus marker. On Ubuntu noble arm64 / Rust 1.93.1 it failed with EBADF. The harness substitutes only the version constant and resolves include_str paths; it does not modify transaction implementation. /tmp/grow-builtin-regression is temporary Linux test storage.
+
+After fix: the same Ubuntu/Rust/direct-dependency harness passes the first-transaction completeness assertion. macOS actual Shell builtin module: 6/6 tests pass, including fresh transaction, version/same-version reconciliation, failed-extraction retry, concurrent extraction and symlink rejection. Temporary Linux harness build output (77 MB) was removed and the previously stopped VM was stopped again.
