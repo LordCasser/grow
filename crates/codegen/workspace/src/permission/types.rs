@@ -372,7 +372,6 @@ impl AccessKind {
                 glob: g.glob.clone(),
             },
             ToolInput::TaskOutput(_)
-            | ToolInput::Skill(_)
             | ToolInput::Lsp(_)
             | ToolInput::MemorySearch(_)
             | ToolInput::MemoryGet(_)

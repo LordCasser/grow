@@ -1,40 +1,9 @@
-//! Skill tool implementation - allows the agent to invoke user-defined skills.
+//! Skill prompt loading and expansion.
 //!
 //! Skills are user-defined prompts stored as Markdown files that can be invoked
-//! by the user via slash commands (e.g., /commit) or by the model via this tool.
+//! through skill references and slash commands (e.g., /commit).
 
 use crate::implementations::skills::types::SkillInfo;
-
-/// Input for the Skill tool
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct SkillInput {
-    /// The name of the skill to invoke (e.g., "commit", "review-pr", or fully qualified "user:commit")
-    #[schemars(description = "The name of the skill to invoke")]
-    pub skill: String,
-
-    /// Optional arguments to pass to the skill
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "Optional arguments to pass to the skill")]
-    pub args: Option<String>,
-}
-
-/// Output from the Skill tool
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-pub struct SkillOutput {
-    /// Whether the skill was successfully resolved
-    pub success: bool,
-    /// Brief fallback message, used as the tool result when there is no skill body.
-    pub tool_result: String,
-    /// The skill's display name
-    pub skill_name: String,
-    /// The formatted skill content, delivered to the model as the tool result.
-    pub skill_message: Option<String>,
-    /// Error message if the skill failed to load
-    pub error: Option<String>,
-}
-
-// Old `SkillToolImpl` + `impl Tool` deleted.
-// New implementation is in `grow_build/skill/`.
 
 /// Build the formatted skill message shown to the model.
 ///

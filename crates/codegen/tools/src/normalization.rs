@@ -102,7 +102,6 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
             (field::PATH, opt(g.path.as_ref())),
         ]),
         ToolInput::TodoWrite(_)
-        | ToolInput::Skill(_)
         | ToolInput::MCPTool(_)
         | ToolInput::TaskOutput(_)
         | ToolInput::KillTask(_)

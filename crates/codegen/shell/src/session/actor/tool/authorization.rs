@@ -107,7 +107,6 @@ pub(super) fn project_call_access(
         ToolInput::ReadFile(_)
         | ToolInput::Grep(_)
         | ToolInput::ListDir(_)
-        | ToolInput::Skill(_)
         | ToolInput::TaskOutput(_)
         | ToolInput::MemorySearch(_)
         | ToolInput::MemoryGet(_)

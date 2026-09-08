@@ -1,4 +1,3 @@
-use crate::implementations::skills::skill::SkillOutput;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use strip_ansi_escapes::strip_str;
@@ -487,7 +486,6 @@ pub enum ToolOutput {
     MCP(MCPOutput),
     TaskOutput(TaskOutputOutput),
     KillTask(KillTaskOutput),
-    Skill(SkillOutput),
     SearchTool(SearchToolOutput),
     SubagentCompleted(SubagentCompletedOutput),
     PlanControl(PlanControlOutput),
@@ -531,7 +529,6 @@ impl ToolOutput {
             ToolOutput::ReadFile(
                 ReadFileOutput::FileContent(_) | ReadFileOutput::ImageContent(_),
             ) => false,
-            ToolOutput::Skill(s) => !s.success,
             ToolOutput::ReadFile(_) => true,
             ToolOutput::TaskOutput(TaskOutputOutput::TaskNotFound(_)) => true,
             ToolOutput::KillTask(KillTaskOutput::TaskNotFound(_)) => true,
@@ -686,10 +683,6 @@ impl ToolOutput {
                 KillTaskOutput::Result(r) => format!("{}: {}", r.outcome, r.message),
                 KillTaskOutput::TaskNotFound(msg) => msg.to_owned(),
             },
-            ToolOutput::Skill(skill_output) => skill_output
-                .skill_message
-                .clone()
-                .unwrap_or_else(|| skill_output.tool_result.clone()),
             ToolOutput::SearchTool(out) => out.content.clone(),
             ToolOutput::SubagentCompleted(sub) => {
                 let mut text = sub.output.clone();
@@ -1738,5 +1731,3 @@ mod tests {
         );
     }
 }
-
-impl tool_runtime::ToolOutput for SkillOutput {}

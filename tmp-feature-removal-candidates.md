@@ -63,6 +63,8 @@
 - 必须保留：skill.rs 的加载、消息格式化、参数替换、内部链接和 slash/预加载函数；不要整文件删除，也不顺带删除 ToolKind::Skill 模板分类。
 - 状态：等待用户确认，尚未删除。证据见 OpenSpec audit-legacy-skill-tool-protocol。
 
+- 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R6 验证记录。
+
 ## R7 · 无仓内调用的整份配置保存入口
 
 - 位置：crates/codegen/shell/src/util/config/persist.rs 的公开 save_config 与其专用 save_config_locked 包装。

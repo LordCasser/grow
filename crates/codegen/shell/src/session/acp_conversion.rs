@@ -413,30 +413,6 @@ pub fn acp_tool_update(
                     .title(Some(title)),
             ))
         }
-        ToolOutput::Skill(skill_output) => {
-            let status = if skill_output.success {
-                acp::ToolCallStatus::Completed
-            } else {
-                acp::ToolCallStatus::Failed
-            };
-            let title = if let Some(ref error) = skill_output.error {
-                format!("Skill: {} - {}", skill_output.skill_name, error)
-            } else {
-                format!("Skill: {}", skill_output.skill_name)
-            };
-            Some(acp::ToolCallUpdate::new(
-                acp::ToolCallId::new(Arc::from(tool_call_id)),
-                acp::ToolCallUpdateFields::new()
-                    .status(Some(status))
-                    .content(Some(vec![acp::ToolCallContent::from(
-                        acp::ContentBlock::Text(acp::TextContent::new(
-                            skill_output.tool_result.clone(),
-                        )),
-                    )]))
-                    .raw_output(raw_output_json(output, rewriter))
-                    .title(Some(title)),
-            ))
-        }
         ToolOutput::SearchTool(out) => Some(acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from(tool_call_id)),
             acp::ToolCallUpdateFields::new()

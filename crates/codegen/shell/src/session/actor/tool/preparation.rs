@@ -152,24 +152,6 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
-            ToolInput::Skill(skill) => {
-                ::diagnostics::session_ctx::log_event(::diagnostics::events::SkillDispatched {
-                    skill_name: skill.skill.clone(),
-                    plugin_source: None,
-                });
-                tracing::info_span!(
-                    "skill.activated",
-                    skill_name = %skill.skill,
-                    invocation_trigger = "skill_tool",
-                )
-                .in_scope(|| {});
-                (
-                    format!("Skill: {}", skill.skill),
-                    acp::ToolKind::Other,
-                    vec![],
-                    vec![],
-                )
-            }
             ToolInput::Dynamic(_) => (
                 "Dynamic tool call".to_string(),
                 acp::ToolKind::Other,

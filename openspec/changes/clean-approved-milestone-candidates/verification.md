@@ -15,3 +15,6 @@ Removed only unused internal ID formatter selector/branch and seven exclusive fo
 
 ## R5
 SkillManager owns active listings/slash advertisement; duplicate AvailableSkills type and writes removed. Migrated startup+dynamic preservation assertions to SkillManager. Fresh tools skill-filter regressions passed 200/200, including manager, discovery and registry coverage.
+
+## R6
+Removed unregistered SkillInput/SkillOutput and exclusive protocol/normalization/permission/ACP/preparation branches. Retained skill prompt loading and ToolKind::Skill. Fresh tools skill regressions 200/200 and shell acp_conversion 29/29 passed; no remaining old IO symbol references. Existing nonfatal linker unwind warning only.

@@ -24,7 +24,6 @@ use crate::implementations::grow_build::write::WriteInput;
 use crate::implementations::lsp::LspToolInput;
 use crate::implementations::memory::types::{MemoryGetInput, MemorySearchInput};
 use crate::implementations::search_tool::SearchToolInput;
-use crate::implementations::skills::skill::SkillInput;
 use crate::implementations::use_tool::UseToolInput;
 use serde::{Deserialize, Serialize};
 use tool_types::KillTaskToolInput;
@@ -54,7 +53,6 @@ pub enum ToolInput {
     Grep(GrepSearchInput),
     ListDir(ListDirInput),
     TodoWrite(TodoWriteInput),
-    Skill(SkillInput),
     MCPTool(MCPToolInput),
     TaskOutput(TaskOutputToolInput),
     KillTask(KillTaskToolInput),
