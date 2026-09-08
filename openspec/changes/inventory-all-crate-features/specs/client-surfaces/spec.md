@@ -15502,3 +15502,415 @@ Methods in this module SHALL only orchestrate caller-owned side effects at the i
 - **THEN** test_count is zero and no compiled/runtime guarantee is claimed.
 
 证据：`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_line_viewer_key`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_line_viewer_mouse`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_block_viewer_key`；`crates/codegen/pager/src/app/agent_view/viewer.rs` — `AgentView::handle_block_viewer_mouse`。
+### Requirement: Initial prompt dispatch starts or reuses a session
+dispatch_initial_prompt SHALL dispatch NewSession only when no Agent view is active, then dispatch SendPrompt so fresh startup creates a session while resume/continue startup reuses its existing session.
+
+#### Scenario: Fresh startup
+- **WHEN** active_view is not Agent
+- **THEN** NewSession precedes SendPrompt.
+
+#### Scenario: Existing session
+- **WHEN** an Agent view is active
+- **THEN** only SendPrompt is dispatched.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_initial_prompt`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `ActiveView::Agent`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `Action::NewSession`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `Action::SendPrompt`。
+
+### Requirement: Doctor report, fix planning, and guarded fix question
+Doctor Report SHALL append a formatted live terminal report; ListFixes/Fix SHALL emit PlanDoctorFix with session binding target/report/terminal; opening a fix SHALL use a two-option no-freeform local question, stash and clear the prompt, and refuse when another question is active.
+
+#### Scenario: Report
+- **WHEN** DoctorRequest::Report is dispatched
+- **THEN** a diagnostic notice is appended.
+
+#### Scenario: Fix
+- **WHEN** a plan is requested
+- **THEN** PlanDoctorFix is emitted or a conflict notice prevents opening.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `collect_live_doctor_report_for_terminal`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `doctor_fix_target`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_doctor`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `open_doctor_fix_question`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `DoctorRequest`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `Effect::PlanDoctorFix`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `LocalQuestionKind::DoctorFix`。
+
+### Requirement: Prompt clear and history search dispatch
+dispatch_clear_prompt SHALL record nonempty prompt text through interject history then clear composer state; dispatch_open_history_search SHALL activate the combined prompt history using the current composer as query.
+
+#### Scenario: Clear
+- **WHEN** Esc-Esc clear is dispatched
+- **THEN** history is updated and prompt/images are cleared.
+
+#### Scenario: Search
+- **WHEN** /history is dispatched
+- **THEN** history search activates with current text.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_clear_prompt`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_open_history_search`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `record_interject_prompt_history`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `combined_prompt_history`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `history_search`。
+
+### Requirement: Contextual tips and word-select acceptance
+Contextual tip handlers SHALL honor per-tip gates and active-agent guards, use ephemeral seen-capped slots, log impressions only on actual show, suppress word-select when already configured, snapshot its prompt, and accept only while the matching tip is visible by persisting WordSelect and retiring the tip.
+
+#### Scenario: Tip gate
+- **WHEN** a hint is disabled or no Agent is active
+- **THEN** nothing changes.
+
+#### Scenario: Word select
+- **WHEN** matching tip is shown and accepted
+- **THEN** snapshot is cleared, acceptance logged, and WordSelect setting is persisted.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_show_undo_tip`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `show_small_screen_tip`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `show_ssh_wrap_tip`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_show_plan_nudge`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_show_word_select_tip`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_accept_word_select_tip`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `show_ephemeral_tip`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `tip_seen_counts`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `WORD_SELECT_TIP_KEY`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `set_keep_text_selection`。
+
+### Requirement: Prompt picker and submission guards
+input_can_trigger_project_picker SHALL accept only nonempty plain prompts and reject slash/bash/exit aliases; dispatch_send_prompt_inner SHALL clear stale pending actions, refuse reconnect sends, route eligible user text to open_project_question, and let literal chip submissions bypass picker and slash interpretation.
+
+#### Scenario: Guard
+- **WHEN** reconnect is pending
+- **THEN** a wait toast and no effect are produced.
+
+#### Scenario: Picker
+- **WHEN** eligible nonliteral text needs a project
+- **THEN** the project question opens.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `input_can_trigger_project_picker`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_send_prompt_inner`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `open_project_question`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `reconnect_pending`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `pending_action`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `literal`。
+
+### Requirement: Slash registry command execution and result routing
+dispatch_send_prompt_inner SHALL resolve slash invocations against the registry with current control-intent models and pager snapshot, enforce screen mode refusal, record use, clear consumed input, and route handled/error/message/doctor/action/compact/skill/host results to their respective effects/notices.
+
+#### Scenario: Known command
+- **WHEN** slash input resolves
+- **THEN** mode gate and command execution determine the routed result.
+
+#### Scenario: Unsupported/unknown
+- **WHEN** command is unknown or refused
+- **THEN** an error/message notice is rendered without model submission.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_send_prompt_inner`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `CommandExecCtx`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `parse_invocation`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `CommandRegistry::get_for_dispatch`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `CommandResult`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `mode_support`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `Effect::Compact`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `Effect::ExecuteSlashCommand`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `HostCommand`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `InjectSkill`。
+
+### Requirement: Skill injection and scheduled-task preview
+InjectSkill SHALL allocate a queue id, enqueue model-facing wire blocks with display metadata, and insert a provisional scheduled task immediately when a scheduler preview is supplied.
+
+#### Scenario: Skill
+- **WHEN** an InjectSkill result arrives
+- **THEN** queued prompt stores wire blocks/display data.
+
+#### Scenario: Preview
+- **WHEN** scheduled_task_preview exists
+- **THEN** provisional task is visible before server confirmation.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `InjectSkill`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `QueuedPrompt`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `ScheduledTaskInfo`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `scheduled_task_preview`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `next_queue_id`。
+
+### Requirement: Plain prompt immediate/local routing and history
+Plain submission SHALL defer consume sends while paste probes run; send image-free prompts immediately to eligible bound running sessions with self-originated prompt ids and optimistic queue echoes; otherwise enqueue locally, drain images before clearing, manage follow-up chips, show send-now hints, and update capped prompt history.
+
+#### Scenario: Immediate
+- **WHEN** bound running turn and no images
+- **THEN** Effect::SendPrompt and queue echo are emitted.
+
+#### Scenario: Local/deferred
+- **WHEN** images, idle, or paste probe prevent immediate send
+- **THEN** prompt is deferred or queued and drained through normal path.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_send_prompt`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_send_prompt_inner`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `immediate_server_send_eligible`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `AgentDeferredSend::SendPrompt`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `push_server_queue_echo`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `note_self_originated_prompt`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `enqueue_prompt_with_skill_tokens`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `maybe_drain_queue`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `prompt_history`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `clear_follow_ups`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `maybe_show_send_now_tip`。
+
+### Requirement: Bash command routing
+dispatch_send_bash_command SHALL refuse reconnect/inactive sends, create a session and queue unbound commands, record `! ` history capped at 200 for bound commands, send eligible running commands as SendBashCommand with queue echo/self-origin identity, and otherwise enqueue/drain locally.
+
+#### Scenario: Unbound
+- **WHEN** session_id is absent
+- **THEN** session creation and bash queueing occur.
+
+#### Scenario: Running
+- **WHEN** immediate server send is eligible
+- **THEN** SendBashCommand is emitted.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `dispatch_send_bash_command`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `Effect::SendBashCommand`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `enqueue_bash_command`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `immediate_server_send_eligible`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `push_server_queue_echo`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `bash_turn`。
+
+### Requirement: Reload window result deferral and supersession
+Load results SHALL defer while session_reload is open, preserving the reload owner; a new fork/worktree/restore initiation SHALL abort the open reload window first so the new load owns replay state.
+
+#### Scenario: Result
+- **WHEN** reload window is open
+- **THEN** result is deferred.
+
+#### Scenario: Initiation
+- **WHEN** new load supersedes an open window
+- **THEN** old window is aborted before new ownership.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `defer_to_open_reload_window`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `supersede_open_reload_window`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `session_reload`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `abort_session_reload`。
+
+### Requirement: Prompt response correlation and durable finalization
+handle_prompt_response SHALL gate by prompt id, merge only bounded late metadata, retire stale optimistic echoes, finalize the current turn through first-wins terminal completion, restore failed unconfirmed drafts, apply notifications, drain queues unless reconnecting, and fetch a suggestion only after a clean successful idle non-bash turn.
+
+#### Scenario: Stale
+- **WHEN** response id is not current
+- **THEN** late finalized metadata may merge; otherwise stale echo is retired.
+
+#### Scenario: Current
+- **WHEN** response belongs to active prompt
+- **THEN** durable finalizer runs and post-turn queue/suggestion rules apply.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `handle_prompt_response`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `response_pid`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `finalized_prompt`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `retire_optimistic_echo`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `finalize_prompt_terminal`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `TerminalOutcome`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `restore_failed_input_draft`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `apply_terminal_notifications`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `maybe_drain_queue`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `FetchPromptSuggestion`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `turn_completion`。
+
+### Requirement: Failed input draft restoration
+restore_failed_input_draft SHALL restore a stashed draft/images/chips directly only for an empty normal composer; otherwise it SHALL enqueue the full draft at the front with requires_review=true and ask the user to edit before retry.
+
+#### Scenario: Clean
+- **WHEN** composer is empty and normal
+- **THEN** draft is restored with review toast.
+
+#### Scenario: Dirty
+- **WHEN** composer has newer input/images or alternate mode
+- **THEN** draft is held in queue for review.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `restore_failed_input_draft`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `InFlightPrompt`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `StashedPrompt::from_submission`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `requires_review`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `PromptMode::Normal`。
+
+### Requirement: Compaction completion and feedback
+handle_compact_complete SHALL distinguish foreground command and background scheduling, ignore unrelated state, display scheduled/already-running feedback, defer Completed ownership to durable shell events, classify sanitized errors, finish foreground command/activity, and drain queued work unless reconnecting.
+
+#### Scenario: Background
+- **WHEN** track_foreground is false
+- **THEN** status/error feedback is shown without duplicate terminal marker.
+
+#### Scenario: Foreground
+- **WHEN** compact command is active
+- **THEN** state finishes, errors/status apply, and queue drains.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `handle_compact_complete`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `show_compact_request_error`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `CompactRequestStatus`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `AgentCommand::Compact`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `control_terminal_was_published`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `set_live_feedback`。
+
+### Requirement: Shell suggestion debounce routing
+handle_suggestion_debounce_expired SHALL route by the timer agent id, require Bash mode and matching generation, and emit FetchShellSuggestions with current text/cursor/cwd, AI/model/session options, wire limit, and token_only=false.
+
+#### Scenario: Stale/mismatch
+- **WHEN** view, mode, or generation no longer matches
+- **THEN** no fetch is emitted.
+
+#### Scenario: Valid
+- **WHEN** Bash mode and generation match
+- **THEN** a contextual shell suggestion effect is emitted.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `handle_suggestion_debounce_expired`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `PromptInputMode::Bash`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `on_debounce_expired`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `Effect::FetchShellSuggestions`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `SHELL_SUGGEST_WIRE_LIMIT`；`crates/codegen/pager/src/app/root/dispatch/prompt.rs` — `token_only`。
+### Requirement: Unbound session prompts and follow-up chips remain local until a session exists
+The dispatch layer SHALL queue SendPrompt text when the active agent has no session id, emit no transport effect, and leave follow-up chips intact when a chip is submitted without a bound session. Once SessionCreated or WorktreeSessionCreated supplies the id, queued prompts SHALL be drained into SendPrompt effects.
+
+#### Scenario: Prompt before session
+- **WHEN** SendPrompt is dispatched while session_id is None
+- **THEN** the prompt is queued, effects are empty, and its text is preserved.
+
+#### Scenario: Chip before session
+- **WHEN** SubmitFollowUp is dispatched while session_id is None
+- **THEN** no SendPrompt is emitted and the follow-up chips remain visible.
+
+#### Scenario: Session becomes ready
+- **WHEN** a queued prompt exists when a session-created result arrives
+- **THEN** the queue is emptied and a SendPrompt effect carries the queued text.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `send_prompt_without_session_queues_but_no_effect`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `chip_submit_without_session_keeps_chips_and_does_not_send`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_created_drains_queued_prompts`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `worktree_session_created_drains_queued_prompts`。
+
+### Requirement: Session-created results bind identity and initialize per-session metadata
+SessionCreated SHALL bind the returned session id to the target AgentView, emit prompt-history, agent-name, available-command refresh, marketplace, optional plugin CTA, and active-session registration effects, while session model data updates only the agent session and does not overwrite the process new-session default. New sessions SHALL seed MCP progress and bootstrap commands at generation 1, start with empty scrollback and prompt focus, use the application cwd on the welcome screen, and advertise /resume in minimal mode.
+
+#### Scenario: Create result
+- **WHEN** a SessionCreated result is dispatched
+- **THEN** the agent stores the exact id and emits the initialization effects; plugin CTA is conditional on its flag.
+
+#### Scenario: Model isolation
+- **WHEN** the result contains models while the app has a future default
+- **THEN** the agent receives the returned current model but the app default remains unchanged.
+
+#### Scenario: New-session seed
+- **WHEN** NewSession is dispatched
+- **THEN** MCP progress is present with unknown total, bootstrap commands are copied at generation 1, and CreateSession has no model id unless selected.
+
+#### Scenario: Minimal banner
+- **WHEN** a new session is completed in Minimal mode
+- **THEN** the system banner names /resume and does not advertise /agents.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_created_sets_session_id`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_created_omits_cta_catalog_when_disabled`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_created_models_do_not_overwrite_new_session_default`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_created_banner_advertises_resume_in_minimal_mode`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_session_seeds_mcp_init_progress`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_session_without_model_switch_has_no_model_id`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_session_seeds_available_commands_from_bootstrap`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_session_empty_bootstrap_starts_at_generation_1`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_session_falls_back_to_app_cwd_on_welcome_screen`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_session_starts_with_prompt_focused`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `dispatch_new_session_has_empty_scrollback`。
+
+### Requirement: Worktree session creation enforces repository context and preserves cwd topology
+NewWorktreeSession SHALL create a placeholder AgentView and CreateWorktreeSession effect only when the cwd is inside a git repository. A successful result SHALL bind the session id, use the returned session cwd (including subdirectory offset rather than the worktree root), initialize the agent idle with history/name/registration effects, and preserve session model isolation. A non-git cwd SHALL remain on Welcome with a warning and no agent.
+
+#### Scenario: Git worktree start
+- **WHEN** a worktree action is dispatched in a git cwd
+- **THEN** one agent is created in CommandRunning state and one CreateWorktreeSession effect is returned.
+
+#### Scenario: Nested cwd
+- **WHEN** the source cwd is a repository subdirectory
+- **THEN** the created agent cwd points to the corresponding subdirectory under the returned worktree.
+
+#### Scenario: Invalid cwd
+- **WHEN** the action is dispatched outside git
+- **THEN** no agent/effect is created and a warning says the cwd is not inside a git repository.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_worktree_session_creates_agent_and_returns_effect`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `worktree_session_created_sets_session_and_cwd`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `worktree_session_preserves_subdirectory_offset`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `worktree_session_models_do_not_overwrite_new_session_default`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_worktree_session_rejects_non_git_cwd`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `worktree_session_seeds_available_commands_from_bootstrap`。
+
+### Requirement: Worktree and regular session failures recover according to ownership
+Session and worktree failure results SHALL clear loading and extension/MCP progress and surface the error. An unbound orphan without a fork parent SHALL be removed and return to Welcome or toast an existing active agent; a forked placeholder SHALL remain idle with a TurnFailed event. When Welcome already has a survivor, the failure SHALL be recorded as a startup warning without stealing focus.
+
+#### Scenario: Bound failure
+- **WHEN** an existing session receives SessionFailed
+- **THEN** the agent remains, loading state is cleared, and a failure toast is set.
+
+#### Scenario: Orphan failure
+- **WHEN** a session-less non-fork agent fails
+- **THEN** the agent is removed and the error becomes a startup warning or fallback toast.
+
+#### Scenario: Fork failure
+- **WHEN** a session-less agent has forked_from
+- **THEN** the agent remains idle with a TurnFailed scrollback event.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_failed_keeps_agent_clears_loading_and_toasts`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_failed_orphan_returns_to_welcome_with_warning`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_failed_orphan_with_fallback_toasts`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_failed_orphan_does_not_steal_other_active_agent`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_failed_orphan_on_welcome_with_survivor_uses_startup_warning`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `worktree_session_failed_without_session_returns_to_welcome`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `worktree_session_failed_with_fork_parent_keeps_agent`。
+
+### Requirement: Session initialization conditionally fetches extension state
+When a session carries the pending extensions-fetch flag, session creation SHALL emit the five extension fetch effects, including MCP listing, and clear the flag. Without the flag, no extension fetch effects SHALL be emitted.
+
+#### Scenario: Pending extensions
+- **WHEN** the flag is set before SessionCreated
+- **THEN** five extension fetches are emitted for the returned session and the flag is cleared.
+
+#### Scenario: No pending extensions
+- **WHEN** the flag is absent
+- **THEN** extension fetch count is zero while ordinary initialization remains active.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_created_with_flag_emits_five_fetches_and_clears_flag`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_created_without_flag_emits_no_extension_fetches`。
+
+### Requirement: Deferred model, behavior, permission, and cancel controls respect session readiness
+Model switches SHALL be no-ops or deferred when no session id exists, then replay as SwitchModel after regular or worktree session creation. Setting Plan behavior without a session SHALL create a session and project the deferred mode; setting it on an active session SHALL emit SwitchBehavior only on the transition. AlwaysApprove SHALL clear the per-session auto display flag, and a global cancel-subagents preference SHALL suppress the cancel panel while emitting CancelTurn with cancel_subagents=false.
+
+#### Scenario: Model absent
+- **WHEN** SwitchModel is dispatched with no session id
+- **THEN** no effect is emitted and the requested model is stored as deferred.
+
+#### Scenario: Model replay
+- **WHEN** a deferred model exists when a session result arrives
+- **THEN** the deferred value is cleared, pending state is set, and SwitchModel targets the exact new session.
+
+#### Scenario: Plan absent
+- **WHEN** Plan behavior is selected before a session exists
+- **THEN** CreateSession is emitted and effective plan mode is projected until connection.
+
+#### Scenario: Plan transition
+- **WHEN** Plan behavior is enabled on an active session
+- **THEN** one SwitchBehavior(Plan) effect is emitted.
+
+#### Scenario: Permission precedence
+- **WHEN** AlwaysApprove is selected while auto mode is active
+- **THEN** always-approve is active and auto mode is cleared.
+
+#### Scenario: Global cancel preference
+- **WHEN** CancelTurn is dispatched with always-continue preference
+- **THEN** the cancel panel stays closed and CancelTurn carries cancel_subagents=false.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `switch_model_without_session_does_nothing`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `switch_model_deferred_when_no_session_id`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `deferred_model_switch_applied_on_session_created`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `deferred_model_switch_applied_on_worktree_session_created`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `set_plan_mode_no_session_starts_with_deferred_behavior`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `set_plan_mode_on_from_off_emits_switch_behavior`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `set_always_approve_on_clears_session_auto_mode`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `global_cancel_subagents_pref_skips_panel_without_session_override`。
+
+### Requirement: Workspace trust gates startup and replays one coherent deferred intent
+The dispatch chokepoint SHALL block session startup while TrustState is Pending, stash NewSession/LoadSession/worktree/ref/label intents without clobbering already-stashed companions, and replay once after trust is accepted. Draining SHALL clear every startup field even when higher-priority intents supersede others. TrustFolder SHALL persist a release-build grant only for the confirmed workspace identity and reject a replacement at the same pathname.
+
+#### Scenario: Pending trust
+- **WHEN** NewSession or worktree creation is dispatched while trust is pending
+- **THEN** no agent/effect is created and the exact intent is stashed.
+
+#### Scenario: Accept trust
+- **WHEN** finish_trust is called with deferred startup
+- **THEN** trust becomes Done, the deferred action replays once, and all consumed fields clear.
+
+#### Scenario: Companion preservation
+- **WHEN** a second gated worktree action has None load/label/ref
+- **THEN** the prior resume id, label, and git ref remain and replay together.
+
+#### Scenario: Stale confirmation
+- **WHEN** the directory is replaced before TrustFolder
+- **THEN** the trust state remains Pending and the replacement is not trusted.
+
+#### Scenario: Grant
+- **WHEN** the identity is unchanged in a simulated release build
+- **THEN** the workspace grant is persisted and trust becomes Done.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_startup_allowed_requires_trust`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `finish_trust_resolves_and_replays_startup`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `trust_folder_grants_and_resolves`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `trust_folder_rejects_confirmation_period_replacement`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_session_is_gated_while_trust_pending`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `drain_clears_all_startup_fields_even_when_intents_coexist`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `deferred_worktree_ref_replays_through_gate`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `gated_worktree_without_load_id_preserves_stashed_resume`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `gated_worktree_with_none_companions_preserves_stashed_label_and_ref`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `simulate_release_build`。
+
+### Requirement: New-session worktree choice maps to persisted mode and correct local submit semantics
+The NewSessionAnswered dispatch SHALL update the configured new-session worktree mode and emit PersistWorktreeMode when requested. Local question submission for NewSession SHALL translate the selected choice to worktree plus PersistAlways or PersistNever, and the new-session dispatch path SHALL preserve an empty scrollback.
+
+#### Scenario: Persist Never
+- **WHEN** the answer chooses no worktree with PersistNever
+- **THEN** mode is Never and a persistence effect uses config key new_session_worktree_mode.
+
+#### Scenario: Persist Always
+- **WHEN** the local question selects the worktree option
+- **THEN** NewSessionAnswered has worktree=true and PersistAlways.
+
+#### Scenario: Persist Never translation
+- **WHEN** the local question selects the plain-session option
+- **THEN** NewSessionAnswered has worktree=false and PersistNever.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `dispatch_new_session_answered_with_persist_never_updates_mode_and_emits_effect`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `translate_local_submit_always_returns_persist_always_for_new_session`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `translate_local_submit_never_returns_persist_never_for_new_session`。
+
+### Requirement: Project selection is asynchronous, draft-preserving, and single-consume
+When a new session starts outside a project directory, the placeholder SHALL open a project picker and fetch recents without creating a session. Recent completion SHALL update only an untouched, still-open picker; navigation or a closed picker makes completion stale/no-op. Initial prompts, selected model, and preferred session id SHALL survive the picker, while duplicate ProjectSelected callbacks SHALL consume one creation token and not mutate cwd or disable state.
+
+#### Scenario: Picker open
+- **WHEN** NewSession is dispatched in a non-project cwd
+- **THEN** ProjectSelect opens and FetchProjectPickerRecents is emitted without CreateSession.
+
+#### Scenario: Stale recents
+- **WHEN** the picker was interacted with or closed before completion
+- **THEN** the completion does not replace user options or mutate session/cwd state.
+
+#### Scenario: Draft preservation
+- **WHEN** a prompt/model/preferred id is supplied before selection
+- **THEN** CreateSession carries model and preferred id and the prompt remains attached exactly once.
+
+#### Scenario: Duplicate callback
+- **WHEN** ProjectSelected is dispatched twice
+- **THEN** only the first creates a session; the late callback is a no-op.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_session_opens_project_picker_before_creating_session_for_non_project_dir`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `project_picker_recents_complete_only_for_untouched_picker`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `closed_project_picker_recents_completion_is_a_noop`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `initial_prompt_is_attached_to_the_already_open_project_picker`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `welcome_draft_survives_picker_with_model_and_preferred_session_id`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `new_session_creates_session_for_project_dir`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `project_selected_creates_session_and_sends_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `duplicate_project_selected_consumes_one_create_token`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `project_selection_updates_dashboard_cwd_and_git_snapshot`。
+
+### Requirement: Session deletion, exit, titles, and resolver identity remain coherent
+ExitSession SHALL unregister the active session and return to Welcome. DeleteSession SHALL emit the requested delete effect; DeleteCurrentSession SHALL require confirmation, cancel the turn/subagents before deleting, and after completion remove only the matching agent while preserving another active agent. Session titles SHALL fall back to a short id, and dashboard persisted top-level/subagent ids SHALL round-trip through SessionIdResolver.
+
+#### Scenario: Exit
+- **WHEN** ExitSession is dispatched
+- **THEN** UnregisterActiveSession is emitted and Welcome becomes active.
+
+#### Scenario: Confirmed delete
+- **WHEN** current deletion is confirmed
+- **THEN** CancelTurn precedes DeleteSession with Welcome continuation.
+
+#### Scenario: Completion guard
+- **WHEN** a delete completion arrives for one of multiple agents
+- **THEN** only the matching agent is removed and the survivor remains active; unknown background task completion is ignored.
+
+#### Scenario: Title fallback
+- **WHEN** a session has no prompt
+- **THEN** the title is `session ` plus the short session id.
+
+#### Scenario: Resolver round trip
+- **WHEN** top-level or child persisted ids are resolved
+- **THEN** live dashboard ids resolve and convert back exactly; absent ids return None.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `exit_session_unregisters_active_session`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `delete_session_action_emits_delete_effect`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `delete_current_session_confirm_emits_effect`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `delete_current_session_complete_welcome_and_guard`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `entry_title_falls_back_to_short_session_id_when_no_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `bg_task_killed_no_op_for_unknown_session`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_id_resolver_round_trip_top_level`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_id_resolver_round_trip_subagent`。
+
+### Requirement: Dashboard stop interaction deletes the selected row and advances peek selection
+DashboardStop SHALL support the real double Ctrl-X input path: the first press arms confirmation, the second emits DeleteSession for the selected top-level row, and completion removes the agent. When peek is open, deleting the selected row SHALL move selection to the next row and subsequent render SHALL follow the new row.
+
+#### Scenario: Peek open stop
+- **WHEN** the selected row has an open peek and Ctrl-X is pressed twice
+- **THEN** the row is deleted, selection advances one row, and peek follows the new selection.
+
+#### Scenario: Top-level confirmation
+- **WHEN** a top-level row receives two Ctrl-X events through handle_input
+- **THEN** the second event emits DeleteSession and the completed deletion removes the target.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `dashboard_stop_with_peek_open_moves_selection_and_peek_down_one`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `dashboard_stop_double_press_via_handle_key_deletes_top_level`。
+
+### Requirement: Lifecycle tests define synthetic verification boundaries for dispatch integration
+The 70 inline tests in lifecycle.rs SHALL be treated as static evidence for dispatch state/effect contracts only. They construct synthetic AppView, agents, paths, trust stores, dashboard buffers, and test task results; they do not prove compilation, Cargo execution, real ACP delivery, terminal event-loop behavior, filesystem watcher timing, or integration with unexamined callers.
+
+#### Scenario: Synthetic dispatch
+- **WHEN** tests call dispatch or dispatch_task_result with constructed state
+- **THEN** state transitions and Effect vectors are asserted directly.
+
+#### Scenario: Filesystem fixtures
+- **WHEN** trust/project tests use temp dirs and git markers
+- **THEN** identity, cwd, and effect behavior is asserted for the fixture only.
+
+#### Scenario: Dashboard input
+- **WHEN** dashboard tests synthesize Ctrl-X and Ratatui buffers
+- **THEN** selection/delete/peek state is asserted without a live terminal.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `tests module`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `all_system_texts`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `project_selected_creates_session_and_sends_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `trust_folder_grants_and_resolves`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `dashboard_stop_with_peek_open_moves_selection_and_peek_down_one`。

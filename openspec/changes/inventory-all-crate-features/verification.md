@@ -3730,3 +3730,9 @@ OpenSpec strict复核发现三项agent_view新增契约缺少RFC 2119关键词�
 合并Pager `src/app/agent_view/viewer.rs`：1011行、无内联测试、SHA-256匹配；新增9条契约，pager reviewed 文件增至487个。未运行Cargo或动态viewer。
 
 合并Pager `src/app/agent_view/session.rs`：2035行、29项内联测试、SHA-256匹配；补齐该文件功能契约，pager reviewed 文件增至488个。未运行Cargo或动态会话。
+
+合并Pager `src/app/root/dispatch/tests/session/lifecycle.rs`：2166行、70项内联测试、SHA-256匹配；新增7条契约，pager reviewed 文件增至489个。未运行Cargo或动态session生命周期。
+
+合并Pager `src/app/root/dispatch/prompt.rs`：1488行、无内联测试、SHA-256匹配；新增14条契约，pager reviewed 文件增至490个。未运行Cargo或动态prompt dispatch。
+
+补充Pager `src/app/root/dispatch/tests/session/lifecycle.rs`第二轮细化：同一2166行文件新增12条更细的生命周期契约，既有7条摘要契约保留，pager reviewed 文件仍为490个。未运行Cargo或动态session dispatch。

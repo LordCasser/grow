@@ -816,3 +816,15 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager agent session混合绑定、子Agent身份和工作区投影
 
 `app/agent_view/session.rs`同时处理会话绑定/解绑定、子Agent身份、cwd/工作区投影和状态清理。静态事实已登记，后续需按会话身份、工作区投影和清理生命周期拆分并补真实会话验证；本轮不改session行为。
+
+## 待拆分：Pager session lifecycle测试混合恢复、绑定和持久化终态
+
+`app/root/dispatch/tests/session/lifecycle.rs`集中session生命周期、绑定/解绑、恢复、删除、重命名、终态通知和失败回滚。7条静态契约已登记，后续需按生命周期事务、身份绑定和持久化终态拆分并补动态存储验证；本轮不改session协议。
+
+## 待拆分：Pager prompt dispatch混合队列、输入和权限路由
+
+`app/root/dispatch/prompt.rs`同时处理prompt dispatch、队列/输入控制、权限和会话路由边界。14条静态契约已登记，后续需按队列协议、输入准入和权限路由拆分并补动态验证；本轮不改prompt dispatch。
+
+## 待拆分：Pager session lifecycle跨越创建、trust、deferred control和picker
+
+第二轮细化表明`session/lifecycle.rs`还同时覆盖session创建、worktree、deferred control、workspace trust、project picker、删除/退出和dashboard stop。新增12条静态契约已登记，后续需按创建事务、信任准入、延迟控制和picker状态拆分；本轮不改实现。
