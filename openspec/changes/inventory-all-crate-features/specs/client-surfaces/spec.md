@@ -16576,3 +16576,390 @@ unregister_session_effect SHALL create one UnregisterActiveSession effect only f
 - **THEN** message is appended to the preferred/active/first scrollback or to startup warnings.
 
 证据：`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `unregister_session_effect`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `unregister_all_active_sessions`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `show_clipboard_toast`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `maybe_show_x11_primary_paste_hint`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `show_clipboard_failure`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `current_doctor_target`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `deliver_doctor_message`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `X11_PRIMARY_PASTE_HINT`。
+### Requirement: Typed confirmation, cancel, reset, and Goal-interrupt choices expose stable labels and results
+ModalConfirmation<R> SHALL resolve only keys declared by its typed options. EditConfirm SHALL provide y/save, n/discard, x/delete and dynamic labels that distinguish save/discard from send when drain is blocked. ResetSettings SHALL provide y/reset and n/cancel with stable footer ids. CancelTurnChoice SHALL expose four ordered choices. GoalInterruptChoice SHALL offer pause-only when no turn is active and pause/stop-turn/(optional) stop-subagents when a turn is active, with labels matching the semantic action.
+
+#### Scenario: Edit confirmation
+- **WHEN** a key is pressed in the edit modal
+- **THEN** the matching typed result resolves and labels reflect whether sending is blocked.
+
+#### Scenario: Reset confirmation
+- **WHEN** reset settings is opened
+- **THEN** y resolves Reset, n resolves Cancel, and the footer ids remain 1 and 2.
+
+#### Scenario: Goal interrupt
+- **WHEN** an active Goal has zero or more running subagents
+- **THEN** choices include only meaningful pause/stop actions and labels identify their scope.
+
+证据：`crates/codegen/pager/src/views/modal.rs` — `ModalConfirmation::resolve`；`crates/codegen/pager/src/views/modal.rs` — `EditConfirmResult::label`；`crates/codegen/pager/src/views/modal.rs` — `ModalConfirmation<EditConfirmResult>::edit_confirm`；`crates/codegen/pager/src/views/modal.rs` — `ResetSettingsResult::label`；`crates/codegen/pager/src/views/modal.rs` — `ModalConfirmation<ResetSettingsResult>::reset_settings`；`crates/codegen/pager/src/views/modal.rs` — `CancelTurnChoice::ALL`；`crates/codegen/pager/src/views/modal.rs` — `CancelTurnChoice::label`；`crates/codegen/pager/src/views/modal.rs` — `GoalInterruptChoice::for_active_turn`；`crates/codegen/pager/src/views/modal.rs` — `GoalInterruptChoice::pause_only`；`crates/codegen/pager/src/views/modal.rs` — `GoalInterruptChoice::label`。
+
+### Requirement: ActiveModal models picker, documentation, settings, memory, note, usage, and confirmation contexts with reversible palette state
+ActiveModal SHALL represent every supported modal context with its associated picker/window/content state. PaletteSnapshot SHALL preserve command-palette entries and PickerState for return from ArgPicker or picker flows. hint_pairs SHALL expose only blocking confirmation options; other modal variants SHALL return no bar hints. message SHALL provide context-sensitive titles, including model reasoning-effort submenus and Settings/Usage/DocViewer titles. Reset prompt/breadcrumb SHALL resolve registry metadata and defaults, returning None for unrelated or unknown keys.
+
+#### Scenario: Palette return
+- **WHEN** an arg picker or doc picker was opened from the palette
+- **THEN** the saved entries and picker state are retained for restoration on Esc.
+
+#### Scenario: Blocking modal
+- **WHEN** EditConfirm or ResetSettingsConfirm is active
+- **THEN** hint_pairs returns typed key/label pairs; picker/read-only modal variants return empty pairs.
+
+#### Scenario: Context title
+- **WHEN** a modal variant is active
+- **THEN** message returns its appropriate title or dynamic prompt.
+
+#### Scenario: Reset text
+- **WHEN** the modal carries a registered or unknown setting key
+- **THEN** prompt/breadcrumb show the label/default for a known key and return None for unknown/non-reset variants.
+
+证据：`crates/codegen/pager/src/views/modal.rs` — `ActiveModal`；`crates/codegen/pager/src/views/modal.rs` — `PaletteSnapshot`；`crates/codegen/pager/src/views/modal.rs` — `PaletteEntry`；`crates/codegen/pager/src/views/modal.rs` — `PaletteCommand`；`crates/codegen/pager/src/views/modal.rs` — `ActiveModal::hint_pairs`；`crates/codegen/pager/src/views/modal.rs` — `ActiveModal::message`；`crates/codegen/pager/src/views/modal.rs` — `reset_confirm_prompt`；`crates/codegen/pager/src/views/modal.rs` — `reset_confirm_breadcrumb`；`crates/codegen/pager/src/views/modal.rs` — `format_default_for_prompt`。
+
+### Requirement: Command palette entries are grouped, mode-filtered, searchable, and routed to registered commands or tool tabs
+default_palette_entries SHALL build grouped Session, Context, Model & Input, Tools and Other entries with slash commands, shortcuts, palette-only actions and tool-tab targets. Unsupported slash commands SHALL be removed for the active ScreenMode, EditPromptExternal SHALL appear only in Minimal mode, and every remaining slash row SHALL name a registered command. filter_palette_entries SHALL case-fold query text, match labels or shortcuts, and retain a section header only when that section has a matching item.
+
+#### Scenario: Fullscreen palette
+- **WHEN** the palette opens in Fullscreen
+- **THEN** dashboard, session, model, tool, settings, documentation and registered slash rows are available.
+
+#### Scenario: Minimal palette
+- **WHEN** the palette opens in Minimal
+- **THEN** mode-gated theme/agents/tutorial rows are removed while mode-agnostic rows remain and external prompt editing is present.
+
+#### Scenario: Search
+- **WHEN** a nonempty query matches an item label or shortcut
+- **THEN** the matching item and its section header are returned; unrelated headers are omitted.
+
+#### Scenario: Tool routing
+- **WHEN** Hooks/Plugins/Marketplace/Skills/MCP entries are selected
+- **THEN** each entry carries the corresponding ExtensionsTab.
+
+证据：`crates/codegen/pager/src/views/modal.rs` — `default_palette_entries`；`crates/codegen/pager/src/views/modal.rs` — `filter_palette_entries`；`crates/codegen/pager/src/views/modal.rs` — `PaletteCommand::OpenExtensionsTab`；`crates/codegen/pager/src/views/modal.rs` — `default_palette_includes_dashboard`；`crates/codegen/pager/src/views/modal.rs` — `palette_drops_slash_rows_the_mode_cannot_run`；`crates/codegen/pager/src/views/modal.rs` — `every_palette_slash_row_resolves_to_a_registered_command`；`crates/codegen/pager/src/views/modal.rs` — `edit_prompt_palette_entry_is_minimal_only`；`crates/codegen/pager/src/views/modal.rs` — `palette_tools_section_routes_each_tab_to_itself`。
+
+### Requirement: Confirmation overlay dims the background and produces bounded clickable button hit regions
+render_modal_overlay SHALL dim the supplied background area, render the active modal message and available key/label pills in the bar, apply hover styling to the matching key, and return button rectangles with their keys. Zero-height or too-narrow bars SHALL render no buttons. Button layout SHALL stop when the next pill would exceed bar width and use Unicode display width for sizing.
+
+#### Scenario: Normal overlay
+- **WHEN** a blocking modal and sufficiently wide bar are rendered
+- **THEN** background cells are dimmed, message/buttons are styled, and hit rectangles correspond to visible options.
+
+#### Scenario: Hover
+- **WHEN** hovered_key matches a visible option
+- **THEN** that button uses hover background while other buttons retain normal styling.
+
+#### Scenario: Small bar
+- **WHEN** bar height is zero or width is below the minimum
+- **THEN** no buttons are returned and no out-of-bounds button geometry is produced.
+
+证据：`crates/codegen/pager/src/views/modal.rs` — `render_modal_overlay`；`crates/codegen/pager/src/views/modal.rs` — `ModalButtonHit`；`crates/codegen/pager/src/views/modal.rs` — `ModalRenderResult`；`crates/codegen/pager/src/views/modal.rs` — `UnicodeWidthStr`。
+
+### Requirement: Cancel-turn and Goal-interrupt panels compute bounded geometry and render focused choices
+cancel_turn_panel_height SHALL cap the fixed four-choice panel to the screen-dependent 33–80% range. goal_interrupt_panel_height SHALL size to four rows plus up to three choices and apply the same screen caps. Both renderers SHALL clear and repopulate button rectangles, draw an accent bar/title/options, mark the active choice with a filled marker and focused background, and blend the panel when unfocused; Goal interrupt text and choice set SHALL remain distinct from ordinary cancel semantics.
+
+#### Scenario: Cancel panel
+- **WHEN** four cancel choices are rendered
+- **THEN** height is fixed at nine rows when the screen permits and each choice has a hit rectangle/selection marker.
+
+#### Scenario: Goal panel
+- **WHEN** one, two or three Goal choices are rendered
+- **THEN** the title and height reflect whether a turn is active and whether subagents can be stopped.
+
+#### Scenario: Tiny terminal
+- **WHEN** screen height is small
+- **THEN** height is clamped to the screen cap without overflowing the area.
+
+#### Scenario: Unfocused
+- **WHEN** panel focus is false
+- **THEN** the panel remains readable but is blended to show it is not the active input target.
+
+证据：`crates/codegen/pager/src/views/modal.rs` — `cancel_turn_panel_height`；`crates/codegen/pager/src/views/modal.rs` — `goal_interrupt_panel_height`；`crates/codegen/pager/src/views/modal.rs` — `render_cancel_turn_panel`；`crates/codegen/pager/src/views/modal.rs` — `render_goal_interrupt_panel`；`crates/codegen/pager/src/views/modal.rs` — `GoalInterruptViewState`；`crates/codegen/pager/src/views/modal.rs` — `CancelTurnViewState`；`crates/codegen/pager/src/views/modal.rs` — `goal_interrupt_panel_height_follows_choice_count`。
+
+### Requirement: Documentation picker and viewer support responsive tips, filtering, scroll input, cached markdown, and palette return
+howto_list_modal SHALL open a DocPicker with all docs, default list focus and selected index zero while retaining an optional previous palette. apply_doc_scroll SHALL map arrows/vim/page/home/end to saturating u16 offsets; signed and mouse deltas SHALL use saturating arithmetic and report only handled wheel events. render_doc_picker_overlay SHALL filter title/description, adapt narrow descriptions, render modal chrome and a width-fitting docs tip. render_doc_viewer_overlay SHALL cache MarkdownContent output by content width, clamp scroll to visible lines, render the selected slice, and support caller-supplied shortcuts such as tutorial next-topic hints.
+
+#### Scenario: Doc key scroll
+- **WHEN** a viewer receives arrow/vim/page/home/end input
+- **THEN** the offset moves by the documented increment or clamps to zero/u16::MAX and handled status is true.
+
+#### Scenario: Mouse scroll
+- **WHEN** a wheel event arrives
+- **THEN** ScrollUp/Down move three lines; unrelated mouse events return false.
+
+#### Scenario: Picker open
+- **WHEN** how-to guides are requested
+- **THEN** a DocPicker opens on Getting Started with search inactive and optional palette snapshot.
+
+#### Scenario: Picker render
+- **WHEN** the docs picker has a query or narrow viewport
+- **THEN** only matching docs are shown, descriptions adapt, and the footer tip fits without exceeding width.
+
+#### Scenario: Viewer render
+- **WHEN** content width changes or scroll exceeds available lines
+- **THEN** Markdown is reparsed only for the new width, visible lines render, and scroll is clamped.
+
+证据：`crates/codegen/pager/src/views/modal.rs` — `howto_list_modal`；`crates/codegen/pager/src/views/modal.rs` — `apply_doc_scroll`；`crates/codegen/pager/src/views/modal.rs` — `apply_doc_scroll_delta`；`crates/codegen/pager/src/views/modal.rs` — `apply_doc_mouse_scroll`；`crates/codegen/pager/src/views/modal.rs` — `fit_docs_ask_grow_tip`；`crates/codegen/pager/src/views/modal.rs` — `render_doc_picker_overlay`；`crates/codegen/pager/src/views/modal.rs` — `render_doc_viewer_overlay`；`crates/codegen/pager/src/views/modal.rs` — `render_doc_viewer_overlay_with_shortcuts`；`crates/codegen/pager/src/views/modal.rs` — `apply_doc_scroll_moves_by_key`；`crates/codegen/pager/src/views/modal.rs` — `apply_doc_scroll_delta_saturates_at_zero`；`crates/codegen/pager/src/views/modal.rs` — `apply_doc_mouse_scroll_handles_wheel`；`crates/codegen/pager/src/views/modal.rs` — `howto_list_modal_opens_on_first_guide`；`crates/codegen/pager/src/views/modal.rs` — `fit_docs_tip_prefers_path_and_never_overflows`；`crates/codegen/pager/src/views/modal.rs` — `doc_picker_renders_tip_with_path`；`crates/codegen/pager/src/views/modal.rs` — `goal_interrupt_panel_height_follows_choice_count`。
+### Requirement: The agent viewer module SHALL keep ownership boundaries explicit
+AgentView::handle_mouse SHALL own cached hit-region priority, AgentView focus and overlay transitions, InputOutcome action/change production, and delegation to the Todo, Queue, Prompt, Tasks, Catalog, scrollback and modal components. A scrollback block viewer receives scrollback mouse events through its own handler, while prompt and list panes retain their content-state ownership. This source contains no inline test module.
+
+#### Scenario: Cached control priority
+- **WHEN** a left-button event lands in a cached AgentView control rectangle
+- **THEN** the first matching control performs its state transition or returns its Action and the event does not fall through to a pane.
+
+#### Scenario: Pane delegation
+- **WHEN** a left-button event lands in Todo, Queue, Prompt, Tasks, Catalog or Scrollback
+- **THEN** AgentView selects the corresponding active pane, delegates pane-owned work, and returns the pane outcome boundary used by this handler.
+
+#### Scenario: Modal ownership
+- **WHEN** scrollback is active while a block viewer exists
+- **THEN** the event is passed to handle_block_viewer_mouse and ordinary scrollback selection setup is skipped.
+
+#### Scenario: Prompt ownership
+- **WHEN** a prompt click edits text or pairs as a double click
+- **THEN** PromptEvent editing refreshes slash state and suggestion notification, while a double click may open a line viewer or expand a paste element.
+
+证据：`crates/codegen/pager/src/app/agent_view/mouse.rs` — `AgentView::handle_mouse`；`crates/codegen/pager/src/app/agent_view/mouse.rs` — `AgentView::prompt_click_is_double`。
+
+### Requirement: ListPane mouse handling SHALL prioritize scrollbar clicks/drags over content selection, map content rows to virtual item coordinates, route wheel events over the scrollbar to proportional movement, and release drag state on mouse-up
+AgentView::apply_scrollbar_click SHALL return false when no rendered scrollbar exists or its height is zero. Otherwise it reads scrollback total and viewport heights, scales totals above u16::MAX, maps the screen cell through scrollbar_click_to_offset, and dispatches Top, Bottom or a scaled offset to ScrollbackState. The parent mouse handler focuses scrollback, marks scrollbar_dragging on a scrollbar press, and clears the flag on left release.
+
+#### Scenario: Unavailable scrollbar
+- **WHEN** the cached scrollbar rectangle is absent or has zero height
+- **THEN** apply_scrollbar_click returns false without changing scrollback.
+
+#### Scenario: Top or bottom click
+- **WHEN** scrollbar_click_to_offset returns Top or Bottom
+- **THEN** goto_top or goto_bottom is called.
+
+#### Scenario: Offset click
+- **WHEN** scrollbar_click_to_offset returns an offset
+- **THEN** set_scroll_offset receives that offset multiplied by the same scale used for tall content.
+
+#### Scenario: Very tall history
+- **WHEN** total_height exceeds u16::MAX
+- **THEN** the mapping uses a positive scale and a u16 scaled total before converting the resulting offset back to scrollback units.
+
+#### Scenario: Drag lifecycle
+- **WHEN** a left press hits the scrollbar and a later left release arrives
+- **THEN** scrollbar_dragging is set for the gesture and then cleared on release.
+
+证据：`crates/codegen/pager/src/app/agent_view/mouse.rs` — `AgentView::handle_mouse`；`crates/codegen/pager/src/app/agent_view/mouse.rs` — `AgentView::apply_scrollbar_click`。
+### Requirement: Literal follow-up and cancel picker focus
+dispatch SHALL send a follow-up chip literal directly through SendPrompt without reopening project selection, and CancelTurn SHALL move focus to the prompt picker when cancellation originates from scrollback.
+
+#### Scenario: Follow-up chip
+- **WHEN** a follow-up chip is submitted
+- **THEN** exactly one SendPrompt effect carries the chip text and project picking is bypassed.
+
+#### Scenario: Cancel turn
+- **WHEN** CancelTurn is dispatched while scrollback has focus
+- **THEN** the active pane becomes Prompt and the picker receives focus.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Action::SubmitFollowUp`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Effect::SendPrompt`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Action::CancelTurn`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `ActivePane::Prompt`。
+
+### Requirement: Session load restore, model, behavior, title, replay, cwd, and reload-window reconciliation
+SessionLoaded SHALL apply restored model and restore metadata, show a restore summary when present, hydrate disk titles and prompt history, register the active session, preserve a new-session model default when the loaded session omits a model, reconcile deferred behavior before prompt draining, resolve the agent cwd from session/origin/process cwd, finish replay-transient entries, and keep an already-open reload window gated until the deferred load result is reconciled.
+
+#### Scenario: Restored session
+- **WHEN** SessionLoaded includes restore_summary and restore_degree
+- **THEN** the summary is appended to scrollback, restore_degree is stored, and title/history/registration effects are emitted.
+
+#### Scenario: Model default
+- **WHEN** the loaded payload has no model while a new-session default is set
+- **THEN** the new-session default remains unchanged.
+
+#### Scenario: Deferred behavior
+- **WHEN** a session has deferred behavior and reload is being reconciled
+- **THEN** matching behavior is reissued or unresolved behavior is reissued before pending prompts drain.
+
+#### Scenario: Title hydration
+- **WHEN** disk title is auto/manual/blank
+- **THEN** auto titles leave display_name unset, manual titles restore only cold cache state, and blank titles are ignored.
+
+#### Scenario: Cwd fallback
+- **WHEN** session cwd is present or absent
+- **THEN** the agent uses the resolved session cwd or process cwd fallback.
+
+#### Scenario: Reload gate
+- **WHEN** SessionLoaded or SessionLoadFailed arrives during an open reload window
+- **THEN** loading_replay remains true and reconciliation is deferred to the reload window.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionLoaded`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionTitleFromDisk`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `restore_summary`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `restore_degree`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `deferred_session_mode`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `HydrateSessionTitleFromDisk`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `FetchPromptHistory`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `RegisterActiveSession`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `begin_session_reload`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_reload`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `loading_replay`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `memory_release`。
+
+### Requirement: Session load failure, extension refresh, and bootstrap command seeding
+SessionLoaded SHALL surface restore failures as a warning and reset absent restore metadata; a pending extension refresh SHALL emit exactly the five extension-list fetches and clear its flag, while SessionLoadFailed SHALL clear the flag without fetching; loading a session SHALL seed available commands from bootstrap ACP commands.
+
+#### Scenario: Restore failure
+- **WHEN** restore_summary carries a failure marker
+- **THEN** a warning banner is shown.
+
+#### Scenario: No restore
+- **WHEN** a subsequent load has no restore summary/degree
+- **THEN** no restore summary is shown and stale restore_degree is reset.
+
+#### Scenario: Extension refresh
+- **WHEN** pending_extensions_fetch is set
+- **THEN** FetchSkillsList, FetchWorkflowsList, FetchMcpsList, FetchHooksList, and FetchPluginsList are emitted and the flag clears.
+
+#### Scenario: Load failure
+- **WHEN** SessionLoadFailed arrives with the flag set
+- **THEN** the flag clears and no extension fetches are emitted.
+
+#### Scenario: Bootstrap commands
+- **WHEN** bootstrap_acp_commands contains a command
+- **THEN** the loaded session receives the command and generation.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionLoaded`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionLoadFailed`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `pending_extensions_fetch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `FetchSkillsList`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `FetchWorkflowsList`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `FetchMcpsList`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `FetchHooksList`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `FetchPluginsList`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `bootstrap_acp_commands`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `available_commands`。
+
+### Requirement: Resume session identity and agent ownership
+LoadSession SHALL reuse a known session identity by issuing LoadSession rather than CreateSession, focus an existing open-session owner, create a new agent only for an unknown session, avoid rearming stale overlays, preserve the existing owner on duplicate loads, focus a dashboard row when an attached target is stale, and retry LoadSession after a prior load failure.
+
+#### Scenario: Known identity
+- **WHEN** resume targets a known session id
+- **THEN** LoadSession is emitted and CreateSession is absent.
+
+#### Scenario: Open owner
+- **WHEN** the target session is already attached to an agent
+- **THEN** the existing agent is focused without creating or unbinding ownership.
+
+#### Scenario: Unknown identity
+- **WHEN** resume targets a session never opened
+- **THEN** a new agent is created after the load effect.
+
+#### Scenario: Stale target
+- **WHEN** the attached target is stale or overlay state is stale
+- **THEN** the dashboard row is focused and stale overlay state is not rearmed.
+
+#### Scenario: Retry
+- **WHEN** the first load fails and resume is requested again
+- **THEN** LoadSession is reissued.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Action::LoadSession`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Effect::LoadSession`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Effect::CreateSession`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `ActiveView::Agent`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `attached_agent`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `focus_row`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `active_subagent`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionCreated`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionLoadFailed`。
+
+### Requirement: Pending first prompt, selection anchoring, title loading, and stale running cleanup
+Session load completion SHALL drain a pending first prompt to the front of the prompt queue, leave the queue unchanged when none exists, clear orphaned first prompts on load failure, reanchor grouped selection to a valid row or empty state, use a loading title when no session id exists, and clear stale running replay entries after SessionLoaded.
+
+#### Scenario: Pending first prompt
+- **WHEN** pending_first_prompt is present at load completion
+- **THEN** it is moved to the front and the field is cleared.
+
+#### Scenario: No pending prompt
+- **WHEN** pending_first_prompt is absent
+- **THEN** no queue item is added.
+
+#### Scenario: Failed load
+- **WHEN** SessionLoadFailed arrives with an orphaned prompt
+- **THEN** the orphan is cleared.
+
+#### Scenario: Grouped selection
+- **WHEN** the grouped selection map has a row or is empty
+- **THEN** selection lands on a valid row or is safely cleared.
+
+#### Scenario: Untitled entry
+- **WHEN** an agent has no session id
+- **THEN** entry_title returns the loading title.
+
+#### Scenario: Stale replay
+- **WHEN** scrollback contains running entries before SessionLoaded
+- **THEN** running entries are finished and no longer animate.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `pending_first_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `pending_prompts`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `reanchor_grouped_selection`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `entry_title`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_id`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `scrollback.needs_animation`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionLoaded`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionLoadFailed`。
+
+### Requirement: Project picker selection, freeform, opt-out, and persistence
+Project selection input SHALL translate skip to the original cwd, use an explicitly entered path when no option is selected, let a freeform path override dont-ask, report no picker when disabled, persist the dont-ask choice, use a selected recent project path, and persist the disable flag when ProjectSelected is dispatched.
+
+#### Scenario: Skip
+- **WHEN** the project picker answer is skipped
+- **THEN** ProjectSelected uses the original cwd.
+
+#### Scenario: Freeform
+- **WHEN** no option is selected and a path is entered
+- **THEN** the entered path is used.
+
+#### Scenario: Override
+- **WHEN** a freeform path is entered with dont-ask enabled
+- **THEN** the freeform path wins.
+
+#### Scenario: Disabled
+- **WHEN** project picker is disabled
+- **THEN** needs_project_picker is false.
+
+#### Scenario: Dont ask again
+- **WHEN** the answer requests dont-ask
+- **THEN** the disable flag is set and persisted.
+
+#### Scenario: Recent project
+- **WHEN** a recent project option is selected
+- **THEN** that project path is used.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `translate_local_submit_for_test`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `LocalQuestionKind::ProjectSelect`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `ProjectSelected`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `needs_project_picker`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `project_picker_disabled`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Effect::PersistProjectPickerDisabled`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `shellexpand`。
+
+### Requirement: Minimal-mode welcome card behavior
+NewSession SHALL queue the welcome card only in minimal screen mode and SHALL leave welcome_pending false in inline/non-minimal mode.
+
+#### Scenario: Minimal
+- **WHEN** NewSession runs in ScreenMode::Minimal
+- **THEN** minimal_state.welcome_pending becomes true.
+
+#### Scenario: Non-minimal
+- **WHEN** NewSession runs outside minimal mode
+- **THEN** the welcome card is not queued.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Action::NewSession`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `minimal_state`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `welcome_pending`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `ScreenMode::Minimal`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `ScreenMode::Inline`。
+
+### Requirement: Deep-search debounce and stale sequence handling
+TriggerDeepSearch SHALL arm a debounce for an eligible query even when title hits exist, ForceDeepSearch SHALL bypass the debounce and search immediately, short queries SHALL clear results and invalidate an armed debounce, and debounce expiry SHALL search the current query while dropping stale sequence results.
+
+#### Scenario: Debounce
+- **WHEN** an eligible build-mode query is triggered
+- **THEN** DebounceSessionSearch is emitted and content loading is set.
+
+#### Scenario: Force
+- **WHEN** ForceDeepSearch is dispatched for the current query
+- **THEN** DeepSearchSessions is emitted immediately with the next sequence.
+
+#### Scenario: Short query
+- **WHEN** the query becomes shorter than the minimum
+- **THEN** results/loading are cleared and the old debounce cannot search.
+
+#### Scenario: Stale expiry
+- **WHEN** a debounce expires after the query changes
+- **THEN** only the current sequence/query searches; stale expiry is ignored.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Action::TriggerDeepSearch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Action::ForceDeepSearch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `SessionSearchDebounceExpired`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Effect::DebounceSessionSearch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Effect::DeepSearchSessions`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_picker_content_loading`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_picker_deep_search_seq`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_picker_list_seq`。
+
+### Requirement: Modal deep-search sequence and picker-surface validation
+Session-picker deep-search debounce expiry SHALL validate the sequence counter belonging to the active modal surface, and closing the modal SHALL invalidate its armed debounce even when its sequence collides with the welcome picker counter.
+
+#### Scenario: Modal expiry
+- **WHEN** the active modal picker owns the armed sequence
+- **THEN** matching expiry emits DeepSearchSessions for the modal query.
+
+#### Scenario: Modal close
+- **WHEN** the modal closes while debounce is armed
+- **THEN** the modal sequence is invalidated and expiry emits no stale search, even on counter collision.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `ActiveModal::SessionPicker`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `open_session_picker_with`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_picker_deep_search_seq`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `SessionPickerClosed`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `SessionSearchDebounceExpired`。
+
+### Requirement: Session picker close, loading cancellation, and list response races
+SessionPickerClosed SHALL dismiss the welcome/modal picker and invalidate only the loading/search state appropriate to that surface; it SHALL preserve a plain list fetch when closing a build-mode modal, ignore stale list responses, preserve an in-flight deep-search spinner across a matching plain-list response, and apply rapid plain fetches last-write-wins.
+
+#### Scenario: Welcome close during load
+- **WHEN** the welcome picker is loading and Esc closes it
+- **THEN** entries/loading are cleared and a late response cannot resurrect the picker.
+
+#### Scenario: Spinner-only close
+- **WHEN** the welcome picker has only loading state
+- **THEN** Esc dismisses the spinner and picker.
+
+#### Scenario: Modal close with plain fetch
+- **WHEN** a build-mode modal closes while a plain fetch is in flight
+- **THEN** the plain fetch sequence remains valid and its response lands.
+
+#### Scenario: Concurrent search/list
+- **WHEN** deep search is loading while a matching list response arrives
+- **THEN** entries update while deep-search content loading remains true until its own response.
+
+#### Scenario: Rapid fetch
+- **WHEN** two plain list fetches race
+- **THEN** only the latest sequence writes entries.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Action::FetchSessionList`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Action::SessionPickerClosed`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionListLoaded`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionListFailed`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_picker_loading`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_picker_content_loading`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_picker_list_seq`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `handle_input`。

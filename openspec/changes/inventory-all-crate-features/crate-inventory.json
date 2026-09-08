@@ -2452,6 +2452,7 @@
       "ACP notification metadata typed projection and replay stamp",
       "ACP streaming reducer event preservation and terminal lines",
       "Action registry exact routing and presentation",
+      "ActiveModal models picker, documentation, settings, memory, note, usage, and confirmation contexts with reversible palette state",
       "Adjacent edit block coalescing and copied patch source",
       "Agent Esc cancel hint contract",
       "Agent action dispatch and child-view boundary contract",
@@ -2504,6 +2505,7 @@
       "Cancel turn emits trigger-aware cancellation and preserves server queue",
       "Cancel turn subagent panel, choices, and retries",
       "Cancel-turn and Goal interrupt panels SHALL consume their own keyboard and mouse input. Cancel-turn supports navigation, numeric/Enter choice submission, Ctrl-C cancel, Tab to scrollback, and Esc ContinueToRun while refreshing rewind suppression. Goal interrupt supports navigation, numeric/Enter choice submission, Tab/focus controls and an Esc dismiss-only path that closes the panel without cancelling the turn or Goal.",
+      "Cancel-turn and Goal-interrupt panels compute bounded geometry and render focused choices",
       "Cancellation clears panel and rewinds only pristine prompt state",
       "Centered tip footer fitting and content partition",
       "Client model catalog refresh and selection state",
@@ -2511,9 +2513,11 @@
       "Clipboard and image task results apply target ownership, host-image fallback, and stale overlay guards",
       "Clipboard image tip polling and successful show commit",
       "Clipboard paste completion precedence",
+      "Command palette entries are grouped, mode-filtered, searchable, and routed to registered commands or tool tabs",
       "Compaction completion and feedback",
       "Compaction request completion foreground ownership",
       "Composer attachment transfer to newest queued row",
+      "Confirmation overlay dims the background and produces bounded clickable button hit regions",
       "Context and session info result projection boundaries",
       "Contextual tips and word-select acceptance",
       "Critical banner two-row rendering and reservation",
@@ -2521,6 +2525,7 @@
       "Dashboard stop interaction deletes the selected row and advances peek selection",
       "Dashboard subagent rows cap, roster filter, and sanitize labels",
       "Dashboard, goal/workflow, task-result, rewind, and jump routing",
+      "Deep-search debounce and stale sequence handling",
       "Default actions adapt to screen and terminal",
       "Default and fork model setters use different catalogs",
       "Deferred model, behavior, permission, and cancel controls respect session readiness",
@@ -2532,6 +2537,7 @@
       "Doctor and session metadata results are gated by target identity while failures reach the correct surface",
       "Doctor human report fact grouping probe suppression and remediation wording",
       "Doctor report, fix planning, and guarded fix question",
+      "Documentation picker and viewer support responsive tips, filtering, scroll input, cached markdown, and palette return",
       "Edit viewer patch copy SHALL serialize only diff rows covered by the requested item range into a unified patch with correct file headers, hunk starts/counts, prefixes, and newline trimming.",
       "Editable TOML loading and hint persistence boundaries",
       "Embedded modal rendering and row styling",
@@ -2582,10 +2588,12 @@
       "ListPane input modes SHALL expose stable prompts and map Search/Filter to their corresponding match modes; goto-line parsing SHALL accept clamped single numbers and ranges, treat an incomplete N- as a single jump, reject invalid text, and enforce start <= end.",
       "ListPane input-bar state SHALL expose mode-dependent bottom-bar sizing, textarea text/cursor rendering, comment multiline capacity, hardware cursor coordinates, and expiring copy-toast state.",
       "ListPane keyboard handling SHALL consume j/k, arrows, Ctrl-j/k, Ctrl-d/u, PageUp/PageDown, g/G, Home/End, z, and enabled w according to pane state; viewport scrolling pins the selected item screen row and carries leftover movement past clamped viewport edges to the nearest selectable cursor.",
+      "ListPane mouse handling SHALL prioritize scrollbar clicks/drags over content selection, map content rows to virtual item coordinates, route wheel events over the scrollbar to proportional movement, and release drag state on mouse-up",
       "ListPane mouse handling SHALL prioritize scrollbar clicks/drags over content selection, map content rows to virtual item coordinates, route wheel events over the scrollbar to proportional movement, and release drag state on mouse-up.",
       "ListPane rendering SHALL keep desired-height, layout, wrapping, and match-highlight coordinates consistent for long/styled lines, including the two-column scrollbar width reduction and corrective phase.",
       "ListPaneState SHALL clamp scrolling to content and viewport, support fixed-height NoWrap and variable-height Wrap layout, expose visible ranges/skip rows, keep empty or fitting lists at offset zero, center selected items with clamping, and preserve stable positions across append and prepare cycles.",
       "ListPaneState SHALL own scroll/selection/layout/matcher/input/clipboard state while borrowing items only during layout and actions; constructors SHALL apply the requested wrap/follow state subject to configuration, and public accessors SHALL expose stable-ID selection, visible-to-physical mapping, layout metrics, input state, and rendering flags.",
+      "Literal follow-up and cancel picker focus",
       "Local combined dequeue payload projection",
       "Local draft identity validation and durable store operations",
       "Local draft runtime capture recovery and RPC ownership transfer",
@@ -2614,6 +2622,8 @@
       "Minimal renderer hook registration and absent hook dispatch",
       "Minimal transcript request snapshot and expansion retry queue",
       "Minimal view facade projection and btw geometry thresholds",
+      "Minimal-mode welcome card behavior",
+      "Modal deep-search sequence and picker-surface validation",
       "Modal frame geometry and content/footer contract",
       "Modal keyboard close and fold navigation",
       "Modal mouse close, tab, shortcut, and content routing",
@@ -3379,6 +3389,7 @@
       "Peek render and state regression evidence boundary",
       "Peek reply height, multiline placement and paste overlay",
       "Peek response status extraction and sanitized recent text projection",
+      "Pending first prompt, selection anchoring, title loading, and stale running cleanup",
       "Per directory Git cache refresh and notification replacement",
       "Permission epochs and ordered insertion preserve transcript and native commit invariants",
       "Permission option hit-testing SHALL derive the option start row from permission chrome height and return only valid option indices. Permission clicks SHALL select the row on first click and submit only on a same-row second click within MULTI_CLICK_TIMEOUT_MS; clicks on chrome, another row, or after the timeout SHALL reset the pairing without submitting. Ctrl-F and scope arrows SHALL work across option/followup focus as covered by the inline checks.",
@@ -3394,6 +3405,7 @@
       "Plugin tag and marketplace source mutation boundaries",
       "Process memory gauge platform projection and provider seams",
       "Project picker recent directory aggregation and option path alignment",
+      "Project picker selection, freeform, opt-out, and persistence",
       "Project selection is asynchronous, draft-preserving, and single-consume",
       "Promo CTA caption and reservation contract",
       "Promo CTA validation, safe URL target, and slot consistency",
@@ -3433,6 +3445,7 @@
       "RenderBlock SHALL wrap all supported scrollback block variants, delegate BlockContent capabilities to the inner variant, prepend bullets through its output path, and use the edit-specific rendered output path when available.",
       "RenderBlock constructors SHALL create the typed user, agent, tool, thinking, notice, lifecycle, background-task, subagent, workflow, side-question, and context blocks while preserving variant-specific metadata, error, output, event ID, and streaming semantics.",
       "Responsive Mermaid render sizing and quality parameters",
+      "Resume session identity and agent ownership",
       "Resume target pinning and selected profile retention",
       "Resume title matching and ambiguity reporting",
       "Reusable smart case text matching and sorted position wrap navigation",
@@ -3455,6 +3468,9 @@
       "Session deletion, exit, titles, and resolver identity remain coherent",
       "Session initialization conditionally fetches extension state",
       "Session lifecycle, worktree, load, picker, and card routing",
+      "Session load failure, extension refresh, and bootstrap command seeding",
+      "Session load restore, model, behavior, title, replay, cwd, and reload-window reconciliation",
+      "Session picker close, loading cancellation, and list response races",
       "Session startup materialization and local miss provenance",
       "Session title and prompt history sanitize skill XML",
       "Session usage ledger display and cost absence",
@@ -3530,6 +3546,7 @@
       "Terminal titles SHALL strip control characters, fall back to `grow` when empty, truncate Unicode characters before appending ` - grow`, and write through the locked stderr path; exit and relaunch hints SHALL include the correct resume mode/session, optional sanitized summary lines, width truncation, and tolerate broken output pipes.",
       "The `/btw` panel SHALL flush completed overlay responses to scrollback as a Btw block, clear lifecycle/focus state on dismissal, and clear only drag state belonging to the BTW sentinel entry.",
       "The active permission view SHALL own keyboard input. FollowupInput SHALL support Esc back to options, Ctrl-C cancellation, multiline Enter routing, submit-to-PermissionFollowup, and prompt editing. Options SHALL support Ctrl-F argument expansion, Tab to scrollback, j/k or arrows, Enter and 1-9 option actions, RejectOnce text entry into followup mode, and left/right scope adjustment for MCP or Bash permissions.",
+      "The agent viewer module SHALL keep ownership boundaries explicit",
       "The agent viewer module SHALL keep ownership boundaries explicit: it coordinates AgentView state, prompt/plan/scrollback mutations, modal hit regions and clipboard calls while delegating list navigation, block viewer geometry, and line viewer storage to their dedicated components.",
       "The app entry module SHALL expose the PagerArgs command surface with stable leader/no-leader conflict handling, resume/continue sentinels, worktree/session-id/fork combinations, no-alt-screen and feature-gated flags, command naming/help ordering, and shell-completion parsing.",
       "The app module SHALL preserve its inline regression matrix for terminal mode transforms, teardown ordering injection, cursor policy, bounded cancellation, control-safe title/hints, leader precedence and confinement messaging, hunk-tracker precedence, and the complete CLI/session option surface. These tests are source evidence for the stated boundaries and do not prove a live terminal, ACP connection, external editor, or process replacement.",
@@ -3559,6 +3576,7 @@
       "Tracker user echo reconciliation combined display and hidden message ordering",
       "Trajectory CLI implicit session selection",
       "Turn status visibility and startup seed expiry",
+      "Typed confirmation, cancel, reset, and Goal-interrupt choices expose stable labels and results",
       "Unbound session prompts and follow-up chips remain local until a session exists",
       "Unconfirmed input draft restoration admission",
       "Undo tip substantial draft wipe detection",
@@ -3836,6 +3854,10 @@
         "sha256": "64f8775cda271429dff390ea466d0398dfb4694f2ea1ef264b1c779168e74361"
       },
       {
+        "path": "crates/codegen/pager/src/app/agent_view/mouse.rs",
+        "sha256": "c7c6832af10cc0c9130b25005bbe0e44baa45da4f8475862d633f87287b89983"
+      },
+      {
         "path": "crates/codegen/pager/src/app/agent_view/notices.rs",
         "sha256": "57ff85275a393e4c999b7856a9346cbca322fd7026816181b7c3d9a2563fa1cc"
       },
@@ -3998,6 +4020,10 @@
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs",
         "sha256": "8cb735a99d15935cf1838bd84ef8eebb4905452b2f696b65459ed78cd34958d4"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs",
+        "sha256": "89832b8154b26a0cab9642a9adeae91116aaa1a8a14d5bf6cce24551b04bcf7c"
       },
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/tests/settings.rs",
@@ -4902,6 +4928,10 @@
       {
         "path": "crates/codegen/pager/src/views/mod.rs",
         "sha256": "e516656fbd02f0b2ab219a56a8ca269259e0ae72818ba8f79e29e5b87d29c565"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/modal.rs",
+        "sha256": "614d2f13e62444efab01fc0f8156d9c8694d14f99e1a35a5e297e231df646850"
       },
       {
         "path": "crates/codegen/pager/src/views/modal_window.rs",

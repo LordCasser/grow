@@ -2340,3 +2340,9 @@ Luna/high复用代理第二轮完整复核`scrollback/state/mod.rs`共3966行、
 Luna/high复用代理完整读取`app/root/dispatch/router.rs`共1453行、无内联测试；主代理复核SHA-256与12项功能需求来源，覆盖Action路由、Effect分派和边界错误。未运行Cargo或动态dispatch。
 
 Luna/high复用代理完整读取`app/root/dispatch/task_result.rs`共1481行、无内联测试；主代理复核SHA-256、95个TaskResult分支来源与9项功能需求，覆盖任务结果路由、完成/失败投影和副作用边界。未运行Cargo或动态dispatch。
+
+Luna/high复用代理完整读取`views/modal.rs`共1655行、12项内联测试；主代理复核SHA-256与6项功能需求来源，覆盖通用modal尺寸/布局、焦点、滚动、鼠标命中和边框/标题投影。未运行Cargo或真实终端。
+
+Luna/high复用代理完整读取`app/agent_view/mouse.rs`共1225行、无内联测试；主代理复核SHA-256与6项功能需求来源，覆盖鼠标事件路由、拖拽、滚轮、链接和overlay命中。未运行Cargo或真实终端输入。
+
+Luna/high复用代理完整读取`app/root/dispatch/tests/session/load.rs`共1689行、54项内联测试；主代理复核SHA-256与10项功能需求来源，覆盖session加载、恢复、损坏/缺失数据、绑定和状态投影。未运行Cargo或动态存储。

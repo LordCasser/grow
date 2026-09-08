@@ -848,3 +848,15 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager task-result dispatch混合结果投影和副作用
 
 `app/root/dispatch/task_result.rs`集中TaskResult分支、完成/失败投影和副作用边界。9条静态契约已登记，后续需按结果协议、状态投影和副作用执行拆分并补动态验证；本轮不改task result。
+
+## 待拆分：Pager modal模块混合通用布局、焦点和命中
+
+`views/modal.rs`同时处理通用modal尺寸/布局、焦点、滚动、鼠标命中和边框/标题投影。6条静态契约已登记，后续需按布局、焦点状态和命中路由拆分并补真实终端验证；本轮不改modal行为。
+
+## 待拆分：Pager agent mouse混合拖拽、滚轮、链接和overlay命中
+
+`app/agent_view/mouse.rs`同时处理鼠标事件路由、拖拽、滚轮、链接和overlay命中。6条静态契约已登记，后续需按输入路由、命中几何和拖拽状态拆分并补真实终端验证；本轮不改mouse行为。
+
+## 待拆分：Pager session load混合恢复、损坏处理和状态投影
+
+`app/root/dispatch/tests/session/load.rs`同时处理session加载、恢复、损坏/缺失数据、绑定和状态投影。10条静态契约已登记，后续需按恢复事务、错误分类和状态投影拆分并补动态存储验证；本轮不改load行为。
