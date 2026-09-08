@@ -565,37 +565,6 @@ pub fn snapshot_log() -> Option<Vec<u8>> {
     }
 }
 
-/// Read the unified log and return only entries belonging to the given session.
-///
-/// Parses each JSONL line, keeps entries where `"sid"` matches `session_id`,
-/// and returns the filtered lines as JSONL bytes. Returns `None` if the log
-/// is empty or contains no entries for this session.
-pub fn snapshot_session_log(session_id: &str) -> Option<Vec<u8>> {
-    let path = log_path();
-    if let Ok(mut guard) = WRITER.lock()
-        && let Some(ref mut w) = *guard
-    {
-        let _ = w.file.flush();
-    }
-    let data = match fs::read(&path) {
-        Ok(d) if !d.is_empty() => d,
-        _ => return None,
-    };
-    let mut out = Vec::new();
-    for line in data.split(|&b| b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_slice::<serde_json::Value>(line)
-            && entry.get("sid").and_then(|v| v.as_str()) == Some(session_id)
-        {
-            out.extend_from_slice(line);
-            out.push(b'\n');
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

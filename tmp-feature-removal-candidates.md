@@ -244,7 +244,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：全仓 Rust 符号检索只有定义，无测试或生产调用方；snapshot_log 有 Leader 测试消费者，必须保留。
 - 删除理由：闲置的整文件读取与 JSONL 过滤路径，增加维护表面。
 - 拟删除范围：仅 snapshot_session_log 及专属说明，保留 snapshot_log、真实日志写入/裁剪和测试隔离。
-- 状态：待用户确认，尚未删除；公共库的仓库外调用未知。证据见 isolate-leader-integration-log-output。
+- 状态：已获批并删除；统一日志 21/21 回归通过；公共库的仓库外调用未知。证据见 isolate-leader-integration-log-output。
 
 ## R27 · 未接通启用入口的可选图片正规化缓存
 

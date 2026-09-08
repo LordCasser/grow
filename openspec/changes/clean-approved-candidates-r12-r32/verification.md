@@ -39,3 +39,6 @@ Removed unconsumed Announcement.persistent and default assignment. Fresh announc
 
 ## R25
 Removed unused diagnostics device-ID module/export, mid and exclusive UUID-v5 feature request. Lockfile removed only mid/hmac-sha256 and diagnostics dependency entry; verified every remaining package unchanged (no upgrades). Full offline metadata resolved; isolated diagnostics library tests 57/57 passed, with cross-process probes included. Existing user agent_id files untouched.
+
+## R26
+Removed uncalled snapshot_session_log only; snapshot_log and writer/trim paths retained. Fresh isolated unified_log regressions 21/21 passed.
