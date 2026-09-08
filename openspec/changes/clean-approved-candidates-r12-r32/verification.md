@@ -6,3 +6,6 @@ Removed unused Pager restore degree cache and internal forwarding, retaining sha
 
 ## R13
 Removed only cfg(test) raw key formatting helper and its self-test. Fresh input_log::tests passed 7/7, covering production sanitization, ring capacity and private dump writes.
+
+## R14
+Removed unregistered ActionId::DumpInputLog and two no-op arms, preserving Action::DumpInputLog and Esc-d dispatch. Fresh action registry tests 18/18; input diagnostic target tests 3/3; Esc-d policy guard 1/1 passed.

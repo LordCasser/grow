@@ -1697,7 +1697,6 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         | ActionId::EffortPicker
         | ActionId::PermissionPicker
         | ActionId::BehaviorPicker => return None,
-        ActionId::DumpInputLog => return None,
         ActionId::ToggleMultiline => return None,
         ActionId::InterjectPrompt => return None,
         ActionId::OpenSettings => return None,

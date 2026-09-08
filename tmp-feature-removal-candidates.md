@@ -143,7 +143,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：全仓未找到对应 ActionDef 注册或构造入口；typed ActionId 无字符串配置反序列化。已存在引用仅声明与不可执行分支。
 - 删除理由：闲置注册标识造成看似存在快捷键注册的错觉，并扩大穷尽匹配维护范围。
 - 拟删除范围：仅 ActionId 变体和专属无操作 match arms。必须保留 app::actions::Action::DumpInputLog、Esc 后 d 的真实入口、input recorder、文件导出及 debug slash 命令。
-- 状态：等待用户确认，尚未删除。证据见 audit-debug-action-registration；不声称仓库外没有公共类型消费者。
+- 状态：已获批并删除；注册 18/18、诊断 3/3、Esc-d 1/1 回归通过。证据见 audit-debug-action-registration；不声称仓库外没有公共类型消费者。
 
 ## R15 · 隐藏的 GBOOM 射击小游戏
 

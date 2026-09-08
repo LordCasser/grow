@@ -90,9 +90,6 @@ pub enum ActionId {
     Rewind,
     KillBgTask,
 
-    // Debug
-    DumpInputLog,
-
     // App
     Quit,
     NewSession,

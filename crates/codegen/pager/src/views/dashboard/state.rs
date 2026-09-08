@@ -4634,7 +4634,6 @@ fn dashboard_action_for_id(id: crate::actions::ActionId) -> Option<InputOutcome>
         | ActionId::BashMode
         | ActionId::Rewind
         | ActionId::KillBgTask
-        | ActionId::DumpInputLog
         | ActionId::Quit
         | ActionId::NewSession
         | ActionId::ExitSession

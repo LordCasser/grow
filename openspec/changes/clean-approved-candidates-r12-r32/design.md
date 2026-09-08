@@ -8,3 +8,9 @@ Whole Pager search found AgentSession.restore_degree only declared, initialized 
 
 ## R13 reviewed boundary
 format_key_code_raw is cfg(test), referenced only by format_key_code_raw_shows_punctuation. Remove those two items only. Remaining input_log tests exercise the production sanitizer, ring capacity and private dump writing; run them before the separate R13 commit. No behavioral delta is needed for this test-only removal.
+
+## R14 reviewed boundary
+ActionId::DumpInputLog appears only in the enum and two no-op mapping arms; no ActionDef or construction exists. Remove these three locations. Preserve Action::DumpInputLog, Esc-d input translation, dispatch_dump_input_log and input diagnostics. Regress action registry, Esc-d guard and actual dump target selection.
+
+## R15 reviewed boundary
+Remove pager-render/gboom and render/gboom_overlay, the hidden slash command, AgentView game state and exclusive input/render handlers, action/router dispatch, simulation deadline branch and extra game keyboard layer. Preserve general animation/UI-state clocks, Kitty media protocol, mouse/focus handling and ordinary terminal restoration. Remove game-only assertions within mixed tests while retaining other modal/admission assertions. Compile both render and Pager consumers, run command registry, event-loop/clock and active media/input regressions.
