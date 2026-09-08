@@ -1012,3 +1012,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：dialog_width_for casts the aggregate Unicode display-width calculation to u16 before clamping, leaving extreme-width behavior implicit.
 - Pager 审计债务：Rendering couples directly to NewWorktreeDialogState::viewport and its byte range/display-column representation, so the view contract depends on editor internals without a local invariant check.
 - Pager 审计债务：The Unicode cursor test asserts only that some highlighted cell exists, allowing a misplaced cursor to pass while still meeting the test predicate.
+- Pager 审计债务：Timing lifecycle is manually duplicated across set_error, finish, and elapsed_ms with public Option fields, allowing callers to mutate started_at/elapsed_ms without a type-level state transition.
+- Pager 审计债务：Elapsed duration is cast from as_millis() to i64 without checked conversion, leaving extreme-duration behavior implicit.
+- Pager 审计债务：Header width budgeting uses byte lengths for the ASCII prefix and suffix and delegates path shortening separately, so display-cell width invariants are not expressed at this boundary.
+- Pager 审计债务：The production module has only two narrow header tests; core output modes, selection metadata, timing, style, and fold contracts can regress without local evidence.

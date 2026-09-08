@@ -27651,3 +27651,298 @@ format_elapsed SHALL floor milliseconds to whole seconds and format durations as
 - **THEN** complete characters fit within width-1 display columns and a final ellipsis is appended without splitting a character.
 
 证据：`crates/codegen/pager/src/views/goal_detail.rs` — `format_elapsed`；`crates/codegen/pager/src/views/goal_detail.rs` — `truncate_to_width`；`crates/codegen/pager/src/views/workflows.rs` — `render_workflow_detail`；`crates/codegen/pager/src/views/workflows.rs` — `render_workflows`。
+
+
+### Requirement: Tool-call block construction and elapsed timing
+
+The implementation SHALL satisfy the following tested behavior: ListDirToolCallBlock::new stores the supplied path and initializes output to an empty string, error, started_at, and elapsed_ms to None. with_output and with_error replace the corresponding fields with supplied values; set_output replaces output; is_success is true exactly when error is None. set_error captures started_at.elapsed().as_millis() as i64 only when elapsed_ms is unset and started_at exists, then stores the supplied Option<String>. finish returns when elapsed_ms is already set and otherwise captures started_at elapsed time when present. elapsed_ms returns the stored value or a live elapsed value from started_at.
+
+#### Scenario: Initial state
+- **WHEN** a ListDirToolCallBlock is constructed with a path
+- **THEN** the path is retained and output, error, started_at, and elapsed_ms start unset or empty as declared.
+
+#### Scenario: Mutable result state
+- **WHEN** output or error setters/builders are applied
+- **THEN** the corresponding stored field is replaced and success is determined solely by whether error is None.
+
+#### Scenario: Completion timing
+- **WHEN** a block has started_at and no stored elapsed_ms, then set_error or finish is called
+- **THEN** an elapsed millisecond value is captured; a later finish call preserves an already stored value.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::new`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::with_output`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::with_error`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::is_success`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::set_error`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::finish`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::elapsed_ms`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::set_output`。
+
+
+### Requirement: List-dir collapsed header and path selection
+
+The implementation SHALL satisfy the following tested behavior: In Collapsed mode, output builds one header line through collapsed_line using the context content width and the configured collapsed muting policy. The header starts with bold `List `, counts nonblank output lines after trim, appends `(1 entry)` or `(N entries)` only for successful nonempty output, and omits the suffix for empty or failed blocks. When a width is supplied, the suffix is retained only when prefix and suffix byte lengths fit the strict `< width` check; the remaining budget is passed through saturating subtraction to shorten_path. header_block_line marks the path span selectable, assigns TOOL_HEADER_RANGE, and exposes the full path as selection_text.
+
+#### Scenario: Pluralized count
+- **WHEN** successful output contains three nonblank lines or one nonblank line
+- **THEN** the collapsed header is `List src (3 entries)` or `List src (1 entry)`.
+
+#### Scenario: Empty or failed count
+- **WHEN** output is empty or the block has an error
+- **THEN** the collapsed header contains only `List ` followed by the path and no entry count.
+
+#### Scenario: Header selection
+- **WHEN** a collapsed header is returned
+- **THEN** the path span is the selectable header target and the full original path is the selection text.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::collapsed_line`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::header_block_line`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `TOOL_HEADER_RANGE`；`crates/codegen/pager-render/src/render/tool_paths.rs` — `shorten_path`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `tests::collapsed_header_shows_entry_count`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `tests::collapsed_header_omits_count_when_empty_or_failed`。
+
+
+### Requirement: List-dir full-mode terminal output projection
+
+The implementation SHALL satisfy the following tested behavior: For Truncated and Expanded modes, output begins with an unmuted full-width header and, only when output is nonempty, appends a blank separator followed by render_terminal_lines using the primary theme style. Each rendered terminal line receives a two-space prefix; when AppearanceConfig list_dir.terminal_bg is true, the resulting BlockLine receives the theme dark panel background. Truncated and Expanded use the same rendering path and this block does not impose a content-line cap.
+
+#### Scenario: Expanded output
+- **WHEN** a ListDir block with nonempty output is requested in Expanded mode
+- **THEN** the header, separator, indented terminal-rendered lines, and optional panel background are returned.
+
+#### Scenario: Empty full mode
+- **WHEN** Truncated or Expanded mode is requested with empty output
+- **THEN** only the header line is returned and no separator or terminal lines are added.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `impl BlockContent for ListDirToolCallBlock::output`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `DisplayMode::Truncated`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `DisplayMode::Expanded`；`crates/codegen/pager-render/src/render/terminal_output.rs` — `render_terminal_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `BlockContext::content_width`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `AppearanceConfig`。
+
+
+### Requirement: List-dir styling and fold policy
+
+The implementation SHALL satisfy the following tested behavior: ListDirToolCallBlock reports no accent line, no virtual padding, no block background, and no raw mode. bullet returns a static theme accent_error style only when error is present. The block is foldable exactly when it has no error and nonempty output, defaults to Collapsed, and next_fold_mode maps Collapsed to Expanded and every other current mode to Collapsed while ignoring the running flag.
+
+#### Scenario: Failed block styling
+- **WHEN** a ListDir block has an error
+- **THEN** the bullet is the static theme error accent and the block is not foldable.
+
+#### Scenario: Successful block folding
+- **WHEN** a successful block has nonempty output and its fold mode is advanced
+- **THEN** it is foldable, starts Collapsed, advances to Expanded from Collapsed, and returns to Collapsed from another mode.
+
+#### Scenario: Neutral geometry
+- **WHEN** the caller queries accent, padding, background, or raw-mode capabilities
+- **THEN** the block reports no accent, no virtual padding, no background, and false for raw mode.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::bullet`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::background`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `ListDirToolCallBlock::next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs` — `Theme::current`。
+
+
+### Requirement: ScrollDebugHud SHALL enable the scroll diagnostics HUD at startup when GROW_SCROLL_DEBUG is nonempty and not exactly 0, expose its state, and toggle it live without entering persisted settings.
+
+new SHALL read GROW_SCROLL_DEBUG with is_ok_and and set enabled only for a present, nonempty value other than "0". enabled SHALL return the flag and toggle SHALL invert it. The type has no sampling/cache state and no overlay-height API; callers gate construction/use and keep this diagnostic out of the settings registry.
+
+#### Scenario: No env
+- **WHEN** GROW_SCROLL_DEBUG is absent
+- **THEN** the HUD is disabled.
+
+#### Scenario: Falsy env
+- **WHEN** GROW_SCROLL_DEBUG is empty or 0
+- **THEN** the HUD is disabled.
+
+#### Scenario: Truthy env
+- **WHEN** GROW_SCROLL_DEBUG is nonempty and not 0
+- **THEN** the HUD starts enabled.
+
+#### Scenario: Runtime toggle
+- **WHEN** /scroll-debug command invokes toggle
+- **THEN** enabled flips each time.
+
+#### Scenario: Diagnostic setting
+- **WHEN** the HUD is toggled
+- **THEN** only in-memory diagnostic enablement changes; persistence is not performed.
+
+证据：`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugHud`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugHud::new`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugHud::enabled`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugHud::toggle`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `GROW_SCROLL_DEBUG`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `Default for ScrollDebugHud`。
+
+
+### Requirement: ViewportDebug and ScrollDebugPanel SHALL carry owned per-frame scroll diagnostics, including optional active-agent viewport facts and overlay stacking offset, without owning mutable scroll behavior.
+
+ViewportDebug SHALL retain scroll_offset, max_offset, total_height, follow_mode, and at_bottom. ScrollDebugPanel SHALL retain a ScrollDebugSnapshot, an optional ViewportDebug, and top_offset. The snapshot is read-only input assembled by the caller after scroll state/tick updates; the panel does not mutate or recompute the underlying state.
+
+#### Scenario: Viewport facts
+- **WHEN** an active scrollback view supplies metrics
+- **THEN** all offset/height/follow/bottom fields are retained for the view row.
+
+#### Scenario: No agent view
+- **WHEN** view is None
+- **THEN** render omits the view row rather than inventing viewport facts.
+
+#### Scenario: Overlay stacking
+- **WHEN** an FPS/debug overlay occupies rows above
+- **THEN** top_offset is retained and passed to the shared panel renderer.
+
+#### Scenario: Read-only snapshot
+- **WHEN** the draw path provides a snapshot
+- **THEN** panel rendering consumes it without changing scroll behavior.
+
+证据：`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ViewportDebug`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugPanel`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `snapshot`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `view`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `top_offset`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugPanel::render`。
+
+
+### Requirement: ScrollDebugPanel::render SHALL format a fixed diagnostic line set from ScrollDebugSnapshot, terminal context, optional stream/last-stream data, and optional viewport state.
+
+render SHALL build lines in order: `scroll debug  (/scroll-debug)`; `term:<brand> mux:<multiplexer>` from terminal_context; mode/invert/speed; ept/wheel/trackpad/viewport/flush/cadence; three stream rows; carry/flush/clock; last-stream row; and an optional view row. Boolean values SHALL use y/n. No stream SHALL render `stream:- kind:- ev:-`, `avg:- accel:- gap:-`, and `desired:- applied:- backlog:-`; a stream SHALL show live kind with `*` when promoted, event count, formatted average or -, acceleration/gap, and signed desired/applied/backlog. next_deadline_ms and last_stream SHALL use `-` or their compact values. The view row SHALL show offsets, total height, follow, and bottom flags when present.
+
+#### Scenario: Base snapshot
+- **WHEN** snapshot has no stream/last stream/view
+- **THEN** placeholder stream/last rows and no view row are emitted after core mode/cadence rows.
+
+#### Scenario: Live stream
+- **WHEN** stream is Some
+- **THEN** live/promoted kind, event count, avg interval, acceleration, gap, desired/applied/backlog rows are emitted.
+
+#### Scenario: Promoted stream
+- **WHEN** stream.promoted is true
+- **THEN** kind receives a trailing * marker.
+
+#### Scenario: No average/deadline
+- **WHEN** optional timing values are None
+- **THEN** the corresponding avg or clock field uses -.
+
+#### Scenario: Last stream
+- **WHEN** last_stream is Some
+- **THEN** last kind, event count, and signed applied lines are shown.
+
+#### Scenario: Viewport row
+- **WHEN** view is Some
+- **THEN** view offset/max, height, follow, and bottom state are appended.
+
+#### Scenario: Boolean formatting
+- **WHEN** invert/follow/at_bottom vary
+- **THEN** values render as y or n.
+
+证据：`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugPanel::render`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ViewportDebug`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `terminal_context`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollInputMode::label`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `yn`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `stream`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `last_stream`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `next_deadline_ms`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot::mode`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot::invert`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot::speed_multiplier`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot::events_per_tick`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot::wheel_lines_per_tick`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot::trackpad_lines_per_tick`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot::viewport_height`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot::flush_cap`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugSnapshot::cadence_ms`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ViewportDebug::scroll_offset`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ViewportDebug::max_offset`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ViewportDebug::total_height`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ViewportDebug::follow_mode`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ViewportDebug::at_bottom`。
+
+
+### Requirement: ScrollDebugPanel::render SHALL delegate a fixed-width 46-cell panel to debug_style::render_panel with the caller area, top offset, and formatted line references, leaving clipping/colors/modifier reset to shared debug chrome.
+
+render SHALL collect formatted Strings, borrow them as &str, and call super::debug_style::render_panel(area, buf, top_offset, PANEL_WIDTH, &line_refs) with PANEL_WIDTH=46. This module does not paint individual cells or inspect the application theme; the shared renderer owns right alignment, padding/truncation, explicit colors, height clipping, and inherited-style reset. The inline test verifies black backgrounds, white/yellow foregrounds, empty modifiers on every panel cell including trailing padding, and preservation of themed cells outside the panel.
+
+#### Scenario: Panel paint
+- **WHEN** a ScrollDebugPanel is rendered into a Buffer
+- **THEN** the shared debug panel renderer receives all formatted rows at width 46 and top_offset.
+
+#### Scenario: Explicit chrome
+- **WHEN** the area starts with themed tinted italic cells
+- **THEN** panel cells become black with white/yellow debug foreground and no modifiers.
+
+#### Scenario: Rect scope
+- **WHEN** cells lie outside the right-aligned panel
+- **THEN** outside cells retain their original theme style.
+
+#### Scenario: Viewport-inclusive height
+- **WHEN** view is Some
+- **THEN** the test-visible panel includes the `view:` row and paints ten rows.
+
+证据：`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugPanel::render`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `PANEL_WIDTH`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `debug_style::render_panel`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `line_refs`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `panel_paints_theme_agnostic_style_over_every_cell`。
+
+
+### Requirement: The scroll debug HUD SHALL observe already-updated real-session scroll state and render diagnostics without affecting scroll behavior, persistence, event handling, or frame scheduling.
+
+The implementation SHALL satisfy the following tested behavior: The module documents that the snapshot is read-only, caller-supplied, and taken after input/tick state updates; rendering only paints buffer cells and disabled cost is a single bool check per frame. It intentionally compiles behind a runtime GROW_SCROLL_DEBUG gate for production-path fidelity, while event-exact capture remains owned by the scroll log. This source does not implement scroll transitions, setting mutation, JSONL recording, input routing, or terminal event delivery.
+
+#### Scenario: Pure observation
+- **WHEN** a draw frame supplies current scroll snapshot
+- **THEN** the HUD formats it without mutating scroll state.
+
+#### Scenario: Production path
+- **WHEN** release binary enables the runtime gate
+- **THEN** the same render path is observable without dev-only phase instrumentation.
+
+#### Scenario: Event-exact diagnostics
+- **WHEN** caller needs per-event history beyond frame samples
+- **THEN** GROW_SCROLL_LOG/scroll_log remains the separate recorder; this HUD only shows per-frame facts.
+
+#### Scenario: Integration boundary
+- **WHEN** panel renders or toggle runs
+- **THEN** no settings persistence, scroll mutation, input dispatch, or frame scheduling occurs here.
+
+证据：`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugHud`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugHud::new`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugHud::toggle`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugPanel`；`crates/codegen/pager/src/views/scroll_debug_hud.rs` — `ScrollDebugPanel::render`。
+
+
+### Requirement: Welcome menu row width and alignment contract
+
+render_menu SHALL derive a row width from the widest key/label byte-length pair plus a four-column gap, enforce a minimum width of 30, honor a positive min_width_hint, cap at MENU_MAX_WIDTH=51, and cap at the supplied area width. With a positive hint it SHALL left-align the menu at area.x; with a zero hint it SHALL center the menu horizontally within area. The resulting width SHALL remain safe for narrow areas.
+
+#### Scenario: Minimum and maximum width
+- **WHEN** items are empty, short, or paired with a very large min_width_hint
+- **THEN** the menu width is at least 30 before area clamping and never exceeds 51 or area.width.
+
+#### Scenario: Hero alignment
+- **WHEN** the hero passes a positive text-column min_width_hint
+- **THEN** the menu starts at area.x so labels align with the hero text column.
+
+#### Scenario: Trust/gate alignment
+- **WHEN** min_width_hint is zero
+- **THEN** the menu is centered within area.
+
+#### Scenario: Narrow area
+- **WHEN** area.width is less than content_min
+- **THEN** the row width is clamped to area.width and key positioning uses saturating arithmetic without underflow.
+
+证据：`crates/codegen/pager/src/views/welcome/menu.rs` — `MENU_MAX_WIDTH`；`crates/codegen/pager/src/views/welcome/menu.rs` — `KEY_RIGHT_PAD`；`crates/codegen/pager/src/views/welcome/menu.rs` — `render_menu`；`crates/codegen/pager/src/views/welcome/menu.rs` — `tests::menu_width_is_clamped_by_max_width`；`crates/codegen/pager/src/views/welcome/menu.rs` — `tests::menu_aligns_left_with_hint_and_centers_without`；`crates/codegen/pager/src/views/welcome/menu.rs` — `tests::narrow_area_clamps_width_without_panicking`；`crates/codegen/pager/src/views/welcome/hero.rs` — `render_hero`。
+
+
+### Requirement: Welcome menu row geometry and visible-item contract
+
+render_menu SHALL create one height-one Rect per item in menu order, beginning at menu_centered.y and increasing y by one, and SHALL stop before rows exceed menu_centered.height. It SHALL return the emitted rectangles in the same item order for callers to use as hit geometry; items beyond the available vertical area SHALL have no returned rectangle and no painted row.
+
+#### Scenario: Normal rows
+- **WHEN** the menu area has at least as many rows as items
+- **THEN** each item receives a one-row rectangle at successive y positions and the returned vector preserves item order.
+
+#### Scenario: Vertical clipping
+- **WHEN** items outnumber menu_centered.height
+- **THEN** rendering stops at the first row outside the area and returned rects contain only visible rows.
+
+#### Scenario: Hero integration
+- **WHEN** render_hero supplies a menu area and forwards the returned vector
+- **THEN** HeroRects.menu_rects exposes the same per-row hit rectangles and tests observe increasing row y values.
+
+#### Scenario: Welcome routing
+- **WHEN** root input receives menu rectangles from rendering
+- **THEN** click and hover hit-tests use row rectangles to dispatch or select the corresponding menu index.
+
+证据：`crates/codegen/pager/src/views/welcome/menu.rs` — `render_menu`；`crates/codegen/pager/src/views/welcome/hero.rs` — `render_hero`；`crates/codegen/pager/src/views/welcome/hero.rs` — `tests::hero_menu_rects_follow_rows`；`crates/codegen/pager/src/app/root/mod.rs` — `WelcomeInputCtx`；`crates/codegen/pager/src/app/root/mod.rs` — `handle_welcome_input`；`crates/codegen/pager/src/app/root/mod.rs` — `tests::welcome_mouse_click_menu_row_dispatches_action`。
+
+
+### Requirement: Welcome menu selection and shortcut styling contract
+
+Each unselected row SHALL render a bold text_primary label flush at the menu left and a gray_bright shortcut right-aligned with a four-column right inset. A selected row SHALL fill the whole row with bg_highlight, use bold text_primary label and gray_bright shortcut with the same background, and retain the same row geometry. The row's key placement SHALL use saturating subtraction so narrow menus cannot underflow.
+
+#### Scenario: Unselected item
+- **WHEN** selected is absent or points at another index
+- **THEN** the label is bold at the row's left edge and the shortcut is gray_bright near the right edge with the configured pad.
+
+#### Scenario: Selected item
+- **WHEN** selected equals the current item index
+- **THEN** every cell in the row gets the highlight background and both label and key use selected styles.
+
+#### Scenario: Right padding
+- **WHEN** a shortcut is rendered in a menu row
+- **THEN** the last shortcut cell remains at least KEY_RIGHT_PAD columns before the row's right edge and trailing pad cells remain blank.
+
+#### Scenario: Narrow shortcut
+- **WHEN** the key plus right pad is wider than the row
+- **THEN** saturating placement avoids arithmetic underflow and buffer writes remain bounded.
+
+证据：`crates/codegen/pager/src/views/welcome/menu.rs` — `render_menu`；`crates/codegen/pager/src/views/welcome/menu.rs` — `KEY_RIGHT_PAD`；`crates/codegen/pager/src/views/welcome/menu.rs` — `tests::shortcut_keeps_right_pad_from_row_edge`；`crates/codegen/pager/src/views/welcome/menu.rs` — `tests::narrow_area_clamps_width_without_panicking`；`crates/codegen/pager/src/views/welcome/mod.rs` — `render_welcome_done`；`crates/codegen/pager/src/app/root/mod.rs` — `handle_menu_nav`。
+
+
+### Requirement: Welcome menu dismiss affordance hover contract
+
+When a shortcut string contains [x], render_menu SHALL restyle the last [x] occurrence as a three-column dismiss affordance. The affordance SHALL be gray_bright and bold by default, text_primary and bold when mouse_pos is on its exact row and three-column range, and SHALL retain bg_highlight when its row is selected. Other shortcut text SHALL keep the row's normal or selected key style.
+
+#### Scenario: Dismiss affordance present
+- **WHEN** a menu key contains one or more [x] substrings
+- **THEN** only the final [x] substring is restyled and its three cells are written with the affordance style.
+
+#### Scenario: Dismiss hover
+- **WHEN** mouse_pos matches the affordance row and columns
+- **THEN** the affordance foreground brightens to text_primary while remaining bold.
+
+#### Scenario: Dismiss not hovered
+- **WHEN** mouse_pos is absent or outside the exact row/range
+- **THEN** the affordance remains gray_bright and bold.
+
+#### Scenario: Selected dismiss row
+- **WHEN** the containing row is selected
+- **THEN** the affordance keeps bg_highlight and bold while using text_primary only when hovered.
+
+证据：`crates/codegen/pager/src/views/welcome/menu.rs` — `render_menu`；`crates/codegen/pager/src/views/welcome/menu.rs` — `mouse_on_dismiss`；`crates/codegen/pager/src/views/welcome/menu.rs` — `dismiss_style`。

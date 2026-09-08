@@ -4046,7 +4046,20 @@
       "Goal detail overlay rendering and live goal projection contract",
       "Goal status labels and lifecycle action hints contract",
       "Goal detail text wrapping and control-character sanitization contract",
-      "Goal detail elapsed and Unicode-width truncation contract"
+      "Goal detail elapsed and Unicode-width truncation contract",
+      "Tool-call block construction and elapsed timing",
+      "List-dir collapsed header and path selection",
+      "List-dir full-mode terminal output projection",
+      "List-dir styling and fold policy",
+      "ScrollDebugHud SHALL enable the scroll diagnostics HUD at startup when GROW_SCROLL_DEBUG is nonempty and not exactly 0, expose its state, and toggle it live without entering persisted settings.",
+      "ViewportDebug and ScrollDebugPanel SHALL carry owned per-frame scroll diagnostics, including optional active-agent viewport facts and overlay stacking offset, without owning mutable scroll behavior.",
+      "ScrollDebugPanel::render SHALL format a fixed diagnostic line set from ScrollDebugSnapshot, terminal context, optional stream/last-stream data, and optional viewport state.",
+      "ScrollDebugPanel::render SHALL delegate a fixed-width 46-cell panel to debug_style::render_panel with the caller area, top offset, and formatted line references, leaving clipping/colors/modifier reset to shared debug chrome.",
+      "The scroll debug HUD SHALL observe already-updated real-session scroll state and render diagnostics without affecting scroll behavior, persistence, event handling, or frame scheduling.",
+      "Welcome menu row width and alignment contract",
+      "Welcome menu row geometry and visible-item contract",
+      "Welcome menu selection and shortcut styling contract",
+      "Welcome menu dismiss affordance hover contract"
     ],
     "reviewed_files": [
       {
@@ -6424,6 +6437,18 @@
       {
         "path": "crates/codegen/pager/src/views/goal_detail.rs",
         "sha256": "d0069a7f2f450a86984b201a9a66cde1564ae22e4844f9780fab6729234a640c"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/list_dir.rs",
+        "sha256": "a6c5b054a1e76632434fa79177a89d4e5cec0d58ac5c2831c06eddcc11bf0757"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/scroll_debug_hud.rs",
+        "sha256": "c6ea664d392623aac3a591d4ab112d0759cccff9ebc9f49ca895518301c04eaa"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/welcome/menu.rs",
+        "sha256": "ee401f13b5061b5e907c0ba5045eab76043c79fc1a614c744cf4b7627b808892"
       }
     ],
     "review": "reviews/pager.md"
