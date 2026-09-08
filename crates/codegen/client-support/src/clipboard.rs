@@ -1531,17 +1531,6 @@ mod platform {
         Ok(get_attachments()?.file_urls)
     }
 
-    /// Map pasteboard class to file extension for the temp file.
-    #[cfg(test)]
-    pub(super) fn extension_for_class(class: &str) -> &'static str {
-        match class {
-            "PNGf" => "png",
-            "TIFF" => "tiff",
-            "JPEG" | "JPEGAufs" => "jpg",
-            _ => "bin",
-        }
-    }
-
     /// Copy an image file to the macOS clipboard via `osascript`.
     ///
     /// Detects the pasteboard class from the file extension (PNG, JPEG, TIFF).
@@ -3557,23 +3546,6 @@ mod tests {
                 parse_attachments_output("<<<FURL>>>\n/tmp/foo.txt"),
                 (Some("/tmp/foo.txt".to_owned()), None),
             );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // macOS extension helper
-    // -----------------------------------------------------------------------
-
-    #[cfg(target_os = "macos")]
-    mod macos_helpers {
-        use super::super::platform::extension_for_class;
-
-        #[test]
-        fn extension_mapping() {
-            assert_eq!(extension_for_class("PNGf"), "png");
-            assert_eq!(extension_for_class("TIFF"), "tiff");
-            assert_eq!(extension_for_class("JPEG"), "jpg");
-            assert_eq!(extension_for_class("unknown"), "bin");
         }
     }
 

@@ -14,3 +14,9 @@ ActionId::DumpInputLog appears only in the enum and two no-op mapping arms; no A
 
 ## R15 reviewed boundary
 Remove pager-render/gboom and render/gboom_overlay, the hidden slash command, AgentView game state and exclusive input/render handlers, action/router dispatch, simulation deadline branch and extra game keyboard layer. Preserve general animation/UI-state clocks, Kitty media protocol, mouse/focus handling and ordinary terminal restoration. Remove game-only assertions within mixed tests while retaining other modal/admission assertions. Compile both render and Pager consumers, run command registry, event-loop/clock and active media/input regressions.
+
+## R16 reviewed boundary
+Clipboard extension_for_class is cfg(test) and only macos_helpers::extension_mapping calls it. Remove helper and exclusive test module. Production pasteboard type selection, MIME mapping and file handling remain unchanged. Regress actual native type selection and MIME mapping; no behavioral delta for this test-only removal.
+
+## R17 reviewed boundary
+ManagedTextInspection.original_text is read only by one test assertion. Production consumers use unmanaged_text/requested_items/managed_block, while SourceState.bytes remains the authoritative transaction snapshot. Remove the duplicate field, accessor, allocation and exclusive test read/assertion; retain the rest of the inspection/apply test and transaction behavior. This is an internal representation/API cleanup without a changed persistence contract. Regress managed_text including backup/rollback and unmanaged preservation.

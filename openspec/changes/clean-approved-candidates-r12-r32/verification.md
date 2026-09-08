@@ -12,3 +12,6 @@ Removed unregistered ActionId::DumpInputLog and two no-op arms, preserving Actio
 
 ## R15
 Removed GBOOM game/render files, hidden command and reservation, view/action/input/render hooks, simulation clock and exclusive keyboard layer. Retained general animation/UI clocks, Kitty flags used by input, media and diagnostic paths. Fresh Pager slash regressions 374/374; event loop 80/80; media loader/viewer 3/3; shared modal cascade 1/1. Render and Shell production dependencies compiled through Pager. Removed unrelated rustfmt changes before final event-loop/media validation. No remaining Rust GBOOM references; git diff --check passed.
+
+## R16
+Removed only test-only clipboard extension mapping and its exclusive test module. Fresh native pasteboard type-selection tests 3/3 and MIME mapping tests 10/10 passed; no actual clipboard mutation performed.

@@ -160,7 +160,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：全仓引用只有定义、该测试的导入及断言；生产 read_clipboard_image_from_class 直接分派路径/MIME，native_image_type_from_types 负责原生类型选择，两者都不调用此函数。
 - 删除理由：测试维护的映射不参与产品行为，包括 JPEGAufs 和 unknown→bin 分支，无法对实际图片读取提供回归保护。
 - 拟删除范围：仅该辅助函数和独占测试模块。保留真实类型选择、私有临时文件、附件门禁、剪贴板测试钩子、诊断示例和原生读图回退开关。
-- 状态：等待用户确认，尚未删除。证据见 audit-clipboard-helper-reachability。
+- 状态：已获批并删除；原生类型 3/3、MIME 10/10 回归通过。证据见 audit-clipboard-helper-reachability。
 
 ## R17 · 托管配置 inspection 的重复原文快照
 
