@@ -30492,3 +30492,243 @@ assert_flush_left_live_rows SHALL process needles in order, select the first scr
 - **THEN** the helper accepts it as column-zero alignment.
 
 证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs` — `assert_flush_left_live_rows`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs` — `trim_start_matches(' ')`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs` — `phase`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs` — `screen.lines`。
+
+
+### Requirement: Minimal parked-plan fixture and tool-call setup
+
+The implementation SHALL satisfy the following tested behavior: The test uses PLAN_LINES=100, creates plan bodies with unique tag plus zero-padded step sentinels, and provides missing/duplicated projections over the harness full_text. park_plan writes the tagged plan to the session plan.md, registers an exit_plan_mode tool turn with the supplied call id and empty JSON arguments, injects the supplied prompt, waits up to 60 seconds for PLAN_PARKED_SENTINEL, then pumps ten 100 ms updates before returning the AgentTurnExpectation. The main test starts ContentController, sets a first response, spawns minimal at 20 rows by 100 columns with query responses enabled, waits for minimal readiness, submits a first `go` turn, waits up to 40 seconds for MOCK_RESPONSE_SENTINEL in full_text, and locates the session directory.
+
+#### Scenario: Tall plan fixture
+- **WHEN** a plan is prepared with a tag and PLAN_LINES count
+- **THEN** plan_body writes a heading plus one unique tagged sentinel per line, allowing missing and duplicate line checks.
+
+#### Scenario: Parked approval
+- **WHEN** park_plan is called with a session directory, call id, tag, and prompt
+- **THEN** plan.md is seeded, an exit_plan_mode expectation is registered, the prompt is submitted, and the plan approval sentinel must appear before the settle pumps complete.
+
+#### Scenario: Session initialization
+- **WHEN** minimal starts at 20x100 and the initial turn sentinel appears
+- **THEN** the test has a session directory in which subsequent plan.md writes and tool calls are performed.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `PLAN_LINES`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `missing`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `duplicated`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `park_plan`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `plan_body`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `expect_tool_turn`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PLAN_PARKED_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal_sized`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `session_dir`；`crates/codegen/pager-pty-harness/src/content.rs` — `AgentTurnExpectation`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`。
+
+
+### Requirement: First parked plan reaches native scrollback exactly once
+
+The implementation SHALL satisfy the following tested behavior: After park_plan creates the ONE plan with call_plan_one and prompt `present the plan`, the test requires missing(&mut harness, "ONE") to be empty, meaning every ONE000 through ONE099 sentinel is present in the harness full_text spanning native scrollback and visible screen. It also requires duplicated(&mut harness, "ONE") to be empty, so each tagged plan line appears at most once while approval remains parked.
+
+#### Scenario: Complete parked plan
+- **WHEN** the first plan approval sentinel is visible
+- **THEN** all 100 tagged ONE lines are reachable through full_text while the approval is parked.
+
+#### Scenario: No duplicate first plan
+- **WHEN** the first parked plan is inspected for repeated tagged lines
+- **THEN** no ONE line appears more than once.
+
+#### Scenario: Clipped live region
+- **WHEN** the plan is taller than the 20-row terminal
+- **THEN** the assertion depends on full_text including native scrollback rather than only the visible live region.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `minimal_parked_plan_commits_to_scrollback`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `missing`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `duplicated`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PLAN_LINES`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::scrollback_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: Revised parked plan is additive and print-once
+
+The implementation SHALL satisfy the following tested behavior: The test sends `s` to request changes, pumps 400 ms, then calls park_plan with call_plan_two and prompt `make it shorter` for tag TWO. It requires every TWO line to be present while the revised approval is parked. It then requires both duplicated(ONE) and duplicated(TWO) to be empty, so the revision does not re-emit either the original or revised plan body.
+
+#### Scenario: Request revision
+- **WHEN** the first plan is parked and byte `s` is injected
+- **THEN** the harness is given 400 ms before the revised plan prompt is submitted.
+
+#### Scenario: Second plan complete
+- **WHEN** the revised plan reaches PLAN_PARKED_SENTINEL
+- **THEN** all 100 TWO tagged lines are reachable through full_text.
+
+#### Scenario: No re-emission during revision
+- **WHEN** ONE and TWO outputs are checked after the second plan parks
+- **THEN** neither plan has duplicate tagged lines.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `park_plan`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `missing`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `duplicated`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PLAN_PARKED_SENTINEL`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::full_text`。
+
+
+### Requirement: Approval preserves parked plan output and pager health
+
+The implementation SHALL satisfy the following tested behavior: The test injects `a` to approve the revised parked plan, pumps forty 100 ms updates, and requires duplicated(ONE) and duplicated(TWO) to remain empty. It then rejects a visible `panicked` marker from the minimal screen and calls quit_minimal. The single Tokio test is marked #[ignore], so these are explicit-selection assertions rather than default-suite verification.
+
+#### Scenario: Approve revised plan
+- **WHEN** the revised plan is parked and byte `a` is injected
+- **THEN** after four seconds of harness updates, neither plan body has been printed a second time.
+
+#### Scenario: Healthy approval path
+- **WHEN** the post-approval checks run
+- **THEN** the visible screen does not contain `panicked`.
+
+#### Scenario: Cleanup
+- **WHEN** all assertions pass
+- **THEN** quit_minimal is invoked to close the minimal pager.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_parked_plan_commits_to_scrollback.rs` — `duplicated`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::contains_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: The ignored minimal PTY test SHALL start an isolated ContentController, configure a short MOCK_RESPONSE_SENTINEL response, spawn the default minimal fixture at DEFAULT_ROWS by DEFAULT_COLS, wait for minimal readiness, submit PROMPT, and wait for the response sentinel before layout assertions.
+
+The implementation SHALL satisfy the following tested behavior: minimal_short_response_stays_on_screen starts ContentController, sets the response to MOCK_RESPONSE_SENTINEL followed by ` — short answer that fits.`, calls spawn_minimal(&content), waits with wait_minimal_ready, injects PROMPT plus carriage return, waits up to 30 seconds for MOCK_RESPONSE_SENTINEL, then pumps 400 ms so the turn and commit can settle. spawn_minimal supplies minimal/no-leader arguments and enables terminal query responses through the shared helper; this test relies on that fixture rather than proving the probe itself.
+
+#### Scenario: Isolated content setup
+- **WHEN** the ignored test begins
+- **THEN** ContentController::start succeeds and serves the deterministic short response.
+
+#### Scenario: Minimal process startup
+- **WHEN** spawn_minimal is called
+- **THEN** the pager runs in minimal mode at the shared default 50x120 geometry with query forwarding enabled.
+
+#### Scenario: Readiness gate
+- **WHEN** the process has started
+- **THEN** wait_minimal_ready observes the minimal idle prompt before the prompt is submitted.
+
+#### Scenario: Response settle
+- **WHEN** PROMPT is submitted and the sentinel appears within 30 seconds
+- **THEN** the test pumps an additional 400 ms before reading screen and scrollback state.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_short_response_stays_on_screen.rs` — `minimal_short_response_stays_on_screen`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::start`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::update`。
+
+
+### Requirement: When the completed response fits within the minimal viewport, the visible screen SHALL contain MOCK_RESPONSE_SENTINEL while the native scrollback SHALL not contain it.
+
+The implementation SHALL satisfy the following tested behavior: After the 400 ms settle, the test asserts harness.screen_contents().contains(MOCK_RESPONSE_SENTINEL) and asserts !harness.scrollback_text().contains(MOCK_RESPONSE_SENTINEL). The source treats this as content-anchored behavior: short content stays in the visible static band and is not force-pushed into terminal history; the taller-response scrollback path is covered by a separate test.
+
+#### Scenario: Visible short response
+- **WHEN** the short answer has rendered and the settled screen is captured
+- **THEN** the visible screen contains MOCK_RESPONSE_SENTINEL.
+
+#### Scenario: No unnecessary history insertion
+- **WHEN** the same settled state is inspected through scrollback_text
+- **THEN** native scrollback does not contain MOCK_RESPONSE_SENTINEL.
+
+#### Scenario: Fits-screen boundary
+- **WHEN** the response is the configured short answer at the default geometry
+- **THEN** the content-anchored live region keeps it in the viewport instead of applying bottom-pin behavior.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_short_response_stays_on_screen.rs` — `minimal_short_response_stays_on_screen`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_response_to_scrollback.rs` — `minimal_commits_response_to_scrollback`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::scrollback_text`。
+
+
+### Requirement: After a short response settles in minimal mode, the focused prompt cursor SHALL remain in the upper portion of the screen and the last non-blank rendered row SHALL remain well above the bottom, demonstrating that the live region is content-anchored rather than bottom-pinned.
+
+The implementation SHALL satisfy the following tested behavior: The test reads cursor_position and requires cursor_row < DEFAULT_ROWS - 12, which is <38 for the default 50-row terminal. It then enumerates screen_contents lines, selects the last line whose trim is non-empty, defaults to row 0 if none exists, and requires last_non_blank < DEFAULT_ROWS - 10, which is <40. These checks are designed to avoid depending on how the emulator represents trailing blank rows.
+
+#### Scenario: Prompt remains high
+- **WHEN** the short conversation is visible after the settle
+- **THEN** the focused prompt cursor row is at least 12 rows above the final terminal row.
+
+#### Scenario: Lower viewport stays blank
+- **WHEN** screen_contents is split into lines
+- **THEN** the last non-blank line is at least 10 rows above the final terminal row.
+
+#### Scenario: Emulator padding independent
+- **WHEN** the screen representation omits or pads trailing blank rows
+- **THEN** the explicit last-non-blank scan supplies the alignment signal instead of relying on trailing padding.
+
+#### Scenario: Content anchoring regression guard
+- **WHEN** the cursor and last non-blank thresholds pass
+- **THEN** the test rejects the former layout that pushed the prompt near the bottom with a large gap above the conversation.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_short_response_stays_on_screen.rs` — `minimal_short_response_stays_on_screen`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::cursor_position`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`。
+
+
+### Requirement: The settled minimal short-response screen SHALL contain no visible panic marker, and the ignored test SHALL request clean minimal shutdown after all layout assertions.
+
+The implementation SHALL satisfy the following tested behavior: The test asserts !harness.contains_text("panicked") and includes the captured screen in the failure diagnostic, then calls quit_minimal(&mut harness). quit_minimal owns the Ctrl-Q confirmation and exit polling; this source does not assert an exit code or post-quit persisted state.
+
+#### Scenario: No panic
+- **WHEN** all layout assertions have reached the settled screen
+- **THEN** the screen contains no `panicked` substring.
+
+#### Scenario: Minimal cleanup
+- **WHEN** the visible-screen checks pass
+- **THEN** quit_minimal is invoked to confirm and wait for pager exit, with a harness kill fallback.
+
+#### Scenario: Ignored execution gate
+- **WHEN** the default test command discovers this function
+- **THEN** the #[ignore] attribute excludes it unless the PTY suite is explicitly selected.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_short_response_stays_on_screen.rs` — `minimal_short_response_stays_on_screen`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::contains_text`。
+
+
+### Requirement: Fullscreen-to-minimal PTY relaunch fixture and session history setup
+
+The ignored Tokio PTY test SHALL start an isolated ContentController, use a deterministic turn_sentinel(1) response, create a temporary project directory containing .git, resolve the pager binary, and spawn the default fullscreen pager with --no-leader at DEFAULT_ROWS by DEFAULT_COLS. It SHALL enable terminal query responses before the mode switch, wait for WELCOME_SCREEN_SENTINEL, submit PROMPT, and wait for the first sentinel so the resumed session has real history.
+
+#### Scenario: Isolated project fixture
+- **WHEN** the test starts
+- **THEN** a temporary project directory with a .git child is created and used as the pager cwd.
+
+#### Scenario: Fullscreen readiness
+- **WHEN** the default pager is spawned with --no-leader
+- **THEN** query responses are enabled and WELCOME_SCREEN_SENTINEL is observed before input.
+
+#### Scenario: History seed
+- **WHEN** PROMPT is submitted and the mock response is available
+- **THEN** the first turn sentinel appears within the 30-second wait, providing content for --resume.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `minimal_slash_switches_from_fullscreen`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `ContentController::start`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `turn_sentinel`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `tempfile::tempdir`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `PtyHarness::spawn_with_content_in_dir`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `WELCOME_SCREEN_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::set_respond_to_queries`。
+
+
+### Requirement: Pager fullscreen-to-minimal slash relaunch preserves session identity and history
+
+From a live fullscreen session, paced `/minimal` input SHALL open the slash suggestion whose description is `Reopen this session in minimal (scrollback-native) mode`; after the selected command is submitted, the pager SHALL remain attached to the same PTY while relaunching into minimal mode with the prior session available. The post-relaunch screen SHALL expose MINIMAL_SWITCH_BACK_IDLE_SENTINEL and full_text SHALL retain the pre-switch turn sentinel.
+
+#### Scenario: Slash discovery
+- **WHEN** the fullscreen session has completed one turn and `/minimal` is injected one byte at a time
+- **THEN** the minimal mode suggestion description becomes visible within five seconds.
+
+#### Scenario: Mode relaunch
+- **WHEN** the suggestion is visible and carriage return is submitted
+- **THEN** the PTY remains live through the process replacement/child handoff and eventually shows the minimal switch-back idle status.
+
+#### Scenario: History replay
+- **WHEN** minimal mode has reopened
+- **THEN** the original turn sentinel is present in the harness full text within 30 seconds.
+
+#### Scenario: Mode-specific status
+- **WHEN** the switch came from fullscreen rather than a cold minimal start
+- **THEN** the status uses MINIMAL_SWITCH_BACK_IDLE_SENTINEL, including the `/fullscreen to go back` cue.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `inject_keys_paced`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `/minimal`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `Reopen this session in minimal (scrollback-native) mode`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `MINIMAL_SWITCH_BACK_IDLE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `inject_keys_paced`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_SWITCH_BACK_IDLE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_to_fullscreen.rs` — `minimal_slash_switches_to_fullscreen`；`crates/codegen/pager/src/slash/commands/screen_mode_switch.rs` — `ScreenModeSwitchCommand::minimal`；`crates/codegen/pager/src/app/screen_mode_relaunch.rs` — `exec_screen_mode_relaunch`。
+
+
+### Requirement: Minimal relaunch clears stale main-screen output and reanchors resumed UI
+
+After `/minimal` relaunch completes, the captured visible screen SHALL not contain the transient `Reopening session` text printed before exec, and the harness screen or full text SHALL contain the `Grow` welcome-card marker. The relaunch path SHALL therefore clear residual main-buffer detritus before the resumed minimal UI is observed.
+
+#### Scenario: Relaunch clear
+- **WHEN** MINIMAL_SWITCH_BACK_IDLE_SENTINEL and prior history have been observed
+- **THEN** screen_contents contains no `Reopening session` residue.
+
+#### Scenario: Welcome marker
+- **WHEN** the resumed UI is captured
+- **THEN** `Grow` is present either in the visible screen or in harness full_text.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `Reopening session`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `Grow`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `PtyHarness::full_text`；`crates/codegen/pager/src/app/mod.rs` — `init_terminal`；`crates/codegen/pager/src/app/mod.rs` — `clear a relaunching minimal screen`。
+
+
+### Requirement: Screen-mode switch liveness, panic absence and minimal cleanup
+
+The relaunch test SHALL fail with captured screen/full-text diagnostics if the minimal switch or history replay times out, SHALL reject a visible `panicked` marker after the switch, and SHALL finish by invoking quit_minimal so the resumed minimal process receives the two-step Ctrl+Q cleanup path with a bounded exit wait/fallback.
+
+#### Scenario: Mode switch timeout
+- **WHEN** the switch-back idle sentinel is not observed within 45 seconds
+- **THEN** the test panics with the current screen diagnostics rather than accepting an indeterminate mode.
+
+#### Scenario: History timeout
+- **WHEN** the prior sentinel is not found in full_text within 30 seconds
+- **THEN** the test panics with full-text diagnostics rather than claiming resume success.
+
+#### Scenario: No panic
+- **WHEN** the post-relaunch screen is captured
+- **THEN** contains_text(`panicked`) is false.
+
+#### Scenario: Cleanup
+- **WHEN** all assertions pass
+- **THEN** quit_minimal sends the confirmation chord and waits up to 15 seconds before its harness-kill fallback.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `unwrap_or_else`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_slash_switches_from_fullscreen.rs` — `quit_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_exit_code`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`。

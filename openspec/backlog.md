@@ -1056,3 +1056,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Fan-out correctness is encoded as hard-coded sentinel occurrence counts and a `panicked` substring check rather than structured session/replay/frame evidence.
 - Pager 审计债务：VIEWERS, Tokio worker-thread count, and post-driver pump duration are coupled by comments and manual tuning rather than a typed scaling budget or parameterized stress harness.
 - Pager 审计债务：The test combines shared setup, replay, live broadcast, delayed-frame duplicate detection, process lifecycle, and cleanup in one scenario, broadening the failure diagnosis surface.
+- Pager 审计债务：The regression test is ignored, leaving minimal parked-plan scrollback behavior outside routine automated coverage.
+- Pager 审计债务：Plan correctness relies on hard-coded generated sentinel substrings and occurrence counts rather than a structured scrollback block identity or native-history assertion.
+- Pager 审计债务：The test registers AgentTurnExpectation handles but drops them without awaiting satisfaction, so the UI path and scripted backend path are only loosely synchronized.
+- Pager 审计债务：Fixed 100 ms update loops, a 60-second parking wait, a 40-second first-turn wait, and a 20x100 geometry make the scenario sensitive to scheduler and PTY timing.
+- Pager 审计债务：One test combines filesystem seeding, initial session creation, two tool calls, revision input, approval, scrollback completeness, duplicate detection, and shutdown, giving failures a broad diagnosis surface.
