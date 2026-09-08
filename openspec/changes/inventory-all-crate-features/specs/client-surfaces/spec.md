@@ -16963,3 +16963,340 @@ SessionPickerClosed SHALL dismiss the welcome/modal picker and invalidate only t
 - **THEN** only the latest sequence writes entries.
 
 证据：`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Action::FetchSessionList`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `Action::SessionPickerClosed`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionListLoaded`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `TaskResult::SessionListFailed`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_picker_loading`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_picker_content_loading`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `session_picker_list_seq`；`crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs` — `handle_input`。
+
+
+### Requirement: Memory entries are grouped, labeled, formatted, and previewed with bounded file reads
+
+build_entries SHALL transform MemoryFileInfo values into Global, Workspace, and Sessions sections, add headers only for nonempty sections, format byte sizes and relative modification times, preserve file/source metadata, and list session logs newest-first. MemoryModalState::new SHALL initialize browsing state, skip leading headers, and load the selected file preview. Preview loading SHALL read UTF-8 files, show a fixed too-large message above 1 MiB, and leave missing/unreadable files without a preview.
+
+#### Scenario: Entry grouping
+- **WHEN** global/workspace/session file metadata is supplied
+- **THEN** headers and file rows appear in section order, with session rows reversed and metadata formatted.
+
+#### Scenario: New modal
+- **WHEN** entries are loaded into MemoryModalState
+- **THEN** selection lands on the first non-header and its preview is loaded/reset.
+
+#### Scenario: Large file
+- **WHEN** the selected file exceeds 1 MiB
+- **THEN** preview content is the explicit too-large message without reading the file body.
+
+#### Scenario: Missing file
+- **WHEN** metadata/read-to-string fails
+- **THEN** preview is absent and the renderer shows No file selected.
+
+证据：`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryFileEntry`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::new`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::selected_entry`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::load_preview`；`crates/codegen/pager/src/views/memory_modal.rs` — `build_entries`；`crates/codegen/pager/src/views/memory_modal.rs` — `format_size`；`crates/codegen/pager/src/views/memory_modal.rs` — `format_modified`；`crates/codegen/pager/src/views/memory_modal.rs` — `file_label`；`crates/codegen/pager/src/views/memory_modal.rs` — `MAX_PREVIEW_BYTES`；`crates/codegen/pager/src/views/memory_modal.rs` — `format_size_ranges`；`crates/codegen/pager/src/views/memory_modal.rs` — `format_modified_relative`；`crates/codegen/pager/src/views/memory_modal.rs` — `file_label_extracts_filename`；`crates/codegen/pager/src/views/memory_modal.rs` — `build_entries_groups_by_source`；`crates/codegen/pager/src/views/memory_modal.rs` — `new_selects_first_non_header`。
+
+
+### Requirement: Memory filtering preserves matching section headers and keeps selection/preview state coherent
+
+MemoryModalState SHALL cache filtered entry indices, match query text case-insensitively against file labels and source names, retain a section header only when a member matches, and invalidate/recompute the cache after query or entry changes. Selection SHALL skip headers, clamp when filters shrink, reload preview only when the selected file changes, and clear preview when no entries remain.
+
+#### Scenario: Filter match
+- **WHEN** a query matches a file label or source
+- **THEN** the filtered list contains the matching file and its section header.
+
+#### Scenario: Selection navigation
+- **WHEN** next/previous or select_at targets a header, same index, or out-of-range index
+- **THEN** headers and invalid/same selections are rejected; valid file selection updates preview.
+
+#### Scenario: Filter edit
+- **WHEN** text changes or paste changes the query
+- **THEN** cache and selected entry are recomputed once and preview scroll resets only on text changes.
+
+#### Scenario: Cursor-only edit
+- **WHEN** the query cursor moves without text change
+- **THEN** filtered indices and preview scroll remain unchanged.
+
+证据：`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::filtered_indices`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::query`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::query_cursor_byte`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::invalidate_filter`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::advance_past_headers`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::select_next`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::select_prev`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::select_at`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::clamp_selected`；`crates/codegen/pager/src/views/memory_modal.rs` — `compute_filtered`；`crates/codegen/pager/src/views/memory_modal.rs` — `cached_filter_updates_on_invalidate`；`crates/codegen/pager/src/views/memory_modal.rs` — `filtered_indices_preserves_headers_for_matching_entries`；`crates/codegen/pager/src/views/memory_modal.rs` — `select_at_skips_headers_and_updates`；`crates/codegen/pager/src/views/memory_modal.rs` — `select_at_out_of_bounds`；`crates/codegen/pager/src/views/memory_modal.rs` — `filter_text_changes_recompute_preview_but_cursor_moves_do_not`；`crates/codegen/pager/src/views/memory_modal.rs` — `filter_paste_recomputes_once_and_consumes_empty_input`。
+
+
+### Requirement: Memory keyboard routing supports browse navigation, canonical filter editing, copy, toggle, fullscreen persistence, and session-only deletion
+
+handle_memory_key SHALL ignore key-release events, route FilterFocused input to the line editor while keeping Enter focused and Esc returning to Browse, and route Browse keys for j/Down, k/Up, page movement, / or unmodified i search, trailing-grapheme backspace, y path copy, t memory toggle, and Ctrl-F fullscreen persistence. x SHALL arm double-press deletion only for session entries; while confirming, x removes the entry/file and any other key cancels. Modified i and removed Ctrl-D/Ctrl-U preview shortcuts SHALL be no-ops.
+
+#### Scenario: Browse navigation
+- **WHEN** j/k, arrows, PageUp/PageDown or backspace is pressed in Browse
+- **THEN** selection/query changes are applied and preview follows valid selection.
+
+#### Scenario: Filter focus
+- **WHEN** text, paste, Enter, Esc, cursor or grapheme editing arrives
+- **THEN** canonical line editing handles the input, text changes invalidate filtering, Enter stays focused, and Esc preserves query while exiting.
+
+#### Scenario: Memory toggle
+- **WHEN** t is pressed
+- **THEN** memory_enabled flips immediately and a draft-preserving /memory on/off action is returned.
+
+#### Scenario: Fullscreen
+- **WHEN** Ctrl-F is pressed
+- **THEN** fullscreen flips and PersistMemoryFullscreen carries the new value.
+
+#### Scenario: Delete
+- **WHEN** x is pressed on session/global/confirming state
+- **THEN** only session rows arm confirmation; second x deletes the row/file, while any other confirmation key cancels.
+
+#### Scenario: Copy
+- **WHEN** y is pressed on a file row
+- **THEN** the path is copied and the outcome is Changed.
+
+证据：`crates/codegen/pager/src/views/memory_modal.rs` — `handle_memory_key`；`crates/codegen/pager/src/views/memory_modal.rs` — `handle_memory_paste`；`crates/codegen/pager/src/views/memory_modal.rs` — `handle_filter_focused`；`crates/codegen/pager/src/views/memory_modal.rs` — `finish_filter_edit`；`crates/codegen/pager/src/views/memory_modal.rs` — `handle_browse`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalMode::FilterFocused`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalMode::ConfirmingDelete`；`crates/codegen/pager/src/views/memory_modal.rs` — `Action::PersistMemoryFullscreen`；`crates/codegen/pager/src/views/memory_modal.rs` — `Action::SendSlashCommandPreservingDraft`；`crates/codegen/pager/src/views/memory_modal.rs` — `delete_only_allowed_for_session_entries`；`crates/codegen/pager/src/views/memory_modal.rs` — `i_key_enters_filter_like_slash`；`crates/codegen/pager/src/views/memory_modal.rs` — `modified_i_does_not_enter_filter`；`crates/codegen/pager/src/views/memory_modal.rs` — `ctrl_d_u_no_longer_scrolls_preview`；`crates/codegen/pager/src/views/memory_modal.rs` — `filter_escape_preserves_query_and_enter_stays_focused`；`crates/codegen/pager/src/views/memory_modal.rs` — `filter_uses_canonical_word_and_grapheme_editing`；`crates/codegen/pager/src/views/memory_modal.rs` — `browse_backspace_deletes_trailing_grapheme_independent_of_cursor_and_modifiers`；`crates/codegen/pager/src/views/memory_modal.rs` — `filter_paste_recomputes_once_and_consumes_empty_input`。
+
+
+### Requirement: Memory mouse routing selects files and scrolls or jumps list and preview independently
+
+handle_memory_mouse SHALL hit-test rendered list, preview, and scrollbar rectangles. Left click on a list file row SHALL select it; headers/outside areas SHALL remain unchanged. Wheel events over the list SHALL move selection by three non-header entries and refresh preview; wheel events over preview SHALL move preview_scroll by three bounded lines. Click/drag on list or preview scrollbars SHALL map the pointer to a clamped offset, selecting the first visible file for list jumps.
+
+#### Scenario: List click
+- **WHEN** a left click lands on a rendered file row
+- **THEN** the corresponding filtered file is selected and preview reloads.
+
+#### Scenario: Header/outside click
+- **WHEN** a click lands on a section header or outside both panes
+- **THEN** state and selection remain unchanged.
+
+#### Scenario: List wheel
+- **WHEN** ScrollUp/Down occurs over list or list scrollbar
+- **THEN** selection moves across non-header rows and preview follows.
+
+#### Scenario: Preview wheel
+- **WHEN** ScrollUp/Down occurs over preview or preview scrollbar
+- **THEN** preview_scroll changes by three and stays within available range.
+
+#### Scenario: Scrollbar jump
+- **WHEN** drag/click lands at top/bottom/offset of a scrollbar
+- **THEN** scroll offset is mapped and clamped; list selection moves to the first visible file.
+
+证据：`crates/codegen/pager/src/views/memory_modal.rs` — `handle_memory_mouse`；`crates/codegen/pager/src/views/memory_modal.rs` — `select_first_visible`；`crates/codegen/pager/src/views/memory_modal.rs` — `apply_scrollbar_jump`；`crates/codegen/pager/src/views/memory_modal.rs` — `ScrollbarClickResult`；`crates/codegen/pager/src/views/memory_modal.rs` — `scrollbar_click_to_offset`；`crates/codegen/pager/src/views/memory_modal.rs` — `mouse_click_selects_file`；`crates/codegen/pager/src/views/memory_modal.rs` — `mouse_click_on_header_unchanged`；`crates/codegen/pager/src/views/memory_modal.rs` — `mouse_scroll_up_down_on_list`；`crates/codegen/pager/src/views/memory_modal.rs` — `mouse_scroll_on_preview`；`crates/codegen/pager/src/views/memory_modal.rs` — `mouse_outside_both_panes_unchanged`；`crates/codegen/pager/src/views/memory_modal.rs` — `apply_scrollbar_jump_edges`。
+
+
+### Requirement: Memory modal rendering adapts split/fullscreen layout and preserves list/preview scroll geometry
+
+render_memory_modal SHALL use ModalWindow chrome with persisted fullscreen or compact sizing, collapse to list-only below 80 columns, split wider content into a 40% list and preview pane, store hit-test rectangles, render search placeholder/cursor, section headers, selected rows, metadata/truncation, and scrollbars. The preview SHALL wrap MarkdownContent to available width, reserve scrollbar width when needed, clamp preview_scroll, and render the visible lines; missing preview SHALL show a centered message.
+
+#### Scenario: Narrow layout
+- **WHEN** content width is below the split threshold
+- **THEN** only the file list is rendered and preview geometry/scrollbar is cleared.
+
+#### Scenario: Wide layout
+- **WHEN** content width permits preview
+- **THEN** list/preview rectangles and separator are stored and both panes render.
+
+#### Scenario: List row
+- **WHEN** a header, selected file, long label, or delete confirmation is visible
+- **THEN** header/selection/meta/delete hint styles and width-safe truncation are used.
+
+#### Scenario: Preview wrap
+- **WHEN** wrapped content exceeds viewport
+- **THEN** total lines and scrollbar are recomputed at narrowed content width and scroll is clamped.
+
+#### Scenario: Unicode query
+- **WHEN** filter text includes CJK/combining/emoji and cursor is near the edge
+- **THEN** viewport preserves grapheme boundaries and cursor remains visible in the rendered filter row.
+
+证据：`crates/codegen/pager/src/views/memory_modal.rs` — `render_memory_modal`；`crates/codegen/pager/src/views/memory_modal.rs` — `render_file_list`；`crates/codegen/pager/src/views/memory_modal.rs` — `render_preview`；`crates/codegen/pager/src/views/memory_modal.rs` — `truncate_to_width`；`crates/codegen/pager/src/views/memory_modal.rs` — `sat_u16`；`crates/codegen/pager/src/views/memory_modal.rs` — `MemoryModalState::query_viewport`；`crates/codegen/pager/src/views/memory_modal.rs` — `SPLIT_MIN_WIDTH`；`crates/codegen/pager/src/views/memory_modal.rs` — `LIST_WIDTH_RATIO`；`crates/codegen/pager/src/views/memory_modal.rs` — `render_scrollbar`；`crates/codegen/pager/src/views/memory_modal.rs` — `truncate_to_width_handles_ascii`；`crates/codegen/pager/src/views/memory_modal.rs` — `truncate_to_width_handles_multibyte`；`crates/codegen/pager/src/views/memory_modal.rs` — `filter_render_keeps_unicode_query_and_cursor_visible`。
+
+
+### Requirement: Memory shortcut footer reflects mode, memory state, fullscreen state, and Vim search affordance
+
+build_shortcuts SHALL expose browse navigation/search/copy/delete/toggle/fullscreen/close hints, label the memory toggle with its current on/off state, switch the fullscreen hint between normal/fullscreen, append the shared `i search` hint in Browse, and expose only type/Esc hints in FilterFocused or x/any-key hints in ConfirmingDelete. The current memory fullscreen preference SHALL be read from the hints.memory_modal_fullscreen config value and default false.
+
+#### Scenario: Browse footer
+- **WHEN** Browse mode is rendered with memory enabled/disabled or fullscreen on/off
+- **THEN** toggle and fullscreen labels describe the current state and navigation actions are listed.
+
+#### Scenario: Vim navigation
+- **WHEN** Vim mode is enabled
+- **THEN** Browse shortcuts include `i search`.
+
+#### Scenario: Filter/confirm footer
+- **WHEN** filter or delete confirmation is active
+- **THEN** only mode-appropriate type/Esc or x/cancel hints are advertised.
+
+#### Scenario: Preference
+- **WHEN** config contains or omits hints.memory_modal_fullscreen
+- **THEN** load_fullscreen_pref returns the boolean value or false when unavailable.
+
+证据：`crates/codegen/pager/src/views/memory_modal.rs` — `build_shortcuts`；`crates/codegen/pager/src/views/memory_modal.rs` — `load_fullscreen_pref`；`crates/codegen/pager/src/views/memory_modal.rs` — `browse_footer_advertises_i_search_under_vim`。
+
+
+### Requirement: Memory display helpers remain Unicode-safe and use bounded human-readable metadata
+
+truncate_to_width SHALL cut only at a valid display-width boundary through the shared byte-offset helper. file_label SHALL use the final path component with lossy fallback, format_size SHALL emit B/KB/MB with one decimal above the unit threshold, and format_modified SHALL map missing/future/sub-minute to just now then minutes/hours/days.
+
+#### Scenario: Width truncation
+- **WHEN** ASCII, multibyte or grapheme text is truncated
+- **THEN** the returned slice never exceeds max display columns and does not split a multibyte boundary.
+
+#### Scenario: Metadata
+- **WHEN** size or modified timestamp falls in a boundary range
+- **THEN** stable human-readable units and relative labels are returned.
+
+证据：`crates/codegen/pager/src/views/memory_modal.rs` — `truncate_to_width`；`crates/codegen/pager/src/views/memory_modal.rs` — `file_label`；`crates/codegen/pager/src/views/memory_modal.rs` — `format_size`；`crates/codegen/pager/src/views/memory_modal.rs` — `format_modified`；`crates/codegen/pager/src/views/memory_modal.rs` — `truncate_to_width_handles_ascii`；`crates/codegen/pager/src/views/memory_modal.rs` — `truncate_to_width_handles_multibyte`；`crates/codegen/pager/src/views/memory_modal.rs` — `format_size_ranges`；`crates/codegen/pager/src/views/memory_modal.rs` — `format_modified_relative`。
+
+
+### Requirement: Typed context snapshot and header model summary
+
+ContextInfoBlock SHALL retain the typed ContextInfo snapshot and active model name, and build_lines SHALL render a Context header, a blank separator, the used/total token summary with a precise percentage, and the model caption in that order.
+
+#### Scenario: Header
+- **WHEN** a context snapshot and model are supplied to ContextInfoBlock::new
+- **THEN** the first lines are Context, a blank line, the token summary, and the model name.
+
+#### Scenario: Large total
+- **WHEN** the total context reaches the million range
+- **THEN** the summary uses the large-count formatter while retaining the token suffix.
+
+#### Scenario: Precision
+- **WHEN** used and total are 36,700 and 1,000,000
+- **THEN** the summary shows 3.67% rather than the pre-rounded integer usage_pct.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock::new`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock::snapshot`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock::model`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `build_lines`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `fmt_tok_big`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `precise_usage_percent`。
+
+
+### Requirement: Token and percentage formatting boundaries
+
+Token and share formatters SHALL handle zero totals safely, preserve raw counts below 1,000, use one-decimal k values through 99,499, switch to half-up integer k at 99,500, use one-decimal m values at one million for large summaries, render category shares with one decimal below 10%, whole percentages at or above 10%, and floor tiny nonzero shares at 0.1%.
+
+#### Scenario: Token cutovers
+- **WHEN** values cross 999, 1,000, 99,499, 99,500, 999,999, and 1,000,000
+- **THEN** fmt_tok/fmt_tok_big return the stable compact representation at each boundary.
+
+#### Scenario: Zero window
+- **WHEN** total is zero
+- **THEN** precise_usage_percent returns 0.0 and percent_of_window returns `-`.
+
+#### Scenario: Category share
+- **WHEN** part is zero, tiny nonzero, under 10%, or at least 10%
+- **THEN** percent_of_window returns the expected 0.0%, floored 0.1%, decimal, or whole-percent form.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `fmt_tok`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `precise_usage_percent`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `fmt_tok_big`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `percent_of_window`。
+
+
+### Requirement: Auto-compact estimate and warning guidance
+
+build_lines SHALL compute the auto-compact threshold with ceiling arithmetic from the live snapshot threshold, show the remaining token estimate below threshold, switch large remaining values to m notation, show a warning that compaction triggers next turn at or above threshold, and show the manual `/compact` tip only in the 80%-to-threshold band.
+
+#### Scenario: Below threshold
+- **WHEN** usage_pct is below auto_compact_threshold_percent
+- **THEN** the output includes `Auto-compact at X% · ~N tokens remaining` using ceiling threshold arithmetic.
+
+#### Scenario: Large window
+- **WHEN** the remaining estimate reaches millions
+- **THEN** the estimate uses fmt_tok_big and displays m notation.
+
+#### Scenario: At threshold
+- **WHEN** usage_pct equals or exceeds the configured threshold
+- **THEN** the output says auto-compact triggers next turn and omits the manual tip.
+
+#### Scenario: Warning band
+- **WHEN** usage_pct is at least 80% but below threshold
+- **THEN** the warning tip suggests `/compact`; below 80% or at/above threshold it is absent.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `auto_compact_threshold_percent`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `threshold_tokens`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `div_ceil`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `remaining`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `Auto-compact at`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `Auto-compact triggers next turn`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `Tip: run /compact`。
+
+
+### Requirement: Categorical 100-cell context usage bar
+
+build_lines SHALL render exactly 100 categorical cells, partitioning used capacity left-to-right into system, message, and reasoning/overhead bands and the remainder into free capacity; token estimates SHALL be clamped so category bands cannot exceed used cells, tool-definition tokens SHALL stay out of the bar, and a zero total SHALL render all cells as free.
+
+#### Scenario: Normal usage
+- **WHEN** used and total have a nonzero ratio
+- **THEN** the bar contains used cells followed by free cells and the used count equals the rounded used/total ratio.
+
+#### Scenario: Overlapping estimates
+- **WHEN** system/message estimates exceed used
+- **THEN** the used band does not overshoot used capacity.
+
+#### Scenario: Tool definitions
+- **WHEN** tool-definition tokens are large
+- **THEN** tool definitions are shown outside the bar and do not create tool glyph cells.
+
+#### Scenario: Zero total
+- **WHEN** total is zero
+- **THEN** the bar still has 100 cells and all are free.
+
+#### Scenario: Full usage
+- **WHEN** used equals total
+- **THEN** all 100 cells are used and none are free.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `cells_for`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `total_cells`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `used_cells`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `system_cells`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `messages_cells`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `overhead_cells`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `free_cells`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `system_glyph`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `messages_glyph`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `overhead_glyph`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `free_glyph`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `bar.total`。
+
+
+### Requirement: Usage legends, details, and aligned columns
+
+build_lines SHALL render system, messages, optional reasoning/overhead, and free legend rows plus tool-definition and usage-category information rows; RowLayout SHALL measure rendered labels/counts, right-align token and percentage cells, align detail counts, and keep informational rows out of the categorical bar.
+
+#### Scenario: Overhead legend
+- **WHEN** used exceeds system plus messages
+- **THEN** a Reasoning/overhead row shows the residual token count.
+
+#### Scenario: Tool/category details
+- **WHEN** tool definitions or Skills/MCP categories have counts
+- **THEN** rows show labels, compact tokens, percentages, and detail nouns with aligned counts.
+
+#### Scenario: Column alignment
+- **WHEN** rows have different token, percentage, or count widths
+- **THEN** the rendered numeric and detail columns line up and single-digit counts receive leading padding.
+
+#### Scenario: No bar pollution
+- **WHEN** information rows are present
+- **THEN** the bar cell count remains 100 with zero tool/category cells.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `LegendRow`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `RowLayout::measure`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `RowLayout::percent`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `RowLayout::cells`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `RowLayout::detail_suffix`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `RowLayout::render`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `legend_rows`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `info_rows`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `usage_categories`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `count_detail`。
+
+
+### Requirement: Responsive wide and narrow bar geometry
+
+BarLayout SHALL select the wide 5x20 shape at terminal widths of 50 columns and above and the narrow 10x10 shape below 50, while both shapes retain 100 cells and each row stays within its configured cell limit.
+
+#### Scenario: Wide layout
+- **WHEN** width is at least NARROW_BREAKPOINT
+- **THEN** WIDE has five rows of twenty cells.
+
+#### Scenario: Narrow layout
+- **WHEN** width is below NARROW_BREAKPOINT
+- **THEN** NARROW has ten rows of ten cells.
+
+#### Scenario: Bar rendering
+- **WHEN** a chosen layout is rendered
+- **THEN** the bar has the expected number of nonempty rows, exactly 100 cells, and no row exceeds its row length.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `BarLayout::WIDE`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `BarLayout::NARROW`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `BarLayout::NARROW_BREAKPOINT`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `BarLayout::for_width`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `BarLayout::total`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `bar_lines`。
+
+
+### Requirement: Responsive legend wrapping and theme colors
+
+Legend rendering SHALL use the secondary text color for labels in both layouts, keep each wide legend category on one line, and split narrow legend categories into a label row followed by a one-space-indented numeric/detail row.
+
+#### Scenario: Wide legend
+- **WHEN** bar layout is WIDE
+- **THEN** each legend label and its numeric data share one line and labels use theme.text_secondary.
+
+#### Scenario: Narrow legend
+- **WHEN** bar layout is NARROW
+- **THEN** each category occupies two lines, the data row starts with exactly one space, and labels use theme.text_secondary.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `RowLayout::render`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `BarLayout::WIDE`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `BarLayout::NARROW`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `label_style`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `theme.text_secondary`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `Span::raw(" ")`。
+
+
+### Requirement: Theme-reactive BlockContent output and truncation contract
+
+ContextInfoBlock::output SHALL resolve the current theme on every redraw, choose a responsive bar from BlockContext.width, wrap styled lines to the available width, mark rendered lines with selection range 0, enforce max_lines by retaining content plus a muted ellipsis and span selection range, provide an empty line fallback, and expose compact nonselectable, nongroup-foldable metadata while remaining groupable.
+
+#### Scenario: Normal output
+- **WHEN** output is requested with a BlockContext
+- **THEN** styled context lines are wrapped to width and returned as BlockLines with selection ranges.
+
+#### Scenario: Line budget
+- **WHEN** max_lines is set below rendered length
+- **THEN** the output is truncated to the budget, appends a muted ellipsis to the last retained line, and limits its selectable span range.
+
+#### Scenario: Empty budget
+- **WHEN** max_lines is zero or rendering yields no lines
+- **THEN** a safe empty line is returned.
+
+#### Scenario: Block metadata
+- **WHEN** the scrollback block is queried for presentation flags
+- **THEN** it reports no accent, no vertical padding, no raw mode, not foldable, not selectable, and groupable.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `BlockContent for ContextInfoBlock`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `ContextInfoBlock::output`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `Theme::current`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `BarLayout::for_width`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `word_wrap_lines`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `BlockLine::styled`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `with_selection_range`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `max_lines`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `Selectable::Spans`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `AccentStyle`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `is_foldable`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `is_selectable`；`crates/codegen/pager/src/scrollback/blocks/context_info.rs` — `is_groupable`。

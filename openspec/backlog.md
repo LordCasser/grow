@@ -860,3 +860,9 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager session load混合恢复、损坏处理和状态投影
 
 `app/root/dispatch/tests/session/load.rs`同时处理session加载、恢复、损坏/缺失数据、绑定和状态投影。10条静态契约已登记，后续需按恢复事务、错误分类和状态投影拆分并补动态存储验证；本轮不改load行为。
+
+- Pager 审计债务：Effects helpers mix wire parsing, persistence policy and UI projection：One effects module and helper file contain ACP JSON shapes, filesystem persistence, permission notification policy, session picker mapping, model/status formatting and task result construction, so changes can cross transport and UI boundaries without a type-level contract.
+- Pager 审计债务：Test fixtures mutate process-global environment：setup_grow_home_in_tempdir changes GROW_HOME with unsafe process-global state; parallel tests or unrelated code can observe the temporary path unless the surrounding runner serializes access.
+- Pager 审计债务：Best-effort persistence has policy encoded in result variants：WithRollback and BestEffort differ in notification, rollback and TaskResult semantics; callers must preserve the distinction or can report a false persisted state.
+- Pager 审计债务：Session picker parsing and roster projection duplicate identity policy：UpdatedAt/title filtering, restore metadata and dormant roster mapping are spread across parsing helpers and dispatch consumers, leaving canonical session identity and display policy distributed.
+- Pager 审计债务：Wire-shape compatibility relies on stringly typed JSON keys：screenMode, askUserQuestion, permissionMode, grow/listScope, codeRestore and ACP outcome kinds are validated by ad hoc JSON parsing and tests rather than a shared typed schema.

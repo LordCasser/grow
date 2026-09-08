@@ -2346,3 +2346,9 @@ Luna/high复用代理完整读取`views/modal.rs`共1655行、12项内联测试�
 Luna/high复用代理完整读取`app/agent_view/mouse.rs`共1225行、无内联测试；主代理复核SHA-256与6项功能需求来源，覆盖鼠标事件路由、拖拽、滚轮、链接和overlay命中。未运行Cargo或真实终端输入。
 
 Luna/high复用代理完整读取`app/root/dispatch/tests/session/load.rs`共1689行、54项内联测试；主代理复核SHA-256与10项功能需求来源，覆盖session加载、恢复、损坏/缺失数据、绑定和状态投影。未运行Cargo或动态存储。
+
+合并 Pager `crates/codegen/pager/src/app/root/effects/tests.rs`：1460 行、76 项内联测试、SHA-256 `966a2f68416c695cc94548673ab2a8d256b22083383dc36499847002bcc64f83`；从源码事实提取 16 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
+
+合并 Pager `crates/codegen/pager/src/views/memory_modal.rs`：1682 行、28 项内联测试、SHA-256 `9c2e40e5beedfe660dda53a25158f08458e856dabab92160f62cf37d3f921df8`；从源码事实提取 7 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。
+
+合并 Pager `crates/codegen/pager/src/scrollback/blocks/context_info.rs`：1385 行、36 项内联测试、SHA-256 `5086432dfc754572b3a95d30fe0f503eca9dd55ae12f96baa44d53395d513c95`；从源码事实提取 8 条契约，已合并到 feature-map。未运行 Cargo 或运行时测试。

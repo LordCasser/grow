@@ -3610,7 +3610,22 @@
       "dashboard_answer_question SHALL answer only the active external question. A valid option index selects that option; a nonempty freeform string selects Other and clears a single-choice option; empty Other input, missing question view, or local questions SHALL be NoOp. Nonfinal answers advance the active tab, while the final answer sends the accepted response, restores the stashed prompt, clears question state, and returns Submitted.",
       "prepare_layout SHALL reuse a clean cache, extend heights incrementally on appends, rebuild on width/wrap/filter changes or shrink/eviction, refilter stale physical indices, and preserve stable selection through item mutations.",
       "prepend_bullet SHALL add the configured bullet/icon to the first output line with theme-derived or explicit accent color while preserving selection metadata and shifting selectable span coordinates past the prefix.",
-      "toggle_follow SHALL enter bottom-follow with no selection when NAV is active and exit to a valid selection when follow is active; follow-disabled configurations make it a no-op."
+      "toggle_follow SHALL enter bottom-follow with no selection when NAV is active and exit to a valid selection when follow is active; follow-disabled configurations make it a no-op.",
+      "Memory entries are grouped, labeled, formatted, and previewed with bounded file reads",
+      "Memory filtering preserves matching section headers and keeps selection/preview state coherent",
+      "Memory keyboard routing supports browse navigation, canonical filter editing, copy, toggle, fullscreen persistence, and session-only deletion",
+      "Memory mouse routing selects files and scrolls or jumps list and preview independently",
+      "Memory modal rendering adapts split/fullscreen layout and preserves list/preview scroll geometry",
+      "Memory shortcut footer reflects mode, memory state, fullscreen state, and Vim search affordance",
+      "Memory display helpers remain Unicode-safe and use bounded human-readable metadata",
+      "Typed context snapshot and header model summary",
+      "Token and percentage formatting boundaries",
+      "Auto-compact estimate and warning guidance",
+      "Categorical 100-cell context usage bar",
+      "Usage legends, details, and aligned columns",
+      "Responsive wide and narrow bar geometry",
+      "Responsive legend wrapping and theme colors",
+      "Theme-reactive BlockContent output and truncation contract"
     ],
     "reviewed_files": [
       {
@@ -5592,6 +5607,18 @@
       {
         "path": "crates/codegen/pager/tests/settings_e2e.rs",
         "sha256": "1ff3b359c49ab96a15d62de9549b6ea32b24399cc6d86dac243c9af5e8d6f720"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "sha256": "966a2f68416c695cc94548673ab2a8d256b22083383dc36499847002bcc64f83"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/memory_modal.rs",
+        "sha256": "9c2e40e5beedfe660dda53a25158f08458e856dabab92160f62cf37d3f921df8"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "sha256": "5086432dfc754572b3a95d30fe0f503eca9dd55ae12f96baa44d53395d513c95"
       }
     ],
     "review": "reviews/pager.md"

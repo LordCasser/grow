@@ -56902,12 +56902,51 @@
         "Pager-owned folds",
         "读取respect_manual_folds元数据",
         "owner为Pager、无需重启且Minimal不隐藏。"
+      ],
+      [
+        "Ask-user disabled",
+        "SessionFlags has ask_user=false",
+        "metadata contains askUserQuestion=false and no implicit agentProfile."
+      ],
+      [
+        "Ask-user enabled",
+        "SessionFlags has ask_user=true",
+        "askUserQuestion is omitted."
+      ],
+      [
+        "Permission mode",
+        "SessionFlags uses each supported permission mode",
+        "metadata contains ask, auto or always-approve respectively."
       ]
     ],
     "sources": [
       [
         "crates/codegen/pager/src/settings/defs.rs",
         "default_settings"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "SessionFlags::to_meta"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::session_flags_do_not_emit_agent_profile_without_explicit_override"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::to_meta_emits_ask_user_question_false_when_disabled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::to_meta_omits_ask_user_question_when_enabled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::to_meta_emits_canonical_permission_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::to_meta_emits_every_permission_mode_explicitly"
       ]
     ]
   },
@@ -56926,6 +56965,36 @@
         "Best effort failure",
         "收到SettingPersistFailedBestEffort",
         "保留内存值并显示经scrub的失败提示。"
+      ],
+      [
+        "Unknown setting",
+        "an unsupported key is passed to persist_setting",
+        "an error mentions the unknown setting key."
+      ],
+      [
+        "Type mismatch",
+        "a supported setting receives the wrong SettingValue kind",
+        "an error names the key and expected kind instead of panicking."
+      ],
+      [
+        "Best-effort permission persistence",
+        "permission mode persistence uses BestEffort with or without disk success",
+        "ACP notification fires once when a session id exists and the result is persisted or the dedicated best-effort failure is returned."
+      ],
+      [
+        "Rollback permission persistence",
+        "WithRollback persistence succeeds or fails",
+        "ACP notification fires only on disk success and failure returns SettingPersistFailed with the prior canonical value."
+      ],
+      [
+        "Sessionless permission persistence",
+        "session_id is None",
+        "no ACP notification is emitted."
+      ],
+      [
+        "Result routing",
+        "permission persistence returns Ok or Err under either policy",
+        "the route returns SettingPersisted, SettingPersistFailed, or SettingPersistFailedBestEffort with permission_mode key."
       ]
     ],
     "sources": [
@@ -56948,6 +57017,94 @@
       [
         "crates/codegen/pager/src/app/root/effects/helpers.rs",
         "persist_setting respect_manual_folds arm"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "persist_setting"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "persist_permission_mode_and_notify"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "should_send_permission_mode_notification"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "route_permission_mode_result"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_setting_unknown_key_returns_err"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_setting_type_mismatch_errors_compact_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_setting_type_mismatch_errors_show_timestamps"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_setting_type_mismatch_errors_show_timeline"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_setting_type_mismatch_errors_page_flip_on_send"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_setting_type_mismatch_errors_combine_queued_prompts"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_setting_type_mismatch_errors_simple_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_permission_mode_acp_notification_fires_once_on_best_effort"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_permission_mode_acp_notification_gated_on_disk_for_with_rollback"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_permission_mode_no_session_id_suppresses_acp"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::persist_permission_mode_best_effort_failure_returns_dedicated_variant"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::should_send_always_approve_acp_with_rollback_suppresses_on_err"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::should_send_always_approve_acp_with_rollback_fires_on_ok"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::should_send_always_approve_acp_best_effort_fires_on_both_outcomes"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::route_permission_mode_result_ok_returns_persisted"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::route_permission_mode_result_err_with_rollback_off_routes_to_failed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::route_permission_mode_result_err_with_rollback_on_routes_to_failed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::route_permission_mode_result_err_best_effort_routes_to_dedicated_variant"
       ]
     ]
   },
@@ -92622,6 +92779,16 @@
         "Discovery task fails internally",
         "worktree indexing or card-detail blocking work cannot join",
         "the effect returns default empty worktree/detail data rather than a distinct failure TaskResult."
+      ],
+      [
+        "Trajectory ready line",
+        "stderr text contains the trajectory readiness prefix and an http URL",
+        "the exact URL slice is returned."
+      ],
+      [
+        "Startup failure",
+        "stderr text reports a failure without a readiness URL",
+        "None is returned."
       ]
     ],
     "sources": [
@@ -92660,6 +92827,10 @@
       [
         "crates/codegen/pager/src/app/root/effects/mod.rs",
         "trajectory_ready_url"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::trajectory_ready_line_yields_the_exact_url"
       ]
     ]
   },
@@ -93205,6 +93376,26 @@
         "Changelog failure",
         "blocking fetch cannot join",
         "ChangelogFetched has no markdown and an empty entries vector."
+      ],
+      [
+        "Image batch limit",
+        "the supplied image list contains the tested over-limit count",
+        "append_prompt_images returns an error before encoding."
+      ],
+      [
+        "Missing or oversized file",
+        "an image has no encoded bytes and its session path is missing or exceeds the tested size",
+        "append_prompt_images returns an error."
+      ],
+      [
+        "Aggregate size",
+        "multiple existing image files exceed the tested aggregate limit",
+        "append_prompt_images returns an error."
+      ],
+      [
+        "Placeholder text",
+        "ACP content only contains a textual image placeholder and the image list is empty",
+        "the original content remains unchanged."
       ]
     ],
     "sources": [
@@ -93231,6 +93422,18 @@
       [
         "crates/codegen/pager/src/app/root/effects/mod.rs",
         "Effect::FetchChangelog)"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "append_prompt_images"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::failed_image_loader_rejects_missing_oversized_and_aggregate_before_encoding"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::failed_image_loader_never_guesses_from_placeholder_text"
       ]
     ]
   },
@@ -162613,6 +162816,16 @@
         "Observed",
         "the tested dispatch scenario is exercised",
         "Session title and prompt history presentation SHALL convert command-name/message/args XML wrappers into clean slash commands and arguments while preserving plain prompts."
+      ],
+      [
+        "Skill summary",
+        "a summary contains the tested command XML wrappers",
+        "the display text is the slash command followed by its arguments."
+      ],
+      [
+        "Normal summary",
+        "a summary is ordinary prose",
+        "the original text is preserved."
       ]
     ],
     "sources": [
@@ -162643,6 +162856,18 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
         "prompt_history_loaded_sanitizes_skill_xml"
+      ],
+      [
+        "crates/codegen/tools/src/implementations/skills/skill.rs",
+        "extract_skill_display_text"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::session_picker_summary_strips_skill_xml"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::session_picker_summary_preserves_normal_text"
       ]
     ]
   },
@@ -162656,6 +162881,26 @@
         "Observed",
         "the tested dispatch scenario is exercised",
         "BgTaskKilled/BgTaskKillFailed SHALL clear retry state for already-exited/missing/error outcomes, keep pending kill for Killed, and remove NotFound tasks while finishing associated running scrollback entries."
+      ],
+      [
+        "Task outcome envelope",
+        "a valid task result contains a recognized outcome",
+        "the matching KillOutcome is returned."
+      ],
+      [
+        "Task malformed response",
+        "the result is absent, null, errored or unknown",
+        "None is returned."
+      ],
+      [
+        "Subagent outcome",
+        "a recognized subagent outcome is wrapped in result",
+        "the typed SubagentKillOutcome is returned with status when present."
+      ],
+      [
+        "Subagent malformed response",
+        "outcome is missing, unknown, top-level, errored or malformed",
+        "RpcFailed is returned."
       ]
     ],
     "sources": [
@@ -162706,6 +162951,46 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
         "bg_task_kill_failed_clears_pending_kill_on_inactive_agent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "parse_kill_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "parse_subagent_kill_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_kill_outcome_reads_result_envelope"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_kill_outcome_round_trips_agent_serialization"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_kill_outcome_none_for_error_or_malformed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_subagent_kill_outcome_reads_typed_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_subagent_kill_outcome_rejects_missing_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_subagent_kill_outcome_rejects_unknown_kind"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_subagent_kill_outcome_round_trips_agent_serialization"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_subagent_kill_outcome_rpc_failed_for_error_or_malformed"
       ]
     ]
   },
@@ -164043,6 +164328,26 @@
         "Fork failure",
         "a session-less agent has forked_from",
         "the agent remains idle with a TurnFailed scrollback event."
+      ],
+      [
+        "Authentication prefix",
+        "an error begins with Authentication required/failed",
+        "the prefix is removed."
+      ],
+      [
+        "Disk full",
+        "a nested worktree or OS error reports disk exhaustion",
+        "the user message is No space left on device."
+      ],
+      [
+        "Unrelated error",
+        "the message is not an authentication or disk-full error",
+        "the original message is preserved."
+      ],
+      [
+        "Resume hint",
+        "a worktree resume detail is disk-full and a title is missing or mismatched",
+        "the sanitized detail is composed first and the title hint is appended only when a title exists."
       ]
     ],
     "sources": [
@@ -164073,6 +164378,26 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs",
         "worktree_session_failed_with_fork_parent_keeps_agent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "sanitize_user_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/session_title_resolve.rs",
+        "worktree_resume_failure_message"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::sanitize_user_error_strips_auth_prefixes"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::sanitize_user_error_collapses_disk_full"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::worktree_resume_failure_sanitizes_detail_before_hint"
       ]
     ]
   },
@@ -164384,6 +164709,11 @@
         "Resolver round trip",
         "top-level or child persisted ids are resolved",
         "live dashboard ids resolve and convert back exactly; absent ids return None."
+      ],
+      [
+        "Dormant roster projection",
+        "a picker entry has title, cwd, model, worktree label, timestamp and origin data",
+        "the resulting roster row is dormant/nonresident and preserves the tested identity and metadata fields."
       ]
     ],
     "sources": [
@@ -164418,6 +164748,14 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs",
         "session_id_resolver_round_trip_subagent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "session_picker_entry_to_roster"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::session_picker_entry_maps_to_dormant_roster_row"
       ]
     ]
   },
@@ -166393,6 +166731,21 @@
         "Unbound",
         "agent/session is absent",
         "no effect is emitted or control is deferred."
+      ],
+      [
+        "MCP list request",
+        "a session id is supplied",
+        "the request method is the shell LIST constant and params decode to that sessionId."
+      ],
+      [
+        "Wrapped ACP detail",
+        "invalid-params data contains message and promptUsage",
+        "the message detail is returned."
+      ],
+      [
+        "Rate limit fallback",
+        "a rate-limit error has no usable detail",
+        "the canonical rate-limit user message is returned."
       ]
     ],
     "sources": [
@@ -166463,6 +166816,26 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/router.rs",
         "enqueue_agent_control"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "mcp_list_request"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "format_acp_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::mcp_list_request_matches_the_strict_shell_contract"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::format_acp_error_reads_detail_from_wrapped_data"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::format_acp_error_rate_limit_surfaces_detail_or_fallback"
       ]
     ]
   },
@@ -167048,6 +167421,31 @@
         "Title from disk",
         "a nonblank title result arrives",
         "manual titles fill display_name only when absent while generated_session_title is updated."
+      ],
+      [
+        "Session search",
+        "FetchSessionList receives a query",
+        "the wire request includes query, limit and cwd without allowRelax, and the loaded result echoes query/seq with non-relaxed scope."
+      ],
+      [
+        "Session browse",
+        "FetchSessionList has no query",
+        "the wire request omits query, enables allowRelax, and a grow/listScope repo response yields relaxed scope."
+      ],
+      [
+        "Session list failure",
+        "the list request returns an error",
+        "SessionListFailed echoes the original query and sequence."
+      ],
+      [
+        "Workflow list",
+        "FetchWorkflowsList receives an agent and session id",
+        "the wire request contains sessionId without cwd and the result retains both identities."
+      ],
+      [
+        "Search debounce",
+        "DebounceSessionSearch receives query and sequence",
+        "the task result echoes both values after the tested delay."
       ]
     ],
     "sources": [
@@ -167134,6 +167532,22 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
         "TaskResult::SessionAgentNameResolved"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/mod.rs",
+        "execute"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::fetch_session_list_pushes_query_and_echoes_seq"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::fetch_workflows_list_sends_session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::debounce_session_search_echoes_query_and_seq"
       ]
     ]
   },
@@ -167347,6 +167761,31 @@
         "Usage/context",
         "context or usage succeeds/fails with a nonce",
         "the dedicated status handler applies only the permitted live/modal projection."
+      ],
+      [
+        "Provider identity",
+        "session info reports the provider BYOK backend",
+        "the formatted text includes Auth method: provider BYOK."
+      ],
+      [
+        "Resolved model",
+        "resolved model differs and the display flag is enabled",
+        "the requested and resolved models appear in the documented parenthesized form."
+      ],
+      [
+        "Resolved model hidden",
+        "display is disabled or requested and resolved ids match",
+        "the resolved id is absent or not repeated in parentheses."
+      ],
+      [
+        "Model fingerprint",
+        "a fingerprint exists with catalog visibility enabled or a coding slug",
+        "Model Hash is shown."
+      ],
+      [
+        "Fingerprint hidden",
+        "a noncoding model has a fingerprint but the catalog flag is disabled",
+        "Model Hash is absent."
       ]
     ],
     "sources": [
@@ -167429,6 +167868,38 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
         "remove_agent_and_cleanup"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/mod.rs",
+        "format_session_info"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::format_session_info_reports_provider_byok"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::format_session_info_shows_resolved_when_enabled_and_different"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::format_session_info_hides_resolved_when_disabled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::format_session_info_no_parens_when_resolved_matches_requested"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::format_session_info_shows_model_hash_when_catalog_flag_set"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::format_session_info_hides_model_hash_for_noncoding_without_flag"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::format_session_info_shows_model_hash_for_coding_slug_without_flag"
       ]
     ]
   },
@@ -167462,6 +167933,21 @@
         "Bundle/catalog",
         "bundle or catalog result arrives",
         "bundle facts replace in memory and active-agent catalog content opens in a block viewer or a notice records failure."
+      ],
+      [
+        "Success status",
+        "a marketplace outcome has Success status",
+        "marketplace_outcome_succeeded returns true."
+      ],
+      [
+        "Failure status",
+        "a marketplace outcome has InternalError status",
+        "marketplace_outcome_succeeded returns false."
+      ],
+      [
+        "Update dispatch",
+        "marketplace listing contains an update-available plugin and its update action fails",
+        "one matching update action is observed, the task result carries the tested agent id, and no success notification is sent."
       ]
     ],
     "sources": [
@@ -167588,6 +168074,22 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
         "handle_plugin_cta_catalog_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "marketplace_outcome_succeeded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/mod.rs",
+        "execute"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::marketplace_outcome_succeeded_only_accepts_success_status"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::check_marketplace_updates_dispatches_update_and_skips_failed_notifications"
       ]
     ]
   },
@@ -167616,6 +168118,26 @@
         "Rewind/search/note",
         "deep-search, rewind, BTW, memory-note, trajectory or recap results arrive",
         "the corresponding handler updates the targeted UI and no unrelated agent receives the result."
+      ],
+      [
+        "Skill token ranges",
+        "plain prompt content receives nonempty token ranges",
+        "text is unchanged and meta.skillTokenRanges contains the byte pairs."
+      ],
+      [
+        "Empty metadata",
+        "plain prompt content receives no ranges",
+        "meta is absent."
+      ],
+      [
+        "Screen mode metadata",
+        "prompt request meta receives a configured or absent screen mode",
+        "promptId is always present and screenMode is present only when configured."
+      ],
+      [
+        "Canonical interjection content",
+        "an interjection has text with no blocks or has supplied blocks",
+        "params use the canonical content array and omit the parallel text field."
       ]
     ],
     "sources": [
@@ -167722,6 +168244,42 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
         "TaskResult::InterjectFailed"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/mod.rs",
+        "plain_prompt_content_block"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/mod.rs",
+        "prompt_request_meta"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/mod.rs",
+        "build_interject_params"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::plain_prompt_block_stamps_skill_token_ranges_meta"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::plain_prompt_block_no_meta_when_ranges_empty"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::prompt_request_meta_stamps_screen_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::prompt_request_meta_omits_screen_mode_when_unset"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::text_only_interject_uses_the_canonical_content_channel"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::interject_params_carry_content_when_blocks_present"
       ]
     ]
   },
@@ -167856,6 +168414,21 @@
         "Doctor destination",
         "preferred agent exists, active agent exists, or no agent exists",
         "message is appended to the preferred/active/first scrollback or to startup warnings."
+      ],
+      [
+        "Lock-free unregister",
+        "a registered session is unregistered with an available lock",
+        "the registry becomes empty."
+      ],
+      [
+        "Contended unregister",
+        "the registry lock is held by another owner",
+        "the helper returns within the tested deadline and leaves the entry for crash collection."
+      ],
+      [
+        "I/O failure",
+        "the registry root cannot be used as a directory",
+        "the helper returns without propagating a panic."
       ]
     ],
     "sources": [
@@ -167890,6 +168463,22 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
         "X11_PRIMARY_PASTE_HINT"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "unregister_active_session_best_effort_in"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::unregister_best_effort_removes_entry_when_lock_free"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::unregister_best_effort_is_nonblocking_under_lock_contention"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::unregister_best_effort_swallows_io_error"
       ]
     ]
   },
@@ -168436,6 +169025,31 @@
         "Reload gate",
         "SessionLoaded or SessionLoadFailed arrives during an open reload window",
         "loading_replay remains true and reconciliation is deferred to the reload window."
+      ],
+      [
+        "Full worktree restore",
+        "codeRestored, restoreSummary and a recognized restoreDegree are present",
+        "all three values are returned."
+      ],
+      [
+        "Partial or absent restore",
+        "only codeRestored is present or no codeRestore object exists",
+        "restored is false when appropriate and summary/degree are None."
+      ],
+      [
+        "Unknown restore degree",
+        "restoreDegree or degree is not recognized",
+        "the degree is None."
+      ],
+      [
+        "Structured foreground",
+        "grow/foreground has all tested identity fields",
+        "the parsed foreground retains each field."
+      ],
+      [
+        "Legacy foreground",
+        "only grow/runningPromptId is present",
+        "no foreground identity is adopted."
       ]
     ],
     "sources": [
@@ -168490,6 +169104,58 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs",
         "memory_release"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "parse_worktree_restore_payload"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "parse_session_load_restore_meta"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "parse_session_load_foreground"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_worktree_restore_payload_full"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_worktree_restore_payload_head_only"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_worktree_restore_payload_missing_fields"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_worktree_restore_payload_rejects_unknown_degree"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_session_load_restore_meta_full_shape"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_session_load_restore_meta_absent_returns_false"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_session_load_restore_meta_no_coderestore_key"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::parse_session_load_restore_meta_rejects_unknown_degree"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::session_load_foreground_requires_structured_identity"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::session_load_does_not_adopt_an_id_without_structured_foreground"
       ]
     ]
   },
@@ -168758,6 +169424,16 @@
         "Recent project",
         "a recent project option is selected",
         "that project path is used."
+      ],
+      [
+        "Missing timestamp",
+        "a local picker row has no updatedAt",
+        "the row is excluded."
+      ],
+      [
+        "Missing canonical title",
+        "a Build row has updatedAt but no canonical title",
+        "the row is excluded."
       ]
     ],
     "sources": [
@@ -168792,6 +169468,18 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs",
         "shellexpand"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/helpers.rs",
+        "parse_session_picker_entries"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::picker_drops_local_with_missing_updated_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/effects/tests.rs",
+        "tests::picker_rejects_build_row_without_canonical_title"
       ]
     ]
   },
@@ -169017,6 +169705,1066 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs",
         "handle_input"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Memory entries are grouped, labeled, formatted, and previewed with bounded file reads",
+    "contract": "build_entries SHALL transform MemoryFileInfo values into Global, Workspace, and Sessions sections, add headers only for nonempty sections, format byte sizes and relative modification times, preserve file/source metadata, and list session logs newest-first. MemoryModalState::new SHALL initialize browsing state, skip leading headers, and load the selected file preview. Preview loading SHALL read UTF-8 files, show a fixed too-large message above 1 MiB, and leave missing/unreadable files without a preview.",
+    "scenarios": [
+      [
+        "Entry grouping",
+        "global/workspace/session file metadata is supplied",
+        "headers and file rows appear in section order, with session rows reversed and metadata formatted."
+      ],
+      [
+        "New modal",
+        "entries are loaded into MemoryModalState",
+        "selection lands on the first non-header and its preview is loaded/reset."
+      ],
+      [
+        "Large file",
+        "the selected file exceeds 1 MiB",
+        "preview content is the explicit too-large message without reading the file body."
+      ],
+      [
+        "Missing file",
+        "metadata/read-to-string fails",
+        "preview is absent and the renderer shows No file selected."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryFileEntry"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::new"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::selected_entry"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::load_preview"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "build_entries"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "format_size"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "format_modified"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "file_label"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MAX_PREVIEW_BYTES"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "format_size_ranges"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "format_modified_relative"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "file_label_extracts_filename"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "build_entries_groups_by_source"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "new_selects_first_non_header"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Memory filtering preserves matching section headers and keeps selection/preview state coherent",
+    "contract": "MemoryModalState SHALL cache filtered entry indices, match query text case-insensitively against file labels and source names, retain a section header only when a member matches, and invalidate/recompute the cache after query or entry changes. Selection SHALL skip headers, clamp when filters shrink, reload preview only when the selected file changes, and clear preview when no entries remain.",
+    "scenarios": [
+      [
+        "Filter match",
+        "a query matches a file label or source",
+        "the filtered list contains the matching file and its section header."
+      ],
+      [
+        "Selection navigation",
+        "next/previous or select_at targets a header, same index, or out-of-range index",
+        "headers and invalid/same selections are rejected; valid file selection updates preview."
+      ],
+      [
+        "Filter edit",
+        "text changes or paste changes the query",
+        "cache and selected entry are recomputed once and preview scroll resets only on text changes."
+      ],
+      [
+        "Cursor-only edit",
+        "the query cursor moves without text change",
+        "filtered indices and preview scroll remain unchanged."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::filtered_indices"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::query"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::query_cursor_byte"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::invalidate_filter"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::advance_past_headers"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::select_next"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::select_prev"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::select_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::clamp_selected"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "compute_filtered"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "cached_filter_updates_on_invalidate"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "filtered_indices_preserves_headers_for_matching_entries"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "select_at_skips_headers_and_updates"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "select_at_out_of_bounds"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "filter_text_changes_recompute_preview_but_cursor_moves_do_not"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "filter_paste_recomputes_once_and_consumes_empty_input"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Memory keyboard routing supports browse navigation, canonical filter editing, copy, toggle, fullscreen persistence, and session-only deletion",
+    "contract": "handle_memory_key SHALL ignore key-release events, route FilterFocused input to the line editor while keeping Enter focused and Esc returning to Browse, and route Browse keys for j/Down, k/Up, page movement, / or unmodified i search, trailing-grapheme backspace, y path copy, t memory toggle, and Ctrl-F fullscreen persistence. x SHALL arm double-press deletion only for session entries; while confirming, x removes the entry/file and any other key cancels. Modified i and removed Ctrl-D/Ctrl-U preview shortcuts SHALL be no-ops.",
+    "scenarios": [
+      [
+        "Browse navigation",
+        "j/k, arrows, PageUp/PageDown or backspace is pressed in Browse",
+        "selection/query changes are applied and preview follows valid selection."
+      ],
+      [
+        "Filter focus",
+        "text, paste, Enter, Esc, cursor or grapheme editing arrives",
+        "canonical line editing handles the input, text changes invalidate filtering, Enter stays focused, and Esc preserves query while exiting."
+      ],
+      [
+        "Memory toggle",
+        "t is pressed",
+        "memory_enabled flips immediately and a draft-preserving /memory on/off action is returned."
+      ],
+      [
+        "Fullscreen",
+        "Ctrl-F is pressed",
+        "fullscreen flips and PersistMemoryFullscreen carries the new value."
+      ],
+      [
+        "Delete",
+        "x is pressed on session/global/confirming state",
+        "only session rows arm confirmation; second x deletes the row/file, while any other confirmation key cancels."
+      ],
+      [
+        "Copy",
+        "y is pressed on a file row",
+        "the path is copied and the outcome is Changed."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "handle_memory_key"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "handle_memory_paste"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "handle_filter_focused"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "finish_filter_edit"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "handle_browse"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalMode::FilterFocused"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalMode::ConfirmingDelete"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "Action::PersistMemoryFullscreen"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "Action::SendSlashCommandPreservingDraft"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "delete_only_allowed_for_session_entries"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "i_key_enters_filter_like_slash"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "modified_i_does_not_enter_filter"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "ctrl_d_u_no_longer_scrolls_preview"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "filter_escape_preserves_query_and_enter_stays_focused"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "filter_uses_canonical_word_and_grapheme_editing"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "browse_backspace_deletes_trailing_grapheme_independent_of_cursor_and_modifiers"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "filter_paste_recomputes_once_and_consumes_empty_input"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Memory mouse routing selects files and scrolls or jumps list and preview independently",
+    "contract": "handle_memory_mouse SHALL hit-test rendered list, preview, and scrollbar rectangles. Left click on a list file row SHALL select it; headers/outside areas SHALL remain unchanged. Wheel events over the list SHALL move selection by three non-header entries and refresh preview; wheel events over preview SHALL move preview_scroll by three bounded lines. Click/drag on list or preview scrollbars SHALL map the pointer to a clamped offset, selecting the first visible file for list jumps.",
+    "scenarios": [
+      [
+        "List click",
+        "a left click lands on a rendered file row",
+        "the corresponding filtered file is selected and preview reloads."
+      ],
+      [
+        "Header/outside click",
+        "a click lands on a section header or outside both panes",
+        "state and selection remain unchanged."
+      ],
+      [
+        "List wheel",
+        "ScrollUp/Down occurs over list or list scrollbar",
+        "selection moves across non-header rows and preview follows."
+      ],
+      [
+        "Preview wheel",
+        "ScrollUp/Down occurs over preview or preview scrollbar",
+        "preview_scroll changes by three and stays within available range."
+      ],
+      [
+        "Scrollbar jump",
+        "drag/click lands at top/bottom/offset of a scrollbar",
+        "scroll offset is mapped and clamped; list selection moves to the first visible file."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "handle_memory_mouse"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "select_first_visible"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "apply_scrollbar_jump"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "ScrollbarClickResult"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "scrollbar_click_to_offset"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "mouse_click_selects_file"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "mouse_click_on_header_unchanged"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "mouse_scroll_up_down_on_list"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "mouse_scroll_on_preview"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "mouse_outside_both_panes_unchanged"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "apply_scrollbar_jump_edges"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Memory modal rendering adapts split/fullscreen layout and preserves list/preview scroll geometry",
+    "contract": "render_memory_modal SHALL use ModalWindow chrome with persisted fullscreen or compact sizing, collapse to list-only below 80 columns, split wider content into a 40% list and preview pane, store hit-test rectangles, render search placeholder/cursor, section headers, selected rows, metadata/truncation, and scrollbars. The preview SHALL wrap MarkdownContent to available width, reserve scrollbar width when needed, clamp preview_scroll, and render the visible lines; missing preview SHALL show a centered message.",
+    "scenarios": [
+      [
+        "Narrow layout",
+        "content width is below the split threshold",
+        "only the file list is rendered and preview geometry/scrollbar is cleared."
+      ],
+      [
+        "Wide layout",
+        "content width permits preview",
+        "list/preview rectangles and separator are stored and both panes render."
+      ],
+      [
+        "List row",
+        "a header, selected file, long label, or delete confirmation is visible",
+        "header/selection/meta/delete hint styles and width-safe truncation are used."
+      ],
+      [
+        "Preview wrap",
+        "wrapped content exceeds viewport",
+        "total lines and scrollbar are recomputed at narrowed content width and scroll is clamped."
+      ],
+      [
+        "Unicode query",
+        "filter text includes CJK/combining/emoji and cursor is near the edge",
+        "viewport preserves grapheme boundaries and cursor remains visible in the rendered filter row."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "render_memory_modal"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "render_file_list"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "render_preview"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "truncate_to_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "sat_u16"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "MemoryModalState::query_viewport"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "SPLIT_MIN_WIDTH"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "LIST_WIDTH_RATIO"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "render_scrollbar"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "truncate_to_width_handles_ascii"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "truncate_to_width_handles_multibyte"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "filter_render_keeps_unicode_query_and_cursor_visible"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Memory shortcut footer reflects mode, memory state, fullscreen state, and Vim search affordance",
+    "contract": "build_shortcuts SHALL expose browse navigation/search/copy/delete/toggle/fullscreen/close hints, label the memory toggle with its current on/off state, switch the fullscreen hint between normal/fullscreen, append the shared `i search` hint in Browse, and expose only type/Esc hints in FilterFocused or x/any-key hints in ConfirmingDelete. The current memory fullscreen preference SHALL be read from the hints.memory_modal_fullscreen config value and default false.",
+    "scenarios": [
+      [
+        "Browse footer",
+        "Browse mode is rendered with memory enabled/disabled or fullscreen on/off",
+        "toggle and fullscreen labels describe the current state and navigation actions are listed."
+      ],
+      [
+        "Vim navigation",
+        "Vim mode is enabled",
+        "Browse shortcuts include `i search`."
+      ],
+      [
+        "Filter/confirm footer",
+        "filter or delete confirmation is active",
+        "only mode-appropriate type/Esc or x/cancel hints are advertised."
+      ],
+      [
+        "Preference",
+        "config contains or omits hints.memory_modal_fullscreen",
+        "load_fullscreen_pref returns the boolean value or false when unavailable."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "build_shortcuts"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "load_fullscreen_pref"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "browse_footer_advertises_i_search_under_vim"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Memory display helpers remain Unicode-safe and use bounded human-readable metadata",
+    "contract": "truncate_to_width SHALL cut only at a valid display-width boundary through the shared byte-offset helper. file_label SHALL use the final path component with lossy fallback, format_size SHALL emit B/KB/MB with one decimal above the unit threshold, and format_modified SHALL map missing/future/sub-minute to just now then minutes/hours/days.",
+    "scenarios": [
+      [
+        "Width truncation",
+        "ASCII, multibyte or grapheme text is truncated",
+        "the returned slice never exceeds max display columns and does not split a multibyte boundary."
+      ],
+      [
+        "Metadata",
+        "size or modified timestamp falls in a boundary range",
+        "stable human-readable units and relative labels are returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "truncate_to_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "file_label"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "format_size"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "format_modified"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "truncate_to_width_handles_ascii"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "truncate_to_width_handles_multibyte"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "format_size_ranges"
+      ],
+      [
+        "crates/codegen/pager/src/views/memory_modal.rs",
+        "format_modified_relative"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Typed context snapshot and header model summary",
+    "contract": "ContextInfoBlock SHALL retain the typed ContextInfo snapshot and active model name, and build_lines SHALL render a Context header, a blank separator, the used/total token summary with a precise percentage, and the model caption in that order.",
+    "scenarios": [
+      [
+        "Header",
+        "a context snapshot and model are supplied to ContextInfoBlock::new",
+        "the first lines are Context, a blank line, the token summary, and the model name."
+      ],
+      [
+        "Large total",
+        "the total context reaches the million range",
+        "the summary uses the large-count formatter while retaining the token suffix."
+      ],
+      [
+        "Precision",
+        "used and total are 36,700 and 1,000,000",
+        "the summary shows 3.67% rather than the pre-rounded integer usage_pct."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock::snapshot"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock::model"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "build_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "fmt_tok_big"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "precise_usage_percent"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Token and percentage formatting boundaries",
+    "contract": "Token and share formatters SHALL handle zero totals safely, preserve raw counts below 1,000, use one-decimal k values through 99,499, switch to half-up integer k at 99,500, use one-decimal m values at one million for large summaries, render category shares with one decimal below 10%, whole percentages at or above 10%, and floor tiny nonzero shares at 0.1%.",
+    "scenarios": [
+      [
+        "Token cutovers",
+        "values cross 999, 1,000, 99,499, 99,500, 999,999, and 1,000,000",
+        "fmt_tok/fmt_tok_big return the stable compact representation at each boundary."
+      ],
+      [
+        "Zero window",
+        "total is zero",
+        "precise_usage_percent returns 0.0 and percent_of_window returns `-`."
+      ],
+      [
+        "Category share",
+        "part is zero, tiny nonzero, under 10%, or at least 10%",
+        "percent_of_window returns the expected 0.0%, floored 0.1%, decimal, or whole-percent form."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "fmt_tok"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "precise_usage_percent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "fmt_tok_big"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "percent_of_window"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Auto-compact estimate and warning guidance",
+    "contract": "build_lines SHALL compute the auto-compact threshold with ceiling arithmetic from the live snapshot threshold, show the remaining token estimate below threshold, switch large remaining values to m notation, show a warning that compaction triggers next turn at or above threshold, and show the manual `/compact` tip only in the 80%-to-threshold band.",
+    "scenarios": [
+      [
+        "Below threshold",
+        "usage_pct is below auto_compact_threshold_percent",
+        "the output includes `Auto-compact at X% · ~N tokens remaining` using ceiling threshold arithmetic."
+      ],
+      [
+        "Large window",
+        "the remaining estimate reaches millions",
+        "the estimate uses fmt_tok_big and displays m notation."
+      ],
+      [
+        "At threshold",
+        "usage_pct equals or exceeds the configured threshold",
+        "the output says auto-compact triggers next turn and omits the manual tip."
+      ],
+      [
+        "Warning band",
+        "usage_pct is at least 80% but below threshold",
+        "the warning tip suggests `/compact`; below 80% or at/above threshold it is absent."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "auto_compact_threshold_percent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "threshold_tokens"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "div_ceil"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "remaining"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "Auto-compact at"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "Auto-compact triggers next turn"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "Tip: run /compact"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Categorical 100-cell context usage bar",
+    "contract": "build_lines SHALL render exactly 100 categorical cells, partitioning used capacity left-to-right into system, message, and reasoning/overhead bands and the remainder into free capacity; token estimates SHALL be clamped so category bands cannot exceed used cells, tool-definition tokens SHALL stay out of the bar, and a zero total SHALL render all cells as free.",
+    "scenarios": [
+      [
+        "Normal usage",
+        "used and total have a nonzero ratio",
+        "the bar contains used cells followed by free cells and the used count equals the rounded used/total ratio."
+      ],
+      [
+        "Overlapping estimates",
+        "system/message estimates exceed used",
+        "the used band does not overshoot used capacity."
+      ],
+      [
+        "Tool definitions",
+        "tool-definition tokens are large",
+        "tool definitions are shown outside the bar and do not create tool glyph cells."
+      ],
+      [
+        "Zero total",
+        "total is zero",
+        "the bar still has 100 cells and all are free."
+      ],
+      [
+        "Full usage",
+        "used equals total",
+        "all 100 cells are used and none are free."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "cells_for"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "total_cells"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "used_cells"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "system_cells"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "messages_cells"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "overhead_cells"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "free_cells"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "system_glyph"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "messages_glyph"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "overhead_glyph"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "free_glyph"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "bar.total"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Usage legends, details, and aligned columns",
+    "contract": "build_lines SHALL render system, messages, optional reasoning/overhead, and free legend rows plus tool-definition and usage-category information rows; RowLayout SHALL measure rendered labels/counts, right-align token and percentage cells, align detail counts, and keep informational rows out of the categorical bar.",
+    "scenarios": [
+      [
+        "Overhead legend",
+        "used exceeds system plus messages",
+        "a Reasoning/overhead row shows the residual token count."
+      ],
+      [
+        "Tool/category details",
+        "tool definitions or Skills/MCP categories have counts",
+        "rows show labels, compact tokens, percentages, and detail nouns with aligned counts."
+      ],
+      [
+        "Column alignment",
+        "rows have different token, percentage, or count widths",
+        "the rendered numeric and detail columns line up and single-digit counts receive leading padding."
+      ],
+      [
+        "No bar pollution",
+        "information rows are present",
+        "the bar cell count remains 100 with zero tool/category cells."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "LegendRow"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "RowLayout::measure"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "RowLayout::percent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "RowLayout::cells"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "RowLayout::detail_suffix"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "RowLayout::render"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "legend_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "info_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "usage_categories"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "count_detail"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Responsive wide and narrow bar geometry",
+    "contract": "BarLayout SHALL select the wide 5x20 shape at terminal widths of 50 columns and above and the narrow 10x10 shape below 50, while both shapes retain 100 cells and each row stays within its configured cell limit.",
+    "scenarios": [
+      [
+        "Wide layout",
+        "width is at least NARROW_BREAKPOINT",
+        "WIDE has five rows of twenty cells."
+      ],
+      [
+        "Narrow layout",
+        "width is below NARROW_BREAKPOINT",
+        "NARROW has ten rows of ten cells."
+      ],
+      [
+        "Bar rendering",
+        "a chosen layout is rendered",
+        "the bar has the expected number of nonempty rows, exactly 100 cells, and no row exceeds its row length."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "BarLayout::WIDE"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "BarLayout::NARROW"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "BarLayout::NARROW_BREAKPOINT"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "BarLayout::for_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "BarLayout::total"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "bar_lines"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Responsive legend wrapping and theme colors",
+    "contract": "Legend rendering SHALL use the secondary text color for labels in both layouts, keep each wide legend category on one line, and split narrow legend categories into a label row followed by a one-space-indented numeric/detail row.",
+    "scenarios": [
+      [
+        "Wide legend",
+        "bar layout is WIDE",
+        "each legend label and its numeric data share one line and labels use theme.text_secondary."
+      ],
+      [
+        "Narrow legend",
+        "bar layout is NARROW",
+        "each category occupies two lines, the data row starts with exactly one space, and labels use theme.text_secondary."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "RowLayout::render"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "BarLayout::WIDE"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "BarLayout::NARROW"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "label_style"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "theme.text_secondary"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "Span::raw(\" \")"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Theme-reactive BlockContent output and truncation contract",
+    "contract": "ContextInfoBlock::output SHALL resolve the current theme on every redraw, choose a responsive bar from BlockContext.width, wrap styled lines to the available width, mark rendered lines with selection range 0, enforce max_lines by retaining content plus a muted ellipsis and span selection range, provide an empty line fallback, and expose compact nonselectable, nongroup-foldable metadata while remaining groupable.",
+    "scenarios": [
+      [
+        "Normal output",
+        "output is requested with a BlockContext",
+        "styled context lines are wrapped to width and returned as BlockLines with selection ranges."
+      ],
+      [
+        "Line budget",
+        "max_lines is set below rendered length",
+        "the output is truncated to the budget, appends a muted ellipsis to the last retained line, and limits its selectable span range."
+      ],
+      [
+        "Empty budget",
+        "max_lines is zero or rendering yields no lines",
+        "a safe empty line is returned."
+      ],
+      [
+        "Block metadata",
+        "the scrollback block is queried for presentation flags",
+        "it reports no accent, no vertical padding, no raw mode, not foldable, not selectable, and groupable."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "BlockContent for ContextInfoBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "ContextInfoBlock::output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "Theme::current"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "BarLayout::for_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "word_wrap_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "BlockLine::styled"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "with_selection_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "max_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "Selectable::Spans"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "AccentStyle"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "has_vpad_for"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "has_raw_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "is_foldable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "is_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
+        "is_groupable"
       ]
     ]
   }
