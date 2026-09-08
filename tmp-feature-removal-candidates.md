@@ -20,6 +20,8 @@
 - 拟删除范围：仅此 feature 声明。执行前再次检查全仓构建引用；不删除任何实际实验实现。
 - 状态：等待用户确认，尚未删除。仓库外构建参数是否使用它未知，不为其设计兼容层。
 
+- 用户批准后已删除；Cargo 元数据回归确认仅移除该空 feature，其他声明未变。
+
 ## R3 · 未接入执行路径的 ZDR access 开关
 
 - 位置：`crates/codegen/shell/src/util/config/resolve/features.rs` 的 `resolve_zdr_access_enabled`，以及 `crates/codegen/config-types/src/lib.rs` 的 `RemoteSettings.zdr_access_enabled`。
