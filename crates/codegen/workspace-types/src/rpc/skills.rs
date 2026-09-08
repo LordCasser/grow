@@ -87,10 +87,6 @@ pub struct SkillInfo {
     pub plugin_data: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
     #[serde(default = "default_true")]
     pub user_invocable: bool,
     #[serde(default)]
@@ -148,8 +144,6 @@ mod tests {
             "plugin_root": "/root/.grow/plugins/infra-plugin",
             "plugin_data": "/root/.grow/plugin-data/infra-plugin",
             "allowed_tools": ["bash"],
-            "model": "grow-4",
-            "effort": "high",
             "user_invocable": true,
             "disable_model_invocation": false,
             "enabled": true,

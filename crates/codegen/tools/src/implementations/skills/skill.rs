@@ -696,8 +696,7 @@ It has multiple lines."#;
             license: None,
             compatibility: None,
             metadata: None,
-            model: None,
-            effort: None,
+
             user_invocable: true,
             disable_model_invocation: false,
             when_to_use: None,
@@ -730,8 +729,7 @@ It has multiple lines."#;
             license: None,
             compatibility: None,
             metadata: None,
-            model: None,
-            effort: None,
+
             user_invocable: true,
             disable_model_invocation: false,
             when_to_use: None,
@@ -765,8 +763,7 @@ It has multiple lines."#;
             license: None,
             compatibility: None,
             metadata: None,
-            model: None,
-            effort: None,
+
             user_invocable: true,
             disable_model_invocation: false,
             when_to_use: None,
@@ -795,8 +792,7 @@ It has multiple lines."#;
             license: None,
             compatibility: None,
             metadata: None,
-            model: None,
-            effort: None,
+
             user_invocable: true,
             disable_model_invocation: false,
             when_to_use: None,
@@ -828,8 +824,7 @@ It has multiple lines."#;
             license: None,
             compatibility: None,
             metadata: None,
-            model: None,
-            effort: None,
+
             user_invocable: true,
             disable_model_invocation: false,
             when_to_use: None,
@@ -867,8 +862,7 @@ It has multiple lines."#;
             license: None,
             compatibility: None,
             metadata: None,
-            model: None,
-            effort: None,
+
             user_invocable: true,
             disable_model_invocation: false,
             when_to_use: None,

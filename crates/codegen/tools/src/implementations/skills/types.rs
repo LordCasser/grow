@@ -97,12 +97,6 @@ pub struct SkillInfo {
     pub plugin_data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
-    /// Optional model metadata; currently not applied to session sampling.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Optional reasoning effort metadata; currently not applied to session sampling.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
     /// Whether this skill can be invoked by the user via /skill-name.
     /// Skills with user_invocable=false are not shown in the skill tool.
     #[serde(default = "default_true")]
@@ -174,8 +168,6 @@ impl Default for SkillInfo {
             plugin_root: None,
             plugin_data: None,
             allowed_tools: None,
-            model: None,
-            effort: None,
 
             user_invocable: true,
             disable_model_invocation: false,

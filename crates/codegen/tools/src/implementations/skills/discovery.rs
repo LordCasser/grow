@@ -295,8 +295,6 @@ pub struct ParsedFrontmatter {
     pub metadata: Option<std::collections::HashMap<String, String>>,
     pub argument_hint: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
-    pub model: Option<String>,
-    pub effort: Option<String>,
 
     pub user_invocable: bool,
     pub disable_model_invocation: bool,
@@ -428,8 +426,6 @@ pub fn parse_skill_frontmatter(
         metadata,
         argument_hint: coerce_to_string(frontmatter.get("argument-hint")),
         allowed_tools: coerce_tool_list(frontmatter.get("allowed-tools")),
-        model: coerce_to_string(frontmatter.get("model")),
-        effort: coerce_to_string(frontmatter.get("effort")),
 
         // Absent `user-invocable` defaults to true; `disable-model-invocation` to false.
         user_invocable: parse_boolean_frontmatter(
@@ -616,8 +612,6 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
                             metadata: None,
                             argument_hint: None,
                             allowed_tools: None,
-                            model: None,
-                            effort: None,
 
 
                             user_invocable: true,
@@ -691,8 +685,6 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
                 plugin_root: None,
                 plugin_data: None,
                 allowed_tools: parsed.allowed_tools,
-                model: parsed.model,
-                effort: parsed.effort,
 
 
                 user_invocable: parsed.user_invocable,
@@ -1031,10 +1023,9 @@ mod tests {
         );
         let skill = parse_one(
             "d",
-            "---\nname: d\ndescription: \"Deploy: push to prod\"\nwhen-to-use: trig\nuser-invocable: false\nallowed-tools: bash, grep\neffort: 5\n---\n",
+            "---\nname: d\ndescription: \"Deploy: push to prod\"\nwhen-to-use: trig\nuser-invocable: false\nallowed-tools: bash, grep\n---\n",
         );
         assert_eq!(skill.description, "Deploy: push to prod");
-        assert_eq!(skill.effort.as_deref(), Some("5"));
         assert_eq!(skill.when_to_use.as_deref(), Some("trig"));
         assert!(!skill.user_invocable);
         assert_eq!(
@@ -1193,7 +1184,6 @@ description: Code review tool
 when-to-use: User says review my code
 allowed-tools: grep, read
 argument-hint: PR number
-model: test-model
 ---
 ";
         let parsed = parse_skill_frontmatter(content, None).unwrap();
@@ -1202,7 +1192,6 @@ model: test-model
             Some("User says review my code")
         );
         assert_eq!(parsed.argument_hint.as_deref(), Some("PR number"));
-        assert_eq!(parsed.model.as_deref(), Some("test-model"));
 
         assert_eq!(
             parsed.allowed_tools.as_deref(),

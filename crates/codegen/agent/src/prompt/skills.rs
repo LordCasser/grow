@@ -1183,22 +1183,6 @@ mod tests {
         assert!(parsed.allowed_tools.is_none());
     }
 
-    #[test]
-    fn parse_model_and_effort() {
-        let content = "---\nname: my-skill\ndescription: test\nmodel: grow-3\neffort: high\n---\n";
-        let parsed = parse_skill_frontmatter(content, None).unwrap();
-        assert_eq!(parsed.model.as_deref(), Some("grow-3"));
-        assert_eq!(parsed.effort.as_deref(), Some("high"));
-    }
-
-    #[test]
-    fn parse_model_and_effort_omitted() {
-        let content = "---\nname: my-skill\ndescription: test\n---\n";
-        let parsed = parse_skill_frontmatter(content, None).unwrap();
-        assert!(parsed.model.is_none());
-        assert!(parsed.effort.is_none());
-    }
-
     // ── agentskills.io spec parity ────────────────────────────────
 
     #[test]
@@ -1328,7 +1312,7 @@ mod tests {
     #[test]
     fn parse_full_spec_plus_extensions() {
         // Mixed agentskills.io spec fields + our extensions — all must parse.
-        let content = "---\nname: my-skill\ndescription: A full skill\nlicense: MIT\ncompatibility: Python 3.12+\nmetadata:\n  author: test-org\n  version: \"2.0\"\nallowed-tools:\n  - bash\n  - read_file\nargument-hint: file path\nmodel: grow-3\neffort: high\nuser-invocable: true\ndisable-model-invocation: false\n---\nBody content.\n";
+        let content = "---\nname: my-skill\ndescription: A full skill\nlicense: MIT\ncompatibility: Python 3.12+\nmetadata:\n  author: test-org\n  version: \"2.0\"\nallowed-tools:\n  - bash\n  - read_file\nargument-hint: file path\nuser-invocable: true\ndisable-model-invocation: false\n---\nBody content.\n";
         let parsed = parse_skill_frontmatter(content, None).unwrap();
         assert_eq!(parsed.name, "my-skill");
         assert_eq!(parsed.description, "A full skill");
@@ -1340,8 +1324,7 @@ mod tests {
             Some(["bash".to_string(), "read_file".to_string()].as_slice())
         );
         assert_eq!(parsed.argument_hint.as_deref(), Some("file path"));
-        assert_eq!(parsed.model.as_deref(), Some("grow-3"));
-        assert_eq!(parsed.effort.as_deref(), Some("high"));
+
         assert!(parsed.user_invocable);
         assert!(!parsed.disable_model_invocation);
     }
@@ -1654,8 +1637,7 @@ mod tests {
             license: None,
             compatibility: None,
             metadata: None,
-            model: None,
-            effort: None,
+
             user_invocable: true,
             disable_model_invocation: false,
             has_user_specified_description: false,

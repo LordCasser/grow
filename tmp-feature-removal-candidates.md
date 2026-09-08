@@ -102,6 +102,8 @@
 - 拟删除范围：仅技能元数据字段和专属解析、说明、测试；不得删除会话模型、reasoning effort 或任务 runtime overrides。执行前核对外部 RPC 消费。
 - 状态：等待用户确认，尚未删除；也未临时发明多技能覆盖冲突规则。
 
+- 用户授权后的执行结果：已删除并完成对应回归；详见 clean-approved-milestone-candidates 的 R10 验证记录。
+
 ## R11 · 已失效的技能 slash 重写选择器
 
 - 位置：shell/session/slash_commands.rs 的 SkillSlashRewrite、resolve 的 _skill_rewrite 参数，admission/slash_exec 固定传参及测试传参。

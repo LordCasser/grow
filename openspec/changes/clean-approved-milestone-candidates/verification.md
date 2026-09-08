@@ -24,3 +24,6 @@ Removed unused permission policy/effect/result helpers and exclusive tests/fixtu
 
 ## R9
 Removed only two uncalled private YAML repair helpers and RECOVERABLE_KEYS. Fresh tools discovery regressions passed 41/41, preserving strict metadata rejection and valid Markdown fallback. No remaining helper symbols; git diff --check passed.
+
+## R10
+Removed unused skill model/effort fields from discovery, both SkillInfo representations and mirrored test fixtures; session sampling fields unchanged. Initial compilation exposed remaining test-only literals, which were removed before final validation. Fresh tools skill 200/200, agent prompt::skills 94/94 and workspace-types rpc::skills 7/7 passed; git diff --check passed.

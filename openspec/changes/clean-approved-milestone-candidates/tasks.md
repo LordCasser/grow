@@ -9,6 +9,6 @@
 - [x] R7: inspect and apply decision.
 - [x] R8: inspect and apply decision.
 - [x] R9: inspect and apply decision.
-- [ ] R10: inspect and apply decision.
+- [x] R10: inspect and apply decision.
 - [ ] R11: inspect and apply decision.
 - [ ] Validate retained behavior, update candidates and archive.
