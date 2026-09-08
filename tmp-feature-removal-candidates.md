@@ -168,7 +168,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：仓库内唯一读取者是 typed_inspection_and_item_updates_share_one_validated_parse 的一个断言；doctor 预览使用 managed_block，冲突检测使用 unmanaged_text/requested_item_state，事务使用 SourceState.bytes。
 - 删除理由：每次规划已有配置都复制完整原文，但产品路径没有消费者，增加计划持有和 clone 的重复数据。未测量实际内存收益。
 - 拟删除范围：此字段、访问器、初始化和专属断言及其无用局部变量。保留整项 typed_inspection 测试其余覆盖、SourceState.bytes、非托管正文、条目状态、预览、备份及回滚。外部编辑器同名 original_text 与此无关，必须保留。
-- 状态：等待用户确认，尚未删除。审计见 audit-managed-inspection-consumers；不声称仓库外没有公共 API 消费者。
+- 状态：已获批并删除；托管配置回归 34/34 通过。审计见 audit-managed-inspection-consumers；不声称仓库外没有公共 API 消费者。
 
 ## R18 · 未接入生产发送的旧图片内容构建链
 

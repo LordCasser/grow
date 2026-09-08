@@ -43,7 +43,6 @@ pub struct ManagedConfigRequest {
 /// Validated source from the snapshot used to build the plan.
 #[derive(Clone, Debug)]
 pub struct ManagedTextInspection {
-    original_text: Option<String>,
     unmanaged_text: String,
     requested_items: Vec<ManagedItemState>,
 }
@@ -56,10 +55,6 @@ pub enum ManagedItemState {
 }
 
 impl ManagedTextInspection {
-    pub fn original_text(&self) -> Option<&str> {
-        self.original_text.as_deref()
-    }
-
     /// Source outside the writer-owned outer block.
     pub fn unmanaged_text(&self) -> &str {
         &self.unmanaged_text
@@ -236,7 +231,6 @@ impl ManagedConfig {
             });
         }
         let inspection = ManagedTextInspection {
-            original_text: original.bytes.as_ref().map(|_| text.to_owned()),
             unmanaged_text: rendered.unmanaged_text,
             requested_items: rendered.requested_items,
         };

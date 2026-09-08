@@ -15,3 +15,6 @@ Removed GBOOM game/render files, hidden command and reservation, view/action/inp
 
 ## R16
 Removed only test-only clipboard extension mapping and its exclusive test module. Fresh native pasteboard type-selection tests 3/3 and MIME mapping tests 10/10 passed; no actual clipboard mutation performed.
+
+## R17
+Removed duplicate ManagedTextInspection original text field/accessor/allocation and exclusive assertion. SourceState.bytes and unmanaged/item inspection remain. Fresh config managed_text regressions 34/34 passed, including transaction, preservation and rollback coverage.

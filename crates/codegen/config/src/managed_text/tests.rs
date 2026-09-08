@@ -119,8 +119,6 @@ fn typed_inspection_and_item_updates_preserve_unmanaged_content() {
     )
     .unwrap();
     let plan = ManagedConfig::plan(request(&path, &[("new", "new body")])).unwrap();
-    let original = fs::read_to_string(&path).unwrap();
-    assert_eq!(plan.inspection().original_text(), Some(original.as_str()));
     assert_eq!(plan.inspection().unmanaged_text(), "before\nafter\n");
     let block = plan.managed_block().unwrap();
     assert!(block.contains("# >>> terminal.old >>>\nold\n# <<< terminal.old <<<"));
