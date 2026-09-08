@@ -17,3 +17,14 @@ Pager SHALL NOT register or run the GBOOM game, its renderer, game simulation cl
 #### Scenario: Input and terminal operation after game removal
 - **WHEN** a user views an image, changes focus or closes the terminal UI
 - **THEN** existing image controls and common terminal/input lifecycle behavior remain intact without game-owned state or clocks.
+
+### Requirement: Image numbering does not emit unused dedicated metadata
+ACP image construction SHALL omit the unused grow.dev/imageDisplayNumber metadata key. Visible image numbers and textual image anchors, image bytes, URIs, durable identities and generic ACP metadata preservation SHALL remain unchanged.
+
+#### Scenario: Recovered image retains its visible identity
+- **WHEN** a numbered image placeholder is recovered into an attachment
+- **THEN** the textual anchor preserves its number and the attachment preserves its content and URI without emitting dedicated display-number metadata.
+
+#### Scenario: Other metadata survives normalization
+- **WHEN** an ACP image with unrelated metadata is normalized or admitted
+- **THEN** generic metadata remains preserved by the existing normalization and admission paths.

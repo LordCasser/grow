@@ -366,9 +366,8 @@ impl AgentView {
             return None;
         }
         /// Upper bound on the size of a paste payload the drop
-        /// classifier will scan. 10 MB matches `MAX_SEND_BYTES` for
-        /// individual image attachments — well above any realistic
-        /// drop, well below any log/code paste worth iterating.
+        /// classifier will scan. The 10 MB text limit is independent of
+        /// image attachment budgets and bounds work on large pasted logs.
         const DROP_CLASSIFIER_MAX_BYTES: usize = 10 * 1024 * 1024;
         if text.len() >= DROP_CLASSIFIER_MAX_BYTES {
             return None;

@@ -20,3 +20,12 @@ Clipboard extension_for_class is cfg(test) and only macos_helpers::extension_map
 
 ## R17 reviewed boundary
 ManagedTextInspection.original_text is read only by one test assertion. Production consumers use unmanaged_text/requested_items/managed_block, while SourceState.bytes remains the authoritative transaction snapshot. Remove the duplicate field, accessor, allocation and exclusive test read/assertion; retain the rest of the inspection/apply test and transaction behavior. This is an internal representation/API cleanup without a changed persistence contract. Regress managed_text including backup/rollback and unmanaged preservation.
+
+## R18 reviewed boundary
+The old load/build/orphan chain has only self-tests and two prompt-widget test consumers. Its collapse_strip_seam and make_real_image fixture are exclusive to that chain. Remove them and exclusive tests; retain PastedImage persistence round-trip by asserting the persisted file, and prompt stash/deleted-chip ownership assertions directly against drained images. Actual append_prompt_images already verifies memory/disk equivalence and bounded admission; run those plus retained prompt_images/prompt-widget tests. Do not remove active placeholder loaders, image numbering, caches, viewer or persistence.
+
+## R19 reviewed boundary
+Dedicated key/helper reads exist only in tests; writes are the shared placeholder recovery and live append_prompt_images. Remove that protocol key, helpers, writes and exclusive metadata assertions. Preserve numbered text anchors and PastedImage.display_number; preserve all generic _meta passthrough. Current client-surfaces requirement on image numbering is fulfilled by the preserved textual/display identities, not the unused metadata interpreter (which does not exist). Regress recovery, actual send and generic metadata passthrough.
+
+## R20 reviewed boundary
+open_from_path is a separate synchronous constructor with exactly three direct tests. Preserve their PNG/JPEG dimensions, byte and display-number assertions by using open_from_path_deferred + finish_loading (which delegates to the actual load_image_data/apply_loaded path); preserve failed-path coverage there too. Remove only synchronous constructor and its obsolete preference comment. The actual background admission is already wired in AppView::prepare_agent_image_load; no additional viewer redesign is required.

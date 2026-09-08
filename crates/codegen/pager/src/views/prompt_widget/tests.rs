@@ -94,10 +94,8 @@
 
         let images = pw.drain_images();
         assert_eq!(images.len(), 1, "restored image must drain for submission");
-        let (bytes, mime) =
-            crate::prompt_images::load_for_send(&images[0]).expect("restored image loads");
-        assert_eq!(bytes, vec![0u8; 16]);
-        assert_eq!(mime, "image/png");
+        assert_eq!(images[0].encoded_bytes.as_deref(), Some(&[0u8; 16][..]));
+        assert_eq!(images[0].mime_type, "image/png");
     }
 
     #[test]
@@ -3194,7 +3192,7 @@
     }
 
     #[test]
-    fn deleted_chip_does_not_produce_content_block() {
+    fn deleted_chip_is_excluded_from_submission_images() {
         let mut pw = PromptWidget::new();
         pw.insert_image(test_image()).unwrap();
         pw.insert_image(test_image()).unwrap();
@@ -3205,12 +3203,9 @@
         let first_id = pw.textarea.elements()[0].id;
         pw.textarea.inline_element(first_id);
 
-        // Drain and build content blocks.
         let images = pw.drain_images();
-        let blocks =
-            crate::prompt_images::build_content_blocks_with_workspace("text".into(), images, None);
-        // Text block + 1 valid image = 2 blocks (not 3).
-        assert_eq!(blocks.len(), 2);
+        assert_eq!(images.len(), 1, "only the remaining chip may be submitted");
+        assert_ne!(images[0].element_id, first_id);
     }
 
     #[test]

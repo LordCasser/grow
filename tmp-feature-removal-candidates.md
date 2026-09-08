@@ -177,7 +177,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 删除理由：旧链维护另一套发送、恢复和预算逻辑，并保留完整读取后才检查的旧行为；修改这些代码不会改善当前发送路径，却增加测试与认知负担。
 - 拟删除范围：仅旧函数链、专属常量及独占测试/注释；逐项区分仍验证PastedImage恢复、源文件、缓存和实际发送的测试，不整段删除测试模块。
 - 必须保留：append_prompt_images、PastedImage及真实显示编号、图片持久化与恢复、client-support的共享占位加载器、剪贴板、渲染和实际发送验证。
-- 状态：等待用户确认，尚未删除。未测量二进制/编译时间收益；公共API的仓库外使用未知。证据见audit-image-number-metadata-and-legacy-builder。
+- 状态：已获批并删除；图片 142/142、PromptWidget 241/241、真实发送加载器 4/4 回归通过。未测量二进制/编译时间收益；公共API的仓库外使用未知。证据见audit-image-number-metadata-and-legacy-builder。
 
 ## R19 · 无内部编号解释消费者的ACP imageDisplayNumber元数据
 

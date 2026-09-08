@@ -18,3 +18,6 @@ Removed only test-only clipboard extension mapping and its exclusive test module
 
 ## R17
 Removed duplicate ManagedTextInspection original text field/accessor/allocation and exclusive assertion. SourceState.bytes and unmanaged/item inspection remain. Fresh config managed_text regressions 34/34 passed, including transaction, preservation and rollback coverage.
+
+## R18
+Removed unreachable image send/orphan builder chain, exclusive seam helper and self-tests. Preserved persistence byte/MIME assertions via saved files and stash/deleted-chip ownership via drained image data; live send loader unchanged. Fresh pager-render prompt_images 142/142; Pager prompt widget 241/241; actual image loader admission 4/4 passed. Corrected obsolete drop-text limit comment only; no limit changed.
