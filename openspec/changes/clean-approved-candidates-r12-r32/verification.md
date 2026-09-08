@@ -24,3 +24,6 @@ Removed unreachable image send/orphan builder chain, exclusive seam helper and s
 
 ## R19
 Removed dedicated imageDisplayNumber helpers/key and two active writes. Numbered placeholders/display fields, data/URI and generic ACP meta preservation unchanged. Fresh shared placeholder recovery tests 54/54 (including absence of unused emitted metadata); Pager live image loader tests 4/4 passed.
+
+## R20
+Removed unused synchronous ImageViewerState::open_from_path. Migrated PNG/JPEG dimension/payload and missing-file assertions to deferred constructor plus actual load_image_data/apply_loaded path. Fresh prompt_images regressions 142/142 passed. No remaining synchronous constructor reference; active background admission retained.

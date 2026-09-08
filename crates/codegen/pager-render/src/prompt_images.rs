@@ -91,34 +91,6 @@ impl ImageViewerState {
         })
     }
 
-    /// Create a viewer from a file path, loading synchronously. Prefer
-    /// [`open_from_path_deferred`] from input handlers to avoid blocking.
-    pub fn open_from_path(path: &std::path::Path) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
-
-        let (w, h) = decode_image_dimensions(&bytes)?;
-        let display_bytes = crate::terminal::image::prepare_overlay_image_bytes(&bytes)
-            .unwrap_or_else(|| bytes.clone());
-
-        let mime_type = client_support::clipboard::mime_from_bytes(&bytes).to_owned();
-        let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-
-        Some(Self {
-            image_bytes: bytes,
-            display_bytes,
-            mime_type,
-            image_width: w,
-            image_height: h,
-            display_number: 1,
-            title: file_name,
-            loading: false,
-            overlay_owner_id: crate::terminal::overlay::next_owner_id(),
-            source: None,
-            protocol: crate::terminal::image::detect_graphics_protocol(),
-            modal_state: Default::default(),
-        })
-    }
-
     /// Create a loading-state viewer for a file path.
     ///
     /// Returns immediately with `loading: true`. A background thread
@@ -3628,13 +3600,14 @@ mod tests {
     }
 
     #[test]
-    fn open_from_path_valid_image() {
+    fn deferred_path_load_preserves_png_payload() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("viewer.png");
         let png = make_test_png(200, 150);
         std::fs::write(&path, &png).unwrap();
 
-        let viewer = ImageViewerState::open_from_path(&path).unwrap();
+        let mut viewer = ImageViewerState::open_from_path_deferred(&path);
+        assert!(viewer.finish_loading());
         assert_eq!(viewer.image_width, 200);
         assert_eq!(viewer.image_height, 150);
         assert_eq!(viewer.display_number, 1);
@@ -3643,23 +3616,24 @@ mod tests {
     }
 
     #[test]
-    fn open_from_path_valid_jpeg_image() {
+    fn deferred_path_load_preserves_jpeg_payload() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("viewer.jpg");
         let jpeg = make_test_jpeg(200, 150);
         std::fs::write(&path, &jpeg).unwrap();
 
-        let viewer = ImageViewerState::open_from_path(&path).unwrap();
+        let mut viewer = ImageViewerState::open_from_path_deferred(&path);
+        assert!(viewer.finish_loading());
         assert_eq!(viewer.image_width, 200);
         assert_eq!(viewer.image_height, 150);
         assert_eq!(viewer.image_bytes, jpeg);
     }
 
     #[test]
-    fn open_from_path_missing_file() {
-        assert!(
-            ImageViewerState::open_from_path(std::path::Path::new("/no/such/file.png")).is_none()
-        );
+    fn deferred_path_missing_file_stays_unloaded() {
+        let mut viewer = ImageViewerState::open_from_path_deferred(std::path::Path::new("/no/such/file.png"));
+        assert!(!viewer.finish_loading());
+        assert!(viewer.image_bytes.is_empty());
     }
 
     // ----- open_from_path_deferred -------------------------------------------
