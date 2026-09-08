@@ -875,3 +875,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：isolate_grow_home uses a process-global OnceLock and unsafe environment mutation, so test isolation depends on the first caller and process-wide environment state.
 - Pager 审计债务：MCP polling and dismissal behavior is verified through synthetic TaskResult dispatches rather than a controllable scheduler or clock, leaving timing contracts partially indirect.
 - Pager 审计债务：The suite contains both focused dispatch checks and nested composed flows with overlapping success/error coverage; the ownership boundary between unit and end-to-end evidence could be made clearer.
+- Pager 审计债务：The modes suite mixes tip, behavior, permission, modal snapshot and theme concerns in one dispatch test module, which makes ownership boundaries harder to discover.
+- Pager 审计债务：Several security-critical tests build large PermissionViewState fixtures inline; a stable fixture builder could reduce duplication, but its semantics would need to remain explicit.
+- Pager 审计债务：Tests mutate process-level appearance and theme caches, so isolation relies on manual restoration and helper environment scoping rather than an injected settings/cache dependency.
+- Pager 审计债务：The always-approve contract is asserted through reducer effects and synthetic response channels; a clock/scheduler and shell contract harness would provide stronger integration evidence for queued transitions.
+- Pager 审计债务：Behavior confirmation tests arrange a warning directly on the agent, leaving the code path that creates and expires that warning covered elsewhere.

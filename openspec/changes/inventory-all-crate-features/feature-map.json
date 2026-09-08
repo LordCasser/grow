@@ -152417,12 +152417,21 @@
         "Confirmation event",
         "a behavior switch banner is active and a key, paste, or mouse event arrives",
         "the event is converted to SetBehaviorMode or Unchanged according to the documented selection boundary."
+      ],
+      [
+        "Confirmation key capture",
+        "a behavior-switch warning is active and one of the tested confirmation or cancellation keys arrives in Fullscreen or Minimal mode",
+        "the input returns an Action, dispatch emits SwitchBehavior for the expected mode, the draft is unchanged and the warning/pending action is cleared."
       ]
     ],
     "sources": [
       [
         "crates/codegen/pager/src/app/agent_view/input.rs",
         "handle_behavior_switch_confirmation"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::behavior_switch_confirmation_captures_keys_before_global_and_minimal_shortcuts"
       ]
     ]
   },
@@ -164206,6 +164215,41 @@
         "Word select",
         "matching tip is shown and accepted",
         "snapshot is cleared, acceptance logged, and WordSelect setting is persisted."
+      ],
+      [
+        "Plan tip disabled",
+        "the plan_mode hint gate is false on a drawable agent",
+        "ShowPlanNudge emits no effect, burns no seen count and leaves the ephemeral tip inactive."
+      ],
+      [
+        "Plan tip shown",
+        "the plan_mode hint gate is true on a drawable agent",
+        "ShowPlanNudge activates the tip and increments the plan seen count in memory without persistence."
+      ],
+      [
+        "Word-select tip disabled",
+        "the word_select hint gate is false",
+        "ShowWordSelectTip emits no effect, burns no count and leaves the tip inactive."
+      ],
+      [
+        "Word-select tip shown",
+        "the gate is true and the live selection setting is Flash",
+        "the word-select tip activates and increments its seen count without an effect."
+      ],
+      [
+        "Already word-select",
+        "the gate is true but the live selection setting already selects words",
+        "the redundant tip is suppressed and the count and tip state remain unchanged."
+      ],
+      [
+        "Accept visible tip",
+        "the word-select tip is active",
+        "AcceptWordSelectTip persists keep_text_selection=word_select, changes the live setting and retires the tip."
+      ],
+      [
+        "Accept absent tip",
+        "AcceptWordSelectTip arrives while no word-select tip is active",
+        "no effect is emitted and the current selection setting is unchanged."
       ]
     ],
     "sources": [
@@ -164248,6 +164292,34 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/prompt.rs",
         "set_keep_text_selection"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::show_plan_nudge_no_op_when_flag_off"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::show_plan_nudge_shows_and_counts_when_flag_on"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::show_word_select_tip_no_op_when_flag_off"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::show_word_select_tip_shows_and_counts_when_flag_on"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::show_word_select_tip_no_op_when_already_word_select"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::accept_word_select_tip_flips_setting_and_retires_tip"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::accept_word_select_tip_no_op_when_tip_not_showing"
       ]
     ]
   },
@@ -165051,6 +165123,31 @@
         "Global cancel preference",
         "CancelTurn is dispatched with always-continue preference",
         "the cancel panel stays closed and CancelTurn carries cancel_subagents=false."
+      ],
+      [
+        "Behavior selection",
+        "SetBehaviorMode(Plan) is dispatched while the active session has permission mode ask",
+        "the active session exposes Plan, permission remains ask and one SwitchBehavior(Plan) effect is emitted."
+      ],
+      [
+        "Plan without arguments",
+        "the active session is not in Plan and /plan is submitted",
+        "the session optimistically enters effective Plan and one SwitchBehavior(Plan) effect is emitted."
+      ],
+      [
+        "Plan re-selection",
+        "the session is already authoritative or optimistically in Plan and /plan or SetBehaviorMode(Plan) is submitted",
+        "the same Plan control is reissued, and any prompt/deferred mode state remains attached to the active session."
+      ],
+      [
+        "Plan with arguments",
+        "a /plan prompt contains a plan request",
+        "the mode control is emitted first, the effective plan state is set, and the prompt is retained in the active session pending the mode transition."
+      ],
+      [
+        "Active-agent isolation",
+        "two agents exist and Plan is selected for the active one",
+        "only the active agent exposes effective Plan; the sibling confirmed and effective Plan state remains false."
       ]
     ],
     "sources": [
@@ -165085,6 +165182,38 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs",
         "global_cancel_subagents_pref_skips_panel_without_session_override"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::behavior_picker_selection_changes_behavior_without_touching_permission"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::slash_plan_no_args_not_in_plan_enters_plan_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::slash_plan_no_args_already_in_plan_reissues_idempotent_selection"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::slash_plan_with_args_not_in_plan_enters_and_sends_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::slash_plan_with_args_already_in_plan_sends_prompt_after_idempotent_transition"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::reselecting_authoritative_behavior_reaches_shell_to_clear_confirmation"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::repeated_behavior_selection_reissues_the_same_target"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_plan_mode_mutates_only_active_agent_not_others"
       ]
     ]
   },
@@ -167521,6 +167650,46 @@
         "Setting/modal",
         "setter or modal action arrives",
         "corresponding setting or modal handler runs."
+      ],
+      [
+        "Slash gate",
+        "auto_mode_gate is enabled or disabled and permission modes change",
+        "always-approve remains offered; /auto is offered only while the gate is enabled."
+      ],
+      [
+        "Permission cross-switch",
+        "the user submits /always-approve, /auto or the same command again",
+        "the active session switches to the requested mode, clears the opposite mode and remains stable on re-selection."
+      ],
+      [
+        "Session notification",
+        "SetPermissionMode changes the active session to always-approve or ask",
+        "one NotifySessionPermissionMode carries the canonical value and session id while the default permission mode remains unchanged."
+      ],
+      [
+        "Plan-aware warning",
+        "always-approve is enabled while confirmed or optimistic Plan mode is active",
+        "the plan-aware toast is shown; without Plan the destructive always-approve warning is shown."
+      ],
+      [
+        "Queue drain safety",
+        "always-approve is enabled with one or more queued permission requests",
+        "the queue is emptied, AllowOnce options receive Selected responses, and the armed double-click tracker is cleared."
+      ],
+      [
+        "No AllowOnce fallback",
+        "a queued permission exposes AllowAlways and RejectAlways but no AllowOnce",
+        "the drain sends Cancelled instead of selecting a more-permissive or permanent option."
+      ],
+      [
+        "Duplicate enable",
+        "a second always-approve dispatch occurs after a new permission arrives or with no state transition",
+        "newly queued work is still drained, one session notification/toast is re-emitted, and no redundant PersistPermissionMode effect is emitted by PermissionSelect when the flag is already on."
+      ],
+      [
+        "No active agent",
+        "SetPermissionMode(AlwaysApprove) is dispatched from Welcome with no active agent",
+        "no effect or shared default/UI mutation occurs."
       ]
     ],
     "sources": [
@@ -167611,6 +167780,66 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/router.rs",
         "Action::ConfirmResetSetting"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::permission_mode_slash_gate_offers_toggles_subject_to_auto_feature"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::slash_always_approve_and_auto_are_idempotent_selections"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_session_always_approve_notifies_without_changing_default"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_always_approve_mode_on_under_plan_uses_plan_aware_toast"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_permission_mode_always_approve_under_plan_uses_plan_aware_toast"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_session_always_approve_to_ask_notifies_without_changing_default"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::always_approve_on_drain_clears_double_click_tracker"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::enable_always_approve_sends_response_and_changes_only_this_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::enable_always_approve_is_idempotent_when_always_approve_already_on"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_always_approve_mode_on_with_no_allow_once_option_sends_cancelled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_always_approve_mode_on_drains_multi_item_queue"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_always_approve_mode_on_duplicate_dispatch_still_drains_queue"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_always_approve_mode_redispatch_same_value_still_emits_effect_and_toast"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_always_approve_mode_toast_format"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_always_approve_mode_no_op_when_no_active_agent"
       ]
     ]
   },
@@ -173585,6 +173814,1056 @@
       [
         "crates/codegen/pager/src/diagnostics/fix_tests.rs",
         "shell_aliases_expand_to_exact_argv_and_bypass_is_explicit"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Shared UI setting resolvers",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The settings boundary keeps current-session permission changes out of the settings modal's captured future-session snapshot, while SetDefaultPermissionMode changes only the future-session default, updates the current UI canonical value and emits PersistPermissionMode with no session id. permission_mode_toast returns the tested brand strings for Ask and AlwaysApprove. SetTheme(\"auto\") commits the literal auto setting, updates current_ui.theme to auto and enables the auto-mode cache after the mocked dark system appearance resolves the concrete palette.",
+    "scenarios": [
+      [
+        "Settings snapshot isolation",
+        "a Settings modal is open and current-session permission changes to AlwaysApprove",
+        "the modal remains open, its pager default snapshot stays false, its UI snapshot stays None and only the session flag changes."
+      ],
+      [
+        "Future default",
+        "SetDefaultPermissionMode(AlwaysApprove) is dispatched",
+        "the active session stays unchanged, the default becomes always-approve, current UI reflects it and a sessionless PersistPermissionMode is emitted."
+      ],
+      [
+        "Toast vocabulary",
+        "permission_mode_toast is requested for Ask or AlwaysApprove",
+        "the exact success or destructive warning string is returned."
+      ],
+      [
+        "Auto theme commit",
+        "SetTheme(\"auto\") runs under the mocked Dark system appearance",
+        "one PersistSetting stores the enum auto, current_ui.theme is auto and the theme cache reports auto mode enabled."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::session_permission_change_does_not_rewrite_default_settings_snapshot"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::default_permission_change_is_future_session_only"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::permission_mode_toast_returns_brand_consistent_strings"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "tests::set_theme_auto_enables_auto_mode_and_persists_auto"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "SessionEvent SHALL model terminal turn outcomes, compaction/retry/context failures, hook annotations, model availability, memory saves, and manual/automatic recaps with structured fields, and message SHALL render each variant with the documented duration, token, error-category, path, model-switch and recovery text.",
+    "contract": "SessionEvent SHALL preserve optional elapsed values for completed/failed turns, format durations through format_duration, show unknown completion duration as Turn completed., include compaction before/after tokens and optional seconds, use the structured error_type to label RetryFailed as a model request failure, make ContextTooLarge actionable with /new, pass HookAnnotation message through, append a model switch only when new_model_id is nonempty, abbreviate memory paths and include /memory to view, and use the same Recap — label for manual and automatic recaps. Token counts below 1000 remain integers and counts at or above 1000 use one decimal k notation.",
+    "scenarios": [
+      [
+        "Turn outcome",
+        "a turn completes, is cancelled, halted, or fails with/without elapsed time",
+        "the message uses the matching human-readable outcome and duration form."
+      ],
+      [
+        "Compaction outcome",
+        "compaction completes with token counts and optional elapsed milliseconds, fails with an empty or nonempty error, or is cancelled",
+        "the message reports the token delta/seconds, terse failure, appended curated error, or cancellation."
+      ],
+      [
+        "Retry and overflow",
+        "a retry failure has no error type, has a structured error type, or the context is too large",
+        "the row says Retry failed, Model request failed, or offers /new recovery as appropriate."
+      ],
+      [
+        "Session adjuncts",
+        "the event is a hook annotation, model-unavailable notice, memory save, or recap",
+        "the event message exposes the supplied annotation, switch/re-auth reason, abbreviated path and trigger, or stable recap label."
+      ],
+      [
+        "Token boundary",
+        "a token count is below, equal to, or above the thousand threshold",
+        "format_tokens uses plain decimal below 1000 and one-decimal k notation at/above 1000."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "SessionEvent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "SessionEvent::message"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "format_tokens"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::turn_completed_message"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::turn_cancelled_message"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::turn_halted_message"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::turn_failed_with_elapsed_message"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::turn_failed_without_elapsed_message"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::model_unavailable_with_switch"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::model_unavailable_blocked_reprompt"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::retry_failed_generic"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::non_retryable_model_error_is_not_labeled_as_retry_failure"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::context_too_large_message_is_actionable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::compaction_completed_renders_before_after_delta"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::compaction_failed_empty_error_is_terse"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::compaction_failed_curated_error_is_appended"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::memory_saved_message_formats_correctly"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_manual_and_auto_use_same_label"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "SessionEventBlock SHALL carry an optional immutable event_id, typed event, stop/stop_failure hook batches, and optional prompt_id, with constructors that initialize empty metadata or attach hook batches only to turn-terminal events.",
+    "contract": "new SHALL create a block with event_id=None, no stop hooks and prompt_id=None. with_stop_hooks SHALL retain the supplied groups and prompt id and debug-assert that nonempty groups belong to a TurnCompleted, TurnCancelled, TurnHalted or TurnFailed event. has_stop_hook_content SHALL return true only when at least one attached run is not Skipped, while skipped-only groups remain inert.",
+    "scenarios": [
+      [
+        "Plain block",
+        "a caller constructs a SessionEventBlock with new",
+        "the typed event is retained and IDs/hooks/prompt association start empty."
+      ],
+      [
+        "Terminal hook attachment",
+        "a caller attaches stop groups to a terminal event",
+        "the groups and prompt id are retained for later summary/detail rendering."
+      ],
+      [
+        "Skipped hooks",
+        "all attached hook runs have HookRunStatus::Skipped",
+        "the block reports no hook content and remains non-interactive."
+      ],
+      [
+        "Mixed hook status",
+        "at least one attached run is Success, Blocked, Failed or otherwise non-skipped",
+        "the block reports hook content and exposes the fold/selection affordance."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "SessionEventBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "SessionEventBlock::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "SessionEventBlock::with_stop_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "SessionEventBlock::has_stop_hook_content"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::marker_with_stop_hooks_is_interactive_and_starts_collapsed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::only_turn_terminal_events_accept_stop_hooks"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Non-recap SessionEventBlock output SHALL render the event message as a compact wrapped informational block, assign a common selection range to text lines, color actionable context/compaction failures with the warning theme, and remain raw-mode and vertical-padding neutral.",
+    "contract": "output SHALL route Recap to recap_output, otherwise style ContextTooLarge and CompactionFailed with Theme::warning and all other events with Theme::muted, wrap single- and multi-line text to BlockContext.width, synthesize an empty selectable line if wrapping returns none, append stop-hook decoration, and give ordinary text lines selection range 0. has_vpad_for and has_raw_mode SHALL both return false; is_groupable SHALL return true.",
+    "scenarios": [
+      [
+        "Ordinary event",
+        "a non-recap event has a message that fits or exceeds the content width",
+        "the message is rendered in muted style and word-wrapped to the supplied width."
+      ],
+      [
+        "Actionable failure",
+        "the event is ContextTooLarge or CompactionFailed",
+        "the text and accent use the theme warning color."
+      ],
+      [
+        "Multiline message",
+        "the message contains newline-separated text",
+        "each source line is wrapped independently through the common wrapping helper."
+      ],
+      [
+        "Empty wrap result",
+        "the wrapper yields no lines",
+        "one empty BlockLine with selection range 0 is retained."
+      ],
+      [
+        "Block flags",
+        "a renderer queries vertical padding, raw mode or groupability",
+        "the block reports compact/no-raw/groupable behavior."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "impl BlockContent for SessionEventBlock"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::has_vpad_for"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::has_raw_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::is_groupable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::context_too_large_has_warning_accent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::compaction_failed_has_warning_accent"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Recap session events SHALL render as a tool-style, foldable presentation with a bold non-selectable Recap header, muted body, collapsed first-line preview, and a loading-only header while generation is running.",
+    "contract": "recap_output SHALL show only the header while ctx.is_running; in collapsed mode it SHALL append the trimmed first summary line, truncate to ctx.content_width and make only the preview span selectable; in truncated/expanded modes it SHALL add a non-selectable blank separator and wrap each summary line to max(ctx.width-2,20). Empty or whitespace-only summaries SHALL not acquire interactive affordances. Finished expanded recaps use a static neutral tool accent; loading recaps use an animated gray accent; collapsed idle recaps have no accent/bullet, and has_bullet follows the configured tool bullet character.",
+    "scenarios": [
+      [
+        "Expanded recap",
+        "a nonempty recap is rendered in Expanded or Truncated mode",
+        "a bold Recap header, decoration gap and wrapped muted body lines are produced."
+      ],
+      [
+        "Collapsed preview",
+        "a multiline nonempty recap is rendered collapsed",
+        "one truncated line shows Recap plus only the trimmed first line, with preview-only selection."
+      ],
+      [
+        "Loading recap",
+        "a recap is running or has an empty loading summary",
+        "only the header is shown and a gray animated sidebar/bullet signals progress."
+      ],
+      [
+        "Empty recap",
+        "the summary is empty or whitespace-only after trimming",
+        "the block is not selectable or foldable."
+      ],
+      [
+        "Copy boundaries",
+        "expanded recap body lines are selected",
+        "header and gap remain decoration while every body line shares selection range 0."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "SessionEvent::recap_summary"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "SessionEventBlock::recap_has_body"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "SessionEventBlock::recap_output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::bullet"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::has_bullet"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::is_foldable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::is_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::default_display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_renders_tool_style_header_and_body"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_is_foldable_selectable_and_bulleted_open_by_default"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_accent_and_bullet_use_neutral_tool_color_when_idle"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_loading_shows_header_only_with_animated_sidebar"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_collapsed_shows_header_with_first_line_preview"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_loading_or_empty_is_not_selectable_or_foldable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_expanded_header_is_not_text_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_collapsed_only_preview_is_text_selectable"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "hook-execution",
+    "requirement": "Turn-terminal SessionEventBlock rows SHALL integrate non-skipped stop and stop_failure hook runs as right-justified summaries and optional expanded detail without contaminating marker text selection.",
+    "contract": "append_stop_hooks SHALL skip empty/skipped-only batches or absent summaries, append a single-line summary inline only when marker text plus two spaces plus summary fits the width, preserve marker spans/selection_text for drag-copy, and otherwise place a right-justified non-selectable summary line below the marker (including wrapped markers). In non-Collapsed mode it SHALL append per-hook detail; multiple groups retain event-name sections, while a single group uses the compact detail renderer. Hook-bearing markers start Collapsed and are foldable/selectable; skipped-only markers stay plain.",
+    "scenarios": [
+      [
+        "Inline summary",
+        "a single-line terminal marker has enough width for the hook summary",
+        "the marker remains one line, the summary is right-justified and only marker spans are copyable."
+      ],
+      [
+        "Narrow marker",
+        "the marker width leaves no room for the summary",
+        "the summary moves to its own right-justified decoration line."
+      ],
+      [
+        "Wrapped marker",
+        "a long TurnFailed marker wraps even though its first line might fit",
+        "the summary is placed below all marker text rather than mid-paragraph."
+      ],
+      [
+        "Collapsed details",
+        "a hook-bearing marker is collapsed",
+        "the summary remains visible but per-hook names/details are hidden."
+      ],
+      [
+        "Expanded details",
+        "a hook-bearing marker is expanded",
+        "hook output is appended; multiple stop/stop_failure groups retain labeled sections."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "SessionEventBlock::append_stop_hooks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::stop_hooks_summary_is_right_justified_on_marker_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::stop_hooks_summary_wraps_to_own_line_when_narrow"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::stop_hooks_summary_goes_below_wrapped_multi_line_marker"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::stop_hooks_detail_only_when_expanded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::marker_with_stop_hooks_is_interactive_and_starts_collapsed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::stop_and_stop_failure_groups_render_labeled_sections"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "SessionEventBlock interaction predicates SHALL expose folding/navigation only for nonempty recaps or terminal markers with hook content, keep ordinary informational events non-interactive, and apply the documented accent/bullet policy.",
+    "contract": "is_foldable and is_selectable SHALL be the disjunction of recap_has_body and has_stop_hook_content. default_display_mode SHALL be Collapsed for hook-bearing markers and Expanded otherwise. accent SHALL return an animated gray recap accent while running, a static neutral tool accent for finished expanded recaps, a static warning accent for ContextTooLarge/CompactionFailed, and None for other events. bullet SHALL delegate to accent except for collapsed idle recap, where it is absent; has_bullet SHALL additionally require the configured tool bullet character.",
+    "scenarios": [
+      [
+        "Ordinary event",
+        "a terminal event has no hook content or a non-recap event is displayed",
+        "it is neither foldable nor selectable and has no accent/bullet."
+      ],
+      [
+        "Hook marker",
+        "a terminal marker has at least one non-skipped hook",
+        "it is foldable/selectable and defaults to Collapsed."
+      ],
+      [
+        "Actionable warning",
+        "ContextTooLarge or CompactionFailed is queried",
+        "a static warning accent is returned."
+      ],
+      [
+        "Finished recap",
+        "a nonempty recap is expanded or collapsed while idle",
+        "expanded uses the neutral tool accent and collapsed suppresses accent/bullet."
+      ],
+      [
+        "Running recap",
+        "a recap is still running",
+        "animated gray accent and matching bullet are returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::accent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::bullet"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::is_foldable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::is_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::default_display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "BlockContent::has_bullet"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::context_too_large_has_warning_accent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::compaction_failed_has_warning_accent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::non_recap_events_stay_non_interactive"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_accent_and_bullet_use_neutral_tool_color_when_idle"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::recap_loading_shows_header_only_with_animated_sidebar"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "tests::marker_with_stop_hooks_is_interactive_and_starts_collapsed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "SubagentInfo lifecycle fields and elapsed display semantics",
+    "contract": "SubagentInfo SHALL be the shared child-session state keyed by child_session_id, preserve identity/provenance/permission/worktree/activity/usage fields, report is_running as the inverse of finished, measure live elapsed time from started_at, and prefer authoritative duration_ms for finished display while falling back to wall-clock elapsed when absent.",
+    "scenarios": [
+      [
+        "Running",
+        "finished is false",
+        "is_running is true and display elapsed uses live elapsed from started_at."
+      ],
+      [
+        "Finished with duration",
+        "finished is true and duration_ms exists",
+        "display_elapsed/display_elapsed_at use the recorded milliseconds."
+      ],
+      [
+        "Finished without duration",
+        "finished is true but duration_ms is absent",
+        "display elapsed falls back to elapsed since started_at, saturating at the supplied clock for display_elapsed_at."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "SubagentInfo"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "is_running"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "elapsed"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "display_elapsed"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "display_elapsed_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "started_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "last_progress_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "duration_ms"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "finished"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Child replay eligibility and one-shot replay gate",
+    "contract": "subagent_child_needs_replay SHALL return true for an empty child scrollback or one containing only UserPrompt blocks, and false once substantive blocks such as tool calls exist; ensure_subagent_child_replayed SHALL replay only when the child has not been marked replayed and still needs replay, then mark the flag even for no-op/missing transcripts.",
+    "scenarios": [
+      [
+        "Empty/prompt-only",
+        "child scrollback is empty or contains only UserPrompt",
+        "the child is eligible for inherited replay."
+      ],
+      [
+        "Substantive content",
+        "a tool-call block is present",
+        "the child is not replayed again."
+      ],
+      [
+        "Already replayed",
+        "child_updates_replayed is true",
+        "ensure_subagent_child_replayed leaves the child scrollback unchanged."
+      ],
+      [
+        "No-op transcript",
+        "the transcript is missing or empty",
+        "the replay attempt marks the child replayed but does not claim a parsed update."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "subagent_child_needs_replay"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "ensure_subagent_child_replayed"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "child_updates_replayed"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "RenderBlock::UserPrompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "replay_inherited_updates"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "replay_inherited_updates_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "subagent-replay"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Streaming inherited transcript replay and memory release",
+    "contract": "replay_inherited_updates SHALL load the effective Grow home, stream typed updates from the child updates log into the child session with replay metadata, no-op safely on missing/read errors, log failures, and release retained memory exactly when ReplayEmission::Emitted is returned.",
+    "scenarios": [
+      [
+        "Replay updates",
+        "a child updates log contains parsed session updates",
+        "each update is passed to handle_update with is_replay metadata and emitted replay memory is released."
+      ],
+      [
+        "Missing/error",
+        "the child session or updates file cannot be read",
+        "the function returns without panicking or releasing memory for a non-emission."
+      ],
+      [
+        "Empty",
+        "the file yields zero updates",
+        "the function does not purge retained memory."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "replay_inherited_updates"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "stream_replay_updates_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "ReplayEmission::Emitted"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "NotificationMeta"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "is_replay"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "handle_update"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "release_retained_memory_with"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Durable spawn enrichment and child-view projection",
+    "contract": "enrich_from_timeline SHALL best-effort load the parent identity-bound Timeline from the effective Grow home, find the matching SubagentSpawned event by subagent_id, and copy prompt, child cwd, and optional worktree path; missing/malformed timelines SHALL leave the info unchanged. enrich_projected_subagent SHALL reject mismatched child ownership and update both the flat info and existing child view cwd/worktree projection for a matching spawn.",
+    "scenarios": [
+      [
+        "Matching timeline",
+        "the parent timeline contains a matching spawn fact",
+        "prompt, child_cwd, and worktree_path are populated."
+      ],
+      [
+        "Missing/malformed",
+        "the timeline file is absent or invalid",
+        "the existing SubagentInfo fields remain unchanged."
+      ],
+      [
+        "Projected child",
+        "the root index has a matching child and view",
+        "the child info is enriched and its AgentView cwd/worktree state is corrected."
+      ],
+      [
+        "Mismatched owner",
+        "subagent_id does not match the durable fact",
+        "the enrichment is ignored."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "durable_child_spawns"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "effective_grow_home"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "set_replay_grow_home_for_tests"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "enrich_from_timeline"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "enrich_from_timeline_with_home"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "enrich_from_spawn"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "enrich_projected_subagent"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "SubagentSpawnEvent"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "child_cwd"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "worktree_path"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "set_worktree"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Breadth-first descendant state restoration",
+    "contract": "restore_descendant_state SHALL rebuild nested child state after root load by reading durable immediate-parent spawns breadth-first, projecting replayable lifecycle notifications (spawn/progress/finish/model/agent changes) through the normal descendant replay handler with isReplay metadata, enriching discovered children, avoiding duplicate visits, and restoring the root loading/replay cursor flags afterward.",
+    "scenarios": [
+      [
+        "Root unavailable",
+        "the root agent or session id is absent",
+        "restoration returns without mutating the app."
+      ],
+      [
+        "Direct children",
+        "root replay already projected direct child ids and durable root spawns exist",
+        "matching children are enriched, queued, and the root replay gate is held during traversal."
+      ],
+      [
+        "Nested lifecycle",
+        "a child timeline contains lifecycle/control notifications",
+        "notifications are re-associated with the parent session and routed through handle_descendant_state_replay; discovered durable children are queued."
+      ],
+      [
+        "Completion",
+        "the breadth-first walk ends",
+        "previous loading_replay is restored and replay_live_cursor_seen is reset."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "restore_descendant_state"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "durable_child_spawns"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "stream_replay_grow_notifications_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "SessionUpdate::SubagentSpawned"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "SessionUpdate::SubagentProgress"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "SessionUpdate::SubagentFinished"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "SessionUpdate::ModelChanged"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "SessionUpdate::AgentChanged"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "handle_descendant_state_replay"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "loading_replay"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "replay_live_cursor_seen"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Finished child finalization and deferred-open completion",
+    "contract": "ensure_subagent_child_replayed SHALL finalize a finished child using its recorded duration, finish the tracker and all running scrollback entries, append exactly one TurnCompleted footer, finish running entries for an idle parent, and avoid closing a child turn while the parent turn/cancellation remains active.",
+    "scenarios": [
+      [
+        "Finished child",
+        "child info is finished with duration_ms",
+        "the child tracker/scrollback are finalized and a TurnCompleted event carries the elapsed duration."
+      ],
+      [
+        "Running parent",
+        "the parent turn is running or cancelling",
+        "the child is replayed without forcibly finishing live running entries."
+      ],
+      [
+        "Idle parent",
+        "the parent is not running",
+        "remaining child running entries are finished after replay."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "ensure_subagent_child_replayed"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "finalize_finished_child_view"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "finish_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "finish_all_running"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "SessionEvent::TurnCompleted"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "parent_turn_running"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "duration_ms"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Subagent metadata, context badges, labels, and canonical title",
+    "contract": "Subagent display formatting SHALL render optional model metadata with parentheses and middle-dot joining, abbreviate general-purpose to general while passing through known/custom types, show resumed/forked context badges only, choose a meaningful subagent type before a leading nonempty description tag and finally General, capitalize the label, strip a used tag prefix from the description, and preserve empty/unclosed prefixes.",
+    "scenarios": [
+      [
+        "Model metadata",
+        "model is absent or present",
+        "format_subagent_meta returns empty or ` (model)`."
+      ],
+      [
+        "Type label",
+        "type is general-purpose, known, or custom",
+        "format_type_label returns general or the original type."
+      ],
+      [
+        "Context badge",
+        "context_source is resumed, forked, new, or absent",
+        "only resumed/forked produce badges."
+      ],
+      [
+        "Label precedence",
+        "type is meaningful, or default with a valid tag, or neither",
+        "format_subagent_label returns capitalized type/tag/General in that order."
+      ],
+      [
+        "Description cleanup",
+        "description has a valid, empty, or unclosed bracket prefix",
+        "valid tags are stripped and used as fallback labels; empty/unclosed forms remain unchanged."
+      ],
+      [
+        "Canonical title",
+        "label and cleaned description are combined",
+        "format_subagent_title returns label alone for empty description or `Label description` otherwise."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "join_meta_parts"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "format_subagent_meta"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "format_type_label"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "format_context_badge"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "parse_tag_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "format_subagent_label"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "format_subagent_title"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "general-purpose"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "context_source"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "resumed"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "forked"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Subagent activity status labels and bounded tool subjects",
+    "contract": "format_activity_label SHALL map tracker activity states to concise labels: Thinking, Responding, Compacting, Retrying (attempt/max), and Waiting reason labels; tool-running activity SHALL prefer a nonempty description subject, otherwise use Running tool or the first title line, truncate by character count at MAX_ACTIVITY_SUBJECT_CHARS with an ellipsis, and preserve multibyte character boundaries.",
+    "scenarios": [
+      [
+        "Core states",
+        "activity is Thinking, Responding, AutoCompacting, or Retrying",
+        "the expected concise status label is returned."
+      ],
+      [
+        "Waiting",
+        "waiting reason is subagent, task output, or a named subject",
+        "the reason label is returned with the expected ellipsis/subject."
+      ],
+      [
+        "Tool title",
+        "tool title is empty, short, multiline, exactly at, or beyond the limit",
+        "the result uses Running tool, first line, full boundary-length title, or a character-safe ellipsis truncation."
+      ],
+      [
+        "Description override",
+        "tool-running description is nonempty",
+        "the waiting-for-subject formatter takes precedence over the title."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "format_activity_label"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "TurnActivity::Thinking"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "TurnActivity::Responding"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "TurnActivity::AutoCompacting"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "TurnActivity::Retrying"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "TurnActivity::Waiting"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "TurnActivity::ToolRunning"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "format_waiting_for_subject"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "MAX_ACTIVITY_SUBJECT_CHARS"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "first_line"
+      ],
+      [
+        "crates/codegen/pager/src/app/subagent.rs",
+        "truncated"
       ]
     ]
   }

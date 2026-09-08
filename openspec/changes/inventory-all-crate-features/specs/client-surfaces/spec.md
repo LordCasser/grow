@@ -17965,3 +17965,341 @@ The generated Bash, zsh, and fish aliases SHALL expand `ssh -p 2222 host` to the
 - **THEN** fish alias behavior matches POSIX expansion and does not leave an ssh environment variable.
 
 证据：`crates/codegen/pager/src/diagnostics/fix.rs` — `fix_spec`；`crates/codegen/pager/src/diagnostics/fix.rs` — `ShellKind::alias`；`crates/codegen/pager/src/diagnostics/fix.rs` — `SSH_WRAP_ALIAS_POSIX`；`crates/codegen/pager/src/diagnostics/fix.rs` — `SSH_WRAP_ALIAS_FISH`；`crates/codegen/pager/src/diagnostics/fix.rs` — `grow wrap ssh`；`crates/codegen/pager/src/diagnostics/fix.rs` — `command ssh`；`crates/codegen/pager/src/diagnostics/fix_tests.rs` — `shell_aliases_expand_to_exact_argv_and_bypass_is_explicit`。
+
+
+### Requirement: SessionEvent SHALL model terminal turn outcomes, compaction/retry/context failures, hook annotations, model availability, memory saves, and manual/automatic recaps with structured fields, and message SHALL render each variant with the documented duration, token, error-category, path, model-switch and recovery text.
+
+SessionEvent SHALL preserve optional elapsed values for completed/failed turns, format durations through format_duration, show unknown completion duration as Turn completed., include compaction before/after tokens and optional seconds, use the structured error_type to label RetryFailed as a model request failure, make ContextTooLarge actionable with /new, pass HookAnnotation message through, append a model switch only when new_model_id is nonempty, abbreviate memory paths and include /memory to view, and use the same Recap — label for manual and automatic recaps. Token counts below 1000 remain integers and counts at or above 1000 use one decimal k notation.
+
+#### Scenario: Turn outcome
+- **WHEN** a turn completes, is cancelled, halted, or fails with/without elapsed time
+- **THEN** the message uses the matching human-readable outcome and duration form.
+
+#### Scenario: Compaction outcome
+- **WHEN** compaction completes with token counts and optional elapsed milliseconds, fails with an empty or nonempty error, or is cancelled
+- **THEN** the message reports the token delta/seconds, terse failure, appended curated error, or cancellation.
+
+#### Scenario: Retry and overflow
+- **WHEN** a retry failure has no error type, has a structured error type, or the context is too large
+- **THEN** the row says Retry failed, Model request failed, or offers /new recovery as appropriate.
+
+#### Scenario: Session adjuncts
+- **WHEN** the event is a hook annotation, model-unavailable notice, memory save, or recap
+- **THEN** the event message exposes the supplied annotation, switch/re-auth reason, abbreviated path and trigger, or stable recap label.
+
+#### Scenario: Token boundary
+- **WHEN** a token count is below, equal to, or above the thousand threshold
+- **THEN** format_tokens uses plain decimal below 1000 and one-decimal k notation at/above 1000.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `SessionEvent`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `SessionEvent::message`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `format_tokens`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::turn_completed_message`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::turn_cancelled_message`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::turn_halted_message`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::turn_failed_with_elapsed_message`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::turn_failed_without_elapsed_message`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::model_unavailable_with_switch`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::model_unavailable_blocked_reprompt`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::retry_failed_generic`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::non_retryable_model_error_is_not_labeled_as_retry_failure`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::context_too_large_message_is_actionable`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::compaction_completed_renders_before_after_delta`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::compaction_failed_empty_error_is_terse`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::compaction_failed_curated_error_is_appended`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::memory_saved_message_formats_correctly`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_manual_and_auto_use_same_label`。
+
+
+### Requirement: SessionEventBlock SHALL carry an optional immutable event_id, typed event, stop/stop_failure hook batches, and optional prompt_id, with constructors that initialize empty metadata or attach hook batches only to turn-terminal events.
+
+new SHALL create a block with event_id=None, no stop hooks and prompt_id=None. with_stop_hooks SHALL retain the supplied groups and prompt id and debug-assert that nonempty groups belong to a TurnCompleted, TurnCancelled, TurnHalted or TurnFailed event. has_stop_hook_content SHALL return true only when at least one attached run is not Skipped, while skipped-only groups remain inert.
+
+#### Scenario: Plain block
+- **WHEN** a caller constructs a SessionEventBlock with new
+- **THEN** the typed event is retained and IDs/hooks/prompt association start empty.
+
+#### Scenario: Terminal hook attachment
+- **WHEN** a caller attaches stop groups to a terminal event
+- **THEN** the groups and prompt id are retained for later summary/detail rendering.
+
+#### Scenario: Skipped hooks
+- **WHEN** all attached hook runs have HookRunStatus::Skipped
+- **THEN** the block reports no hook content and remains non-interactive.
+
+#### Scenario: Mixed hook status
+- **WHEN** at least one attached run is Success, Blocked, Failed or otherwise non-skipped
+- **THEN** the block reports hook content and exposes the fold/selection affordance.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `SessionEventBlock`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `SessionEventBlock::new`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `SessionEventBlock::with_stop_hooks`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `SessionEventBlock::has_stop_hook_content`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::marker_with_stop_hooks_is_interactive_and_starts_collapsed`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::only_turn_terminal_events_accept_stop_hooks`。
+
+
+### Requirement: Non-recap SessionEventBlock output SHALL render the event message as a compact wrapped informational block, assign a common selection range to text lines, color actionable context/compaction failures with the warning theme, and remain raw-mode and vertical-padding neutral.
+
+output SHALL route Recap to recap_output, otherwise style ContextTooLarge and CompactionFailed with Theme::warning and all other events with Theme::muted, wrap single- and multi-line text to BlockContext.width, synthesize an empty selectable line if wrapping returns none, append stop-hook decoration, and give ordinary text lines selection range 0. has_vpad_for and has_raw_mode SHALL both return false; is_groupable SHALL return true.
+
+#### Scenario: Ordinary event
+- **WHEN** a non-recap event has a message that fits or exceeds the content width
+- **THEN** the message is rendered in muted style and word-wrapped to the supplied width.
+
+#### Scenario: Actionable failure
+- **WHEN** the event is ContextTooLarge or CompactionFailed
+- **THEN** the text and accent use the theme warning color.
+
+#### Scenario: Multiline message
+- **WHEN** the message contains newline-separated text
+- **THEN** each source line is wrapped independently through the common wrapping helper.
+
+#### Scenario: Empty wrap result
+- **WHEN** the wrapper yields no lines
+- **THEN** one empty BlockLine with selection range 0 is retained.
+
+#### Scenario: Block flags
+- **WHEN** a renderer queries vertical padding, raw mode or groupability
+- **THEN** the block reports compact/no-raw/groupable behavior.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `impl BlockContent for SessionEventBlock`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::output`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::is_groupable`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::context_too_large_has_warning_accent`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::compaction_failed_has_warning_accent`。
+
+
+### Requirement: Recap session events SHALL render as a tool-style, foldable presentation with a bold non-selectable Recap header, muted body, collapsed first-line preview, and a loading-only header while generation is running.
+
+recap_output SHALL show only the header while ctx.is_running; in collapsed mode it SHALL append the trimmed first summary line, truncate to ctx.content_width and make only the preview span selectable; in truncated/expanded modes it SHALL add a non-selectable blank separator and wrap each summary line to max(ctx.width-2,20). Empty or whitespace-only summaries SHALL not acquire interactive affordances. Finished expanded recaps use a static neutral tool accent; loading recaps use an animated gray accent; collapsed idle recaps have no accent/bullet, and has_bullet follows the configured tool bullet character.
+
+#### Scenario: Expanded recap
+- **WHEN** a nonempty recap is rendered in Expanded or Truncated mode
+- **THEN** a bold Recap header, decoration gap and wrapped muted body lines are produced.
+
+#### Scenario: Collapsed preview
+- **WHEN** a multiline nonempty recap is rendered collapsed
+- **THEN** one truncated line shows Recap plus only the trimmed first line, with preview-only selection.
+
+#### Scenario: Loading recap
+- **WHEN** a recap is running or has an empty loading summary
+- **THEN** only the header is shown and a gray animated sidebar/bullet signals progress.
+
+#### Scenario: Empty recap
+- **WHEN** the summary is empty or whitespace-only after trimming
+- **THEN** the block is not selectable or foldable.
+
+#### Scenario: Copy boundaries
+- **WHEN** expanded recap body lines are selected
+- **THEN** header and gap remain decoration while every body line shares selection range 0.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `SessionEvent::recap_summary`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `SessionEventBlock::recap_has_body`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `SessionEventBlock::recap_output`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::bullet`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::has_bullet`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::is_selectable`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_renders_tool_style_header_and_body`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_is_foldable_selectable_and_bulleted_open_by_default`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_accent_and_bullet_use_neutral_tool_color_when_idle`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_loading_shows_header_only_with_animated_sidebar`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_collapsed_shows_header_with_first_line_preview`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_loading_or_empty_is_not_selectable_or_foldable`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_expanded_header_is_not_text_selectable`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_collapsed_only_preview_is_text_selectable`。
+
+
+### Requirement: Turn-terminal SessionEventBlock rows SHALL integrate non-skipped stop and stop_failure hook runs as right-justified summaries and optional expanded detail without contaminating marker text selection.
+
+append_stop_hooks SHALL skip empty/skipped-only batches or absent summaries, append a single-line summary inline only when marker text plus two spaces plus summary fits the width, preserve marker spans/selection_text for drag-copy, and otherwise place a right-justified non-selectable summary line below the marker (including wrapped markers). In non-Collapsed mode it SHALL append per-hook detail; multiple groups retain event-name sections, while a single group uses the compact detail renderer. Hook-bearing markers start Collapsed and are foldable/selectable; skipped-only markers stay plain.
+
+#### Scenario: Inline summary
+- **WHEN** a single-line terminal marker has enough width for the hook summary
+- **THEN** the marker remains one line, the summary is right-justified and only marker spans are copyable.
+
+#### Scenario: Narrow marker
+- **WHEN** the marker width leaves no room for the summary
+- **THEN** the summary moves to its own right-justified decoration line.
+
+#### Scenario: Wrapped marker
+- **WHEN** a long TurnFailed marker wraps even though its first line might fit
+- **THEN** the summary is placed below all marker text rather than mid-paragraph.
+
+#### Scenario: Collapsed details
+- **WHEN** a hook-bearing marker is collapsed
+- **THEN** the summary remains visible but per-hook names/details are hidden.
+
+#### Scenario: Expanded details
+- **WHEN** a hook-bearing marker is expanded
+- **THEN** hook output is appended; multiple stop/stop_failure groups retain labeled sections.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `SessionEventBlock::append_stop_hooks`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::stop_hooks_summary_is_right_justified_on_marker_line`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::stop_hooks_summary_wraps_to_own_line_when_narrow`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::stop_hooks_summary_goes_below_wrapped_multi_line_marker`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::stop_hooks_detail_only_when_expanded`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::marker_with_stop_hooks_is_interactive_and_starts_collapsed`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::stop_and_stop_failure_groups_render_labeled_sections`。
+
+
+### Requirement: SessionEventBlock interaction predicates SHALL expose folding/navigation only for nonempty recaps or terminal markers with hook content, keep ordinary informational events non-interactive, and apply the documented accent/bullet policy.
+
+is_foldable and is_selectable SHALL be the disjunction of recap_has_body and has_stop_hook_content. default_display_mode SHALL be Collapsed for hook-bearing markers and Expanded otherwise. accent SHALL return an animated gray recap accent while running, a static neutral tool accent for finished expanded recaps, a static warning accent for ContextTooLarge/CompactionFailed, and None for other events. bullet SHALL delegate to accent except for collapsed idle recap, where it is absent; has_bullet SHALL additionally require the configured tool bullet character.
+
+#### Scenario: Ordinary event
+- **WHEN** a terminal event has no hook content or a non-recap event is displayed
+- **THEN** it is neither foldable nor selectable and has no accent/bullet.
+
+#### Scenario: Hook marker
+- **WHEN** a terminal marker has at least one non-skipped hook
+- **THEN** it is foldable/selectable and defaults to Collapsed.
+
+#### Scenario: Actionable warning
+- **WHEN** ContextTooLarge or CompactionFailed is queried
+- **THEN** a static warning accent is returned.
+
+#### Scenario: Finished recap
+- **WHEN** a nonempty recap is expanded or collapsed while idle
+- **THEN** expanded uses the neutral tool accent and collapsed suppresses accent/bullet.
+
+#### Scenario: Running recap
+- **WHEN** a recap is still running
+- **THEN** animated gray accent and matching bullet are returned.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::accent`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::bullet`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::is_selectable`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `BlockContent::has_bullet`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::context_too_large_has_warning_accent`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::compaction_failed_has_warning_accent`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::non_recap_events_stay_non_interactive`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_accent_and_bullet_use_neutral_tool_color_when_idle`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::recap_loading_shows_header_only_with_animated_sidebar`；`crates/codegen/pager/src/scrollback/blocks/session_event.rs` — `tests::marker_with_stop_hooks_is_interactive_and_starts_collapsed`。
+
+
+### Requirement: SubagentInfo lifecycle fields and elapsed display semantics
+
+SubagentInfo SHALL be the shared child-session state keyed by child_session_id, preserve identity/provenance/permission/worktree/activity/usage fields, report is_running as the inverse of finished, measure live elapsed time from started_at, and prefer authoritative duration_ms for finished display while falling back to wall-clock elapsed when absent.
+
+#### Scenario: Running
+- **WHEN** finished is false
+- **THEN** is_running is true and display elapsed uses live elapsed from started_at.
+
+#### Scenario: Finished with duration
+- **WHEN** finished is true and duration_ms exists
+- **THEN** display_elapsed/display_elapsed_at use the recorded milliseconds.
+
+#### Scenario: Finished without duration
+- **WHEN** finished is true but duration_ms is absent
+- **THEN** display elapsed falls back to elapsed since started_at, saturating at the supplied clock for display_elapsed_at.
+
+证据：`crates/codegen/pager/src/app/subagent.rs` — `SubagentInfo`；`crates/codegen/pager/src/app/subagent.rs` — `is_running`；`crates/codegen/pager/src/app/subagent.rs` — `elapsed`；`crates/codegen/pager/src/app/subagent.rs` — `display_elapsed`；`crates/codegen/pager/src/app/subagent.rs` — `display_elapsed_at`；`crates/codegen/pager/src/app/subagent.rs` — `started_at`；`crates/codegen/pager/src/app/subagent.rs` — `last_progress_at`；`crates/codegen/pager/src/app/subagent.rs` — `duration_ms`；`crates/codegen/pager/src/app/subagent.rs` — `finished`。
+
+
+### Requirement: Child replay eligibility and one-shot replay gate
+
+subagent_child_needs_replay SHALL return true for an empty child scrollback or one containing only UserPrompt blocks, and false once substantive blocks such as tool calls exist; ensure_subagent_child_replayed SHALL replay only when the child has not been marked replayed and still needs replay, then mark the flag even for no-op/missing transcripts.
+
+#### Scenario: Empty/prompt-only
+- **WHEN** child scrollback is empty or contains only UserPrompt
+- **THEN** the child is eligible for inherited replay.
+
+#### Scenario: Substantive content
+- **WHEN** a tool-call block is present
+- **THEN** the child is not replayed again.
+
+#### Scenario: Already replayed
+- **WHEN** child_updates_replayed is true
+- **THEN** ensure_subagent_child_replayed leaves the child scrollback unchanged.
+
+#### Scenario: No-op transcript
+- **WHEN** the transcript is missing or empty
+- **THEN** the replay attempt marks the child replayed but does not claim a parsed update.
+
+证据：`crates/codegen/pager/src/app/subagent.rs` — `subagent_child_needs_replay`；`crates/codegen/pager/src/app/subagent.rs` — `ensure_subagent_child_replayed`；`crates/codegen/pager/src/app/subagent.rs` — `child_updates_replayed`；`crates/codegen/pager/src/app/subagent.rs` — `RenderBlock::UserPrompt`；`crates/codegen/pager/src/app/subagent.rs` — `replay_inherited_updates`；`crates/codegen/pager/src/app/subagent.rs` — `replay_inherited_updates_at`；`crates/codegen/pager/src/app/subagent.rs` — `subagent-replay`。
+
+
+### Requirement: Streaming inherited transcript replay and memory release
+
+replay_inherited_updates SHALL load the effective Grow home, stream typed updates from the child updates log into the child session with replay metadata, no-op safely on missing/read errors, log failures, and release retained memory exactly when ReplayEmission::Emitted is returned.
+
+#### Scenario: Replay updates
+- **WHEN** a child updates log contains parsed session updates
+- **THEN** each update is passed to handle_update with is_replay metadata and emitted replay memory is released.
+
+#### Scenario: Missing/error
+- **WHEN** the child session or updates file cannot be read
+- **THEN** the function returns without panicking or releasing memory for a non-emission.
+
+#### Scenario: Empty
+- **WHEN** the file yields zero updates
+- **THEN** the function does not purge retained memory.
+
+证据：`crates/codegen/pager/src/app/subagent.rs` — `replay_inherited_updates`；`crates/codegen/pager/src/app/subagent.rs` — `stream_replay_updates_at`；`crates/codegen/pager/src/app/subagent.rs` — `ReplayEmission::Emitted`；`crates/codegen/pager/src/app/subagent.rs` — `NotificationMeta`；`crates/codegen/pager/src/app/subagent.rs` — `is_replay`；`crates/codegen/pager/src/app/subagent.rs` — `handle_update`；`crates/codegen/pager/src/app/subagent.rs` — `release_retained_memory_with`。
+
+
+### Requirement: Durable spawn enrichment and child-view projection
+
+enrich_from_timeline SHALL best-effort load the parent identity-bound Timeline from the effective Grow home, find the matching SubagentSpawned event by subagent_id, and copy prompt, child cwd, and optional worktree path; missing/malformed timelines SHALL leave the info unchanged. enrich_projected_subagent SHALL reject mismatched child ownership and update both the flat info and existing child view cwd/worktree projection for a matching spawn.
+
+#### Scenario: Matching timeline
+- **WHEN** the parent timeline contains a matching spawn fact
+- **THEN** prompt, child_cwd, and worktree_path are populated.
+
+#### Scenario: Missing/malformed
+- **WHEN** the timeline file is absent or invalid
+- **THEN** the existing SubagentInfo fields remain unchanged.
+
+#### Scenario: Projected child
+- **WHEN** the root index has a matching child and view
+- **THEN** the child info is enriched and its AgentView cwd/worktree state is corrected.
+
+#### Scenario: Mismatched owner
+- **WHEN** subagent_id does not match the durable fact
+- **THEN** the enrichment is ignored.
+
+证据：`crates/codegen/pager/src/app/subagent.rs` — `durable_child_spawns`；`crates/codegen/pager/src/app/subagent.rs` — `effective_grow_home`；`crates/codegen/pager/src/app/subagent.rs` — `set_replay_grow_home_for_tests`；`crates/codegen/pager/src/app/subagent.rs` — `enrich_from_timeline`；`crates/codegen/pager/src/app/subagent.rs` — `enrich_from_timeline_with_home`；`crates/codegen/pager/src/app/subagent.rs` — `enrich_from_spawn`；`crates/codegen/pager/src/app/subagent.rs` — `enrich_projected_subagent`；`crates/codegen/pager/src/app/subagent.rs` — `SubagentSpawnEvent`；`crates/codegen/pager/src/app/subagent.rs` — `prompt`；`crates/codegen/pager/src/app/subagent.rs` — `child_cwd`；`crates/codegen/pager/src/app/subagent.rs` — `worktree_path`；`crates/codegen/pager/src/app/subagent.rs` — `set_worktree`。
+
+
+### Requirement: Breadth-first descendant state restoration
+
+restore_descendant_state SHALL rebuild nested child state after root load by reading durable immediate-parent spawns breadth-first, projecting replayable lifecycle notifications (spawn/progress/finish/model/agent changes) through the normal descendant replay handler with isReplay metadata, enriching discovered children, avoiding duplicate visits, and restoring the root loading/replay cursor flags afterward.
+
+#### Scenario: Root unavailable
+- **WHEN** the root agent or session id is absent
+- **THEN** restoration returns without mutating the app.
+
+#### Scenario: Direct children
+- **WHEN** root replay already projected direct child ids and durable root spawns exist
+- **THEN** matching children are enriched, queued, and the root replay gate is held during traversal.
+
+#### Scenario: Nested lifecycle
+- **WHEN** a child timeline contains lifecycle/control notifications
+- **THEN** notifications are re-associated with the parent session and routed through handle_descendant_state_replay; discovered durable children are queued.
+
+#### Scenario: Completion
+- **WHEN** the breadth-first walk ends
+- **THEN** previous loading_replay is restored and replay_live_cursor_seen is reset.
+
+证据：`crates/codegen/pager/src/app/subagent.rs` — `restore_descendant_state`；`crates/codegen/pager/src/app/subagent.rs` — `durable_child_spawns`；`crates/codegen/pager/src/app/subagent.rs` — `stream_replay_grow_notifications_at`；`crates/codegen/pager/src/app/subagent.rs` — `SessionUpdate::SubagentSpawned`；`crates/codegen/pager/src/app/subagent.rs` — `SessionUpdate::SubagentProgress`；`crates/codegen/pager/src/app/subagent.rs` — `SessionUpdate::SubagentFinished`；`crates/codegen/pager/src/app/subagent.rs` — `SessionUpdate::ModelChanged`；`crates/codegen/pager/src/app/subagent.rs` — `SessionUpdate::AgentChanged`；`crates/codegen/pager/src/app/subagent.rs` — `handle_descendant_state_replay`；`crates/codegen/pager/src/app/subagent.rs` — `loading_replay`；`crates/codegen/pager/src/app/subagent.rs` — `replay_live_cursor_seen`。
+
+
+### Requirement: Finished child finalization and deferred-open completion
+
+ensure_subagent_child_replayed SHALL finalize a finished child using its recorded duration, finish the tracker and all running scrollback entries, append exactly one TurnCompleted footer, finish running entries for an idle parent, and avoid closing a child turn while the parent turn/cancellation remains active.
+
+#### Scenario: Finished child
+- **WHEN** child info is finished with duration_ms
+- **THEN** the child tracker/scrollback are finalized and a TurnCompleted event carries the elapsed duration.
+
+#### Scenario: Running parent
+- **WHEN** the parent turn is running or cancelling
+- **THEN** the child is replayed without forcibly finishing live running entries.
+
+#### Scenario: Idle parent
+- **WHEN** the parent is not running
+- **THEN** remaining child running entries are finished after replay.
+
+证据：`crates/codegen/pager/src/app/subagent.rs` — `ensure_subagent_child_replayed`；`crates/codegen/pager/src/app/subagent.rs` — `finalize_finished_child_view`；`crates/codegen/pager/src/app/subagent.rs` — `finish_turn`；`crates/codegen/pager/src/app/subagent.rs` — `finish_all_running`；`crates/codegen/pager/src/app/subagent.rs` — `SessionEvent::TurnCompleted`；`crates/codegen/pager/src/app/subagent.rs` — `parent_turn_running`；`crates/codegen/pager/src/app/subagent.rs` — `duration_ms`。
+
+
+### Requirement: Subagent metadata, context badges, labels, and canonical title
+
+Subagent display formatting SHALL render optional model metadata with parentheses and middle-dot joining, abbreviate general-purpose to general while passing through known/custom types, show resumed/forked context badges only, choose a meaningful subagent type before a leading nonempty description tag and finally General, capitalize the label, strip a used tag prefix from the description, and preserve empty/unclosed prefixes.
+
+#### Scenario: Model metadata
+- **WHEN** model is absent or present
+- **THEN** format_subagent_meta returns empty or ` (model)`.
+
+#### Scenario: Type label
+- **WHEN** type is general-purpose, known, or custom
+- **THEN** format_type_label returns general or the original type.
+
+#### Scenario: Context badge
+- **WHEN** context_source is resumed, forked, new, or absent
+- **THEN** only resumed/forked produce badges.
+
+#### Scenario: Label precedence
+- **WHEN** type is meaningful, or default with a valid tag, or neither
+- **THEN** format_subagent_label returns capitalized type/tag/General in that order.
+
+#### Scenario: Description cleanup
+- **WHEN** description has a valid, empty, or unclosed bracket prefix
+- **THEN** valid tags are stripped and used as fallback labels; empty/unclosed forms remain unchanged.
+
+#### Scenario: Canonical title
+- **WHEN** label and cleaned description are combined
+- **THEN** format_subagent_title returns label alone for empty description or `Label description` otherwise.
+
+证据：`crates/codegen/pager/src/app/subagent.rs` — `join_meta_parts`；`crates/codegen/pager/src/app/subagent.rs` — `format_subagent_meta`；`crates/codegen/pager/src/app/subagent.rs` — `format_type_label`；`crates/codegen/pager/src/app/subagent.rs` — `format_context_badge`；`crates/codegen/pager/src/app/subagent.rs` — `parse_tag_prefix`；`crates/codegen/pager/src/app/subagent.rs` — `format_subagent_label`；`crates/codegen/pager/src/app/subagent.rs` — `format_subagent_title`；`crates/codegen/pager/src/app/subagent.rs` — `general-purpose`；`crates/codegen/pager/src/app/subagent.rs` — `context_source`；`crates/codegen/pager/src/app/subagent.rs` — `resumed`；`crates/codegen/pager/src/app/subagent.rs` — `forked`。
+
+
+### Requirement: Subagent activity status labels and bounded tool subjects
+
+format_activity_label SHALL map tracker activity states to concise labels: Thinking, Responding, Compacting, Retrying (attempt/max), and Waiting reason labels; tool-running activity SHALL prefer a nonempty description subject, otherwise use Running tool or the first title line, truncate by character count at MAX_ACTIVITY_SUBJECT_CHARS with an ellipsis, and preserve multibyte character boundaries.
+
+#### Scenario: Core states
+- **WHEN** activity is Thinking, Responding, AutoCompacting, or Retrying
+- **THEN** the expected concise status label is returned.
+
+#### Scenario: Waiting
+- **WHEN** waiting reason is subagent, task output, or a named subject
+- **THEN** the reason label is returned with the expected ellipsis/subject.
+
+#### Scenario: Tool title
+- **WHEN** tool title is empty, short, multiline, exactly at, or beyond the limit
+- **THEN** the result uses Running tool, first line, full boundary-length title, or a character-safe ellipsis truncation.
+
+#### Scenario: Description override
+- **WHEN** tool-running description is nonempty
+- **THEN** the waiting-for-subject formatter takes precedence over the title.
+
+证据：`crates/codegen/pager/src/app/subagent.rs` — `format_activity_label`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::Thinking`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::Responding`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::AutoCompacting`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::Retrying`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::Waiting`；`crates/codegen/pager/src/app/subagent.rs` — `TurnActivity::ToolRunning`；`crates/codegen/pager/src/app/subagent.rs` — `format_waiting_for_subject`；`crates/codegen/pager/src/app/subagent.rs` — `MAX_ACTIVITY_SUBJECT_CHARS`；`crates/codegen/pager/src/app/subagent.rs` — `first_line`；`crates/codegen/pager/src/app/subagent.rs` — `truncated`。

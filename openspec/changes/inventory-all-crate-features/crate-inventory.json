@@ -3656,7 +3656,22 @@
       "Validator discovery and validated-source conflict policy",
       "Transactional apply, idempotence, outcomes, and persistent verification",
       "Diagnostic report filtering and user-facing fix messages",
-      "Shell alias expansion and explicit bypass behavior"
+      "Shell alias expansion and explicit bypass behavior",
+      "Shared UI setting resolvers",
+      "SessionEvent SHALL model terminal turn outcomes, compaction/retry/context failures, hook annotations, model availability, memory saves, and manual/automatic recaps with structured fields, and message SHALL render each variant with the documented duration, token, error-category, path, model-switch and recovery text.",
+      "SessionEventBlock SHALL carry an optional immutable event_id, typed event, stop/stop_failure hook batches, and optional prompt_id, with constructors that initialize empty metadata or attach hook batches only to turn-terminal events.",
+      "Non-recap SessionEventBlock output SHALL render the event message as a compact wrapped informational block, assign a common selection range to text lines, color actionable context/compaction failures with the warning theme, and remain raw-mode and vertical-padding neutral.",
+      "Recap session events SHALL render as a tool-style, foldable presentation with a bold non-selectable Recap header, muted body, collapsed first-line preview, and a loading-only header while generation is running.",
+      "Turn-terminal SessionEventBlock rows SHALL integrate non-skipped stop and stop_failure hook runs as right-justified summaries and optional expanded detail without contaminating marker text selection.",
+      "SessionEventBlock interaction predicates SHALL expose folding/navigation only for nonempty recaps or terminal markers with hook content, keep ordinary informational events non-interactive, and apply the documented accent/bullet policy.",
+      "SubagentInfo lifecycle fields and elapsed display semantics",
+      "Child replay eligibility and one-shot replay gate",
+      "Streaming inherited transcript replay and memory release",
+      "Durable spawn enrichment and child-view projection",
+      "Breadth-first descendant state restoration",
+      "Finished child finalization and deferred-open completion",
+      "Subagent metadata, context badges, labels, and canonical title",
+      "Subagent activity status labels and bounded tool subjects"
     ],
     "reviewed_files": [
       {
@@ -5674,6 +5689,18 @@
       {
         "path": "crates/codegen/pager/src/diagnostics/fix.rs",
         "sha256": "951ba8ac3fbbbfac0d71a4f7f95cdb361877eac23200cac2b8f47dd28458dcca"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/modes.rs",
+        "sha256": "f98e08f130cd6a86407e098ce45ec0779112e5a763d4694b720c0ca78610378c"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/session_event.rs",
+        "sha256": "747985ade4c38b8e490c44d3fd0d9f3c890e671e4e64672316081839a8727cf7"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/subagent.rs",
+        "sha256": "b6269ad8526a4afc37dba723f05390d45d602b583d7bc8715cb985adcd67c3b9"
       }
     ],
     "review": "reviews/pager.md"
