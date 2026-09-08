@@ -2308,3 +2308,9 @@ Luna/high复用代理完整读取`scrollback/block.rs`共1775行、33项内联�
 Luna/high复用代理完整读取`views/modal_window.rs`共1968行、47项内联测试；主代理复核SHA-256与12项功能需求来源，覆盖modal尺寸/布局、标题/边框、滚动、焦点和鼠标/键盘输入投影。未运行Cargo或真实终端。
 
 Luna/high复用代理完整读取`scrollback/wrappers/entry_renderer.rs`共2064行、32项内联测试；主代理复核SHA-256与4项功能需求来源，覆盖entry渲染包装、块/工具状态投影、文本布局和测试辅助边界。未运行Cargo或真实终端。
+
+Luna/high复用代理完整读取`views/announcements.rs`共1578行、29项内联测试；主代理复核SHA-256与8项功能需求来源，覆盖announcement加载/关闭、CTA、布局、缓存、权限和提示状态。未运行Cargo或真实终端。
+
+Luna/high复用代理完整读取`views/file_search/line_viewer.rs`共1866行、9项内联测试；主代理复核SHA-256与3项功能需求来源，覆盖文件搜索行查看、匹配高亮、滚动定位和命中投影。未运行Cargo或真实文件搜索终端。
+
+Luna/high复用代理完整读取`views/block_viewer.rs`共1748行、无内联测试；主代理复核SHA-256与9项功能需求来源，覆盖block查看器、滚动/布局、文本选择和输入状态投影。未运行Cargo或真实终端。

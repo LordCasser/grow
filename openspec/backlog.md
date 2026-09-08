@@ -784,3 +784,15 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager entry renderer混合块包装和工具状态投影
 
 `scrollback/wrappers/entry_renderer.rs`同时承载entry渲染包装、块/工具状态投影、文本布局和测试辅助边界。静态事实已登记，后续需按渲染包装、状态投影和布局拆分并补真实终端验证；本轮不改renderer行为。
+
+## 待拆分：Pager announcements混合内容加载、布局和CTA交互
+
+`views/announcements.rs`同时处理announcement加载/关闭、CTA、布局、缓存、权限和提示状态。8条静态契约已登记，后续需按内容状态、布局命中和CTA路由拆分并补真实终端验证；本轮不改announcement行为。
+
+## 待拆分：Pager line viewer混合文件搜索、命中高亮和滚动定位
+
+`views/file_search/line_viewer.rs`同时处理文件搜索行查看、匹配高亮、滚动定位和命中投影。3条静态契约已登记，后续需按搜索结果模型、布局高亮和滚动定位拆分并补真实文件搜索验证；本轮不改viewer行为。
+
+## 待拆分：Pager block viewer混合内容查看、布局和选择状态
+
+`views/block_viewer.rs`同时处理block查看器、滚动/布局、文本选择和输入状态投影。9条静态契约已登记，后续需按内容查看、布局和选择状态拆分并补真实终端验证；本轮不改viewer行为。

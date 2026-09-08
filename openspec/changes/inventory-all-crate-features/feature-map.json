@@ -90480,6 +90480,194 @@
       [
         "crates/codegen/pager/src/views/prompt_widget/mod.rs",
         "file_ref_display"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::new"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::new_markdown"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::is_markdown"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "build_prefixes"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::content"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::prefix"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::prefix_in_selection"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::prefix_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::stable_id"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::search_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::copy_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::desired_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::goto_line_number"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "SourceLine::render"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "CommentLine::new"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "CommentLine::content"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "CommentLine::prefix"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "CommentLine::prefix_in_selection"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "CommentLine::prefix_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "CommentLine::stable_id"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "CommentLine::search_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "CommentLine::copy_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "CommentLine::desired_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "CommentLine::render"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::line_number"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::comment_id"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::content"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::prefix"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::prefix_in_selection"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::prefix_cursor"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::stable_id"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::is_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::search_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::copy_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::desired_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::render"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "PlanViewerItem::goto_line_number"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "build_source_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "source_line_count"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "build_markdown_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "highlight_to_ratatui_line"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "digit_count"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "build_markdown_lines_preserves_blank_source_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "markdown_source_blank_line_renders_as_numbered_empty_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "markdown_viewer_preserves_soft_break_collapsed_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "line_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "row_text"
       ]
     ]
   },
@@ -90932,6 +91120,14 @@
       [
         "crates/codegen/pager/src/app/agent_view/modal_routing.rs",
         "AgentView::handle_modal_mouse"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "build_shortcut_button"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "render_line_viewer"
       ]
     ]
   },
@@ -94709,6 +94905,106 @@
       [
         "crates/codegen/pager/src/scrollback/state/selection.rs",
         "ScrollbackState::find_last_selectable_in_range"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::open"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::open_markdown"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::open_markdown_content"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::set_initial_selection"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::rebuild_markdown_for_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::markdown_content_for_test"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::markdown_content_for_feedback"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::plan_mut"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::plan_ref"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::feedback_active"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::show_footer"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::source_line_at_screen_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::prepare_layout"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::rebuild_with_comments"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::interleave_comments"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::selected_line_range"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::line_range_suffix"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "LineViewerState::list_pane_style"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "open_markdown_content_uses_in_memory_content"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "markdown_content_for_test_returns_in_memory_content"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "open_markdown_content_rejects_blank_content"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "plan_preview_exposes_full_raw_markdown_for_copy"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "markdown_viewer_selection_uses_source_line_numbers_with_blank_rows"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "markdown_viewer_comment_range_maps_full_soft_break_paragraph"
+      ],
+      [
+        "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "source_line"
       ]
     ]
   },
@@ -158914,6 +159210,1150 @@
       [
         "crates/codegen/pager/src/views/modal_window.rs",
         "default_matches_new"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Session announcement selection, expiry, visibility, and critical precedence",
+    "contract": "The session announcement selector SHALL consider only visible live critical or promo announcements, skip hidden dismissible entries, retain non-dismissible entries even when their hide key is stored, skip expired entries at draw time, and always select the first live critical before falling back to the first live promo.",
+    "scenarios": [
+      [
+        "Critical filter",
+        "the list includes info/warning, missing-message, empty-message, and critical entries",
+        "the first usable live critical is selected and lower severities/empty entries are ignored."
+      ],
+      [
+        "Hidden selection",
+        "the first selected item is hidden",
+        "the next unhidden item is selected; hiding all eligible items yields no slot item."
+      ],
+      [
+        "Expiry",
+        "an expires_at boundary is reached",
+        "the expired item is skipped and the next live candidate is selected."
+      ],
+      [
+        "Priority",
+        "critical and promo candidates coexist",
+        "critical owns the single session slot regardless of list order; promo takes over only when no critical is selected."
+      ],
+      [
+        "Pinned item",
+        "dismissible is explicitly false and its hide key is stored",
+        "the item remains selectable; absent/true dismissible values remain hideable."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "is_critical"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "is_promo"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "is_live_critical"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "is_live_promo"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "is_live_session_announcement"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "is_dismissible"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "is_hidden"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "first_critical_session_announcement_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "first_promo_session_announcement_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "first_session_announcement"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "first_session_announcement_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "visible_announcements"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "first_critical_session_announcement_skips_non_critical_and_empty"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "first_critical_selection_skips_hidden_and_reveals_next"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "first_critical_session_announcement_at_skips_expired"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "first_promo_selection_filters_severity_and_hidden"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "first_promo_session_announcement_at_skips_expired"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "first_session_announcement_prefers_critical_over_promo"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "non_dismissible_selected_despite_stored_hide_key"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Session announcement slash gate, hide keys, critical gate, and banner height",
+    "contract": "The session predicates SHALL keep `/announcements show` reachable whenever any live critical or promo exists regardless of hidden state, expose live session hide keys for clearing, report whether a critical owns the slot, and derive banner height as 2 for critical, 1 for promo, or 0 when no selectable item remains.",
+    "scenarios": [
+      [
+        "Slash gate",
+        "live critical/promo entries exist but all are hidden",
+        "has_session_announcements remains true."
+      ],
+      [
+        "Hide set",
+        "the current time is supplied",
+        "session_announcement_hide_keys_at returns hide keys for live critical/promo entries only, excluding info, empty, and expired entries."
+      ],
+      [
+        "Critical gate",
+        "a live unhidden critical exists",
+        "has_critical_session_announcement is true."
+      ],
+      [
+        "Height",
+        "selection is critical/promo/empty",
+        "session_banner_height returns 2/1/0 respectively."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "session_announcement_hide_keys"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "session_announcement_hide_keys_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "has_session_announcements"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "has_critical_session_announcement"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "session_banner_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "announcement_hide_key"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "session_hide_keys_cover_live_criticals_and_promos_only"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "session_banner_height_zero_for_unfiltered_info_only"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "session_banner_height_is_two_for_critical"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Promo CTA validation, safe URL target, and slot consistency",
+    "contract": "A promo CTA SHALL be usable only when trimmed label and URL are nonempty and the URL passes the Standard safe-open scheme filter; promo_cta and promo_cta_target SHALL resolve through the current banner slot, return no target when a critical owns it or the promo is hidden/invalid, and expose the owner for dismissibility decisions.",
+    "scenarios": [
+      [
+        "Usable pair",
+        "label and URL contain nonempty trimmed values with an allowed scheme",
+        "the trimmed label/URL are returned as the CTA target."
+      ],
+      [
+        "Partial CTA",
+        "label or URL is absent/blank",
+        "no CTA target is returned."
+      ],
+      [
+        "Unsafe URL",
+        "URL uses file, javascript, custom, or malformed scheme",
+        "no button/OSC target/dispatch URL is armed."
+      ],
+      [
+        "Slot owner",
+        "a live critical precedes a promo",
+        "promo_cta_target returns None until the critical is hidden or expired."
+      ],
+      [
+        "Pinned status",
+        "the selected promo is dismissible false",
+        "promo_cta exposes an owner whose is_dismissible value enables pinned behavior."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "usable_cta"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "promo_cta"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "promo_cta_target"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "is_safe_to_open"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "SchemeFilter::Standard"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "promo_cta_target_requires_usable_pair"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "promo_cta_returns_label_and_pinned_flag"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "promo_cta_target_yields_to_critical_slot_owner"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "usable_cta_rejects_unsafe_schemes"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Promo CTA caption and reservation contract",
+    "contract": "The CTA helpers SHALL treat a caption as trimmed nonempty decorative text independent of CTA validity, reserve button plus optional caption display width, and keep the caption out of the clickable rect; callers may suppress the caption while retaining the button.",
+    "scenarios": [
+      [
+        "Caption normalization",
+        "cta.caption is absent, blank, or padded",
+        "usable_cta_caption returns None or the trimmed text."
+      ],
+      [
+        "Invalid CTA caption",
+        "a URL is absent but caption exists",
+        "caption access remains available, but no button or caption is painted without a usable CTA."
+      ],
+      [
+        "Reservation",
+        "label and optional caption are supplied",
+        "promo_cta_reserve counts `[label]` plus its leading caption space and caption width."
+      ],
+      [
+        "Permission gate",
+        "caption_allowed is false",
+        "the button remains eligible while the decorative caption is omitted."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "usable_cta_caption"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "promo_cta_reserve"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_cta_button"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "usable_cta_caption_trims_and_never_resurrects_unusable_cta"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row_non_dismissible_shows_configured_caption"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "promo_cta_reserve_counts_button_and_caption"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Shared CTA button painting and hit rectangle",
+    "contract": "render_cta_button SHALL paint a warning-colored `[label]` button with hover background, truncate the button to max_width without overpainting, append a dim caption only when it fits whole, and return a clickable rect covering only the button or None when no cell fits.",
+    "scenarios": [
+      [
+        "Normal button",
+        "positive width is available",
+        "the warning button is painted and its rect covers exactly the displayed button."
+      ],
+      [
+        "Hover",
+        "hovered is true",
+        "warning foreground and bg_hover are applied."
+      ],
+      [
+        "Caption",
+        "caption fits after the button",
+        "dim caption text is painted after one space while the rect remains button-only."
+      ],
+      [
+        "Tight width",
+        "only part of caption or button fits",
+        "caption is dropped whole and button is clipped to max_width."
+      ],
+      [
+        "Zero width",
+        "max_width is zero",
+        "nothing is painted and no rect is returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_cta_button"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "truncate_str"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "BannerHits"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_cta_button_clamps_to_max_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row_hover_styles"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Critical banner two-row rendering and reservation",
+    "contract": "render_banner SHALL paint the selected critical as two rows with an error-red bold `! title`, right-aligned hide button, message indented past the prefix, and dim hide command; it SHALL reserve affordance widths before truncating title/message and reclaim those columns for non-dismissible announcements.",
+    "scenarios": [
+      [
+        "Critical row",
+        "a live critical has title/message",
+        "row 0 uses error-red prefix/title and row 1 uses primary message plus dim hide CTA, with hide/CTA hit semantics as documented."
+      ],
+      [
+        "Long content",
+        "title or message exceeds available width",
+        "title/message truncate with an ellipsis while `[hide]` and hide command retain their full reserved widths."
+      ],
+      [
+        "Hover",
+        "hide_hovered is true",
+        "the hide button uses accent_error without DIM."
+      ],
+      [
+        "Pinned critical",
+        "dismissible is false",
+        "both hide affordances are omitted and title/message reclaim the reserved columns."
+      ],
+      [
+        "Empty critical",
+        "title and message are both absent/blank",
+        "no banner hits are returned."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_banner"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_critical_rows"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "paint_hide_button"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "dim_hide_style"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "HIDE_CTA"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "HIDE_BUTTON"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "TITLE_PREFIX"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_banner_title_row_with_hide_button_message_row_with_cta"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_banner_hide_button_highlights_on_hover"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_banner_truncates_message_never_cta"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_banner_shows_first_critical_only"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_banner_ignores_info_only"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_banner_long_title_truncates_before_hide_button"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_critical_rows_non_dismissible_reclaims_hide_columns"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Promo banner one-row rendering and affordance reservation",
+    "contract": "render_banner SHALL paint a live promo as one row with a validated warning CTA at the left, optional pinned caption, and right-aligned hide command/button only for dismissible promos; promo message text SHALL remain unpainted on the banner, and right-side affordances SHALL retain their full width while the CTA truncates first.",
+    "scenarios": [
+      [
+        "Dismissible promo",
+        "a usable CTA and hideable promo are selected",
+        "the CTA, hide command, and `[hide]` are painted with matching hit rectangles."
+      ],
+      [
+        "Pinned promo",
+        "dismissible is false and caption is allowed",
+        "the CTA and dim caption paint without any hide affordance."
+      ],
+      [
+        "No CTA",
+        "promo has no usable CTA",
+        "no CTA button/rect or message is painted; dismissible promos may still show hide affordances."
+      ],
+      [
+        "Narrow row",
+        "the reserved hide block leaves little CTA width",
+        "hide affordances remain intact, hide CTA may be dropped whole, and the button is truncated instead."
+      ],
+      [
+        "Hover",
+        "hide or CTA is hovered",
+        "respective error-red or warning/bg_hover style is applied."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "paint_hide_button"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_cta_button"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "is_dismissible"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "BannerHits"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row_non_dismissible_shows_configured_caption"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row_truncates_button_never_affordances"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row_without_cta_paints_no_button"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row_narrow_width_drops_hide_cta_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row_hover_styles"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Banner hit metadata and zero-area behavior",
+    "contract": "render_banner SHALL return BannerHits only for affordances actually painted, with critical rows never exposing a CTA hit; zero-width/height areas and non-session severities SHALL produce default empty hits without painting announcement text.",
+    "scenarios": [
+      [
+        "Zero area",
+        "render area has zero width or height",
+        "default BannerHits is returned and no drawing occurs."
+      ],
+      [
+        "Info-only",
+        "only info/warning announcements are present",
+        "no banner text or hit rectangles are painted."
+      ],
+      [
+        "Critical",
+        "critical is selected",
+        "hide may be set while cta is always None."
+      ],
+      [
+        "Promo",
+        "promo CTA/hide is actually painted",
+        "corresponding rects identify only the clickable button cells."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_banner"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "BannerHits"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_critical_rows"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_banner_ignores_info_only"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_banner_title_row_with_hide_button_message_row_with_cta"
+      ],
+      [
+        "crates/codegen/pager/src/views/announcements.rs",
+        "render_promo_row_without_cta_paints_no_button"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "BlockViewer ContentLine SHALL adapt styled rendered lines to ListItem with stable pre-wrap IDs, plain search text, and optional full-width backgrounds; TextEndpoint/TextDrag SHALL provide ordered, character-column selections that remain stable across viewport scrolling.",
+    "contract": "ContentLine::from_lines SHALL preserve each Line, concatenate span content for plain_text, assign the source line index as stable_id, and retain line background. TextDrag::ordered SHALL return endpoints in reading order and is_non_empty SHALL report whether at least one character-column is covered; ListItem accessors SHALL expose these exact fields.",
+    "scenarios": [
+      [
+        "Line adaptation",
+        "styled lines are converted to viewer items",
+        "content, plain search text, zero-based stable ID, and background are retained."
+      ],
+      [
+        "Stable drag order",
+        "mouse anchor is after the head",
+        "ordered returns the head first without mutating the selection."
+      ],
+      [
+        "Empty drag",
+        "anchor and head are equal",
+        "is_non_empty returns false."
+      ],
+      [
+        "Search text",
+        "a line has multiple spans",
+        "search sees their concatenated textual content without style metadata."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "ContentLine"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "ContentLine::from_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "impl ListItem for ContentLine"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "TextEndpoint"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "TextDrag"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "TextDrag::ordered"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "TextDrag::is_non_empty"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "ContentLine::content"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "ContentLine::stable_id"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "ContentLine::search_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "ContentLine::background"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "BlockViewerPane SHALL construct configured ListPane viewers for markdown, execute, edit, background-task, web-fetch, read, grep, list-dir, integration-search, use-tool, and plain-text sources, rejecting incompatible or empty viewer requests and preserving source-specific content metadata.",
+    "contract": "Markdown/execute viewers SHALL enable wrapping, search/filter/copy/visual selection and follow only while streaming; static viewers SHALL disable follow. Read SHALL show error text when content is absent or syntax-highlighted absolute-line content otherwise. Edit SHALL reject empty hunks and build diff metadata; integration search SHALL render limits/results/tool descriptions; use-tool SHALL render input plus output/error; background tasks SHALL retain task_id for central-store refresh; plain text SHALL prepend a styled title and separator with collision-safe IDs.",
+    "scenarios": [
+      [
+        "Markdown/execute",
+        "entry block is the matching type",
+        "a wrapped viewer with configured ListPane state and system clipboard is returned."
+      ],
+      [
+        "Incompatible source",
+        "constructor receives another RenderBlock variant",
+        "None is returned."
+      ],
+      [
+        "Read error/content",
+        "read has an error without content or content with an optional line range",
+        "error lines or syntax-highlighted numbered lines are displayed."
+      ],
+      [
+        "Edit empty/nonempty",
+        "edit has no hunks or one or more hunks",
+        "empty edits return None; nonempty edits expose rendered diff lines and parallel metadata."
+      ],
+      [
+        "Structured tools",
+        "integration/use tool fields are present",
+        "metadata, arguments, descriptions, outputs, and errors are laid out in styled lines."
+      ],
+      [
+        "Plain/background content",
+        "catalog text or task stdout is requested",
+        "title/separator or terminal-output lines are represented and task identity is retained."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "ViewerKind"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_markdown"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_execute"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_static_content"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_web_fetch"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_read"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_grep"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_list_dir"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_integration_search"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_use_tool"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_bg_task"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_plain_text"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::for_edit"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Viewer item builders SHALL preserve terminal-output styling, edit diff line metadata, markdown source-line maps, and stable cursor restoration across raw-mode or content rebuilds.",
+    "contract": "build_execute_items SHALL convert terminal output into styled ContentLines with plain text, stable indices, and dark background. build_edit_items SHALL use the block-owned wide diff renderer, interleave separator metadata, and parallelize each rendered row with optional DiffLineMeta. extract_markdown_lines/generation/source map SHALL read only markdown-capable blocks; source_line_for_id and jump_to_source_line SHALL map stable pre-wrap IDs to the first rendered line at or after the requested source line.",
+    "scenarios": [
+      [
+        "Streaming output",
+        "execute stdout is present or absent",
+        "terminal output rows are converted or an empty list is returned."
+      ],
+      [
+        "Diff metadata",
+        "rendered edit lines include hunk separators",
+        "separator rows have None metadata and diff rows retain tag/text/old/new line numbers."
+      ],
+      [
+        "Raw toggle restore",
+        "a markdown source map changes after rebuild",
+        "the saved source line resolves to the first matching new item ID."
+      ],
+      [
+        "Unsupported source map",
+        "a non-markdown block is queried",
+        "generation/source-map extraction returns None and no jump occurs."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::build_execute_items"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::build_edit_items"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::extract_markdown_lines"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::extract_generation"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::extract_line_source_map"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::source_line_for_id"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::jump_to_source_line"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::static_lines_from_block"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Viewer ticks SHALL detect generation or stdout changes, invalidate/rebuild layout content, redraw when changed, and on running-to-finished transition disable follow and select the last item by stable ID.",
+    "contract": "tick and tick_bg_task SHALL compare the stored generation counter (markdown generation or output length), rebuild only the applicable dynamic content, invalidate ListPane layout, and return whether redraw is needed. A running-to-finished transition SHALL permanently disable follow, select the last available item, and request redraw; static viewer kinds remain unchanged.",
+    "scenarios": [
+      [
+        "Content generation",
+        "a markdown generation or execute output length changes",
+        "items are rebuilt, layout invalidated, and tick returns true."
+      ],
+      [
+        "No change",
+        "generation and running state remain unchanged",
+        "tick returns false."
+      ],
+      [
+        "Finish transition",
+        "a running entry/task becomes finished",
+        "follow is disabled permanently, the last item ID is selected, and redraw is requested."
+      ],
+      [
+        "Background task",
+        "central stdout changes",
+        "tick_bg_task replaces terminal-output items and retains task identity."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::tick_bg_task"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::rebuild_items"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::tick"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "ListPaneState::invalidate_layout"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "ListPaneState::disable_follow_permanently"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "ListPaneState::select_by_id"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "BlockViewer SHALL expose kind-specific shortcut hints, close-key detection, raw-mode and metadata-copy requests, edit patch-copy requests, ListPane navigation/search/paste routing, and deferred copy extraction for the caller.",
+    "contract": "shortcuts_hints SHALL always expose close/search/filter/select/wrap and add r or Y according to viewer kind. is_close_key SHALL recognize Ctrl-F or Esc/q only when no input bar or visual selection is active. handle_key SHALL set pending flags for markdown raw, supported metadata Y, or edit y, otherwise route the unified prepend+body items to ListPane and clear sticky text drag after consumed actions. process_pending_copy SHALL return metadata, full block text, or a range-derived unified patch, clear its pending flag, exit visual mode, and filter empty results.",
+    "scenarios": [
+      [
+        "Close gating",
+        "Ctrl-F, Esc, or q is pressed with or without input/visual state",
+        "only eligible close keys return true."
+      ],
+      [
+        "Raw request",
+        "markdown viewer receives bare r",
+        "raw_toggle_pending is set and the key is consumed."
+      ],
+      [
+        "Metadata request",
+        "supported viewer receives Shift-Y",
+        "copy_meta_pending is set for caller-side clipboard handling."
+      ],
+      [
+        "Edit content request",
+        "edit viewer receives bare y",
+        "copy_content_pending is set before ListPane handles it."
+      ],
+      [
+        "Ordinary navigation",
+        "a ListPane key or paste is received",
+        "the same unified item space is passed and consumed state clears sticky drag selection."
+      ],
+      [
+        "Pending copy",
+        "caller drains pending actions",
+        "metadata, block text, or a generated patch is returned and visual state is cleared."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::shortcuts_hints"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::is_close_key"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::handle_key"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::handle_paste"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::patch_from_range"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::process_pending_copy"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::rebuild_unified_cache"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Edit viewer patch copy SHALL serialize only diff rows covered by the requested item range into a unified patch with correct file headers, hunk starts/counts, prefixes, and newline trimming.",
+    "contract": "patch_from_range SHALL return None for non-edit/empty metadata or ranges containing no diff rows. It SHALL emit `--- a/path`, `+++ b/path`, derive old/new starts from non-insert/non-delete rows with defaults of one, count old/new rows excluding opposite changes, map Equal/Insert/Delete to space/plus/minus, trim CR/LF terminators, and terminate every emitted row with LF.",
+    "scenarios": [
+      [
+        "No metadata",
+        "viewer is not an edit or range has no diff rows",
+        "None is returned."
+      ],
+      [
+        "Mixed hunk",
+        "range contains equal, insert, delete, and separator rows",
+        "headers/counts and prefixes reflect only diff rows."
+      ],
+      [
+        "Line terminators",
+        "diff text ends in CR/LF",
+        "terminators are stripped before exactly one LF is emitted."
+      ],
+      [
+        "Visual edit copy",
+        "visual range includes prepended lines",
+        "caller adjusts the range before serialization so only parallel diff metadata is read."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::patch_from_range"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::process_pending_copy"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "DiffLineMeta"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "BlockViewer mouse drag SHALL create character-precise stable selections over unified preamble/body items, auto-scroll at content edges, copy off-screen covered text on release, and render visible selection overlays using display-cell and grapheme-aware bounds.",
+    "contract": "handle_mouse SHALL exclude scrollbar columns from content drags, clear keyboard visual mode on a new left-down, update a stable TextDrag during drag with 1..5-row edge autoscroll, clamp release coordinates, extract copy text on release, and clear selection on other clicks. screen_to_endpoint SHALL map wrapped screen coordinates through joiner widths to logical display columns; col_past_char SHALL advance past the grapheme at a display column; text_for_drag SHALL slice start/end lines and include complete middle lines. render_text_drag_overlay SHALL invert only visible selected cells while preserving off-screen selection for copying.",
+    "scenarios": [
+      [
+        "Start drag",
+        "left-down is inside content",
+        "a stable anchor/head endpoint is created and keyboard visual mode is cleared."
+      ],
+      [
+        "Edge drag",
+        "drag moves above/below content",
+        "scroll advances by a clamped distance and head maps to the clamped screen endpoint."
+      ],
+      [
+        "Release",
+        "left-up follows a nonempty drag",
+        "selected text is extracted immediately, drag is cleared, and caller-visible drag_copy_text is populated."
+      ],
+      [
+        "Unicode/wrap",
+        "selection crosses wrapped CJK/grapheme content",
+        "screen columns map to logical display columns with joiner compensation and grapheme end inclusion."
+      ],
+      [
+        "Visible overlay",
+        "a sticky or active selection overlaps rendered rows",
+        "only visible cells in the selection range receive highlight."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "TextDrag::ordered"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "TextDrag::is_non_empty"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::handle_mouse"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::screen_to_endpoint"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::effective_wrap_width"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::wrap_item_with_joiners"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::col_past_char"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::text_for_drag"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::render_text_drag_overlay"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "line_display_width_u16"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "BlockViewer render_content SHALL combine preamble and body items in one stable index space, react to theme changes, prepare ListPane layout at the effective scrollbar-aware width, and render content into modal chrome without out-of-bounds handler indices.",
+    "contract": "render_content SHALL restyle ListPane and rebuild execute/background content when ThemeKind changes, cache prepend lines with high-half IDs, rebuild the unified cache, skip empty/zero areas, perform a scrollbar-width-aware initial layout and a corrective wider layout when wrapped content overflows, then render the same unified vec through ListPane. last_content_area SHALL be updated for mouse hit testing.",
+    "scenarios": [
+      [
+        "Theme switch",
+        "theme kind changes before render",
+        "list style updates and dynamic execute/background items are rebuilt or marked for refresh."
+      ],
+      [
+        "Preamble",
+        "modal supplies header lines",
+        "header and blank separator items use high u64 IDs and share the ListPane index space with body."
+      ],
+      [
+        "Scrollbar guess",
+        "content likely fits or may overflow",
+        "layout uses content width first or reserves scrollbar columns, then corrects width if total height proves overflow."
+      ],
+      [
+        "Empty area",
+        "content area or unified items are empty",
+        "no ListPane render occurs while hit-test area is still updated."
+      ],
+      [
+        "Input consistency",
+        "handlers run after render",
+        "cached unified items match the prepared layout, preventing prepend/body index drift."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::render_content"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::rebuild_unified_cache"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::last_content_area"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "SCROLLBAR_TOTAL_COLS"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The block viewer source SHALL preserve its documented ListPane/viewer boundaries: it delegates navigation and filtering to ListPaneState, handles source-specific construction and patch/text selection locally, and exposes pending actions for callers rather than performing external clipboard/raw-mode/entry mutation itself.",
+    "contract": "All viewer methods SHALL maintain the ownership split represented by the fields and comments: this module owns viewer items, drag geometry, pending flags, and modal render state; callers own entry raw toggles and clipboard side effects. No inline tests are present in this 1,748-line source, so this requirement records source-level boundaries only.",
+    "scenarios": [
+      [
+        "Caller action",
+        "raw or copy pending flag is set",
+        "the caller must consume the flag and perform external mutation/clipboard work."
+      ],
+      [
+        "List navigation",
+        "search/filter/scroll keys arrive",
+        "ListPaneState remains the navigation owner using the cached unified items."
+      ],
+      [
+        "No inline tests",
+        "the source is statically audited",
+        "test_count is zero and no runtime behavior is claimed."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::handle_key"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::process_pending_copy"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::handle_scroll"
+      ],
+      [
+        "crates/codegen/pager/src/views/block_viewer.rs",
+        "BlockViewerPane::handle_paste"
       ]
     ]
   }

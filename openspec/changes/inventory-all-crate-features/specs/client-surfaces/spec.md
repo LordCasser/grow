@@ -14616,3 +14616,398 @@ ModalWindowState::new/default SHALL initialize no popup/close/tab/shortcut hit r
 - **THEN** tab_count=n and tab_rects has n None entries.
 
 证据：`crates/codegen/pager/src/views/modal_window.rs` — `ModalWindowState::new`；`crates/codegen/pager/src/views/modal_window.rs` — `ModalWindowState::with_tabs`；`crates/codegen/pager/src/views/modal_window.rs` — `ModalWindowState::default`；`crates/codegen/pager/src/views/modal_window.rs` — `tab_rects`；`crates/codegen/pager/src/views/modal_window.rs` — `close_button_rect`；`crates/codegen/pager/src/views/modal_window.rs` — `new_defaults`；`crates/codegen/pager/src/views/modal_window.rs` — `with_tabs_initialises_rects`；`crates/codegen/pager/src/views/modal_window.rs` — `default_matches_new`。
+### Requirement: Session announcement selection, expiry, visibility, and critical precedence
+The session announcement selector SHALL consider only visible live critical or promo announcements, skip hidden dismissible entries, retain non-dismissible entries even when their hide key is stored, skip expired entries at draw time, and always select the first live critical before falling back to the first live promo.
+
+#### Scenario: Critical filter
+- **WHEN** the list includes info/warning, missing-message, empty-message, and critical entries
+- **THEN** the first usable live critical is selected and lower severities/empty entries are ignored.
+
+#### Scenario: Hidden selection
+- **WHEN** the first selected item is hidden
+- **THEN** the next unhidden item is selected; hiding all eligible items yields no slot item.
+
+#### Scenario: Expiry
+- **WHEN** an expires_at boundary is reached
+- **THEN** the expired item is skipped and the next live candidate is selected.
+
+#### Scenario: Priority
+- **WHEN** critical and promo candidates coexist
+- **THEN** critical owns the single session slot regardless of list order; promo takes over only when no critical is selected.
+
+#### Scenario: Pinned item
+- **WHEN** dismissible is explicitly false and its hide key is stored
+- **THEN** the item remains selectable; absent/true dismissible values remain hideable.
+
+证据：`crates/codegen/pager/src/views/announcements.rs` — `is_critical`；`crates/codegen/pager/src/views/announcements.rs` — `is_promo`；`crates/codegen/pager/src/views/announcements.rs` — `is_live_critical`；`crates/codegen/pager/src/views/announcements.rs` — `is_live_promo`；`crates/codegen/pager/src/views/announcements.rs` — `is_live_session_announcement`；`crates/codegen/pager/src/views/announcements.rs` — `is_dismissible`；`crates/codegen/pager/src/views/announcements.rs` — `is_hidden`；`crates/codegen/pager/src/views/announcements.rs` — `first_critical_session_announcement_at`；`crates/codegen/pager/src/views/announcements.rs` — `first_promo_session_announcement_at`；`crates/codegen/pager/src/views/announcements.rs` — `first_session_announcement`；`crates/codegen/pager/src/views/announcements.rs` — `first_session_announcement_at`；`crates/codegen/pager/src/views/announcements.rs` — `visible_announcements`；`crates/codegen/pager/src/views/announcements.rs` — `first_critical_session_announcement_skips_non_critical_and_empty`；`crates/codegen/pager/src/views/announcements.rs` — `first_critical_selection_skips_hidden_and_reveals_next`；`crates/codegen/pager/src/views/announcements.rs` — `first_critical_session_announcement_at_skips_expired`；`crates/codegen/pager/src/views/announcements.rs` — `first_promo_selection_filters_severity_and_hidden`；`crates/codegen/pager/src/views/announcements.rs` — `first_promo_session_announcement_at_skips_expired`；`crates/codegen/pager/src/views/announcements.rs` — `first_session_announcement_prefers_critical_over_promo`；`crates/codegen/pager/src/views/announcements.rs` — `non_dismissible_selected_despite_stored_hide_key`。
+
+### Requirement: Session announcement slash gate, hide keys, critical gate, and banner height
+The session predicates SHALL keep `/announcements show` reachable whenever any live critical or promo exists regardless of hidden state, expose live session hide keys for clearing, report whether a critical owns the slot, and derive banner height as 2 for critical, 1 for promo, or 0 when no selectable item remains.
+
+#### Scenario: Slash gate
+- **WHEN** live critical/promo entries exist but all are hidden
+- **THEN** has_session_announcements remains true.
+
+#### Scenario: Hide set
+- **WHEN** the current time is supplied
+- **THEN** session_announcement_hide_keys_at returns hide keys for live critical/promo entries only, excluding info, empty, and expired entries.
+
+#### Scenario: Critical gate
+- **WHEN** a live unhidden critical exists
+- **THEN** has_critical_session_announcement is true.
+
+#### Scenario: Height
+- **WHEN** selection is critical/promo/empty
+- **THEN** session_banner_height returns 2/1/0 respectively.
+
+证据：`crates/codegen/pager/src/views/announcements.rs` — `session_announcement_hide_keys`；`crates/codegen/pager/src/views/announcements.rs` — `session_announcement_hide_keys_at`；`crates/codegen/pager/src/views/announcements.rs` — `has_session_announcements`；`crates/codegen/pager/src/views/announcements.rs` — `has_critical_session_announcement`；`crates/codegen/pager/src/views/announcements.rs` — `session_banner_height`；`crates/codegen/pager/src/views/announcements.rs` — `announcement_hide_key`；`crates/codegen/pager/src/views/announcements.rs` — `session_hide_keys_cover_live_criticals_and_promos_only`；`crates/codegen/pager/src/views/announcements.rs` — `session_banner_height_zero_for_unfiltered_info_only`；`crates/codegen/pager/src/views/announcements.rs` — `session_banner_height_is_two_for_critical`。
+
+### Requirement: Promo CTA validation, safe URL target, and slot consistency
+A promo CTA SHALL be usable only when trimmed label and URL are nonempty and the URL passes the Standard safe-open scheme filter; promo_cta and promo_cta_target SHALL resolve through the current banner slot, return no target when a critical owns it or the promo is hidden/invalid, and expose the owner for dismissibility decisions.
+
+#### Scenario: Usable pair
+- **WHEN** label and URL contain nonempty trimmed values with an allowed scheme
+- **THEN** the trimmed label/URL are returned as the CTA target.
+
+#### Scenario: Partial CTA
+- **WHEN** label or URL is absent/blank
+- **THEN** no CTA target is returned.
+
+#### Scenario: Unsafe URL
+- **WHEN** URL uses file, javascript, custom, or malformed scheme
+- **THEN** no button/OSC target/dispatch URL is armed.
+
+#### Scenario: Slot owner
+- **WHEN** a live critical precedes a promo
+- **THEN** promo_cta_target returns None until the critical is hidden or expired.
+
+#### Scenario: Pinned status
+- **WHEN** the selected promo is dismissible false
+- **THEN** promo_cta exposes an owner whose is_dismissible value enables pinned behavior.
+
+证据：`crates/codegen/pager/src/views/announcements.rs` — `usable_cta`；`crates/codegen/pager/src/views/announcements.rs` — `promo_cta`；`crates/codegen/pager/src/views/announcements.rs` — `promo_cta_target`；`crates/codegen/pager/src/views/announcements.rs` — `is_safe_to_open`；`crates/codegen/pager/src/views/announcements.rs` — `SchemeFilter::Standard`；`crates/codegen/pager/src/views/announcements.rs` — `promo_cta_target_requires_usable_pair`；`crates/codegen/pager/src/views/announcements.rs` — `promo_cta_returns_label_and_pinned_flag`；`crates/codegen/pager/src/views/announcements.rs` — `promo_cta_target_yields_to_critical_slot_owner`；`crates/codegen/pager/src/views/announcements.rs` — `usable_cta_rejects_unsafe_schemes`。
+
+### Requirement: Promo CTA caption and reservation contract
+The CTA helpers SHALL treat a caption as trimmed nonempty decorative text independent of CTA validity, reserve button plus optional caption display width, and keep the caption out of the clickable rect; callers may suppress the caption while retaining the button.
+
+#### Scenario: Caption normalization
+- **WHEN** cta.caption is absent, blank, or padded
+- **THEN** usable_cta_caption returns None or the trimmed text.
+
+#### Scenario: Invalid CTA caption
+- **WHEN** a URL is absent but caption exists
+- **THEN** caption access remains available, but no button or caption is painted without a usable CTA.
+
+#### Scenario: Reservation
+- **WHEN** label and optional caption are supplied
+- **THEN** promo_cta_reserve counts `[label]` plus its leading caption space and caption width.
+
+#### Scenario: Permission gate
+- **WHEN** caption_allowed is false
+- **THEN** the button remains eligible while the decorative caption is omitted.
+
+证据：`crates/codegen/pager/src/views/announcements.rs` — `usable_cta_caption`；`crates/codegen/pager/src/views/announcements.rs` — `promo_cta_reserve`；`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row`；`crates/codegen/pager/src/views/announcements.rs` — `render_cta_button`；`crates/codegen/pager/src/views/announcements.rs` — `usable_cta_caption_trims_and_never_resurrects_unusable_cta`；`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row_non_dismissible_shows_configured_caption`；`crates/codegen/pager/src/views/announcements.rs` — `promo_cta_reserve_counts_button_and_caption`。
+
+### Requirement: Shared CTA button painting and hit rectangle
+render_cta_button SHALL paint a warning-colored `[label]` button with hover background, truncate the button to max_width without overpainting, append a dim caption only when it fits whole, and return a clickable rect covering only the button or None when no cell fits.
+
+#### Scenario: Normal button
+- **WHEN** positive width is available
+- **THEN** the warning button is painted and its rect covers exactly the displayed button.
+
+#### Scenario: Hover
+- **WHEN** hovered is true
+- **THEN** warning foreground and bg_hover are applied.
+
+#### Scenario: Caption
+- **WHEN** caption fits after the button
+- **THEN** dim caption text is painted after one space while the rect remains button-only.
+
+#### Scenario: Tight width
+- **WHEN** only part of caption or button fits
+- **THEN** caption is dropped whole and button is clipped to max_width.
+
+#### Scenario: Zero width
+- **WHEN** max_width is zero
+- **THEN** nothing is painted and no rect is returned.
+
+证据：`crates/codegen/pager/src/views/announcements.rs` — `render_cta_button`；`crates/codegen/pager/src/views/announcements.rs` — `truncate_str`；`crates/codegen/pager/src/views/announcements.rs` — `BannerHits`；`crates/codegen/pager/src/views/announcements.rs` — `render_cta_button_clamps_to_max_width`；`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row_hover_styles`。
+
+### Requirement: Critical banner two-row rendering and reservation
+render_banner SHALL paint the selected critical as two rows with an error-red bold `! title`, right-aligned hide button, message indented past the prefix, and dim hide command; it SHALL reserve affordance widths before truncating title/message and reclaim those columns for non-dismissible announcements.
+
+#### Scenario: Critical row
+- **WHEN** a live critical has title/message
+- **THEN** row 0 uses error-red prefix/title and row 1 uses primary message plus dim hide CTA, with hide/CTA hit semantics as documented.
+
+#### Scenario: Long content
+- **WHEN** title or message exceeds available width
+- **THEN** title/message truncate with an ellipsis while `[hide]` and hide command retain their full reserved widths.
+
+#### Scenario: Hover
+- **WHEN** hide_hovered is true
+- **THEN** the hide button uses accent_error without DIM.
+
+#### Scenario: Pinned critical
+- **WHEN** dismissible is false
+- **THEN** both hide affordances are omitted and title/message reclaim the reserved columns.
+
+#### Scenario: Empty critical
+- **WHEN** title and message are both absent/blank
+- **THEN** no banner hits are returned.
+
+证据：`crates/codegen/pager/src/views/announcements.rs` — `render_banner`；`crates/codegen/pager/src/views/announcements.rs` — `render_critical_rows`；`crates/codegen/pager/src/views/announcements.rs` — `paint_hide_button`；`crates/codegen/pager/src/views/announcements.rs` — `dim_hide_style`；`crates/codegen/pager/src/views/announcements.rs` — `HIDE_CTA`；`crates/codegen/pager/src/views/announcements.rs` — `HIDE_BUTTON`；`crates/codegen/pager/src/views/announcements.rs` — `TITLE_PREFIX`；`crates/codegen/pager/src/views/announcements.rs` — `render_banner_title_row_with_hide_button_message_row_with_cta`；`crates/codegen/pager/src/views/announcements.rs` — `render_banner_hide_button_highlights_on_hover`；`crates/codegen/pager/src/views/announcements.rs` — `render_banner_truncates_message_never_cta`；`crates/codegen/pager/src/views/announcements.rs` — `render_banner_shows_first_critical_only`；`crates/codegen/pager/src/views/announcements.rs` — `render_banner_ignores_info_only`；`crates/codegen/pager/src/views/announcements.rs` — `render_banner_long_title_truncates_before_hide_button`；`crates/codegen/pager/src/views/announcements.rs` — `render_critical_rows_non_dismissible_reclaims_hide_columns`。
+
+### Requirement: Promo banner one-row rendering and affordance reservation
+render_banner SHALL paint a live promo as one row with a validated warning CTA at the left, optional pinned caption, and right-aligned hide command/button only for dismissible promos; promo message text SHALL remain unpainted on the banner, and right-side affordances SHALL retain their full width while the CTA truncates first.
+
+#### Scenario: Dismissible promo
+- **WHEN** a usable CTA and hideable promo are selected
+- **THEN** the CTA, hide command, and `[hide]` are painted with matching hit rectangles.
+
+#### Scenario: Pinned promo
+- **WHEN** dismissible is false and caption is allowed
+- **THEN** the CTA and dim caption paint without any hide affordance.
+
+#### Scenario: No CTA
+- **WHEN** promo has no usable CTA
+- **THEN** no CTA button/rect or message is painted; dismissible promos may still show hide affordances.
+
+#### Scenario: Narrow row
+- **WHEN** the reserved hide block leaves little CTA width
+- **THEN** hide affordances remain intact, hide CTA may be dropped whole, and the button is truncated instead.
+
+#### Scenario: Hover
+- **WHEN** hide or CTA is hovered
+- **THEN** respective error-red or warning/bg_hover style is applied.
+
+证据：`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row`；`crates/codegen/pager/src/views/announcements.rs` — `paint_hide_button`；`crates/codegen/pager/src/views/announcements.rs` — `render_cta_button`；`crates/codegen/pager/src/views/announcements.rs` — `is_dismissible`；`crates/codegen/pager/src/views/announcements.rs` — `BannerHits`；`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row_non_dismissible_shows_configured_caption`；`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row_truncates_button_never_affordances`；`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row_without_cta_paints_no_button`；`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row_narrow_width_drops_hide_cta_text`；`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row_hover_styles`。
+
+### Requirement: Banner hit metadata and zero-area behavior
+render_banner SHALL return BannerHits only for affordances actually painted, with critical rows never exposing a CTA hit; zero-width/height areas and non-session severities SHALL produce default empty hits without painting announcement text.
+
+#### Scenario: Zero area
+- **WHEN** render area has zero width or height
+- **THEN** default BannerHits is returned and no drawing occurs.
+
+#### Scenario: Info-only
+- **WHEN** only info/warning announcements are present
+- **THEN** no banner text or hit rectangles are painted.
+
+#### Scenario: Critical
+- **WHEN** critical is selected
+- **THEN** hide may be set while cta is always None.
+
+#### Scenario: Promo
+- **WHEN** promo CTA/hide is actually painted
+- **THEN** corresponding rects identify only the clickable button cells.
+
+证据：`crates/codegen/pager/src/views/announcements.rs` — `render_banner`；`crates/codegen/pager/src/views/announcements.rs` — `BannerHits`；`crates/codegen/pager/src/views/announcements.rs` — `render_critical_rows`；`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row`；`crates/codegen/pager/src/views/announcements.rs` — `render_banner_ignores_info_only`；`crates/codegen/pager/src/views/announcements.rs` — `render_banner_title_row_with_hide_button_message_row_with_cta`；`crates/codegen/pager/src/views/announcements.rs` — `render_promo_row_without_cta_paints_no_button`。
+### Requirement: BlockViewer ContentLine SHALL adapt styled rendered lines to ListItem with stable pre-wrap IDs, plain search text, and optional full-width backgrounds; TextEndpoint/TextDrag SHALL provide ordered, character-column selections that remain stable across viewport scrolling.
+ContentLine::from_lines SHALL preserve each Line, concatenate span content for plain_text, assign the source line index as stable_id, and retain line background. TextDrag::ordered SHALL return endpoints in reading order and is_non_empty SHALL report whether at least one character-column is covered; ListItem accessors SHALL expose these exact fields.
+
+#### Scenario: Line adaptation
+- **WHEN** styled lines are converted to viewer items
+- **THEN** content, plain search text, zero-based stable ID, and background are retained.
+
+#### Scenario: Stable drag order
+- **WHEN** mouse anchor is after the head
+- **THEN** ordered returns the head first without mutating the selection.
+
+#### Scenario: Empty drag
+- **WHEN** anchor and head are equal
+- **THEN** is_non_empty returns false.
+
+#### Scenario: Search text
+- **WHEN** a line has multiple spans
+- **THEN** search sees their concatenated textual content without style metadata.
+
+证据：`crates/codegen/pager/src/views/block_viewer.rs` — `ContentLine`；`crates/codegen/pager/src/views/block_viewer.rs` — `ContentLine::from_lines`；`crates/codegen/pager/src/views/block_viewer.rs` — `impl ListItem for ContentLine`；`crates/codegen/pager/src/views/block_viewer.rs` — `TextEndpoint`；`crates/codegen/pager/src/views/block_viewer.rs` — `TextDrag`；`crates/codegen/pager/src/views/block_viewer.rs` — `TextDrag::ordered`；`crates/codegen/pager/src/views/block_viewer.rs` — `TextDrag::is_non_empty`；`crates/codegen/pager/src/views/block_viewer.rs` — `ContentLine::content`；`crates/codegen/pager/src/views/block_viewer.rs` — `ContentLine::stable_id`；`crates/codegen/pager/src/views/block_viewer.rs` — `ContentLine::search_text`；`crates/codegen/pager/src/views/block_viewer.rs` — `ContentLine::background`。
+
+### Requirement: BlockViewerPane SHALL construct configured ListPane viewers for markdown, execute, edit, background-task, web-fetch, read, grep, list-dir, integration-search, use-tool, and plain-text sources, rejecting incompatible or empty viewer requests and preserving source-specific content metadata.
+Markdown/execute viewers SHALL enable wrapping, search/filter/copy/visual selection and follow only while streaming; static viewers SHALL disable follow. Read SHALL show error text when content is absent or syntax-highlighted absolute-line content otherwise. Edit SHALL reject empty hunks and build diff metadata; integration search SHALL render limits/results/tool descriptions; use-tool SHALL render input plus output/error; background tasks SHALL retain task_id for central-store refresh; plain text SHALL prepend a styled title and separator with collision-safe IDs.
+
+#### Scenario: Markdown/execute
+- **WHEN** entry block is the matching type
+- **THEN** a wrapped viewer with configured ListPane state and system clipboard is returned.
+
+#### Scenario: Incompatible source
+- **WHEN** constructor receives another RenderBlock variant
+- **THEN** None is returned.
+
+#### Scenario: Read error/content
+- **WHEN** read has an error without content or content with an optional line range
+- **THEN** error lines or syntax-highlighted numbered lines are displayed.
+
+#### Scenario: Edit empty/nonempty
+- **WHEN** edit has no hunks or one or more hunks
+- **THEN** empty edits return None; nonempty edits expose rendered diff lines and parallel metadata.
+
+#### Scenario: Structured tools
+- **WHEN** integration/use tool fields are present
+- **THEN** metadata, arguments, descriptions, outputs, and errors are laid out in styled lines.
+
+#### Scenario: Plain/background content
+- **WHEN** catalog text or task stdout is requested
+- **THEN** title/separator or terminal-output lines are represented and task identity is retained.
+
+证据：`crates/codegen/pager/src/views/block_viewer.rs` — `ViewerKind`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_markdown`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_execute`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_static_content`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_web_fetch`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_read`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_grep`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_list_dir`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_integration_search`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_use_tool`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_bg_task`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_plain_text`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_edit`。
+
+### Requirement: Viewer item builders SHALL preserve terminal-output styling, edit diff line metadata, markdown source-line maps, and stable cursor restoration across raw-mode or content rebuilds.
+build_execute_items SHALL convert terminal output into styled ContentLines with plain text, stable indices, and dark background. build_edit_items SHALL use the block-owned wide diff renderer, interleave separator metadata, and parallelize each rendered row with optional DiffLineMeta. extract_markdown_lines/generation/source map SHALL read only markdown-capable blocks; source_line_for_id and jump_to_source_line SHALL map stable pre-wrap IDs to the first rendered line at or after the requested source line.
+
+#### Scenario: Streaming output
+- **WHEN** execute stdout is present or absent
+- **THEN** terminal output rows are converted or an empty list is returned.
+
+#### Scenario: Diff metadata
+- **WHEN** rendered edit lines include hunk separators
+- **THEN** separator rows have None metadata and diff rows retain tag/text/old/new line numbers.
+
+#### Scenario: Raw toggle restore
+- **WHEN** a markdown source map changes after rebuild
+- **THEN** the saved source line resolves to the first matching new item ID.
+
+#### Scenario: Unsupported source map
+- **WHEN** a non-markdown block is queried
+- **THEN** generation/source-map extraction returns None and no jump occurs.
+
+证据：`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::build_execute_items`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::build_edit_items`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::extract_markdown_lines`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::extract_generation`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::extract_line_source_map`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::source_line_for_id`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::jump_to_source_line`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::static_lines_from_block`。
+
+### Requirement: Viewer ticks SHALL detect generation or stdout changes, invalidate/rebuild layout content, redraw when changed, and on running-to-finished transition disable follow and select the last item by stable ID.
+tick and tick_bg_task SHALL compare the stored generation counter (markdown generation or output length), rebuild only the applicable dynamic content, invalidate ListPane layout, and return whether redraw is needed. A running-to-finished transition SHALL permanently disable follow, select the last available item, and request redraw; static viewer kinds remain unchanged.
+
+#### Scenario: Content generation
+- **WHEN** a markdown generation or execute output length changes
+- **THEN** items are rebuilt, layout invalidated, and tick returns true.
+
+#### Scenario: No change
+- **WHEN** generation and running state remain unchanged
+- **THEN** tick returns false.
+
+#### Scenario: Finish transition
+- **WHEN** a running entry/task becomes finished
+- **THEN** follow is disabled permanently, the last item ID is selected, and redraw is requested.
+
+#### Scenario: Background task
+- **WHEN** central stdout changes
+- **THEN** tick_bg_task replaces terminal-output items and retains task identity.
+
+证据：`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::tick_bg_task`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::rebuild_items`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::tick`；`crates/codegen/pager/src/views/block_viewer.rs` — `ListPaneState::invalidate_layout`；`crates/codegen/pager/src/views/block_viewer.rs` — `ListPaneState::disable_follow_permanently`；`crates/codegen/pager/src/views/block_viewer.rs` — `ListPaneState::select_by_id`。
+
+### Requirement: BlockViewer SHALL expose kind-specific shortcut hints, close-key detection, raw-mode and metadata-copy requests, edit patch-copy requests, ListPane navigation/search/paste routing, and deferred copy extraction for the caller.
+shortcuts_hints SHALL always expose close/search/filter/select/wrap and add r or Y according to viewer kind. is_close_key SHALL recognize Ctrl-F or Esc/q only when no input bar or visual selection is active. handle_key SHALL set pending flags for markdown raw, supported metadata Y, or edit y, otherwise route the unified prepend+body items to ListPane and clear sticky text drag after consumed actions. process_pending_copy SHALL return metadata, full block text, or a range-derived unified patch, clear its pending flag, exit visual mode, and filter empty results.
+
+#### Scenario: Close gating
+- **WHEN** Ctrl-F, Esc, or q is pressed with or without input/visual state
+- **THEN** only eligible close keys return true.
+
+#### Scenario: Raw request
+- **WHEN** markdown viewer receives bare r
+- **THEN** raw_toggle_pending is set and the key is consumed.
+
+#### Scenario: Metadata request
+- **WHEN** supported viewer receives Shift-Y
+- **THEN** copy_meta_pending is set for caller-side clipboard handling.
+
+#### Scenario: Edit content request
+- **WHEN** edit viewer receives bare y
+- **THEN** copy_content_pending is set before ListPane handles it.
+
+#### Scenario: Ordinary navigation
+- **WHEN** a ListPane key or paste is received
+- **THEN** the same unified item space is passed and consumed state clears sticky drag selection.
+
+#### Scenario: Pending copy
+- **WHEN** caller drains pending actions
+- **THEN** metadata, block text, or a generated patch is returned and visual state is cleared.
+
+证据：`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::shortcuts_hints`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::is_close_key`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::handle_key`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::handle_paste`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::patch_from_range`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::process_pending_copy`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::rebuild_unified_cache`。
+
+### Requirement: Edit viewer patch copy SHALL serialize only diff rows covered by the requested item range into a unified patch with correct file headers, hunk starts/counts, prefixes, and newline trimming.
+patch_from_range SHALL return None for non-edit/empty metadata or ranges containing no diff rows. It SHALL emit `--- a/path`, `+++ b/path`, derive old/new starts from non-insert/non-delete rows with defaults of one, count old/new rows excluding opposite changes, map Equal/Insert/Delete to space/plus/minus, trim CR/LF terminators, and terminate every emitted row with LF.
+
+#### Scenario: No metadata
+- **WHEN** viewer is not an edit or range has no diff rows
+- **THEN** None is returned.
+
+#### Scenario: Mixed hunk
+- **WHEN** range contains equal, insert, delete, and separator rows
+- **THEN** headers/counts and prefixes reflect only diff rows.
+
+#### Scenario: Line terminators
+- **WHEN** diff text ends in CR/LF
+- **THEN** terminators are stripped before exactly one LF is emitted.
+
+#### Scenario: Visual edit copy
+- **WHEN** visual range includes prepended lines
+- **THEN** caller adjusts the range before serialization so only parallel diff metadata is read.
+
+证据：`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::patch_from_range`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::process_pending_copy`；`crates/codegen/pager/src/views/block_viewer.rs` — `DiffLineMeta`。
+
+### Requirement: BlockViewer mouse drag SHALL create character-precise stable selections over unified preamble/body items, auto-scroll at content edges, copy off-screen covered text on release, and render visible selection overlays using display-cell and grapheme-aware bounds.
+handle_mouse SHALL exclude scrollbar columns from content drags, clear keyboard visual mode on a new left-down, update a stable TextDrag during drag with 1..5-row edge autoscroll, clamp release coordinates, extract copy text on release, and clear selection on other clicks. screen_to_endpoint SHALL map wrapped screen coordinates through joiner widths to logical display columns; col_past_char SHALL advance past the grapheme at a display column; text_for_drag SHALL slice start/end lines and include complete middle lines. render_text_drag_overlay SHALL invert only visible selected cells while preserving off-screen selection for copying.
+
+#### Scenario: Start drag
+- **WHEN** left-down is inside content
+- **THEN** a stable anchor/head endpoint is created and keyboard visual mode is cleared.
+
+#### Scenario: Edge drag
+- **WHEN** drag moves above/below content
+- **THEN** scroll advances by a clamped distance and head maps to the clamped screen endpoint.
+
+#### Scenario: Release
+- **WHEN** left-up follows a nonempty drag
+- **THEN** selected text is extracted immediately, drag is cleared, and caller-visible drag_copy_text is populated.
+
+#### Scenario: Unicode/wrap
+- **WHEN** selection crosses wrapped CJK/grapheme content
+- **THEN** screen columns map to logical display columns with joiner compensation and grapheme end inclusion.
+
+#### Scenario: Visible overlay
+- **WHEN** a sticky or active selection overlaps rendered rows
+- **THEN** only visible cells in the selection range receive highlight.
+
+证据：`crates/codegen/pager/src/views/block_viewer.rs` — `TextDrag::ordered`；`crates/codegen/pager/src/views/block_viewer.rs` — `TextDrag::is_non_empty`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::handle_mouse`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::screen_to_endpoint`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::effective_wrap_width`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::wrap_item_with_joiners`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::col_past_char`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::text_for_drag`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::render_text_drag_overlay`；`crates/codegen/pager/src/views/block_viewer.rs` — `line_display_width_u16`。
+
+### Requirement: BlockViewer render_content SHALL combine preamble and body items in one stable index space, react to theme changes, prepare ListPane layout at the effective scrollbar-aware width, and render content into modal chrome without out-of-bounds handler indices.
+render_content SHALL restyle ListPane and rebuild execute/background content when ThemeKind changes, cache prepend lines with high-half IDs, rebuild the unified cache, skip empty/zero areas, perform a scrollbar-width-aware initial layout and a corrective wider layout when wrapped content overflows, then render the same unified vec through ListPane. last_content_area SHALL be updated for mouse hit testing.
+
+#### Scenario: Theme switch
+- **WHEN** theme kind changes before render
+- **THEN** list style updates and dynamic execute/background items are rebuilt or marked for refresh.
+
+#### Scenario: Preamble
+- **WHEN** modal supplies header lines
+- **THEN** header and blank separator items use high u64 IDs and share the ListPane index space with body.
+
+#### Scenario: Scrollbar guess
+- **WHEN** content likely fits or may overflow
+- **THEN** layout uses content width first or reserves scrollbar columns, then corrects width if total height proves overflow.
+
+#### Scenario: Empty area
+- **WHEN** content area or unified items are empty
+- **THEN** no ListPane render occurs while hit-test area is still updated.
+
+#### Scenario: Input consistency
+- **WHEN** handlers run after render
+- **THEN** cached unified items match the prepared layout, preventing prepend/body index drift.
+
+证据：`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::render_content`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::rebuild_unified_cache`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::last_content_area`；`crates/codegen/pager/src/views/block_viewer.rs` — `SCROLLBAR_TOTAL_COLS`。
+
+### Requirement: The block viewer source SHALL preserve its documented ListPane/viewer boundaries: it delegates navigation and filtering to ListPaneState, handles source-specific construction and patch/text selection locally, and exposes pending actions for callers rather than performing external clipboard/raw-mode/entry mutation itself.
+All viewer methods SHALL maintain the ownership split represented by the fields and comments: this module owns viewer items, drag geometry, pending flags, and modal render state; callers own entry raw toggles and clipboard side effects. No inline tests are present in this 1,748-line source, so this requirement records source-level boundaries only.
+
+#### Scenario: Caller action
+- **WHEN** raw or copy pending flag is set
+- **THEN** the caller must consume the flag and perform external mutation/clipboard work.
+
+#### Scenario: List navigation
+- **WHEN** search/filter/scroll keys arrive
+- **THEN** ListPaneState remains the navigation owner using the cached unified items.
+
+#### Scenario: No inline tests
+- **WHEN** the source is statically audited
+- **THEN** test_count is zero and no runtime behavior is claimed.
+
+证据：`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::handle_key`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::process_pending_copy`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::handle_scroll`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::handle_paste`。

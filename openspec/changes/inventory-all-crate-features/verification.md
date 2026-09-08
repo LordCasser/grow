@@ -3714,3 +3714,9 @@ OpenSpec strict复核发现三项agent_view新增契约缺少RFC 2119关键词�
 合并Pager `src/views/modal_window.rs`：1968行、47项内联测试、SHA-256匹配；新增12条契约，pager reviewed 文件增至479个。未运行Cargo或动态modal交互。
 
 合并Pager `src/scrollback/wrappers/entry_renderer.rs`：2064行、32项内联测试、SHA-256匹配；补齐该文件功能契约，pager reviewed 文件增至480个。未运行Cargo或动态渲染。
+
+合并Pager `src/views/announcements.rs`：1578行、29项内联测试、SHA-256匹配；新增8条契约，pager reviewed 文件增至481个。未运行Cargo或动态announcement交互。
+
+合并Pager `src/views/file_search/line_viewer.rs`：1866行、9项内联测试、SHA-256匹配；新增3条契约，pager reviewed 文件增至482个。未运行Cargo或动态文件搜索。
+
+合并Pager `src/views/block_viewer.rs`：1748行、无内联测试、SHA-256匹配；新增9条契约，pager reviewed 文件增至483个。未运行Cargo或动态block viewer。

@@ -2478,8 +2478,14 @@
       "Allocator release hook installation and trace attribution",
       "Async view shared wake notification",
       "Background work watcher count projection",
+      "Banner hit metadata and zero-area behavior",
       "BlockContent SHALL define the common scrollback rendering contract: content, accent/bullet styling, backgrounds, padding, fold/display modes, selection/grouping, media references, fullscreen preambles, and optional Mermaid/media affordances.",
       "BlockContent inline media SHALL reserve trailing image geometry and expose Mermaid affordance rows without forcing output work for non-media blocks.",
+      "BlockViewer ContentLine SHALL adapt styled rendered lines to ListItem with stable pre-wrap IDs, plain search text, and optional full-width backgrounds; TextEndpoint/TextDrag SHALL provide ordered, character-column selections that remain stable across viewport scrolling.",
+      "BlockViewer SHALL expose kind-specific shortcut hints, close-key detection, raw-mode and metadata-copy requests, edit patch-copy requests, ListPane navigation/search/paste routing, and deferred copy extraction for the caller.",
+      "BlockViewer mouse drag SHALL create character-precise stable selections over unified preamble/body items, auto-scroll at content edges, copy off-screen covered text on release, and render visible selection overlays using display-cell and grapheme-aware bounds.",
+      "BlockViewer render_content SHALL combine preamble and body items in one stable index space, react to theme changes, prepare ListPane layout at the effective scrollbar-aware width, and render content into modal chrome without out-of-bounds handler indices.",
+      "BlockViewerPane SHALL construct configured ListPane viewers for markdown, execute, edit, background-task, web-fetch, read, grep, list-dir, integration-search, use-tool, and plain-text sources, rejecting incompatible or empty viewer requests and preserving source-specific content metadata.",
       "Bundled how-to lookup and managed disk extraction",
       "CLI agent argument and inline definition normalization",
       "CLI completion script generation and zsh root rewrite",
@@ -2493,6 +2499,7 @@
       "Compaction request completion foreground ownership",
       "Composer attachment transfer to newest queued row",
       "Context and session info result projection boundaries",
+      "Critical banner two-row rendering and reservation",
       "Dashboard peek field computation for top-level, subagent and roster rows",
       "Default actions adapt to screen and terminal",
       "Default and fork model setters use different catalogs",
@@ -2502,6 +2509,7 @@
       "Doctor CLI report collection fix preview confirmation and post verification",
       "Doctor JSON schema facts nullable values and complete probe notes",
       "Doctor human report fact grouping probe suppression and remediation wording",
+      "Edit viewer patch copy SHALL serialize only diff rows covered by the requested item range into a unified patch with correct file headers, hunk starts/counts, prefixes, and newline trimming.",
       "Editable TOML loading and hint persistence boundaries",
       "Embedded modal rendering and row styling",
       "Embedded tutorial topic catalog and guide references",
@@ -3338,6 +3346,9 @@
       "Plugin tag and marketplace source mutation boundaries",
       "Process memory gauge platform projection and provider seams",
       "Project picker recent directory aggregation and option path alignment",
+      "Promo CTA caption and reservation contract",
+      "Promo CTA validation, safe URL target, and slot consistency",
+      "Promo banner one-row rendering and affordance reservation",
       "Prompt completion writes and atomic element overlap refusal",
       "Prompt suggestion completion fetch and response routing",
       "Prompt suggestion controller generation and prefix semantics",
@@ -3374,6 +3385,8 @@
       "Selection navigation SHALL not panic when the item slice is empty while layout metadata is stale, small viewports SHALL keep the selected item visible through repeated prepare cycles, and list input paste SHALL target only the active input bar, normalize CRLF for search, preserve comment newlines, and reject paste when closed.",
       "Server turn adoption echo and rewind projection",
       "Session Mermaid cache sweep and disk cap",
+      "Session announcement selection, expiry, visibility, and critical precedence",
+      "Session announcement slash gate, hide keys, critical gate, and banner height",
       "Session startup materialization and local miss provenance",
       "Session usage ledger display and cost absence",
       "Sessions CLI list search and deletion dispatch",
@@ -3401,6 +3414,7 @@
       "Settings static choice catalogs and permission default distinction",
       "Settings variable height scrolling and description hit areas",
       "Shared CLI session startup intent classification",
+      "Shared CTA button painting and hit rectangle",
       "Shared frame timestamp and time derived motion primitives",
       "Shared queue snapshot optimistic echo reconciliation",
       "Shell completion dropdown layout and visible row projection",
@@ -3432,6 +3446,7 @@
       "The active permission view SHALL own keyboard input. FollowupInput SHALL support Esc back to options, Ctrl-C cancellation, multiline Enter routing, submit-to-PermissionFollowup, and prompt editing. Options SHALL support Ctrl-F argument expansion, Tab to scrollback, j/k or arrows, Enter and 1-9 option actions, RejectOnce text entry into followup mode, and left/right scope adjustment for MCP or Bash permissions.",
       "The app entry module SHALL expose the PagerArgs command surface with stable leader/no-leader conflict handling, resume/continue sentinels, worktree/session-id/fork combinations, no-alt-screen and feature-gated flags, command naming/help ordering, and shell-completion parsing.",
       "The app module SHALL preserve its inline regression matrix for terminal mode transforms, teardown ordering injection, cursor policy, bounded cancellation, control-safe title/hints, leader precedence and confinement messaging, hunk-tracker precedence, and the complete CLI/session option surface. These tests are source evidence for the stated boundaries and do not prove a live terminal, ACP connection, external editor, or process replacement.",
+      "The block viewer source SHALL preserve its documented ListPane/viewer boundaries: it delegates navigation and filtering to ListPaneState, handles source-specific construction and patch/text selection locally, and exposes pending actions for callers rather than performing external clipboard/raw-mode/entry mutation itself.",
       "The interaction module SHALL preserve the focused regression behaviors pinned by its 30 inline tests: Plan action traversal and partial answers, cancel/Goal mouse-key semantics, permission chrome and scope behavior, fixed-choice no-freeform gating, and paste-chip round trips. These tests are source evidence for interaction state transitions and do not establish compiled, terminal, ACP transport, or downstream action execution behavior.",
       "The pager SHALL keep process-wide input ownership flags coherent: the `/gboom` game may push and pop an additional Kitty keyboard layer exactly once, mouse capture state SHALL be observable, minimal mode SHALL be tracked separately from styling toggles, and Esc cancellation plus opt-in mouse-reporting behavior SHALL be derived from explicit mode/config inputs.",
       "The pager run entry point SHALL load and validate effective configuration before redirecting native stderr, materialize session startup intent, resolve leader/permission/screen mode, initialize terminal state, connect with bounded cancellation, fall back from a failed leader to the embedded agent, run the root event loop, restore terminal ownership, and preserve update/relaunch/exit outcomes.",
@@ -3460,6 +3475,8 @@
       "Usage modal opening and usage result identity",
       "Usage modal rendering and row hit projection",
       "Usage modal session and context field projection",
+      "Viewer item builders SHALL preserve terminal-output styling, edit diff line metadata, markdown source-line maps, and stable cursor restoration across raw-mode or content rebuilds.",
+      "Viewer ticks SHALL detect generation or stdout changes, invalidate/rebuild layout content, redraw when changed, and on running-to-finished transition disable follow and select the last item by stable ID.",
       "Vim navigation search hint",
       "When a ProjectSelect question is open, AgentView SHALL temporarily restore the stashed composer prompt and forward the event to the normal input router so project-picker backing input edits the composer rather than the picker path field. The question view SHALL be restashed after routing; non-project questions SHALL be restored unchanged and return no outcome.",
       "When another client resolves an interaction, AgentView SHALL dismiss only the matching question, Plan approval, or permission identified by source session and tool call. Question dismissal restores the prompt and cleans view state; Plan approval sends stale cancel, restores prompt, resets comment/viewer state; removing the front permission resolves the queue transition. Nonmatching or absent interactions SHALL be a silent false result.",
@@ -4700,6 +4717,14 @@
         "sha256": "94b1165a2b01994d0b315f355ba4bdba21ec3b1085fb3ce193aab61364aae3a8"
       },
       {
+        "path": "crates/codegen/pager/src/views/announcements.rs",
+        "sha256": "59f90faf9db695e4cfd047921194075b627eb4a0337444209e7c41532a0dea78"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/block_viewer.rs",
+        "sha256": "c41355e942d0c9897be4b5da13b362f939f078c76af6c3716b8c27a24d33e024"
+      },
+      {
         "path": "crates/codegen/pager/src/views/completion_dropdown.rs",
         "sha256": "98b6310d345949e1b59c70a8979ddfae4da025854a846175e4499509f7db5464"
       },
@@ -4726,6 +4751,10 @@
       {
         "path": "crates/codegen/pager/src/views/extensions_modal.rs",
         "sha256": "183b2410fb241d39cb44a282caede8cc7587ccc59af45adabd3bd849f4ad4107"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/file_search/line_viewer.rs",
+        "sha256": "fecc0f237de43633cc13a3f229b762709c523705cb099db24e8be7e91fdadd7e"
       },
       {
         "path": "crates/codegen/pager/src/views/file_search/mod.rs",
