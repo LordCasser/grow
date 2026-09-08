@@ -1,0 +1,3 @@
+- [x] Complete and verify R27 with recoverable image failure semantics.
+- [x] Update release notes and validate metadata/specifications.
+- [x] Archive packaging preparation before moving the unpublished tag.

@@ -1,0 +1,4 @@
+# Packaging preparation
+R27 completed at f354a783 with 12313 passing local core regressions (13 existing ignored), 13 resource-persistence regressions and 100 final image regressions. R21 and all approved standalone deletions are already committed and archived. CLI/workspace remains 2.1.5; locked offline metadata resolves and no dependency versions changed. Release notes now describe history search, paired images, recoverable multimodal failure and completed cleanup. OpenSpec strict and archived checks pass.
+
+The existing v2.1.5 tag is unpublished (GitHub release lookup returned not found). Final Linux CI must run against the completed release tree before the tag is moved. Tag preflight and the official all-platform release workflow remain execution steps; completing packaging preparation does not claim publication. Remote results will be reported from actual workflow outcomes.
