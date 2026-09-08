@@ -1,1 +1,0 @@
-Run 34232309109, OHOS job 102081381350 failed with Docker manifest unknown before compilation. On 2026-09-08, docker manifest inspect --verbose of the same upstream latest tag resolved sha256:c4be5fb8ad32888d4b125d8ea653b89e96bf6a24940fdfa3c408c3cc1f73d28d, platform linux/arm64. A second request by this digest succeeded. Runtime build verification pending.

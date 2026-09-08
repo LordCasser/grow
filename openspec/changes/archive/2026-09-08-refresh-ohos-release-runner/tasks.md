@@ -1,0 +1,3 @@
+- [x] Confirm old digest failure and resolve the upstream Linux arm64 replacement.
+- [x] Refresh the pin and pass static release preflight.
+- [x] Pass the actual OHOS container build, smoke test and signing gates.
