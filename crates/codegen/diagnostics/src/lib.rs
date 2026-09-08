@@ -6,7 +6,6 @@ pub mod debug_log;
 pub mod enums;
 pub mod events;
 pub mod hooks_log;
-pub mod id;
 pub mod instrumentation;
 pub mod memory_events;
 pub mod memory_log;

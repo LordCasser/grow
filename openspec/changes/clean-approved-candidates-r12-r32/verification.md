@@ -36,3 +36,6 @@ Removed only unconstructed ActivePaneSnapshot::Other. Fresh input_log regression
 
 ## R24
 Removed unconsumed Announcement.persistent and default assignment. Fresh announcement library 13/13 and Pager announcement regressions 60/60 passed; dismissibility, expiry, hidden-ID persistence and client display retained.
+
+## R25
+Removed unused diagnostics device-ID module/export, mid and exclusive UUID-v5 feature request. Lockfile removed only mid/hmac-sha256 and diagnostics dependency entry; verified every remaining package unchanged (no upgrades). Full offline metadata resolved; isolated diagnostics library tests 57/57 passed, with cross-process probes included. Existing user agent_id files untouched.

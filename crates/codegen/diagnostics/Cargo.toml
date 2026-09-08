@@ -36,8 +36,7 @@ tracing-subscriber = { workspace = true, features = [
 chrono = { workspace = true }
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 config = { workspace = true }
-uuid = { workspace = true, features = ["v5", "v7"] }
-mid = "4.0.0"
+uuid = { workspace = true, features = ["v7"] }
 tokio = { workspace = true, features = ["macros", "sync", "rt"] }
 parking_lot = { workspace = true }
 tool-types = { workspace = true }
