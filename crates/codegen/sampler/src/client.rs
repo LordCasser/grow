@@ -327,11 +327,6 @@ pub struct SamplingClient {
     default_headers: HeaderMap,
     base_url: String,
     defaults: ClientDefaults,
-    /// Optional 401-attribution hook. The shell wires this to emit a
-    /// structured event at every UNAUTHORIZED arm so 401s can be
-    /// bucketed by stale-snapshot vs. live-token-rejected. `None` for
-    /// sampler-only callers and tests.
-    attribution_callback: Option<crate::attribution::SharedAttributionCallback>,
     /// Per-request bearer override. See `SamplerConfig::bearer_resolver`.
     bearer_resolver: Option<crate::config::SharedBearerResolver>,
     /// Endpoint URL builder, resolved once from `base_url` + `query_params`.
@@ -346,10 +341,6 @@ impl std::fmt::Debug for SamplingClient {
         f.debug_struct("SamplingClient")
             .field("base_url", &self.base_url)
             .field("defaults", &self.defaults)
-            .field(
-                "has_attribution_callback",
-                &self.attribution_callback.is_some(),
-            )
             .field("has_bearer_resolver", &self.bearer_resolver.is_some())
             .finish()
     }
@@ -665,7 +656,6 @@ impl SamplingClient {
             default_headers: headers,
             base_url: config.base_url,
             defaults,
-            attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
             endpoint,
             idle_timeout: std::time::Duration::from_secs(config.idle_timeout_secs.unwrap_or(300)),
@@ -785,26 +775,6 @@ impl SamplingClient {
         Self::sent_fragment_from_headers(&self.default_headers, &self.defaults.auth_scheme)
     }
 
-    /// Invoke the optional 401 attribution callback for one logical
-    /// 401 response. Each of the six UNAUTHORIZED arms in this file
-    /// calls this helper immediately before returning
-    /// `SamplingError::Auth(...)`. Emit happens at the lowest layer
-    /// that saw the status, so higher layers that react to a 401 must
-    /// not emit a duplicate event.
-    ///
-    /// `sent_prefix` is the fragment [`Self::post`] captured for the
-    /// rejected request (already tail-truncated; the full bearer never
-    /// crosses this boundary).
-    fn record_401_attribution(
-        &self,
-        consumer: crate::attribution::SamplingConsumer,
-        sent_prefix: Option<&str>,
-    ) {
-        if let Some(cb) = self.attribution_callback.as_ref() {
-            cb.record_401(consumer, sent_prefix);
-        }
-    }
-
     pub fn auth_info(&self) -> crate::sampling_log::AuthInfo {
         let auth_prefix = self.current_sent_bearer_prefix();
         let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
@@ -889,10 +859,6 @@ impl SamplingClient {
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.record_401_attribution(
-                    crate::attribution::SamplingConsumer::ChatCompletions,
-                    sent_bearer,
-                );
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
                 return Err(auth_rejected(
                     format!("Unauthorized (401): {server_message}"),
@@ -1027,10 +993,6 @@ impl SamplingClient {
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 span.record("error", "unauthorized (401)");
-                self.record_401_attribution(
-                    crate::attribution::SamplingConsumer::ChatCompletionsStream,
-                    sent_bearer.as_deref(),
-                );
                 let endpoint = self.endpoint("chat/completions");
                 let body = read_response_bytes(response).await?;
                 let server_message = user_facing_api_error_message(status, body.as_ref());
@@ -1214,10 +1176,6 @@ impl SamplingClient {
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.record_401_attribution(
-                    crate::attribution::SamplingConsumer::Responses,
-                    sent_bearer.as_deref(),
-                );
                 let endpoint = self.endpoint("responses");
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
                 return Err(auth_rejected(
@@ -1359,10 +1317,6 @@ impl SamplingClient {
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 span.record("error", "unauthorized (401)");
-                self.record_401_attribution(
-                    crate::attribution::SamplingConsumer::ResponsesStream,
-                    sent_bearer.as_deref(),
-                );
                 let endpoint = self.endpoint("responses");
                 let body = read_response_bytes(response).await?;
                 let server_message = user_facing_api_error_message(status, body.as_ref());
@@ -1541,10 +1495,6 @@ impl SamplingClient {
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                self.record_401_attribution(
-                    crate::attribution::SamplingConsumer::Messages,
-                    sent_bearer.as_deref(),
-                );
                 let endpoint = self.endpoint("messages");
                 let server_message = user_facing_api_error_message(status, bytes.as_ref());
                 return Err(auth_rejected(
@@ -1657,10 +1607,6 @@ impl SamplingClient {
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 span.record("error", "unauthorized (401)");
-                self.record_401_attribution(
-                    crate::attribution::SamplingConsumer::MessagesStream,
-                    sent_bearer.as_deref(),
-                );
                 let endpoint = self.endpoint("messages");
                 let body = read_response_bytes(response).await?;
                 let server_message = user_facing_api_error_message(status, body.as_ref());
@@ -1939,7 +1885,6 @@ mod tests {
             idle_timeout_secs: None,
             reasoning_effort: None,
             origin_client: None,
-            attribution_callback: None,
             bearer_resolver: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
@@ -2333,31 +2278,12 @@ mod tests {
         assert!(ua.starts_with(&format!("{}/{}", AGENT_PRODUCT, agent_version)));
     }
 
-    /// Counts callbacks for assertions in the tests below.
-    #[derive(Default, Debug)]
-    struct CountingCallback {
-        invocations: std::sync::Mutex<Vec<(crate::attribution::SamplingConsumer, Option<String>)>>,
-    }
-
     #[derive(Debug)]
     struct StaticBearerResolver(&'static str);
 
     impl crate::config::BearerResolver for StaticBearerResolver {
         fn current_bearer(&self) -> Option<String> {
             Some(self.0.to_string())
-        }
-    }
-
-    impl crate::attribution::Auth401AttributionCallback for CountingCallback {
-        fn record_401(
-            &self,
-            consumer: crate::attribution::SamplingConsumer,
-            sent_bearer: Option<&str>,
-        ) {
-            self.invocations
-                .lock()
-                .unwrap()
-                .push((consumer, sent_bearer.map(|s| s.to_string())));
         }
     }
 
@@ -2538,35 +2464,21 @@ mod tests {
         assert!(request.headers().get(AUTHORIZATION).is_none());
     }
 
-    /// The callback receives the `post()`-captured fragment only — the
-    /// full bearer never crosses the crate boundary.
+    /// Actual request state retains the bounded credential fragment.
     #[test]
-    fn record_401_attribution_invokes_callback_with_captured_bearer() {
-        let cb = std::sync::Arc::new(CountingCallback::default());
-        let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
+    fn post_retains_bounded_sent_credential_fragment() {
         let cfg = SamplerConfig {
             api_key: Some("the-bearer-1234567890-extra-tail".to_string()),
             api_backend: ApiBackend::ChatCompletions,
-            attribution_callback: Some(cb_dyn),
             bearer_resolver: None,
             ..minimal_config()
         };
         let client = SamplingClient::new(cfg).expect("client should build");
         let SentRequest { sent_bearer, .. } =
             client.post("https://example.test/v1/chat/completions");
-        client.record_401_attribution(
-            crate::attribution::SamplingConsumer::ChatCompletionsStream,
-            sent_bearer.as_deref(),
-        );
-        let calls = cb.invocations.lock().unwrap();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(sent_bearer.as_deref(), Some("0-extra-tail"));
         assert_eq!(
-            calls[0].0,
-            crate::attribution::SamplingConsumer::ChatCompletionsStream
-        );
-        assert_eq!(calls[0].1.as_deref(), Some("0-extra-tail"));
-        assert_eq!(
-            calls[0].1.as_deref().map(str::len),
+            sent_bearer.as_deref().map(str::len),
             Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
         );
     }
@@ -2669,27 +2581,6 @@ mod tests {
             auth_values[0].to_str().unwrap(),
             "Bearer fresh-token",
             "Authorization header should contain the resolver's fresh token"
-        );
-    }
-
-    /// `record_401_attribution` is a no-op when `attribution_callback`
-    /// is `None` (the BYOK / sampler-only path). The previous tests
-    /// in this module construct clients without a callback and rely
-    /// on this property holding.
-    #[test]
-    fn record_401_attribution_is_noop_without_callback() {
-        let cfg = SamplerConfig {
-            api_key: Some("bearer".to_string()),
-            api_backend: ApiBackend::ChatCompletions,
-            attribution_callback: None,
-            bearer_resolver: None,
-            ..minimal_config()
-        };
-        let client = SamplingClient::new(cfg).expect("client should build");
-        // Must not panic.
-        client.record_401_attribution(
-            crate::attribution::SamplingConsumer::ChatCompletions,
-            Some("bearer-tail-12"),
         );
     }
 

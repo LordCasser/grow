@@ -203,7 +203,6 @@ impl WorkflowSamplerSnapshot {
         }
         let mut credential_free = config.clone();
         credential_free.api_key = None;
-        credential_free.attribution_callback = None;
         credential_free.bearer_resolver = None;
         let encoded = serde_json::to_vec(&credential_free)
             .map_err(|_| "Workflow sampler contract could not be encoded")?;
@@ -306,7 +305,6 @@ impl WorkflowSamplerSnapshot {
             idle_timeout_secs: self.idle_timeout_secs,
             reasoning_effort: self.sampling.reasoning_effort,
             origin_client: self.origin_client.clone(),
-            attribution_callback: runtime.attribution_callback.clone(),
             bearer_resolver: runtime.bearer_resolver.clone(),
             compactions_remaining: self.compactions_remaining,
             compaction_at_tokens: self.compaction_at_tokens,
@@ -345,7 +343,6 @@ struct WorkflowSamplerRuntime {
     base_url: String,
     extra_headers: indexmap::IndexMap<String, String>,
     query_params: indexmap::IndexMap<String, String>,
-    attribution_callback: Option<sampler::SharedAttributionCallback>,
     bearer_resolver: Option<sampler::SharedBearerResolver>,
 }
 
@@ -362,7 +359,6 @@ impl From<&sampler::SamplerConfig> for WorkflowSamplerRuntime {
             base_url: config.base_url.clone(),
             extra_headers: config.extra_headers.clone(),
             query_params: config.query_params.clone(),
-            attribution_callback: config.attribution_callback.clone(),
             bearer_resolver: config.bearer_resolver.clone(),
         }
     }
@@ -668,7 +664,6 @@ impl WorkflowRuntimeRoute {
             config.idle_timeout_secs = Some(published_route.inference_idle_timeout.as_secs());
             config.max_retries = Some(published_route.max_retries);
             config.origin_client = default_sampler.origin_client.clone();
-            config.attribution_callback = default_sampler.attribution_callback.clone();
             config.doom_loop_recovery = default_sampler.doom_loop_recovery;
             config.bearer_resolver = entry
                 .effective_auth_provider()
@@ -721,7 +716,6 @@ impl WorkflowRuntimeRoute {
             config.idle_timeout_secs = Some(published_route.inference_idle_timeout.as_secs());
             config.max_retries = Some(published_route.max_retries);
             config.origin_client = default_sampler.origin_client.clone();
-            config.attribution_callback = default_sampler.attribution_callback.clone();
             config.doom_loop_recovery = default_sampler.doom_loop_recovery;
             config.bearer_resolver = entry
                 .effective_auth_provider()

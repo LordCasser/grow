@@ -69,7 +69,6 @@ async fn actor_with_sampler(
         idle_timeout_secs: Some(60),
         reasoning_effort: None,
         origin_client: None,
-        attribution_callback: None,
         bearer_resolver: None,
         compactions_remaining: None,
         compaction_at_tokens: None,

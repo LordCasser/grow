@@ -2533,7 +2533,6 @@ pub fn stamp_session_local_sampler_fields(
     active_session_config: &SamplerConfig,
     max_retries: Option<u32>,
 ) {
-    cfg.attribution_callback = active_session_config.attribution_callback.clone();
     if crate::util::is_service_api_bearer_url(&cfg.base_url) {
         cfg.bearer_resolver = active_session_config.bearer_resolver.clone();
     }
@@ -2575,7 +2574,6 @@ pub fn sampling_config_for_model(
         stream_tool_calls: info.stream_tool_calls.unwrap_or(false),
         idle_timeout_secs: None,
         origin_client: None,
-        attribution_callback: None,
         bearer_resolver: None,
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,

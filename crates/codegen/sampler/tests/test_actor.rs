@@ -95,7 +95,6 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         idle_timeout_secs: Some(30),
         reasoning_effort: None,
         origin_client: None,
-        attribution_callback: None,
         bearer_resolver: None,
         compactions_remaining: None,
         compaction_at_tokens: None,

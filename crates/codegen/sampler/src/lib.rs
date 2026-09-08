@@ -34,9 +34,7 @@ pub mod types;
 
 // Public re-exports — the API surface consumers see.
 pub use actor::{SamplerActor, SamplerOwner};
-pub use attribution::{
-    Auth401AttributionCallback, SENT_BEARER_PREFIX_LEN, SamplingConsumer, SharedAttributionCallback,
-};
+pub use attribution::SENT_BEARER_PREFIX_LEN;
 pub use client::{ApiBackend, SamplingClient, user_agent_string_for};
 pub use config::{
     AuthScheme, BearerResolver, OriginClientInfo, RetryPolicy, SamplerConfig, SharedBearerResolver,

@@ -948,7 +948,6 @@ impl SessionActor {
             stream_tool_calls: cfg.stream_tool_calls.unwrap_or(false),
             idle_timeout_secs: None,
             origin_client: self.origin_client.clone(),
-            attribution_callback: None,
             bearer_resolver: route_bearer_resolver.or_else(|| {
                 provider
                     .as_ref()

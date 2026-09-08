@@ -293,4 +293,4 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 删除理由：保留未启用的诊断扩展和跨层配置字段；注释仍引用已不存在的 shell token_suffix。短 token 会完整跨回调边界，不能把截断称为脱敏。
 - 拟删除范围：可选回调、专属枚举/别名/调用点及纯转发字段；确认后核对专属测试并保留有效认证断言。
 - 必须保留：请求构建时认证状态捕获、auth_rejected、SentCredential 和认证重试预算；bearer resolver 与认证方式诊断。sent_bearer/current_sent_bearer_prefix/截断助手还有这些消费者，不得随回调整体删除，是否改成仅保存 presence 需另行核对。
-- 状态：等待用户确认，尚未删除或启用。仓库外公开库消费者未知。证据见 audit-disconnected-auth-attribution。
+- 状态：已获批并删除；回归结果见 clean-approved-candidates-r12-r32 的 R32 验证记录。

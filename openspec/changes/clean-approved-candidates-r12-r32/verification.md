@@ -54,3 +54,6 @@ Removed uncalled standalone rewind_files and its three exclusive result/conflict
 
 ## R31
 Removed only merge_and_remove_from/max_prompt_index wrappers. Migrated unique assertions to complete get_rewind_points history and pure merge; added preservation assertion that preview does not mutate tracker. Lazy failure/retry, truncate and replace paths retained. Fresh workspace file_state regressions 31/31 passed.
+
+## R32
+Removed unconnected callback API and forwarding only. Retained actual sent credential fragments and 401 retry state. Sampler library: 218/218 passed with --test-threads=1; initial default parallel run: 217 passed, sampling_auth_logs_omit_credentials failed to capture the sampling_request span (tracked separately for CI investigation). Sampler actor integration: 22/22 passed. Shell workflow tracker: 38/38 passed, compiling all Shell library test fixtures. git diff --check passed.

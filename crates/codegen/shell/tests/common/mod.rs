@@ -343,7 +343,6 @@ pub fn test_sampler_config(
         idle_timeout_secs: None,
         reasoning_effort: None,
         origin_client: None,
-        attribution_callback: None,
         bearer_resolver: None,
         compactions_remaining: None,
         compaction_at_tokens: None,

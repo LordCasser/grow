@@ -12,7 +12,6 @@ use sampling_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::attribution::SharedAttributionCallback;
 use crate::retry::{DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -82,24 +81,6 @@ pub struct SamplerConfig {
     // Client identity
     pub origin_client: Option<OriginClientInfo>,
 
-    /// Optional hook invoked at every UNAUTHORIZED (401) response
-    /// site. The sampler passes the bearer that was actually sent on
-    /// the wire to the callback; the implementation is free to do
-    /// whatever it wants with it (typically: join it with a live
-    /// credential source and emit an attribution event for diagnosis
-    /// of stale-token vs. server-rejected-live-token 401s). `None`
-    /// (default) is a no-op -- the 401 arm returns the same
-    /// `SamplingError::Auth` it always did.
-    ///
-    /// `Arc<dyn Trait>` is not serializable, so the field is skipped
-    /// in (de)serialization. Round-tripping a config through serde
-    /// drops the callback; callers that deserialize a `SamplerConfig`
-    /// from disk must re-attach the callback before passing it to
-    /// [`crate::SamplingClient::new`] or 401 attribution will be
-    /// silently disabled for the rebuilt client.
-    #[serde(skip)]
-    pub attribution_callback: Option<SharedAttributionCallback>,
-
     /// Live bearer resolve per request. `None` uses construction-time `api_key`.
     #[serde(skip)]
     pub bearer_resolver: Option<SharedBearerResolver>,
@@ -145,7 +126,6 @@ impl Default for SamplerConfig {
             idle_timeout_secs: None,
             reasoning_effort: None,
             origin_client: None,
-            attribution_callback: None,
             bearer_resolver: None,
             compactions_remaining: None,
             compaction_at_tokens: None,
