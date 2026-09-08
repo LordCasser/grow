@@ -23053,3 +23053,279 @@ The diagnostics view and format_doctor SHALL use the HostOs carried by the Diagn
 - **THEN** keyboard facts are absent and formatted output contains no keyboard row.
 
 证据：`crates/codegen/pager/src/diagnostics/view_tests.rs` — `keyboard_fact_and_formatter_use_snapshot_host`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `snapshot_for_host`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `view`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `format_doctor`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `facts.keyboard`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `keyboard.os`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `HostOs::Macos`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `HostOs::Linux`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `OS rescue active`；`crates/codegen/pager/src/diagnostics/view_tests.rs` — `keyboard     `。
+
+
+### Requirement: VisibleLink SHALL represent one logical clickable target as one or more screen-row rectangles, answer half-open coordinate hit tests, and identify only bare URL paint when total painted display width equals the URL display width.
+
+contains SHALL return true when col lies in [x,x+width) and row in [y,y+height) for any rect, otherwise false. looks_like_bare_url_text SHALL return false for non-URL LinkTarget variants and compare the summed rect widths with unicode_width::UnicodeWidthStr::width(url); short labels and citation blocks therefore do not qualify even when they target a URL.
+
+#### Scenario: Half-open hit
+- **WHEN** pointer is at a link start, last valid cell, end column, wrong row, or before the start
+- **THEN** start and last valid cells hit; end, wrong row, and before-start miss.
+
+#### Scenario: Bare URL paint
+- **WHEN** URL target rectangles total exactly the URL display width, including multiple wrapped segments
+- **THEN** the link is classified as bare URL text.
+
+#### Scenario: Short label or citation
+- **WHEN** painted width is shorter or wider than the URL display width
+- **THEN** the link is not classified as bare URL text.
+
+#### Scenario: Non-URL target
+- **WHEN** target is a File link
+- **THEN** bare URL classification returns false.
+
+证据：`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLink`；`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLink::contains`；`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLink::looks_like_bare_url_text`；`crates/codegen/pager/src/scrollback/link_map.rs` — `looks_like_bare_url_text_when_painted_equals_url_width`；`crates/codegen/pager/src/scrollback/link_map.rs` — `looks_like_bare_url_text_false_for_short_label`；`crates/codegen/pager/src/scrollback/link_map.rs` — `looks_like_bare_url_text_false_for_wide_citation_block`；`crates/codegen/pager/src/scrollback/link_map.rs` — `file_target_provenance_survives_overlay_to_visible_map`。
+
+
+### Requirement: VisibleLinkMap::rebuild SHALL clear the previous frame, store the supplied scrollback generation, reserve for overlay and citation inputs, resolve every target through terminal context, discard targets without an open target, and retain valid citation links alongside markdown overlay links.
+
+The implementation SHALL satisfy the following tested behavior: rebuild delegates to rebuild_for_context with the process terminal context. rebuild_for_context clears links before setting generation, pushes overlay links with presentation-aware resolve_link_target_for_context, then resolves citation targets as Opaque and appends only entries whose open_target is Some. Official VS Code remote sessions exclude self-resolving file overlays while retaining opaque web links; file target provenance remains the original absolute path and OSC8 conversion is delegated to the shared resolver.
+
+#### Scenario: Rebuild replaces frame
+- **WHEN** map has old links and receives a new overlay/generation
+- **THEN** old links disappear, new links remain, and generation becomes the new value.
+
+#### Scenario: Citation inclusion
+- **WHEN** valid citation URL is supplied with an overlay URL
+- **THEN** both links are present and independently hit-testable.
+
+#### Scenario: Remote editor ownership
+- **WHEN** official VS Code remote terminal receives SelfResolvingPath file link plus opaque web link
+- **THEN** the file link is absent from activation map while the web link remains.
+
+#### Scenario: File provenance
+- **WHEN** overlay carries a File target with a path containing spaces
+- **THEN** visible target keeps the same path and shared resolution produces a percent-encoded file URL.
+
+#### Scenario: Empty rebuild
+- **WHEN** overlay and citations are empty
+- **THEN** map is empty and link_at returns None.
+
+证据：`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLinkMap::rebuild`；`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLinkMap::rebuild_for_context`；`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLinkMap::push_overlay_links`；`crates/codegen/pager/src/scrollback/link_map.rs` — `file_target_provenance_survives_overlay_to_visible_map`；`crates/codegen/pager/src/scrollback/link_map.rs` — `official_vscode_remote_file_is_excluded_from_activation_map`；`crates/codegen/pager/src/scrollback/link_map.rs` — `citation_links_are_included`；`crates/codegen/pager/src/scrollback/link_map.rs` — `rebuild_clears_previous_links`；`crates/codegen/pager/src/scrollback/link_map.rs` — `empty_overlay_and_no_citations`。
+
+
+### Requirement: Overlay projection SHALL skip zero-width segments, create one-row rectangles for positive spans, and merge consecutive same-id segments only within the current rebuild or append batch so wrapped fragments of one logical document link share a VisibleLink.
+
+The implementation SHALL satisfy the following tested behavior: push_overlay_links computes width with saturating_sub and drops width zero. With merge_from=0 during rebuild, a segment with Some(id) merges into the immediately preceding entry only when that entry has the same id; with append, merge_from is the pre-append length so the new batch cannot merge into the scrollback prefix or an earlier batch. Different ids and None ids always remain separate, and the first matching entry wins for overlapping screen rectangles.
+
+#### Scenario: Zero width
+- **WHEN** col_start equals col_end
+- **THEN** segment is omitted from links.
+
+#### Scenario: Wrapped same id
+- **WHEN** two positive overlay spans on different rows use the same id in one overlay
+- **THEN** one VisibleLink holds two rects and both row segments hit.
+
+#### Scenario: Different ids
+- **WHEN** adjacent wrapped spans use different ids
+- **THEN** two logical VisibleLink entries remain.
+
+#### Scenario: No id
+- **WHEN** same URL spans multiple rows but id is None
+- **THEN** each segment remains a separate entry.
+
+#### Scenario: Overlap precedence
+- **WHEN** two links overlap at one screen coordinate
+- **THEN** link_at returns the first entry in iteration order.
+
+证据：`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLinkMap::push_overlay_links`；`crates/codegen/pager/src/scrollback/link_map.rs` — `wrapped_link_merges_into_single_entry`；`crates/codegen/pager/src/scrollback/link_map.rs` — `different_ids_stay_separate`；`crates/codegen/pager/src/scrollback/link_map.rs` — `none_id_links_never_merge`；`crates/codegen/pager/src/scrollback/link_map.rs` — `zero_width_links_are_skipped`；`crates/codegen/pager/src/scrollback/link_map.rs` — `multiple_links_first_match_wins`；`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLinkMap::link_at`。
+
+
+### Requirement: VisibleLinkMap SHALL append overlay sources without changing generation, merge wrapped segments only within that appended source, and support truncating the appended suffix before re-appending the current frame overlay.
+
+The implementation SHALL satisfy the following tested behavior: append_from_overlay records the current map length and invokes push_overlay_links with that merge boundary and the current terminal context; it does not alter generation. truncate keeps only the first n logical links. Therefore per-document ids that collide with a scrollback prefix do not merge, while same-batch wrapped segments do; truncating to the saved prefix removes stale BTW/overlay entries and permits the replacement source to be appended.
+
+#### Scenario: Append collision
+- **WHEN** scrollback prefix and appended overlay both use id 0
+- **THEN** the entries remain separate and the prefix keeps precedence at its own row.
+
+#### Scenario: Append wrapped batch
+- **WHEN** empty/rebuilt prefix followed by two same-id wrapped segments
+- **THEN** one appended VisibleLink contains both rectangles.
+
+#### Scenario: Replace suffix
+- **WHEN** old appended overlay exists, then map is truncated to prefix and a new overlay is appended
+- **THEN** old suffix no longer hits and the new overlay is hit at its row.
+
+#### Scenario: Generation stability
+- **WHEN** append is used after a rebuild
+- **THEN** generation remains the rebuild generation until a later rebuild.
+
+证据：`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLinkMap::append_from_overlay`；`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLinkMap::truncate`；`crates/codegen/pager/src/scrollback/link_map.rs` — `append_does_not_merge_ids_with_scrollback_prefix`；`crates/codegen/pager/src/scrollback/link_map.rs` — `append_merges_wrapped_segments_within_batch`；`crates/codegen/pager/src/scrollback/link_map.rs` — `truncate_then_append_replaces_overlay_suffix`。
+
+
+### Requirement: VisibleLinkMap SHALL expose generation and staleness so a frame link map can be rejected whenever scrollback generation differs, while a rebuild at the current generation marks the map fresh and a same-cwd update does not create a false stale state.
+
+The implementation SHALL satisfy the following tested behavior: Default generation is zero, so is_stale(nonzero) is true before a rebuild. rebuild stores the supplied generation; is_stale returns generation != current_generation. ScrollbackState cwd changes advance its generation only when the cwd actually changes; the map is stale before rebuilding for the new cwd and fresh after rebuilding, while setting the same cwd again leaves the generation unchanged.
+
+#### Scenario: Initial map
+- **WHEN** new map is compared with generation 1
+- **THEN** map is stale.
+
+#### Scenario: Fresh generation
+- **WHEN** map is rebuilt at generation 1 and compared with 1
+- **THEN** map is not stale.
+
+#### Scenario: Changed generation
+- **WHEN** map is rebuilt at 1 and compared with 2
+- **THEN** map is stale.
+
+#### Scenario: CWD transition
+- **WHEN** scrollback cwd changes from /other to /worktree
+- **THEN** old map is stale before re-resolve; rebuilt map reflects changed presentation ownership and is fresh.
+
+#### Scenario: Idempotent cwd
+- **WHEN** same cwd is set again
+- **THEN** generation does not change and the map remains fresh.
+
+证据：`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLinkMap::is_stale`；`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLinkMap::generation`；`crates/codegen/pager/src/scrollback/link_map.rs` — `staleness_tracking`；`crates/codegen/pager/src/scrollback/link_map.rs` — `cwd_change_stales_map_before_presentation_ownership_flip`；`crates/codegen/pager/src/scrollback/link_map.rs` — `VisibleLinkMap::rebuild`。
+
+
+### Requirement: Search block state, output modes, match mutation, and timing
+
+SearchOutputMode SHALL parse only `files_with_matches` as FilesWithMatches and `count` as Count, defaulting all other/missing values to Content. SearchToolCallBlock::new SHALL initialize an empty successful result with default metadata and no local timing; with_matches/set_file_matches SHALL replace count and grouped matches; with_error/set_error SHALL update failure state; timing finalization SHALL be idempotent and elapsed_ms SHALL expose stored or live duration.
+
+#### Scenario: Output mode parse
+- **WHEN** raw output_mode is files_with_matches, count, another string, or absent
+- **THEN** the corresponding mode is selected and unknown/missing values use Content.
+
+#### Scenario: Match mutation
+- **WHEN** match count and file matches are supplied
+- **THEN** the block stores the new count and grouped results.
+
+#### Scenario: Error/timing
+- **WHEN** a block is marked failed or a running block finishes
+- **THEN** is_success reflects error absence and elapsed time is captured once.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchOutputMode`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchOutputMode::from_str_opt`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchInputMeta`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchToolCallBlock::new`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `with_matches`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `with_error`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `is_success`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `set_error`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `finish`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `elapsed_ms`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `set_file_matches`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `started_at`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `match_count`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `file_matches`。
+
+
+### Requirement: Search match summaries by output mode
+
+match_summary SHALL return `(no matches)` for zero Content/Count results and `(no files)` for zero FilesWithMatches results. Content mode SHALL distinguish singular match, plural matches, and multiple files; FilesWithMatches SHALL interpret match_count as file count; Count SHALL report matches across the maximum of file_paths and file_matches when multiple files exist.
+
+#### Scenario: No results
+- **WHEN** match_count is zero
+- **THEN** Content/Count show `(no matches)` and FilesWithMatches shows `(no files)`.
+
+#### Scenario: Content mode
+- **WHEN** one or many matches span one or many grouped files
+- **THEN** the summary uses singular `(1 match)`, plural match count, or `matches in N files`.
+
+#### Scenario: Files mode
+- **WHEN** FilesWithMatches has N files
+- **THEN** the summary uses `(1 file)` or `(N files)`.
+
+#### Scenario: Count mode
+- **WHEN** Count has file paths/grouped files
+- **THEN** the summary uses `matches across N files` for multiple files and singular/plural match text otherwise.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `match_summary`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchOutputMode::Content`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchOutputMode::FilesWithMatches`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchOutputMode::Count`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `match_count`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `file_matches.len`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `file_paths.len`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `file_count`。
+
+
+### Requirement: Search header semantics, path scope, width budgeting, and selection
+
+header_line SHALL render `Search ` followed by a glob as the unquoted search term when pattern is empty or `.`, otherwise a quoted pattern; a supplied glob is rendered as an additional `in` scope for real patterns and the path is rendered after it. The summary is last, width-constrained paths are shortened with reserved summary budget, summaries are included only when they fit, and the final line is truncated to width. header_block_line SHALL make only the term span selectable with TOOL_HEADER_RANGE and selection_text SHALL be the promoted glob or raw pattern.
+
+#### Scenario: Trivial pattern
+- **WHEN** pattern is empty or `.` and glob exists
+- **THEN** the glob is shown as the colored unquoted search term and selected text.
+
+#### Scenario: Real pattern/glob
+- **WHEN** a non-trivial pattern and glob exist
+- **THEN** the pattern is quoted, glob is shown after `in`, and path follows as the final scope.
+
+#### Scenario: Width-constrained path
+- **WHEN** a path and width are supplied
+- **THEN** the path is shortened using the remaining budget after search term/summary, and the whole line is width-truncated.
+
+#### Scenario: Header copy
+- **WHEN** the rendered header is selected
+- **THEN** only span 1..term_end is selectable and copied text excludes label/path/summary.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `is_trivial_pattern`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `header_line`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `header_selection_text`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `header_block_line`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `TOOL_HEADER_RANGE`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `Selectable::Spans`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `selection_range`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `selection_text`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `shorten_path`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `truncate_line`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `meta.glob`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `meta.path`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `pattern`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `match_summary`。
+
+
+### Requirement: Search metadata projection for mode and non-default input filters
+
+metadata_line SHALL always render a mode key (`pattern`, `files`, or `count`) and SHALL append file type, case-insensitive, and multiline flags as comma-separated key/value fields in that order when present. The glob is intentionally omitted because it is rendered inline in the header; values use primary styling and labels use muted styling.
+
+#### Scenario: Default metadata
+- **WHEN** no optional filter is set
+- **THEN** the line contains the mode field only.
+
+#### Scenario: Filtered metadata
+- **WHEN** file_type, case_insensitive, and/or multiline are set
+- **THEN** each active field is appended once in stable order with `key: value` formatting.
+
+#### Scenario: Glob metadata
+- **WHEN** a glob is set
+- **THEN** the metadata line omits it because header_line owns glob presentation.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `metadata_line`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchOutputMode::Content`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchOutputMode::FilesWithMatches`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchOutputMode::Count`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `file_type`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `case_insensitive`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `multiline`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `mode: `；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `type: `；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `case-insensitive: `；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `multiline: `。
+
+
+### Requirement: Search result output for content, file-only, count, empty, and error cases
+
+output SHALL render a collapsed width-aware header only in Collapsed mode. Expanded and Truncated modes SHALL render an unmuted header, separator, metadata, then results: grouped file paths and numbered trimmed match lines for file_matches; file paths alone for FilesWithMatches; and path/count split at the last colon for Count. A result set with no paths/matches SHALL show `(no results)`, while result rows SHALL carry panel backgrounds and inter-file blank separators.
+
+#### Scenario: Content results
+- **WHEN** file_matches is non-empty
+- **THEN** each file is a panel path row followed by `line number  content` rows with trailing match whitespace trimmed.
+
+#### Scenario: File-only results
+- **WHEN** file_matches is empty, file_paths non-empty, and mode is FilesWithMatches
+- **THEN** each path is rendered as an indented panel row.
+
+#### Scenario: Count results
+- **WHEN** file_paths contain `path:N` and mode is Count
+- **THEN** the final colon separates path-colored file text from primary-colored `:N`; paths without a colon remain wholly path-colored.
+
+#### Scenario: No results
+- **WHEN** both result collections are empty and match_count is zero
+- **THEN** metadata is followed by an indented muted `(no results)` hint.
+
+#### Scenario: Expanded/truncated
+- **WHEN** mode is Expanded or Truncated
+- **THEN** the same metadata/results projection is used; only the outer display mode/header fold differs.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `output`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `DisplayMode::Collapsed`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `DisplayMode::Truncated`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `DisplayMode::Expanded`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `file_matches`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `file_paths`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchOutputMode::Count`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `with_panel_background`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `line_number`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `content_trimmed`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `panel`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `(no results)`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `word_wrap_lines`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `metadata_line`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `header_line`。
+
+
+### Requirement: Search block fold and neutral visual protocol
+
+Search blocks SHALL have no accent line, show a red error bullet only when error exists, use no vertical padding, semantic background, or raw mode, default to Collapsed, remain foldable whenever successful even when no matches are present, and toggle non-collapsed modes back to Collapsed while Collapsed advances to Expanded. An errored Search block SHALL not be treated as a normal fullscreen viewer by the surrounding RenderBlock.
+
+#### Scenario: Visual protocol
+- **WHEN** the renderer queries accent/bullet/padding/background/raw mode
+- **THEN** accent is None, bullet is error red only, padding/background/raw are disabled.
+
+#### Scenario: Foldability
+- **WHEN** a search succeeds or has an error
+- **THEN** successful blocks are foldable even with no results; errored blocks are not.
+
+#### Scenario: Fold cycle
+- **WHEN** current mode is Collapsed, Truncated, or Expanded
+- **THEN** Collapsed becomes Expanded and either non-collapsed mode becomes Collapsed.
+
+#### Scenario: Fullscreen eligibility
+- **WHEN** a matched or errored search block is wrapped in RenderBlock
+- **THEN** matched search has a normal fullscreen viewer while errored search has none.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `accent`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `bullet`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `background`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `DisplayMode::Collapsed`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `DisplayMode::Expanded`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `BlockBackground::None`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `AccentStyle::static_color`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `error`。
+
+
+### Requirement: Search indexing and Grep viewer dispatch integration
+
+The surrounding RenderBlock/search integration SHALL expose search pattern, file path, and matched line content through searchable_text, and OpenBlockViewer on a matched Search block SHALL consume the block without emitting an effect and open a Grep viewer for the selected entry.
+
+#### Scenario: Search indexing
+- **WHEN** a search block contains pattern, file path, line number, and content
+- **THEN** searchable_text contains the pattern, path, and matched content.
+
+#### Scenario: Open viewer
+- **WHEN** a matched Search block is selected and OpenBlockViewer is dispatched
+- **THEN** no effect is emitted and the agent opens ViewerKind::Grep.
+
+证据：`crates/codegen/pager/src/scrollback/block.rs` — `search_tool_indexes_pattern_and_match_line`；`crates/codegen/pager/src/app/root/dispatch/tests/transcript.rs` — `open_block_viewer_opens_grep_search_block`；`crates/codegen/pager/src/scrollback/blocks/tool/search.rs` — `SearchToolCallBlock`。

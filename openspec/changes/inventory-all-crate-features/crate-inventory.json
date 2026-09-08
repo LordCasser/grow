@@ -3854,7 +3854,19 @@
       "WezTerm and newline fallback require affirmative keyboard evidence",
       "Clipboard delivery findings own remediation while compatibility facts remain stable",
       "Named terminal-specific clipboard caveat recommendations",
-      "Keyboard fact and doctor formatter honor the snapshot host"
+      "Keyboard fact and doctor formatter honor the snapshot host",
+      "VisibleLink SHALL represent one logical clickable target as one or more screen-row rectangles, answer half-open coordinate hit tests, and identify only bare URL paint when total painted display width equals the URL display width.",
+      "VisibleLinkMap::rebuild SHALL clear the previous frame, store the supplied scrollback generation, reserve for overlay and citation inputs, resolve every target through terminal context, discard targets without an open target, and retain valid citation links alongside markdown overlay links.",
+      "Overlay projection SHALL skip zero-width segments, create one-row rectangles for positive spans, and merge consecutive same-id segments only within the current rebuild or append batch so wrapped fragments of one logical document link share a VisibleLink.",
+      "VisibleLinkMap SHALL append overlay sources without changing generation, merge wrapped segments only within that appended source, and support truncating the appended suffix before re-appending the current frame overlay.",
+      "VisibleLinkMap SHALL expose generation and staleness so a frame link map can be rejected whenever scrollback generation differs, while a rebuild at the current generation marks the map fresh and a same-cwd update does not create a false stale state.",
+      "Search block state, output modes, match mutation, and timing",
+      "Search match summaries by output mode",
+      "Search header semantics, path scope, width budgeting, and selection",
+      "Search metadata projection for mode and non-default input filters",
+      "Search result output for content, file-only, count, empty, and error cases",
+      "Search block fold and neutral visual protocol",
+      "Search indexing and Grep viewer dispatch integration"
     ],
     "reviewed_files": [
       {
@@ -6052,6 +6064,18 @@
       {
         "path": "crates/codegen/pager/src/diagnostics/view_tests.rs",
         "sha256": "7dead30c2746cc3d020e558946fc15fb050d997e6644d8e86ca5db265ea65cd7"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/file_search/state.rs",
+        "sha256": "ddd9a39ab90c752225ab70b6155a4c9d021728c701a2258e3b70d1cc2586d6d3"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/link_map.rs",
+        "sha256": "6feed009506dcd999704ebec822052d2c88fa2ffd997a1d97b2d3642918cb4c0"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/search.rs",
+        "sha256": "5f46cc53fac37fe5a29d2e2672d2194a5d10e4a1642e6ba61e09561ca89e457a"
       }
     ],
     "review": "reviews/pager.md"
