@@ -996,3 +996,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The repeated 120-character and three-line limits are hard-coded in both Blocked/Failed detail paths and output handling rather than represented by a shared rendering budget.
 - Pager 审计债务：The module has no local tests despite being a central presentation boundary; current OpenSpec evidence is indirect through entry/session-event composition requirements.
 - Pager 审计债务：HookPhase is a data enum in this file but rendering receives separate vectors and does not use the phase value directly, leaving phase validation to callers.
+- Pager 审计债务：Permission response delivery reports a closed requester only through a UI toast and has no typed result for callers or telemetry.
+- Pager 审计债务：Selection dispatch combines queue mutation, sticky cursor persistence, MCP/bash metadata projection, and AlwaysApprove mode transition, making the per-request response path carry several policy concerns.
+- Pager 审计债务：Root/child ownership is inferred from session-id strings in a shared queue; the queue does not expose a dedicated ownership abstraction to this module.
+- Pager 审计债务：The no-prefix MCP server fallback and bash highlight slicing are defensive assumptions embedded in dispatch rather than validated request types.

@@ -3990,7 +3990,21 @@
       "Latest prompt and agent reply summaries obey turn pairing and safe first-line projection",
       "Display text sanitization removes terminal control injection without needless allocation",
       "Derived titles truncate by Unicode codepoint without splitting UTF-8",
-      "Relative time formatting uses compact floor-second buckets"
+      "Relative time formatting uses compact floor-second buckets",
+      "Permission responses surface disconnected requesters",
+      "Permission selection builds scoped metadata and session approval transitions",
+      "Permission follow-up and cancellation resolve the front request",
+      "Root permission draining preserves child-owned requests",
+      "Permission queue transitions clear transient input and restore stashes",
+      "PlanApprovalViewState SHALL retain the source interaction identity, plan preview, stashed prompt, one-shot response sender, focus, comment records, editing/range state, and stashed feedback prompt, with deterministic constructor defaults.",
+      "PlanApprovalViewState::format_feedback and format_plan_comments SHALL produce stable human-readable feedback that labels 1-based selected plan lines, quotes available source snippets, preserves comment text, and appends nonblank freeform feedback in comment-aware form.",
+      "inline_plan_snippets SHALL convert a valid 1-based half-open line range into quoted plan lines and return explicit unavailable markers for absent content or invalid ranges.",
+      "Plan approval response helpers SHALL map approval actions to typed outcomes, omit trim-empty feedback, serialize an ExtResponse payload, and consume the response sender so repeated actions cannot send twice.",
+      "The plan approval view module SHALL provide pure formatting and response-channel helpers for AgentView while leaving focus transitions, prompt editing, comment selection, viewer lifecycle, and external transport ownership to its callers.",
+      "Use-tool block identity, state, copy text, and completion timing",
+      "Use-tool headers split qualified names and fit the action to available width",
+      "Use-tool output renders arguments and bounded inline result panels",
+      "Use-tool visual status, foldability, and viewer metadata follow block state"
     ],
     "reviewed_files": [
       {
@@ -6320,6 +6334,18 @@
       {
         "path": "crates/codegen/pager/src/views/session_title.rs",
         "sha256": "7defd0577e460230e6bd086a5f156aeda1996c918a96ee2aa210b5a286de4790"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/permissions.rs",
+        "sha256": "5384fa4a32b1fb1f14d7500744d54ab458b2549fb219f9a70a7321f81581aad0"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/plan_approval_view.rs",
+        "sha256": "9904b4accb1db4aa65b657759d087ebe09aed5f8f42c7ae1df5c86f39367c88b"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs",
+        "sha256": "2621128c25ad5794c25084dc0db19ad3e3249fff172238d4fb85edf677b9f813"
       }
     ],
     "review": "reviews/pager.md"

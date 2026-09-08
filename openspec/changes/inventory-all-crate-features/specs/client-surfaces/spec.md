@@ -26299,3 +26299,353 @@ format_relative_time SHALL format elapsed durations using floor seconds: less th
 - **THEN** whole days and `d ago` are returned.
 
 证据：`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time`；`crates/codegen/pager/src/views/dashboard/state.rs` — `format_relative_time`；`crates/codegen/pager/src/project_picker/mod.rs` — `format_relative_time`；`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time_sub_second_is_now`；`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time_seconds`；`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time_minutes`；`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time_hours`；`crates/codegen/pager/src/views/session_title.rs` — `format_relative_time_days`。
+
+
+### Requirement: Permission responses surface disconnected requesters
+
+The implementation SHALL satisfy the following tested behavior: respond_permission sends the selected ACP response through the request's oneshot response_tx. When the receiver is closed, it leaves the response unsent and calls AgentView::show_toast with the exact requester-disconnected message `This permission request is no longer valid (the requester disconnected)`.
+
+#### Scenario: Live requester
+- **WHEN** the permission response receiver accepts the response
+- **THEN** the ACP response is sent and no disconnected-requester toast is added by this helper.
+
+#### Scenario: Disconnected requester
+- **WHEN** the receiver is closed before respond_permission sends
+- **THEN** the send error is converted into the standardized AgentView toast.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `respond_permission`；`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `PERMISSION_REQUESTER_GONE_TOAST`；`crates/codegen/pager/src/app/agent_view/mod.rs` — `AgentView::show_toast`。
+
+
+### Requirement: Permission selection builds scoped metadata and session approval transitions
+
+The implementation SHALL satisfy the following tested behavior: dispatch_permission_select requires an active Agent view and a front permission request. It removes the front request, records only allow-flavored per-request option kinds in the sticky permission cursor, and sends Selected with optional metadata. MCP `allow-always-mcp` metadata selects the configured tool or server (falling back to tool when server prefix is absent); otherwise a positive bash selection count serializes the first highlighted words as command_parts. Selecting the global enable-always option first answers the current request, then for a root session that is not already AlwaysApprove calls set_permission_mode(AlwaysApprove), while the default permission is not changed in this function.
+
+#### Scenario: Ordinary selection
+- **WHEN** the active root or selected permission owner has a front request and a normal AllowOnce, AllowAlways, or reject option
+- **THEN** the request is popped, a Selected response is sent with no unrelated metadata, and allow-flavored kinds alone may update the sticky cursor.
+
+#### Scenario: MCP scope selection
+- **WHEN** option id is allow-always-mcp and the request has MCP scope
+- **THEN** response metadata encodes a tool selection or a server selection when a server prefix exists, with no-prefix server scope falling back to the tool selection.
+
+#### Scenario: Bash scope selection
+- **WHEN** the request has bash_highlights and bash_selection_count is positive while MCP scope branch does not apply
+- **THEN** response metadata encodes the first selected highlight words as BashCommandSelectedTerms command_parts.
+
+#### Scenario: Enable always approve
+- **WHEN** the selected option id is ENABLE_ALWAYS_APPROVE_OPTION_ID and the active view resolves to a root session that is not already AlwaysApprove
+- **THEN** the current request is answered Selected and set_permission_mode is called for session AlwaysApprove.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `dispatch_permission_select`；`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `respond_permission`；`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID`；`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `workspace::permission::ALLOW_EDITS_SESSION_OPTION_ID`；`crates/codegen/pager/src/app/root/dispatch/modes.rs` — `set_permission_mode`；`crates/codegen/pager/src/appearance/permission_cursor.rs` — `set_last_used_permission`；`crates/codegen/pager/src/views/permission_view.rs` — `McpScope`；`crates/codegen/workspace/src/permission/mod.rs` — `McpScopeSelection`；`crates/codegen/workspace/src/permission/mod.rs` — `BashCommandSelectedTerms`。
+
+
+### Requirement: Permission follow-up and cancellation resolve the front request
+
+The implementation SHALL satisfy the following tested behavior: dispatch_permission_followup and dispatch_permission_cancel operate on the active permission owner's front request and return an empty effect list. Followup searches for a RejectOnce option: when absent it sends Cancelled; when present it sends Selected for that option and attaches followup_message metadata only when the original text is not blank after trim. Cancel always sends Cancelled. Each path invokes resolve_permission_queue_transition after responding.
+
+#### Scenario: Follow-up rejection
+- **WHEN** the front request exposes RejectOnce and follow-up text is nonblank
+- **THEN** the request is answered Selected with the RejectOnce id and the original follow-up text is carried in followup_message metadata.
+
+#### Scenario: Missing RejectOnce
+- **WHEN** the front request has no RejectOnce option
+- **THEN** the request is answered Cancelled and no follow-up metadata is sent.
+
+#### Scenario: Cancel
+- **WHEN** a front permission request exists and cancellation is dispatched
+- **THEN** the request is answered Cancelled and queue transition handling runs.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `dispatch_permission_followup`；`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `dispatch_permission_cancel`；`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `respond_permission`；`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `resolve_permission_queue_transition`；`crates/codegen/pager/src/views/permission_view.rs` — `PermissionFocus::FollowupInput`；`crates/codegen/pager/src/app/actions.rs` — `Effect`。
+
+
+### Requirement: Root permission draining preserves child-owned requests
+
+The implementation SHALL satisfy the following tested behavior: drain_root_permission_queue returns without mutation when the Agent has no session_id. With a bound root session, it removes every queued permission whose request session_id equals the root session and answers each with Cancelled, while retaining requests from other session ids in their queue order. It compares the original front request identity using session_id and tool_call_id, and invokes queue transition handling only when a removed root request changed the visible front.
+
+#### Scenario: Unbound root
+- **WHEN** the Agent session_id is None
+- **THEN** the permission queue and response channels are untouched.
+
+#### Scenario: Root-owned drain
+- **WHEN** the queue contains one or more requests with the Agent root session_id
+- **THEN** matching requests are removed and each receives a Cancelled response.
+
+#### Scenario: Child preservation
+- **WHEN** the queue also contains requests with a different session_id
+- **THEN** child requests remain queued and are not answered by this root drain.
+
+#### Scenario: Front identity
+- **WHEN** root requests are removed behind a different front request
+- **THEN** the visible front request is preserved and its transition state is not reset by the drain.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `drain_root_permission_queue`；`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `resolve_permission_queue_transition`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::take_permission_queue`；`crates/codegen/pager/src/app/agent_view/interactions.rs` — `AgentView::replace_permission_queue`；`crates/codegen/pager/src/app/agent_view/mod.rs` — `AgentView::permission_queue`。
+
+
+### Requirement: Permission queue transitions clear transient input and restore stashes
+
+The implementation SHALL satisfy the following tested behavior: resolve_permission_queue_transition clears last_permission_click on every call. If the queue is empty, it calls restore_permission_stashes; otherwise it clears prompt text and sets the next front PermissionFocus to Options. restore_permission_stashes takes and restores permission_stashed_prompt and takes permission_stashed_pane to force_active_pane, leaving each stash consumed after restoration.
+
+#### Scenario: Queue emptied
+- **WHEN** a permission response leaves the queue empty
+- **THEN** the double-click tracker is cleared and any stashed prompt and pane are restored.
+
+#### Scenario: Next request remains
+- **WHEN** a permission response leaves another request at the front
+- **THEN** the double-click tracker is cleared, prompt text is emptied, and the next request focus becomes Options.
+
+#### Scenario: Stash restoration
+- **WHEN** permission_stashed_prompt or permission_stashed_pane is present
+- **THEN** the corresponding value is taken and applied to the composer or active pane.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `resolve_permission_queue_transition`；`crates/codegen/pager/src/app/root/dispatch/permissions.rs` — `restore_permission_stashes`；`crates/codegen/pager/src/app/agent_view/mod.rs` — `AgentView::last_permission_click`；`crates/codegen/pager/src/app/agent_view/mod.rs` — `AgentView::permission_stashed_prompt`；`crates/codegen/pager/src/app/agent_view/mod.rs` — `AgentView::permission_stashed_pane`；`crates/codegen/pager/src/views/permission_view.rs` — `PermissionFocus::Options`。
+
+
+### Requirement: PlanApprovalViewState SHALL retain the source interaction identity, plan preview, stashed prompt, one-shot response sender, focus, comment records, editing/range state, and stashed feedback prompt, with deterministic constructor defaults.
+
+PlanApprovalFocus SHALL distinguish Preview, Prompt, and Commenting. PlanComment SHALL carry an id, a 1-based half-open line_range, and comment text. PlanApprovalViewState::new SHALL clone request.session_id into source_session_id, retain tool_call_id and plan_content, store stashed_prompt, wrap response_tx in Some, set focus to Preview, initialize comments empty and next_comment_id to 0, and clear editing_comment_id, commenting_range, and stashed_feedback_prompt. State fields remain public for AgentView orchestration.
+
+#### Scenario: Focus model
+- **WHEN** the approval surface changes ownership between preview, prompt, and comment editor
+- **THEN** focus is represented by exactly one PlanApprovalFocus variant.
+
+#### Scenario: Constructor identity
+- **WHEN** a PlanApprovalExtRequest, stashed prompt, and response sender are supplied
+- **THEN** session/tool/plan/prompt data are retained and the sender is available once.
+
+#### Scenario: Comment defaults
+- **WHEN** a new approval view is created
+- **THEN** comments are empty, next id is zero, no comment is being edited, and no commenting range or feedback stash exists.
+
+证据：`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalFocus`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanComment`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalViewState`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalViewState::new`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `source_session_id`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `tool_call_id`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `plan_content`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `stashed_prompt`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `response_tx`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `focus`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `comments`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `next_comment_id`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `editing_comment_id`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `commenting_range`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `stashed_feedback_prompt`。
+
+
+### Requirement: PlanApprovalViewState::format_feedback and format_plan_comments SHALL produce stable human-readable feedback that labels 1-based selected plan lines, quotes available source snippets, preserves comment text, and appends nonblank freeform feedback in comment-aware form.
+
+Each comment SHALL render in insertion order as `Proposed plan line N:` for a one-line range or `Proposed plan lines N-M:` where M is range.end-1, followed by inline_plan_snippets, a blank line, `Comment:`, and the exact comment text. Blocks SHALL join with two newlines. format_feedback SHALL ignore freeform text when None or trim-empty; with no comments it SHALL append the original freeform text unchanged, and with comments it SHALL prefix it with `Additional feedback:` while preserving its original non-trimmed body. format_plan_comments SHALL apply the same comment rendering to a supplied slice and optional plan content.
+
+#### Scenario: Single-line comment
+- **WHEN** a comment range covers one line
+- **THEN** feedback uses singular Proposed plan line N and quotes that line.
+
+#### Scenario: Multi-line comment
+- **WHEN** a comment range covers multiple lines
+- **THEN** feedback uses inclusive display end range.end-1 and quotes each selected line.
+
+#### Scenario: Additional feedback
+- **WHEN** freeform text is nonblank and comments already exist
+- **THEN** an Additional feedback section is appended after the comment blocks.
+
+#### Scenario: Standalone feedback
+- **WHEN** freeform text is nonblank and there are no comments
+- **THEN** the original freeform text is appended without the Additional feedback label.
+
+#### Scenario: Blank feedback
+- **WHEN** freeform is None or trim-empty
+- **THEN** no freeform section is emitted.
+
+#### Scenario: Stable ordering
+- **WHEN** multiple comments exist
+- **THEN** blocks preserve comment vector order and are separated by exactly two newlines.
+
+证据：`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalViewState::format_feedback`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `format_plan_comments`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `inline_plan_snippets`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanComment::line_range`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanComment::text`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `inline_plan_feedback_quotes_selected_line_snippets`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `inline_plan_feedback_handles_out_of_range_lines`。
+
+
+### Requirement: inline_plan_snippets SHALL convert a valid 1-based half-open line range into quoted plan lines and return explicit unavailable markers for absent content or invalid ranges.
+
+When plan_content is None, inline_plan_snippets SHALL return `> [plan content unavailable]`. With content, it SHALL use lines(), reject ranges where start==0, start>=end, or start>line_count, clamp the inclusive end to min(range.end-1,line_count), reject end<start, and otherwise prefix each selected 1-based line with `> ` and join lines with `\n`. Out-of-range ends are truncated to available content rather than causing a slice panic.
+
+#### Scenario: Missing content
+- **WHEN** plan_content is None
+- **THEN** the explicit plan content unavailable marker is returned.
+
+#### Scenario: Invalid range
+- **WHEN** start is zero, start is not before end, or start exceeds line count
+- **THEN** the selected lines unavailable marker is returned.
+
+#### Scenario: Valid single line
+- **WHEN** range is N..N+1 for an existing line
+- **THEN** one quoted line is returned.
+
+#### Scenario: Valid multi-line
+- **WHEN** range spans several existing 1-based lines
+- **THEN** all selected lines are quoted in source order.
+
+#### Scenario: Clamped end
+- **WHEN** range.end extends beyond available lines
+- **THEN** the output stops at the final available line.
+
+证据：`crates/codegen/pager/src/views/plan_approval_view.rs` — `inline_plan_snippets`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `plan_content.lines`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `range.start`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `range.end`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `selected lines unavailable`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `plan content unavailable`。
+
+
+### Requirement: Plan approval response helpers SHALL map approval actions to typed outcomes, omit trim-empty feedback, serialize an ExtResponse payload, and consume the response sender so repeated actions cannot send twice.
+
+send_plan_approval_response SHALL filter feedback to None when f.trim().is_empty(), construct PlanApprovalExtResponse with the given outcome and normalized feedback, serialize it to a raw JSON value, wrap it in acp::ExtResponse, and attempt to send Ok(response), ignoring a closed receiver. send_ext_response SHALL take the Option sender and return false without sending when it is None; otherwise it SHALL consume the sender, dispatch the response, and return true. send_approved maps to Approved, send_abandoned to Abandoned with no feedback, send_cancelled to Cancelled, and send_stale_cancel to Cancelled with no feedback.
+
+#### Scenario: Approved response
+- **WHEN** send_approved is called without feedback
+- **THEN** the receiver gets JSON outcome approved with feedback omitted.
+
+#### Scenario: Approved feedback
+- **WHEN** send_approved receives nonblank text
+- **THEN** the receiver gets approved plus the exact feedback string.
+
+#### Scenario: Cancelled response
+- **WHEN** send_cancelled receives feedback or no feedback
+- **THEN** the receiver gets cancelled and optional feedback.
+
+#### Scenario: Empty feedback
+- **WHEN** feedback contains only whitespace
+- **THEN** feedback is omitted from JSON.
+
+#### Scenario: Abandon/stale cancel
+- **WHEN** send_abandoned or send_stale_cancel is called
+- **THEN** the receiver gets abandoned or cancelled with no feedback.
+
+#### Scenario: Double send
+- **WHEN** an action is sent twice on one state
+- **THEN** the first call returns true and consumes the sender; later calls return false.
+
+证据：`crates/codegen/pager/src/views/plan_approval_view.rs` — `send_plan_approval_response`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `send_ext_response`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalViewState::send_approved`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalViewState::send_abandoned`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalViewState::send_cancelled`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalViewState::send_stale_cancel`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalExtResponse`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalOutcome::Approved`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalOutcome::Abandoned`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalOutcome::Cancelled`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `test_send_approved`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `test_send_approved_with_feedback`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `test_send_cancelled_with_feedback`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `test_send_cancelled_without_feedback`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `test_send_cancelled_empty_feedback_is_none`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `test_send_stale_cancel`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `test_double_send_returns_false`。
+
+
+### Requirement: The plan approval view module SHALL provide pure formatting and response-channel helpers for AgentView while leaving focus transitions, prompt editing, comment selection, viewer lifecycle, and external transport ownership to its callers.
+
+The implementation SHALL satisfy the following tested behavior: This file owns PlanApprovalViewState data, comment/plan feedback text assembly, inline source quoting, and serialization of the response sent through the supplied oneshot channel. It does not handle keys, mouse selection, line-viewer opening, prompt restoration, comment editing/deletion, undo groups, or network dispatch. The sender is supplied by the caller and consumed exactly once; stashed_prompt and stashed_feedback_prompt are state carriers whose orchestration is outside this file. Ten inline tests prove constructor defaults, outcome/feedback JSON and pure formatting cases, but not the AgentView integration.
+
+#### Scenario: Caller-owned interaction
+- **WHEN** focus, prompt, comment selection, or viewer state changes
+- **THEN** AgentView owns the transition and uses these helpers for data/response projections.
+
+#### Scenario: Transport handoff
+- **WHEN** a response sender is supplied
+- **THEN** the module serializes and sends through that channel but does not create or retry transport.
+
+#### Scenario: Pure formatting
+- **WHEN** comments and optional plan content are supplied
+- **THEN** feedback is built without filesystem reads or viewer side effects.
+
+#### Scenario: Integration boundary
+- **WHEN** the source is audited with its ten inline tests
+- **THEN** JSON and formatting behavior is proven locally while UI routing and ACP caller behavior remain outside scope.
+
+证据：`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalViewState::format_feedback`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `send_plan_approval_response`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `send_ext_response`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `inline_plan_snippets`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `format_plan_comments`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `PlanApprovalViewState::new`；`crates/codegen/pager/src/views/plan_approval_view.rs` — `tests module`。
+
+
+### Requirement: Use-tool block identity, state, copy text, and completion timing
+
+UseToolCallBlock SHALL store a qualified tool name, ordered input key/value pairs, optional output/error, and optional timing. new SHALL initialize empty arguments/output/error/timing; with_error and set_error SHALL mark failure; is_success SHALL be true exactly when error is absent. set_error and finish SHALL capture elapsed milliseconds once started_at exists without overwriting an existing elapsed value, while elapsed_ms SHALL expose stored time or the current duration. copy_text SHALL emit the tool name, each argument, a blank separator, and output text or `(no output)` when output is absent.
+
+#### Scenario: Fresh block
+- **WHEN** UseToolCallBlock::new(tool_name) is constructed
+- **THEN** the name is retained and args/output/error/timing are empty.
+
+#### Scenario: Error state
+- **WHEN** with_error or set_error receives an error
+- **THEN** error is present and is_success returns false; set_error also captures elapsed time when applicable.
+
+#### Scenario: Completion timing
+- **WHEN** finish or elapsed_ms is called after timing starts
+- **THEN** elapsed milliseconds are reported once and finish does not replace a stored duration.
+
+#### Scenario: Copy with arguments/output
+- **WHEN** the block has input_args and output
+- **THEN** copy text lists `tool:`, each `key: value`, a blank line, and the output verbatim.
+
+#### Scenario: Copy without output
+- **WHEN** output is None
+- **THEN** copy text ends with `(no output)` regardless of whether an error exists.
+
+#### Scenario: ACP materialization
+- **WHEN** a completed ACP tool call carries variant UseTool with tool_name and tool_input
+- **THEN** tracker creates a UseTool block with the qualified name; a missing raw input does not panic.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::new`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::with_error`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::is_success`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::set_error`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::finish`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::elapsed_ms`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::copy_text`；`crates/codegen/pager/src/acp/tracker.rs` — `tool_call_to_block`；`crates/codegen/pager/src/acp/tracker.rs` — `extract_use_tool_args`；`crates/codegen/pager/src/acp/tracker.rs` — `extract_use_tool_output`；`crates/codegen/pager/src/acp/tracker.rs` — `call_mcp_tool_coerced_to_use_tool_renders_block`；`crates/codegen/pager/src/acp/tracker.rs` — `call_mcp_tool_no_raw_input_does_not_panic`。
+
+
+### Requirement: Use-tool headers split qualified names and fit the action to available width
+
+split_name SHALL split once on MCP_TOOL_NAME_DELIMITER, titleize server and action independently, and return an empty server plus titleized full tool name for unqualified names. header_line SHALL render a qualified name as bold server plus command-colored action, an unqualified name as one bold span, and use truncation only on the action portion within the remaining width budget; unbounded headers SHALL preserve the full titleized name.
+
+#### Scenario: Qualified name
+- **WHEN** tool_name contains the validated MCP delimiter
+- **THEN** server and action are titleized and rendered as separate spans with a space separator.
+
+#### Scenario: Unqualified name
+- **WHEN** tool_name has no delimiter
+- **THEN** the full titleized name is rendered as one bold header span and no empty server prefix is shown.
+
+#### Scenario: Narrow qualified header
+- **WHEN** max_width is smaller than server plus action
+- **THEN** the server prefix is retained and only the action is truncated using saturating remaining width.
+
+#### Scenario: Narrow unqualified header
+- **WHEN** max_width is bounded for an unqualified name
+- **THEN** the full titleized name is truncated to the width.
+
+#### Scenario: Collapsed muting
+- **WHEN** collapsed output requests muted styling
+- **THEN** header styles use the theme muted style while expanded/preamble output uses normal primary/command styles.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::split_name`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::header_line`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `MCP_TOOL_NAME_DELIMITER`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `mcp_titleize_segment`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `truncate_str`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::preamble`。
+
+
+### Requirement: Use-tool output renders arguments and bounded inline result panels
+
+BlockContent::output SHALL render a collapsed bounded header only. Truncated and Expanded modes SHALL render the unmuted wrapped header, then optional argument rows, then an output panel when output is present. Truncated mode SHALL show at most 3 output lines and Expanded mode at most 10; when more lines exist, each mode SHALL append a dim `{remaining} more lines, press Enter to view` marker. Output lines and panel separators SHALL use the dark panel background, arguments SHALL show muted keys and primary values, and errors SHALL append in the error color.
+
+#### Scenario: Collapsed mode
+- **WHEN** ctx.mode is Collapsed
+- **THEN** only the header line is emitted with collapsed muting and width truncation.
+
+#### Scenario: Arguments
+- **WHEN** input_args is non-empty in Truncated or Expanded mode
+- **THEN** a separator and one `key: value` row per argument are emitted before output.
+
+#### Scenario: Truncated output
+- **WHEN** output has more than 3 lines
+- **THEN** the first 3 lines render and a `(9 more lines, press Enter to view)` style marker reports the remainder.
+
+#### Scenario: Expanded output
+- **WHEN** output has more than 10 lines
+- **THEN** the first 10 lines render and a remainder marker reports the hidden lines.
+
+#### Scenario: Short output
+- **WHEN** output has no more lines than the mode cap
+- **THEN** all output lines render without a remainder marker.
+
+#### Scenario: Error
+- **WHEN** error is present
+- **THEN** an error line is appended after the output section in the theme error color.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `impl BlockContent for UseToolCallBlock`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::output`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `MAX_INLINE_LINES`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `TRUNCATED_INLINE_LINES`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `DisplayMode::Collapsed`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `DisplayMode::Truncated`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `DisplayMode::Expanded`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `truncated_caps_inline_output_tighter_than_expanded`；`crates/codegen/pager-render/src/render/wrapping.rs` — `wrap_header_flush`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockLine::with_panel_background`。
+
+
+### Requirement: Use-tool visual status, foldability, and viewer metadata follow block state
+
+UseToolCallBlock SHALL have no vertical padding, background, or raw mode. Errors SHALL always use a static error accent/bullet; successful expanded running blocks SHALL use an animated running accent, successful expanded completed blocks a static tool accent, and successful collapsed blocks no accent/bullet. The block SHALL be foldable when arguments, output, or error exists, default to Collapsed, toggle Collapsed to Expanded and other modes back to Collapsed, and expose its header as the preamble. Tool grouping SHALL classify UseTool as an MCP call label, while the fullscreen viewer SHALL use the UseTool viewer kind.
+
+#### Scenario: Running success
+- **WHEN** error is absent, the mode is expanded, and ctx.is_running is true
+- **THEN** accent and bullet use animated running color.
+
+#### Scenario: Completed success
+- **WHEN** error is absent and the expanded block is not running
+- **THEN** accent and bullet use static tool color.
+
+#### Scenario: Error state
+- **WHEN** error is present in any mode
+- **THEN** accent and bullet use static error color and the block remains foldable.
+
+#### Scenario: Collapsed state
+- **WHEN** mode is Collapsed without error
+- **THEN** accent and bullet are absent while foldability is based on arguments/output/error.
+
+#### Scenario: Fold/display metadata
+- **WHEN** the block is queried for fold mode, default mode, preamble, padding, background, or raw mode
+- **THEN** default is Collapsed, toggle enters Expanded only from Collapsed, preamble is the normal header, and padding/background/raw mode remain disabled.
+
+#### Scenario: Integration classification/viewer
+- **WHEN** the block is wrapped as ToolCallBlock::UseTool and opened in a viewer
+- **THEN** label_kind returns McpCall and the viewer uses ViewerKind::UseTool.
+
+证据：`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::accent`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::bullet`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::has_vpad_for`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::background`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::has_raw_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::is_foldable`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::default_display_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::next_fold_mode`；`crates/codegen/pager/src/scrollback/blocks/tool/use_tool.rs` — `UseToolCallBlock::preamble`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `ToolCallBlock::UseTool`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `ToolCallBlock::label_kind`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `VerbGroupKind::McpCall`；`crates/codegen/pager/src/scrollback/blocks/tool/mod.rs` — `label_kind_extends_verb_kinds_to_action_tools`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::for_use_tool`；`crates/codegen/pager/src/app/root/dispatch/transcript.rs` — `dispatch_open_block_viewer`。
