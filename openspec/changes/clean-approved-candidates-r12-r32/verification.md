@@ -48,3 +48,6 @@ Removed only private uncalled read_optional_json_sync. Fresh Shell JSONL storage
 
 ## R29
 Removed only unused summary_lock_file/workflows_dir path helpers. Fresh JSONL storage regressions 135/135 passed; writer lease, Workflow paths and rewind_points_file retained.
+
+## R30
+Removed uncalled standalone rewind_files and its three exclusive result/conflict types. Tracker, snapshots, Shell transactional rewind and compensation unchanged. Fresh workspace session::file_state regressions 31/31 passed; no remaining removed symbol references.

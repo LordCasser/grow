@@ -276,7 +276,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：全仓 Rust 检索中 rewind_files 只有定义；三个类型只在该文件中服务这个入口。实际 shell handle_rewind 使用自己的预览、持久化意图、文件应用/补偿和 Timeline 提交链。
 - 删除理由：保留了第二套未启用的文件回退实现和响应模型；它缺少 shell 的事务协调，不能仅为复用而接入。
 - 拟删除范围：该函数及确认独占的三个类型、专属说明；保留 shell 回退、RewindResponse、RewindConflictInfo、merge_rewind_points_from、文件快照及事务恢复。
-- 状态：等待用户确认，尚未删除。公开库的仓库外调用情况未知；证据见 audit-disconnected-rewind-entrypoints。
+- 状态：已获批并删除；回归结果见 clean-approved-candidates-r12-r32 的 R30 验证记录。
 
 ## R31 · 仅被测试调用的回退 tracker 便利方法
 
