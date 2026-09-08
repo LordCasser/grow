@@ -973,3 +973,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Startup and doctor collection duplicate display-server/native-tool and host probing decisions, while standalone collection uses a separate path with different availability semantics.
 - Pager 审计债务：Targeted fix probing is keyed by diagnostic IDs in this low-level collector, coupling probe selection to diagnostics policy constants rather than a typed probe plan.
 - Pager 审计债务：RuntimeEvidence and TmuxProbeResult represent availability at different layers; downstream conversion must preserve distinctions manually, leaving room for inconsistent unavailable/error presentation.
+- Pager 审计债务：Each paint reconstructs dense output for every candidate entry and then flattens lines, with no per-width or per-generation cache in this module.
+- Pager 审计债务：The painter duplicates policy boundaries from full ScrollbackPane: no sticky headers, padding, gaps, or accent chrome are intentionally hard-coded here, so visual behavior can drift when shared layout rules change.
+- Pager 审计债务：Current-turn selection is inferred by reverse scanning for the last user prompt rather than consuming an authoritative turn range, leaving prompt identity and turn projection coupled to block classification.
+- Pager 审计债务：Global thinking visibility and process-global Theme::current are read during pure-looking projection, which complicates deterministic rendering and parallel tests.

@@ -24334,3 +24334,256 @@ patch_server_row SHALL find only the first server whose name equals the pushed n
 - **THEN** only the first occurrence is mutated.
 
 证据：`crates/codegen/pager/src/views/mcps_modal.rs` — `patch_server_row`；`crates/codegen/pager/src/views/mcps_modal.rs` — `servers.iter_mut().find`；`crates/codegen/pager/src/views/mcps_modal.rs` — `name`；`crates/codegen/pager/src/views/mcps_modal.rs` — `new_status`；`crates/codegen/pager/src/views/mcps_modal.rs` — `new_tools`；`crates/codegen/pager/src/views/mcps_modal.rs` — `tool_count`；`crates/codegen/pager/src/views/mcps_modal.rs` — `tools`；`crates/codegen/pager/src/views/mcps_modal.rs` — `true`；`crates/codegen/pager/src/views/mcps_modal.rs` — `false`。
+
+
+### Requirement: Pager dashboard peek recent-line projection unit checks
+
+Dense live-tail painting SHALL use the last user prompt as a one-line pin when present and use only the current-turn entries after it for the body; without a user prompt it SHALL densify the full scrollback. Foldable entries SHALL use their collapse mode, user prompts SHALL be collapsed, other entries SHALL be expanded, hidden thinking SHALL be skipped according to the global setting, and blank lines SHALL be removed only from foldable output. When the body is truncated, a muted top ellipsis is painted below the pin; the body keeps the newest lines. A fresh user with no subsequent entries SHALL leave the body empty, and an empty scrollback or invalid area SHALL leave the buffer untouched.
+
+#### Scenario: Pinned current turn
+- **WHEN** scrollback has older turns, a latest user prompt, and later tool or agent entries
+- **THEN** the latest user is painted first and only current-turn body lines appear beneath it.
+
+#### Scenario: Fresh user send
+- **WHEN** the latest entry is a user prompt with no following agent lines
+- **THEN** the prompt remains pinned and previous-turn content is not pulled into the body.
+
+#### Scenario: Tail truncation
+- **WHEN** current-turn content exceeds the available rows
+- **THEN** a top ellipsis appears below the pin when there is room and the newest command or message lines remain visible.
+
+#### Scenario: Dense mode projection
+- **WHEN** an entry is foldable, a user prompt, a non-foldable block, or hidden thinking is encountered
+- **THEN** the corresponding collapse/expanded mode and blank-line filtering rules determine the projected lines.
+
+#### Scenario: Empty or invalid area
+- **WHEN** scrollback is empty, width is zero, or height is zero
+- **THEN** paint_peek_live_tail returns without writing a visible row.
+
+证据：`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `paint_peek_live_tail`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `find_last_user_idx`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `densified_lines_from`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `dense_mode`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `dense_entry_lines`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `line_is_blank`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `tests::dense_tail_pins_last_user_at_top`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `tests::dense_tail_after_fresh_user_send_body_is_empty`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `tests::dense_tail_shows_top_ellipsis_when_body_truncated`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `tests::dense_tail_min_box_middle_is_current_turn_with_pin`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `tests::dense_tail_pure_tail_keeps_message_end`；`crates/codegen/pager/src/views/dashboard/peek_tail.rs` — `tests::dense_tail_empty_scrollback_is_noop`。
+
+
+### Requirement: RenderOutput SHALL provide a pure, defaultable carrier for selection-box, scrollbar, selected-entry, resolved-selection, OSC8-link, inline-media, and Mermaid-affordance outputs; with_selection_box SHALL initialize the selected box while leaving other artifacts empty, and with_scroll_info SHALL attach scroll metrics fluently.
+
+The implementation SHALL satisfy the following tested behavior: RenderOutput::new delegates to Default. Default has None for selection_box, scroll_info and selected_entry_area, plus empty ResolvedSelectionModel, LinkOverlay, inline_media and diagram_affordances. with_selection_box sets only selection_box and explicitly resets the remaining fields to their empty values; with_scroll_info replaces scroll_info and returns the modified output. ScrollInfo uses usize for scroll_offset/total_height and u16 for viewport_height to support tall transcripts without narrowing offsets.
+
+#### Scenario: Empty output
+- **WHEN** a caller creates RenderOutput::new or default
+- **THEN** all optional surfaces are absent and all per-frame collections/models are empty.
+
+#### Scenario: Selection output
+- **WHEN** a caller wraps an existing SelectionBox
+- **THEN** selection_box is Some while scroll info and post-flush collections remain empty.
+
+#### Scenario: Scroll metrics
+- **WHEN** a caller adds ScrollInfo
+- **THEN** output carries exact usize scroll/total values and u16 viewport height.
+
+证据：`crates/codegen/pager/src/scrollback/selection.rs` — `RenderOutput`；`crates/codegen/pager/src/scrollback/selection.rs` — `RenderOutput::new`；`crates/codegen/pager/src/scrollback/selection.rs` — `RenderOutput::with_selection_box`；`crates/codegen/pager/src/scrollback/selection.rs` — `RenderOutput::with_scroll_info`；`crates/codegen/pager/src/scrollback/selection.rs` — `ScrollInfo`。
+
+
+### Requirement: SelectionBox SHALL capture inner-area geometry, border style, top/bottom clipping, and optional close state through chainable builders; close_button_rect SHALL return a one-row hit rectangle only when closable, top is visible, and the inner area has room.
+
+The implementation SHALL satisfy the following tested behavior: SelectionBox::new initializes unclipped, non-closable state with no custom label. with_top_clipped and with_bottom_clipped set continuation flags; with_closable records enabled/hover state; with_close_label stores a static label and implies closable when Some. close_button_rect returns None when not closable, top_clipped, or inner_area.y==0. Otherwise it positions a width=max(label.chars().count,1) rect on inner_area.y-1, ending at the inner-area rightmost column; None label uses width one for default ballot-x. Hit computation is pure and does not touch Buffer.
+
+#### Scenario: Default box
+- **WHEN** SelectionBox::new receives a nonzero Rect/style
+- **THEN** box stores inner area/style and starts unclipped/non-closable.
+
+#### Scenario: Clipped top
+- **WHEN** top_clipped is true
+- **THEN** close_button_rect returns None because no top corner row is available.
+
+#### Scenario: Top edge
+- **WHEN** inner_area.y is zero
+- **THEN** close_button_rect returns None to avoid underflow/out-of-area hit.
+
+#### Scenario: Closable default
+- **WHEN** closable is enabled with no custom label and top is visible
+- **THEN** one-cell close hit rect is placed at the top-right corner row.
+
+#### Scenario: Custom label
+- **WHEN** close_label is Some(label)
+- **THEN** box becomes closable and hit width equals label.chars().count().
+
+证据：`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox`；`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::new`；`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::with_top_clipped`；`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::with_bottom_clipped`；`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::with_closable`；`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::with_close_label`；`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::close_button_rect`。
+
+
+### Requirement: SelectionBox::render SHALL draw side borders around every visible inner row, use dashed vertical glyphs on clipped edge rows, draw top/bottom corners only when the corresponding end is visible and in bounds, and safely no-op for zero-area boxes or cells outside the Buffer.
+
+The implementation SHALL satisfy the following tested behavior: For nonzero inner_area, left/right x are the inner edges and each y in the visible height receives │, except first row when top_clipped and last row when bottom_clipped receive ┆. Top corners ┌/┐ are drawn one row above only when !top_clipped and y_top>0; bottom corners └/┘ are drawn one row below only when !bottom_clipped. All writes use Buffer cell checks; close control replaces the top-right corner when available. A one-row box applies both clipping checks to the same row, so both flags produce dashed sides with no corners.
+
+#### Scenario: Normal box
+- **WHEN** nonzero box has neither end clipped and has room above
+- **THEN** solid side borders and both top/bottom corner pairs are rendered.
+
+#### Scenario: Top clipped
+- **WHEN** top_clipped is true
+- **THEN** top corners are omitted, first visible row uses dashed sides, and bottom corners remain if visible.
+
+#### Scenario: Bottom clipped
+- **WHEN** bottom_clipped is true
+- **THEN** bottom corners are omitted, last visible row uses dashed sides, and top corners remain.
+
+#### Scenario: Both clipped
+- **WHEN** both flags are true
+- **THEN** both corner pairs are omitted; first and last visible rows use dashed sides.
+
+#### Scenario: Single-row both clipped
+- **WHEN** height is one and both flags are true
+- **THEN** the only row is dashed on both sides and no corner is drawn.
+
+#### Scenario: Single-row top clipped
+- **WHEN** height is one and only top is clipped
+- **THEN** the only row is dashed, while bottom corners are drawn.
+
+#### Scenario: Top edge
+- **WHEN** inner_area.y is zero while top is not clipped
+- **THEN** side borders render from row zero, but top corners are skipped because there is no row above.
+
+证据：`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::render`；`crates/codegen/pager/src/scrollback/selection.rs` — `border_chars::TOP_LEFT`；`crates/codegen/pager/src/scrollback/selection.rs` — `border_chars::TOP_RIGHT`；`crates/codegen/pager/src/scrollback/selection.rs` — `border_chars::BOTTOM_LEFT`；`crates/codegen/pager/src/scrollback/selection.rs` — `border_chars::BOTTOM_RIGHT`；`crates/codegen/pager/src/scrollback/selection.rs` — `border_chars::VERTICAL`；`crates/codegen/pager/src/scrollback/selection.rs` — `border_chars::VERTICAL_DASHED`；`crates/codegen/pager/src/scrollback/selection.rs` — `test_selection_box_render`；`crates/codegen/pager/src/scrollback/selection.rs` — `test_selection_box_top_clipped`；`crates/codegen/pager/src/scrollback/selection.rs` — `test_selection_box_bottom_clipped`；`crates/codegen/pager/src/scrollback/selection.rs` — `test_selection_box_both_clipped`；`crates/codegen/pager/src/scrollback/selection.rs` — `test_selection_box_single_row_both_clipped`；`crates/codegen/pager/src/scrollback/selection.rs` — `test_selection_box_single_row_top_clipped_only`；`crates/codegen/pager/src/scrollback/selection.rs` — `test_selection_box_at_top_edge`。
+
+
+### Requirement: When a visible selection box is closable, render SHALL replace the top-right corner with the configured label or default ballot-x, use the border style normally and a bright primary foreground while hovered, and keep the close hit target aligned with the rendered label.
+
+The implementation SHALL satisfy the following tested behavior: render calls close_button_rect only for the visible top-corner path, so a clipped top never paints a close control. A custom close_label is written with SafeBuf at the computed rect; without one the ballot_x glyph replaces ┐. Hovered close uses Theme::current().text_primary, while unhovered close uses self.style. The implementation does not emit an action; the rect is for the caller’s mouse hit testing.
+
+#### Scenario: Default close
+- **WHEN** closable box has no custom label and top is visible
+- **THEN** ballot-x replaces the top-right corner and the computed hit rect covers one cell.
+
+#### Scenario: Custom close
+- **WHEN** closable box has a static multi-character label
+- **THEN** label is painted in the hit rect, replacing the corner region.
+
+#### Scenario: Hover feedback
+- **WHEN** close_hovered is true
+- **THEN** close label uses bright theme primary foreground.
+
+#### Scenario: Clipped close
+- **WHEN** top_clipped is true
+- **THEN** close control is neither hit-testable nor rendered.
+
+证据：`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::render`；`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::close_button_rect`；`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::with_closable`；`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::with_close_label`；`crates/codegen/pager/src/scrollback/selection.rs` — `crate::render::SafeBuf`；`crates/codegen/pager/src/scrollback/selection.rs` — `crate::glyphs::ballot_x`。
+
+
+### Requirement: SelectionBox rendering SHALL operate as a post-render overlay over an already-painted buffer, preserve caller-provided inner content, and avoid mutating selection state; callers remain responsible for ordering it after component rendering and for interpreting close hits.
+
+The implementation SHALL satisfy the following tested behavior: SelectionBox owns only border/close geometry and Style. Its render method writes border cells and close label/glyph directly, never edits inner content cells except edge columns, never changes the SelectionBox, and returns no outcome. RenderOutput documents that selection boxes are emitted by components and rendered after the main pass so a box may span component boundaries; link/media/diagram artifacts are carried separately for later post-flush handling.
+
+#### Scenario: Post-pass overlay
+- **WHEN** component first paints selected content then caller invokes SelectionBox::render
+- **THEN** border appears over the content edge without requiring the component to own the full frame.
+
+#### Scenario: State purity
+- **WHEN** same SelectionBox is rendered more than once
+- **THEN** geometry/configuration remains unchanged; only Buffer output changes.
+
+#### Scenario: Cross-component handoff
+- **WHEN** RenderOutput carries selection_box separately from selected_entry_area and other artifacts
+- **THEN** caller can defer border drawing and process other overlays independently.
+
+证据：`crates/codegen/pager/src/scrollback/selection.rs` — `SelectionBox::render`；`crates/codegen/pager/src/scrollback/selection.rs` — `RenderOutput::selection_box`；`crates/codegen/pager/src/scrollback/selection.rs` — `RenderOutput::selected_entry_area`；`crates/codegen/pager/src/scrollback/selection.rs` — `RenderOutput::selection_model`；`crates/codegen/pager/src/scrollback/selection.rs` — `RenderOutput::link_overlay`；`crates/codegen/pager/src/scrollback/selection.rs` — `RenderOutput::inline_media`；`crates/codegen/pager/src/scrollback/selection.rs` — `RenderOutput::diagram_affordances`。
+
+
+### Requirement: Context percentage and token compact formatting
+
+fmt_pct5 SHALL return a fixed five-character percentage representation: `X.XX%` below 10, `XX.X%` from 10 through 99.999…, and `MAX %` at or above 100. fmt_tokens SHALL compact counts below 1K as integers, 1K–9.999K as one-decimal K, 10K–999.999K as integer K, 1M–9.999M as one-decimal M, and 10M+ as integer M, keeping supported outputs at four characters or fewer.
+
+#### Scenario: Percentage below ten
+- **WHEN** pct is 0, 5.123, or 9.99
+- **THEN** two decimal places are used and output length is five.
+
+#### Scenario: Percentage ten-plus
+- **WHEN** pct is 10, 20.16, or 99.9
+- **THEN** one decimal place with normal rounding is used and output length is five.
+
+#### Scenario: Maximum percentage
+- **WHEN** pct is 100 or greater
+- **THEN** `MAX %` is returned.
+
+#### Scenario: Token boundaries
+- **WHEN** n lies below 1K, in K buckets, or in M buckets
+- **THEN** the documented compact suffix/rounding is used and tested values remain <=4 chars.
+
+证据：`crates/codegen/pager/src/views/context_bar.rs` — `fmt_pct5`；`crates/codegen/pager/src/views/context_bar.rs` — `fmt_tokens`；`crates/codegen/pager/src/views/context_bar.rs` — `pct`；`crates/codegen/pager/src/views/context_bar.rs` — `MAX %`；`crates/codegen/pager/src/views/context_bar.rs` — `1_000`；`crates/codegen/pager/src/views/context_bar.rs` — `10_000`；`crates/codegen/pager/src/views/context_bar.rs` — `1_000_000`；`crates/codegen/pager/src/views/context_bar.rs` — `10_000_000`。
+
+
+### Requirement: Usage gradient breakpoints and terminal-compatible color interpolation
+
+default_breakpoints SHALL define the text-primary → accent-user → warning → accent-error gradient at 0, 50/65, 75/85, and 95 percent. blend_color SHALL return Reset for no breakpoints, clamp below/above the range to endpoint colors, linearly interpolate within the first matching interval, resolve named/Reset colors to RGB for interpolation, clamp t to [0,1], and quantize back to a nearest indexed color when either endpoint is indexed.
+
+#### Scenario: Breakpoint endpoints
+- **WHEN** 0% or 95% is requested with the default theme
+- **THEN** the exact first/last theme colors are returned.
+
+#### Scenario: Intermediate gradient
+- **WHEN** pct lies between adjacent breakpoints
+- **THEN** RGB channels are linearly interpolated and rounded.
+
+#### Scenario: Empty/outside input
+- **WHEN** breakpoints are empty or pct is outside their range
+- **THEN** Reset or the nearest endpoint color is returned.
+
+#### Scenario: Indexed theme
+- **WHEN** either endpoint is Color::Indexed
+- **THEN** the interpolated RGB is converted to nearest indexed color.
+
+证据：`crates/codegen/pager/src/views/context_bar.rs` — `ColorBreakpoint`；`crates/codegen/pager/src/views/context_bar.rs` — `default_breakpoints`；`crates/codegen/pager/src/views/context_bar.rs` — `blend_color`；`crates/codegen/pager/src/views/context_bar.rs` — `lerp_color`；`crates/codegen/pager/src/views/context_bar.rs` — `color_to_rgb`；`crates/codegen/pager/src/views/context_bar.rs` — `resolve_to_rgb`；`crates/codegen/pager/src/views/context_bar.rs` — `nearest_indexed`；`crates/codegen/pager/src/views/context_bar.rs` — `Color::Indexed`；`crates/codegen/pager/src/views/context_bar.rs` — `Color::Reset`；`crates/codegen/pager/src/views/context_bar.rs` — `pct`；`crates/codegen/pager/src/views/context_bar.rs` — `breakpoints`。
+
+
+### Requirement: Context bar availability, gateway suppression, and usage prerequisites
+
+context_bar_line SHALL delegate to the session-aware builder with gateway_chat=false. context_bar_line_for_session SHALL return None for gateway/chat sessions before reading token inputs, and otherwise require Some used_tokens plus a strictly positive Some total_tokens before computing usage_percentage; missing or zero totals SHALL return None for both hover states.
+
+#### Scenario: Gateway chat
+- **WHEN** gateway_chat is true even with token values
+- **THEN** the context bar is suppressed.
+
+#### Scenario: Available data
+- **WHEN** gateway_chat is false and used/total are present with total > 0
+- **THEN** a line is produced for hovered and non-hovered states.
+
+#### Scenario: Unavailable data
+- **WHEN** used or total is None, or total is zero
+- **THEN** None is returned without a partial bar.
+
+证据：`crates/codegen/pager/src/views/context_bar.rs` — `context_bar_line`；`crates/codegen/pager/src/views/context_bar.rs` — `context_bar_line_for_session`；`crates/codegen/pager/src/views/context_bar.rs` — `gateway_chat`；`crates/codegen/pager/src/views/context_bar.rs` — `used_tokens`；`crates/codegen/pager/src/views/context_bar.rs` — `total_tokens`；`crates/codegen/pager/src/views/context_bar.rs` — `usage_percentage`；`crates/codegen/pager/src/views/context_bar.rs` — `total_tokens.filter`；`crates/codegen/pager/src/views/context_bar.rs` — `Some`；`crates/codegen/pager/src/views/context_bar.rs` — `None`。
+
+
+### Requirement: Default and hover context bar width invariant and progress rendering
+
+For available token data, the builder SHALL derive total display width from `fmt_tokens(used) / fmt_tokens(total)`, right-pad the default form to at least BAR_PCT_GAP + PCT_WIDTH (six columns), and color it with the usage gradient over the theme base background. Hover mode SHALL replace the token text with a progress_bar_spans bar of total_width minus six, append one background gap and a five-character secondary-colored percentage, and preserve the default line width across hover states.
+
+#### Scenario: Default display
+- **WHEN** hovered is false
+- **THEN** the line shows compact `used / total` text, padded only for sub-minimum widths, with urgency color and base background.
+
+#### Scenario: Hover display
+- **WHEN** hovered is true
+- **THEN** the line contains a progress bar, one gap, and the fixed-width percentage suffix.
+
+#### Scenario: Width invariant
+- **WHEN** the same used/total pair is rendered in both modes
+- **THEN** default and hover Line widths are identical, including `0 / 9` minimum-width input.
+
+#### Scenario: Bar scaling
+- **WHEN** compact token strings have different natural widths
+- **THEN** hover bar width grows with default token string length.
+
+证据：`crates/codegen/pager/src/views/context_bar.rs` — `context_bar_line_for_session`；`crates/codegen/pager/src/views/context_bar.rs` — `context_bar_line`；`crates/codegen/pager/src/views/context_bar.rs` — `fmt_tokens`；`crates/codegen/pager/src/views/context_bar.rs` — `PCT_WIDTH`；`crates/codegen/pager/src/views/context_bar.rs` — `BAR_PCT_GAP`；`crates/codegen/pager/src/views/context_bar.rs` — `natural_width`；`crates/codegen/pager/src/views/context_bar.rs` — `min_width`；`crates/codegen/pager/src/views/context_bar.rs` — `total_width`；`crates/codegen/pager/src/views/context_bar.rs` — `progress_bar_spans`；`crates/codegen/pager/src/views/context_bar.rs` — `theme.bg_highlight`；`crates/codegen/pager/src/views/context_bar.rs` — `theme.bg_base`；`crates/codegen/pager/src/views/context_bar.rs` — `theme.text_secondary`；`crates/codegen/pager/src/views/context_bar.rs` — `quantize`；`crates/codegen/pager/src/views/context_bar.rs` — `fmt_pct5`；`crates/codegen/pager/src/views/context_bar.rs` — `Line::width`。
+
+
+### Requirement: Context bar exported separator and theme-aware line spans
+
+The context bar SHALL expose the status-bar separator as the stable `│` constant and return static Line spans whose background is theme.bg_base; default token text uses the quantized blended urgency color, while hover percentage uses theme.text_secondary and the progress fill uses theme.bg_highlight with the same quantized urgency color.
+
+#### Scenario: Separator
+- **WHEN** a caller inserts the exported status-bar separator
+- **THEN** the constant is exactly `│`.
+
+#### Scenario: Color roles
+- **WHEN** default or hover line is built
+- **THEN** the usage signal color is shared with the progress fill/default text and the hover percentage remains secondary-colored on the base background.
+
+证据：`crates/codegen/pager/src/views/context_bar.rs` — `SEPARATOR`；`crates/codegen/pager/src/views/context_bar.rs` — `context_bar_line_for_session`；`crates/codegen/pager/src/views/context_bar.rs` — `Style::default`；`crates/codegen/pager/src/views/context_bar.rs` — `theme.bg_base`；`crates/codegen/pager/src/views/context_bar.rs` — `theme.bg_highlight`；`crates/codegen/pager/src/views/context_bar.rs` — `theme.text_secondary`；`crates/codegen/pager/src/views/context_bar.rs` — `quantize`；`crates/codegen/pager/src/views/context_bar.rs` — `blend_color`。

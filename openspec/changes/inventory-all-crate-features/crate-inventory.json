@@ -3908,7 +3908,17 @@
       "MCP section identity, ordering, labels, descriptions, and removability",
       "MCP wire models, setup metadata, tool details, and status presentation",
       "MCP list response conversion, status precedence, plugin parsing, and stable sorting",
-      "MCP server status push patching and tool preservation"
+      "MCP server status push patching and tool preservation",
+      "RenderOutput SHALL provide a pure, defaultable carrier for selection-box, scrollbar, selected-entry, resolved-selection, OSC8-link, inline-media, and Mermaid-affordance outputs; with_selection_box SHALL initialize the selected box while leaving other artifacts empty, and with_scroll_info SHALL attach scroll metrics fluently.",
+      "SelectionBox SHALL capture inner-area geometry, border style, top/bottom clipping, and optional close state through chainable builders; close_button_rect SHALL return a one-row hit rectangle only when closable, top is visible, and the inner area has room.",
+      "SelectionBox::render SHALL draw side borders around every visible inner row, use dashed vertical glyphs on clipped edge rows, draw top/bottom corners only when the corresponding end is visible and in bounds, and safely no-op for zero-area boxes or cells outside the Buffer.",
+      "When a visible selection box is closable, render SHALL replace the top-right corner with the configured label or default ballot-x, use the border style normally and a bright primary foreground while hovered, and keep the close hit target aligned with the rendered label.",
+      "SelectionBox rendering SHALL operate as a post-render overlay over an already-painted buffer, preserve caller-provided inner content, and avoid mutating selection state; callers remain responsible for ordering it after component rendering and for interpreting close hits.",
+      "Context percentage and token compact formatting",
+      "Usage gradient breakpoints and terminal-compatible color interpolation",
+      "Context bar availability, gateway suppression, and usage prerequisites",
+      "Default and hover context bar width invariant and progress rendering",
+      "Context bar exported separator and theme-aware line spans"
     ],
     "reviewed_files": [
       {
@@ -6166,6 +6176,18 @@
       {
         "path": "crates/codegen/pager/src/views/mcps_modal.rs",
         "sha256": "3e99d6a7fff214fa3454c7a21353a9cd9ca2c7468e9503c1b2530dd1b43c9fc8"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/dashboard/peek_tail.rs",
+        "sha256": "a1b0daf64e1446797b7c6122bb853665e1c2aa2de1eb58d6667a90b02dc0f9ef"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/selection.rs",
+        "sha256": "508c5788029c2d3bd735d7cd9f6e585355648a9bf5b0eb17138eea178f01ab57"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/context_bar.rs",
+        "sha256": "df7be568d1a1ca957c99dafcad695709c1157a9866ba0f5ae67e4f206cc98538"
       }
     ],
     "review": "reviews/pager.md"
