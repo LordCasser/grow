@@ -1,0 +1,864 @@
+# chat-state 逐包审阅
+
+## Manifest 与入口
+
+Cargo.toml及lib.rs完整读取。包依赖compaction、sampling-types与token-estimation；唯一声明feature default-bazel为空开关。17份Rust文件，模块包含actor、命令/事件/handle、timeline、sideband、trajectory、持久化、usage与types。lib的actor架构图是说明，实际调用与持久化行为待对应文件核对。
+
+## usage.rs 完整读取
+
+UsageTotals/UsageLedger均非serde，公开字段可手工构造。from_call把TokenUsage各u32字段扩到u64，忽略wire total_tokens，model_calls固定1，缺duration记0；成本先委托reported_cost_ticks（零经测试视未报告），缺成本计missing1。total_tokens=input+output饱和加，uncached=max(input-cached_read,0)+output饱和加，cache_creation不单独减。
+
+fold逐字段饱和累加，cost两None仍None，否则缺项作0并i64饱和加；record_subagent直接接受UsageTotals，不再经过成本正值规范化。cost_is_partial仅cost Some且missing_calls>0，不包含ledger.incomplete判断。by_model使用IndexMap，精确model_id首次插入排序，不trim/归一。
+
+record_main_loop_call递增主循环计数再折总数和model分组；record_subagent仅折每项总数、不增加主循环次数，incomplete参数true时置true。mark_incomplete置true，没有方法清除但public字段可改；重复fold不去重。关于后台/drain/冻结策略仅模块注释，实际协调逻辑待shell核对，不视本模块实现。
+
+唯一单测读取完整：零成本缺失、部分成本、主调用3、子调用总数4但主轮次不增、空子集合可置incomplete；未执行。未覆盖溢出极值/重复计费/负cost子账本，不能泛化为完整财务核算验证。
+
+当前完整读取2/17份Rust，包仍pending。
+
+- `crates/codegen/chat-state/Cargo.toml` SHA256 `7dc922ee0e284d4d0fa78e09862aa27e3ce5c9f6d682910b264b3ba70e886d9a`
+
+- `crates/codegen/chat-state/src/lib.rs` SHA256 `45e97e65045e8dcadf1eb9326af00696dc246c76fdd8812f5248b53811ab9170`
+
+- `crates/codegen/chat-state/src/usage.rs` SHA256 `47b3bde7f57441ee40ec8a172e304c573798b0089d538ed759de3448c8081141`
+
+
+## persistence.rs 完整读取
+
+TimelinePersistence 是 Send + static 的独占可变端口；persist_timeline_event_and_ack 返回 oneshot Receiver<io::Result<()>>，flush 无返回值，接口本身不能证明真实磁盘同步完成。永久错误分类明确包括 InvalidData、InvalidInput、PermissionDenied、NotFound、Unsupported、BrokenPipe、StorageFull、QuotaExceeded、FileTooLarge、ReadOnlyFilesystem、OutOfMemory、WriteZero；其他 ErrorKind 返回 false，重试调用方仍需核对。
+
+Mock 先发送克隆 Timeline 记录，再按 bootstrap 自动确认计数、手动确认通道、默认成功顺序处理；记录通道关闭会返回 BrokenPipe。手动确认发送失败时忽略 send 错误并丢弃 sender，接收端看到确认丢失，不是显式 io 错误。自动确认计数只在记录成功后递减。drain 非阻塞取当前可用记录；next_timeline_ack 最多等待5秒，超时、关闭或未启用手动模式都返回 None。flush 只尝试发送 Flush 记录并忽略失败。Null 丢弃事件立即成功确认，flush 无操作，不能作真实持久化证据。文件内两项测试仅检查两次 Flush 记录和 Null flush 不 panic；尚未执行本包测试。
+
+## events.rs 完整读取
+
+ChatStateEvent 只定义会话协调事件：PromptIndexChanged(new_index)、ContextPressureUpdated(projected_tokens)、ConversationReset(new_len)、ImageBudget。ImageBudget 携带 body_bytes、trigger_bytes、reclaim_target_bytes、inline_images、needs_image_compaction、evicted、body_bytes_after；类型本身没有校验这些字段相互一致，也不实现淘汰或日志写入。其发生时机与消费者仍待 actor/shell 核对。唯一测试只构造前三个变体，未检查 ImageBudget 或事件投递。
+
+当前完整读取4/17份Rust；commands.rs已读取1–160行，尚未完成。compaction_utils.rs整文件输出截断，不计为完整读取，后续从头分段核对。包保持pending，以上事实尚未全部转成正式delta契约。
+
+- `crates/codegen/chat-state/src/persistence.rs` SHA256 `828d1990c010e72145c6287eb728a5159f0c0d2b7529bc3876cd514b496b972c`
+
+- `crates/codegen/chat-state/src/events.rs` SHA256 `406af152be7a7da6f5907a8bad386b9dd6167be2e9d4696d06143a15c7e37f64`
+
+
+## commands.rs 完整读取
+
+本文件定义命令与回复类型，不执行状态转移。TimelineWriteError 区分 causal fold Invalid、底层 Persistence（保留 io source）、AcknowledgementLost、Cancelled、InvalidRewindTarget(target/current)、SurfaceChanged(expected/actual)、ImageDescriptionUnavailable。PruneError 分为空会话、actor不可用、Timeline包装；RepairHistoryError 区分活动turn和Timeline错误。ConditionalToolResultOutcome 明确 Accepted/RejectedSurfaceChanged/RejectedHeadroom。ImageProjectionReport.total_images仅返回described_images；PruneReport包含修剪个数及前后tokens，不在类型中约束大小关系。
+
+命令覆盖用户/助手/工具消息、显式repair reason、Timeline边界、通知receipt、输入提交、恢复、开放compaction结算；持久化命令带oneshot Result回复，普通push、flush、route/config/timing更新无回复。PushResponseDurably同时携带原生continuation，成功回复usize；条件工具结果带候选与拒绝结果、期望revision、上下文及结果token上限。ReplaceSurface带乐观revision和cause；ReplaceCompactionRange带稳定SurfaceRange；Rewind带prompt索引；图片投影带独立report。具体先持久化后发布、幂等、冻结范围与拒绝替代是否实现，待actor/timeline逐项核对，不单凭注释确认。
+
+usage命令分别登记provider上下文anchor、最后turn用量、模型调用成本与耗时、子agent按model聚合和prompt归属，以及prompt/session不完整标记。route替换、参数更新、continuation reset是三个接口，reset有确认。repair命令允许dry_run且turn_active为可选Arc<AtomicBool>，因此接口不强制调用者提供活动标记。capture开始无回复、take返回Option<TurnCapture>。
+
+查询范围包含完整conversation及revision、trajectory、Hook投影、事件ledger、待通知/已允许输入、输入payload hash集合、按source/version通知ID、Timeline物化和所选分支原始transcript；prompt/revision/最近压缩/压力/usage/config/编辑路径/时间信息/凭据/模型metadata/snapshot/autoCompact；窄查询提供长度、悬空tool谓词、全局或当前turn助手文本、首用户Text、索引item、末用户query、角色计数及System项。GetSubmittedInputPayloadHashes及编辑路径使用BTreeSet回复。请求构建带timeline lineage、tools、memory reminder、goal tag、JSON output，返回Result<ConversationRequest,TimelineWriteError>。
+
+构造性单测没有调用actor，也未覆盖每个新变体；注释声称every variant不等于穷尽测试。未执行本包测试。当前完整读取5/17份Rust，包保持pending。
+
+- `crates/codegen/chat-state/src/commands.rs` SHA256 `c503ca0757feeecbd30c340a61660b392183b74b84fc88c6d7d16f5627592c63`
+
+
+## actor/mod.rs 完整读取（817行）
+
+actor用unbounded mailbox，tokio task串行await每条命令。launch派生child cancellation token并立即返回handle，无bootstrap就绪确认。spawn把初始state已有事件作为bootstrap；恢复入口先from_events验证，再recover_interrupted和recover_surface_integrity，将恢复事件放bootstrap；虽入口async返回Result，实际持久化在run中逐条完成，之前不接收命令。bootstrap任意失败直接退出，未补做flush。
+
+持久化循环每次传同一不可变event，确认等待无timeout；取消biased优先于同时就绪确认。成功后才accept和刷新prompt投影；accept失败置poison。底层永久错误按classifier置poison并返回，其他io错误及oneshot丢失以25ms起翻倍、上限1秒无限重试，取消结束。每次调用持久化先于select，已取消时仍可能发起一次写入；取消不证明磁盘没有提交。注释称ENOSPC transient但StorageFull已被classifier列永久，规范应跟随实际分类。永久失败当前回复后退出run，后续mailbox命令被丢弃；普通prepare错误仅日志，不poison。关闭事件订阅端只debug并丢事件，不终止actor。正常取消/mailbox关闭亦无隐式flush。
+
+通知重投通过source/version查原事件，owner与payload相同返回原事件不重写，不同返回InvalidNotification。input按ID查原事件，intent与payload一致复用，否则InvalidInput。恢复命令在clone上准备多个事件，随后逐个提交；中途失败此前提交保留、返回Err，不是整批事务。settle compaction也在clone准备，None不写。prompt index变化清空prompt_usage并发PromptIndexChanged。
+
+ReplaceSamplingRoute无条件reset continuation（新backend、当前surface_len、sampling_route_changed），再替换整个config；UpdateSamplingConfig直接替换整个config，不校验route是否变化，也不reset。ResetContinuation使用当前backend并确认。ReplaceSurface先精确revision检查再调用持久化替换。RepairHistory读取可选flag的SeqCst值，缺flag等同false；blocked时连dry-run也拒绝。Flush仅调用无确认port。edited paths原样插入BTreeSet；stream/turn timestamps直接覆盖。
+
+BeginTurnCapture记录next_seq并重置compaction标志，take先移除capture再从timeline取该seq后turn items；重复take无capture返回None。GetConversationWithRevision在同一次处理中克隆surface和revision。MaterializeTimeline/BranchTranscript无事件时None，有事件range固定first_seq0至last event seq；前者包含权限证据、permission context与active control context，后者含branch transcript/IDs及卸载IDs；调用者timeline_id原样写入引用，处理器不验证它与当前lineage相符。大多数查询直接读timeline；BuildConversationRequest委托可变异步构建，不能泛化所有query都纯只读。所有reply send失败均忽略，调用者放弃回复不回滚已执行工作。
+
+## actor/queries.rs 完整读取（192行）
+
+snapshot克隆surface/config/credentials和编辑路径，带prompt records、压力、时间与最近完成压缩索引，不包含全部Timeline ledger、continuation或usage。autoCompact委托token_estimation阈值与截断百分比工具，不在此校验threshold u8范围。last model metadata只取逆序第一个Assistant，即使两个字段都是None也不继续查旧项。
+
+末助手文本trim仅用于判空，返回原始未trim文本；turn版本向后遇到带prompt_index的User、无synthetic_reason的User或starts_prompt_turn reason即停，穿过其他合成注入。first user text存在注释/实现差异：find_map会跳过首part不是Text或空content的User，继续寻找后面的User，因此返回的是第一个首part为Text的User内容，不保证来自第一条User。每条User仍只看first part，不取同条后续Text。索引查询越界None，System查询第一个System克隆，counts/dangling/last-query委托相应工具。待检查actor测试对此差异的覆盖；暂不修改运行时代码。
+
+当前完整读取7/17份Rust，剩余actor state/mutations/request_builder/tests、types、timeline、sideband、trajectory、handle、compaction_utils。包保持pending。
+
+- `crates/codegen/chat-state/src/actor/mod.rs` SHA256 `d63404842c541eb5db2e7da7688ae2bc65d42d7c4195ad661ef41387230c1cc1`
+
+- `crates/codegen/chat-state/src/actor/queries.rs` SHA256 `7bc1a371de3da957eb9f75fc53c44355b439b11c78ad0d8e907dd65d96346c72`
+
+
+## actor/state.rs 完整读取（571行）
+
+系统token估算仅System项；工具定义按name、可选description、序列化parameters总字节除BYTES_PER_TOKEN，各工具分别截断后求和。单项User将所有Text字节合计后除常量并加逐图估算；Assistant仅content与tool arguments，不计tool name/id；ToolResult加content及images数组中Text和图片估算；BackendToolCall用text_summary，Reasoning用可见text。conversation求全部项，messages排除System；普通sum和部分字节累加不是饱和运算，不能统一声称极端大小均饱和。EstimatedItemTokenCounter到u32转换上溢时取u32::MAX。
+
+request输入估算将有效conversation、工具schemas、序列化tool_choice和输出schema饱和相加；JsonObject按json_object文本计，JsonSchema序列化，序列化失败该项作0。wire估算跳过Reasoning；无native时直接wire items。有native时portable前缀先project_portable_history，其余span用fragment estimated_tokens替代对应items；prefix越界或span乱序/重叠/空区间/越界则退回整段portable history估算。不计model routing和采样参数。
+
+ContinuationLane是非持久状态：backend、UUIDv7 epoch、portable前缀、已观察的(SurfaceId,序列化item的blake3)与native spans。reset完全重建。reconcile IDs与items长度不符时reset并false；旧观察非空且新投影不是保持旧前缀的纯追加时reset，但随后更新观察并true。序列化expect失败panic。install只检查backend匹配、fragment非空和IDs非空，不在此验证IDs存在/唯一/顺序。request_projection按各record首ID在当前IDs首次位置寻找，整个连续ID片段匹配才保留；不额外排序/去重span，portable_prefix_len限制为当前长度。合法性还有下游request估算与sampling层检查，不能单凭install成功证明可发送。
+
+ChatState::new先去重工具结果，再以UserCancelled原因修复悬空工具，from_seed失败expect panic；from_timeline估算当前surface，三种projected token字段同值初始化。恢复不保留旧usage、credentials、时间、编辑路径或capture，均默认；continuation新epoch，整个已恢复surface为portable前缀。字段注释明确prompt/session usage非持久，计量账本不能从本状态恢复推断历史消费。TurnCapture用event seq而非surface offset标识起点。
+
+文件内10项单测完整读取：counter一致性、初始默认/保留/估算、仅System计数、工具字节、messages排System/空列表/仅System、工具列表求和；没有本文件级continuation/native投影测试，actor/tests仍待审。尚未执行本包测试。当前完整读取8/17份Rust，包仍pending。
+
+- `crates/codegen/chat-state/src/actor/state.rs` SHA256 `996df542dcb26b7668999a3ddf39616257e255b576533f98bdc3f2712e40f32c`
+
+
+## actor/mutations.rs 完整读取（715行）
+
+message_cause拒绝System及ProjectInstructions/SessionRules/MemoryContext合成User；其余User按DirectUser/Interjection permission evidence选cause，缺证据User，助手/后端工具/Reasoning都Assistant。普通append准备失败expect panic，非法cause只日志返回false；确认成功后才增加静态item token delta。完整性修复先在surface副本计算，changed才替换；durable路径传播错误，buffered路径无返回错误。普通push_user修复返回后仍尝试append，修复失败不是该函数中的显式短路，最终writer poison由外层run检查。
+
+push_response空items重置continuation返回0，不写事件；非空先提交Assistant原始事实，再隔离malformed工具交换，若隔离发生再提交IntegrityRepair并返回隔离数量。两次提交不是原子事务，第二次失败不撤销原始事实；健康pending调用不在此补结果。无隔离时按新增surface IDs安装native fragment，缺失/不匹配重置epoch。explicit repair在timeline clone计算，dry_run返回report不提交；changed时逐个提交事件再刷新projection，单事件数量仅debug_assert。
+
+条件tool结果先比较revision，再检查候选item tokens是否超过结果限额或当前pressure+候选是否超过context上限（严格大于，等于可接受）；被拒时选调用者rejection_item，未重新对其检查token上限，仍经Timeline ToolResult追加验证并durably提交，成功后返回拒绝分类。不得声称本函数自动生成或严格限制拒绝文本大小。
+
+prune空surface即Err，包括空plan；按index跳过越界或非ToolResult，tokens_before只作诊断，budget至少1；内容含完整PRUNE_MARKER直接跳过。只修改content，保留images等结构字段，实际裁剪委托compaction，不能保证保留图片时整项低于budget。至少一项改变才以ToolResultPrune一次replace_all并提交，随后仅调整压力，不调用finish_surface_replacement，因此不发UI/pressure事件、不立即reset continuation。无改变返回原pressure。
+
+provider anchor小于final-request-input + max(current surface estimate-final-request-surface,0)时忽略并warn；达到最小值才覆盖projected_tokens并发pressure事件。last turn usage只覆盖不发事件。model usage缺ID或空字符串用当前config.model，空白字符串不trim；同时创建/更新prompt和session账本。子usage空列表且非incomplete直接返回，否则session始终累加，prompt仅attribute_to_prompt时创建/累加。mark incomplete两个开关独立，可创建空prompt账本。
+
+rewind要求target严格小于next_prompt_index，通过Timeline得到surface并提交Rewind后清capture与prompt usage，随后finish replacement；session账本不清。通用replace比较JSON值完全相等时直接Ok（不验证cause、不写事件、不reset），不同才clone prepare/commit/finish。compaction range提交后置capture.compaction_occurred。buffered替换也跳过相等，prepare使用expect。
+
+delta压力按前后静态估算差饱和加减；request projection先移除旧input/surface envelope差，再应用新差、保存新基准，仅压力实际变化发事件。finish replacement无条件重置continuation并发ConversationReset及ContextPressureUpdated。image projection先revision精确检查，再clone record/commit；只有surface JSON改变才finish，但即使没改变也可有已提交事件，report按各shadow.image_count相加，不按数量实际差值计数。Timeline对shadow身份/范围的约束仍待原文件核查。
+
+当前完整读取9/17份Rust，包仍pending；本文件无内联测试，actor/tests尚未完整审阅，也未运行本包测试。
+
+- `crates/codegen/chat-state/src/actor/mutations.rs` SHA256 `3d8f1f06a2b910ba02123f0496e57a5811f05fc22904dcbdda9d41f83b57fe17`
+
+
+## actor/request_builder.rs 完整读取（802行）
+
+build先durable修复，再对memory_reminder trim并忽略空串；只在当前surface找到同MemoryContext reason且text_content精确相同时去重，否则持久追加MemoryContext并更新压力。不是跨历史永久去重，旧项离开surface后可重加。其后clone surface并按active_goal做请求投影，图片字节淘汰仅发生在请求副本，不是持久ImageProjection；构建器本身没有按model能力调用图片描述服务。
+
+body达到MAX_REQUEST_BODY_BYTES减3MiB（含等号）时尝试回收到硬限一半，编译期assert目标低于触发值。User.content和ToolResult.images都统计所有Image变体，不验证inline/data协议。只在淘汰前有图片时发ImageBudget，即使无图片的纯文本已超限也不发该事件；此处不返回413或保证最终wire合规。工具schemas、请求封装等未计入body，仍需sampler最终验证。
+
+字节计量clone图片URL置空后serde writer计数，再加原URL字节；base64无需JSON转义时精确，包含引号等remote URL只给下界，文件测试明确承认。序列化失败warn并返回已计字节下界。淘汰按item/part升序，将每个Image换固定Text提示，记录原坐标；已小于等于目标无操作，循环处理完全部图片仍可能超目标，不额外报错。小图片换大placeholder可增加running；方法有限循环保证结束，不保证每次缩小。请求每次从canonical surface重新clone，不持久记录上次淘汰；注释cache保持论述不等于跨请求保存淘汰状态。
+
+投影后用canonical surface IDs与请求items reconcile continuation，长度不符fallback portable全长空spans；native_continuation始终Some。source_projection记录timeline_id、last seq、IDs、active_goal、图片前后字节/阈值/淘汰坐标、epoch和native范围。tools按入参原样，tool_choice None，model及采样参数由当前config映射，json_output直接传递，末尾估算完整request input并更新pressure。
+
+cache key用blake3逐项NUL分隔hash固定版本、timeline_id、最新Rewind消息事件seq或root、backend、base_url、model、epoch；截32个hex加grow-前缀。不含温度/tool definitions等，其变化仍可能影响真实provider缓存。普通追加不改branch anchor，但continuation reset会换epoch进而换key，不能泛化所有追加都保持key。
+
+18项文件内测试完整读取，涵盖混合载体、回收次序/低水位/全部图片、helper重复调用、占位文本、JSON byte parity（文本转义/Unicode/base64）、触发与目标边界、小图片大占位终止、跨part次序、remote escaped URL下界。helper重复调用测试使用已变异slice，不证明actor跨次重建的缓存稳定。尚未运行本包测试。
+
+当前完整读取10/17份Rust，包仍pending。
+
+- `crates/codegen/chat-state/src/actor/request_builder.rs` SHA256 `e3a5876145f108003221658f69322871c343f80d2fcbf99c77514ed7395c07f7`
+
+
+## types.rs 完整读取（229行）
+
+memory-context开闭标签为公开常量；类型文件不实现检测/upsert，具体构建路径按MemoryContext reason及text比较已在request_builder核对。ChatStateSnapshot派生Debug/Clone/Serialize/Deserialize，字段均public，conversation实际由actor传surface副本，不是完整事件历史。credentials字段serde(default)允许快照缺该字段；Credentials包含可选api_key与alpha_test_key，派生Debug与serde，无脱敏/skip逻辑，因此不得声称快照或Debug天然无secret。该事实不等同已有泄露，外部输出调用方仍待shell核对。
+
+NotificationMeta与TurnCapture只派生Debug/Clone，不提供serde；capture中compaction_occurred普通bool不自行追踪。ConversationCounts.total为所有items长度，user/assistant/tool_result仅三类计数，System/BackendToolCall/Reasoning只进入total，因此三类相加不必等于total。AutoCompactTrigger.context_window使用NonZeroU64，utilization_percent只是public u8，无0–100校验；字段注释不是强制范围，实际计算委托token_estimation。
+
+两项快照serde往返测试完整读取，分别空快照与包含消息、prompt records、时间、路径及压缩索引的快照；均使用默认空credentials，不覆盖非空secret输出、缺credentials兼容字段和各字段反序列化边界。尚未运行本包测试。当前完整读取11/17份Rust，余handle、timeline、sideband、trajectory、compaction_utils与actor/tests，保持pending。
+
+- `crates/codegen/chat-state/src/types.rs` SHA256 `d004e287972846d95cecd65c5c3bd245bef8495190b0ffc4861a3b8c5a4c5e10`
+
+
+## handle.rs 完整读取（926行）
+
+Clone handle共享Arc<HandleLifetime>，最后一个lifetime释放时cancel actor child token，不是等待mailbox排空或flush。noop创建后立即drop receiver，因此is_closed为true，不存在处理命令的空actor。is_closed只观察sender通道状态，不证明待写事件是否durable。
+
+所有fire-and-forget写入忽略send失败：消息、Timeline、usage、config/route、路径/时间、凭据、capture、halt repair与flush均无调用者确认。query先send再直接await oneshot，无超时或主动取消select；send失败或reply丢失error日志并None。调用者丢弃future不会撤销已经入队的命令，actor仍可能完成副作用。
+
+durable Timeline/input/notification/recovery/settle/response/user/tool/context/range/rewind/image/build接口将query None统一为AcknowledgementLost，因此无法仅凭该错误区分尚未发送与提交后丢回复。prune将None映射ActorUnavailable；repair保留Option<Result>，None不可用，SomeErr为业务/Timeline错误；usage更新、incomplete标记和continuation reset只返回bool是否收到确认。replace_context强制ContextRebuild cause，通用send_replace私有。
+
+读取返回策略并不一致：conversation/completed hooks/edited paths/credentials/model metadata/counts在不可用时给默认空值，prompt index、pressure、估算tokens、len给0，dangling给false；不能将这些值证明为空会话/无计费/无需修复。hook、materialization、compaction index、last usage、capture、autoCompact、各文本/单项/System查询flatten，把领域None与不可用合并。received_notification_id保留Option<Option<String>>区分不可用与无receipt；timeline events、pending notifications/inputs/hash集合、surface+revision、trajectory、snapshot/config/time metadata保留外层Option。try_get_prompt_usage保留Result<Option<Ledger>,()>，try_get_session_usage Result<Ledger,()>，不把读账本失败视零成本。
+
+文件内两项测试仅noop调用/释放不panic及clone可用，不验证异步None分支、最终clone取消、排队关闭或持久化确认；后续actor/tests核对。当前完整读取12/17份Rust，尚余timeline、sideband、trajectory、compaction_utils与actor/tests，包保持pending。
+
+- `crates/codegen/chat-state/src/handle.rs` SHA256 `2e117dbf060d8f896737b660c4b82112a5f59bd946aa6bc00d43fc0863fe097c`
+
+
+## trajectory.rs 部分读取（1–650/2890行）
+
+Trajectory独立schema版本4，与Timeline存储schema分离；repair source链接最多16但保留总数。Row包含本地entry ID、seq、嵌套路径、可选父entry、维度/状态/可见性、关联/耗时/outcome/issue/repair关系和details。Timeline.trajectory每次重放全部events；另有可独立增量accept的TrajectoryProjector，行保留details Null，snapshot再按zip timeline.events序列化kind填充，失败Null。snapshot不检查projector与传入timeline的事件身份/长度一致，调用方须维持一致性，不能视独立校验器。
+
+accept没有Result或序列验证：Started更新active turn/step及request/tool scope映射；scope在已读逻辑没有Completed删除，保留历史关联。Replace shadowed IDs移除当前tool/recovery标记、递减原row当前项数，仅到0才Shadowed并dirty；部分保留row仍Current。消息新项、Input Consumed、带input通知消费建立SurfaceId映射；无input消费/handled/dismissed不贡献当前项。control按boundary判断立即或每layer覆盖待激活项；TurnEnded激活全部待项并清turn/step，StepEnded只激活AgentRole和GoalDefinition并清step。
+
+每次accept新row标dirty，dirty使用BTreeSet排序去重，由clear_dirty_rows显式清除，snapshot不清。当前scope补到缺turn/step的row。工具完整性调用tool_identity_issue，检查历史存活tool ID与当前批次，记录invalid source及AutoRecovery项；IntegrityRepair或ToolResultPrune在invalid项数与替换source数相同条件下按offset继承原source。隔离判断要求替换invalid来源非空、新invalid为空且recovery项增加；更新源row为quarantined、repaired_by，修复row保留至多16个不同源seq及完整计数。否则记录pairing repair及残留invalid错误。
+
+本地row ID为t:local/seq，parent None，nesting_path单seq；多ledger合并关系不是本段生成。snapshot顶层active/open信息来自传入Timeline，并非projector缓存。维度映射已读至control单layer的Behavior Reprojection，后续从651行继续；整文件尚未完成，不计入12/17完成数。
+
+
+## trajectory.rs 续读（651–1160行）
+
+维度：SessionTitle的User来源producer user，Generated/Fallback为sideband；Sideband spawn为meta/auxiliary/core，Subagent及seed/result为meta/lifecycle/core，Notification为meta/governance/core。actor字段仅Workflow事件取workflow:run_id，其他均main，包括subagent spawn记录；不能把actor字段直接理解为全部实际执行者。coordinates统一把kind与state用点连接，但消息/tool等部分路径直接生成固定kind。
+
+消息governance优先按cause映射Compaction→replacement.summary、Rewind→context.branch、Prune→replacement.range_ref、IntegrityRepair→context.repair、ContextRebuild→context.rebuild。其余按第一项确定整row类型，混合items不逐项分row：System system.core；带任何synthetic_reason User为user.synthetic，否则user.direct；Assistant/Reasoning为assistant；ToolResult从历史tool_scopes找tool:name，否则tool:unknown；BackendToolCall为model产出的tool.call；空items message.empty。producer_from_scope仅hook/plugin/skill/mcp/tool精确名字或冒号前缀原样保留，其他scope归core。
+
+输入描述：Submitted pending且显示intent与payload bytes；admission允许/阻止；reroute projected；Consumed与Handled都state consumed，但后者摘要说明未进入模型上下文；多input关联ID逗号连接。Hook triggered planned，run started/finished/skipped按run ID关联，completed按occurrence ID；run outcome/decision通过Debug文本展示，不在此执行Hook。Turn结束state直接用outcome字符串，Step结束state固定ended并摘要outcome。Workflow spawn/resume running；Ended/Closed用status.as_str并保留传入duration，message Some原样使用（含空串），缺失才生成epoch/handoff摘要；spawn objective截180，具体truncate函数待读。ImageProjection摘要统计shadow组数，不是图片总数，关联trigger runtime model。model.changed仅精确scope/name命中特殊描述，to_model_id仅JSON字符串可作关联；其他Observation recorded且摘要scope。控制描述从1160行后继续。当前trajectory已读1–1160/2890，仍未完整登记。
+
+
+## trajectory.rs 续读（1161–1690行）
+
+标题摘要原样title，User无关联ID，Generated/Fallback用sideband ID。Subagent结束/result根据outcome设completed/failed/cancelled，摘要却仅error Some时用error，否则固定subagent completed；因此摘要不一定代表成功，状态字段才反映outcome。通知received pending，consumed admitted、dismissed resolved，批量关联只取首ID，摘要保留数量；六类source有固定人类标签。
+
+模型变更摘要优先级：缺from/to字符串泛称model changed；不同model显示迁移；同model先比较effort（null为default、缺值问号），再provider model，再原JSON transport，最后selected；reason仅catalog_reload追加提示。控制多context全部Reprojection时通用reassembled，否则首context若Reprojection直接选layer描述，可能不描述其后混合Transition。其他控制摘要依序比较agent、behavior、goal ID/status/objective/budget；token checkpoint仅此前changes为空且tokens改变时加入，其他变化会抑制token摘要。无变化给behavior control checkpoint。behavior支持字符串或单键对象Plan，其他对象无值；goal tokens仅as_i64，缺失/不可转换作0。
+
+消息IntegrityRepair不拼完整replacement，其他先收集全部非空text、空格拼接再truncate240，空摘要回退item数；关联取首ToolResult ID。request Started显示model/消息及工具数；retry按scope恢复turn/step并展示attempt/max和reason截180；completed仅显示存在的TTFT、input/output与响应数，保留duration；failed摘要error_kind及message截180；cancelled reason原样。ToolStarted携带scope和call ID，摘要委托payload helper否则call admitted，后续从1691行继续。trajectory目前1–1690/2890已读，保持未完成。
+
+
+## trajectory.rs 续读（1691–2240行）
+
+ToolCompleted state固定completed，真实outcome另字段及摘要保留，因此state不能单独证明工具成功。工具payload对象按path/file_path/command/cmd/query/url/pattern/name/stage/reason/description顺序选最多两项，各值先截120，合并后截180；无偏好键仅显示input fields数量，非对象按JSON值摘要；缺值None，Null显示null。truncate按Unicode scalar chars取前N，若还有内容加省略号，不是字节也不是grapheme限制。
+
+event_outcome只覆盖Turn/Step结束、request retry/completed/failed/cancelled、tool完成、workflow结束/关闭、subagent结束/result；其他含compaction不设置outcome。severity对state与outcome作ASCII lowercase后精确匹配，不trim或子串匹配；Error集合failed/error/invalid_tool/hook_denied/not_dispatched/outcome_unknown/rejected优先，Warning集合cancelled/interrupted/retrying/permission_rejected/permission_cancelled/permission_timed_out，其余None。invalid_tool_metadata的Error由project_tool_integrity显式覆盖，不能泛化所有error前缀。
+
+Compaction Started显示mode/prompt/source项数，Promoted说明后台摘要阻塞前台；Summary显示shadowed数、首尾SurfaceId（e#:i#）、source token/summary chars及result timeline/first seq；Completed显示前后项数/duration，Failed截error180且通过state得到Error severity。至1976行生产逻辑全部读取，剩余测试继续。
+
+已完整读取前7项测试：隔离保留原始details/错误级别/反链且不泄漏到修复summary，增量与重放一致；pairing-only不冒称隔离并保留原来源；ContextRebuild invalid不误标模型；40来源只给16前链但全反链；tool身份索引随replacement移除、不解析用户文本且不因arguments非JSON判身份非法；替换可见性；增量rows details Null、snapshot填充。第8项Hook精确投影测试读取至Completed构造开始，尚未计完整。trajectory已读1–2240/2890，仍pending。
+
+
+## trajectory.rs 完整读取收尾（2241–2890行）
+
+剩余测试确认Hook事实与details逐项一致、planned/started/finished/completed状态；turn内助手行继承稳定turn/step；无context control使用system.behavior/lifecycle；typed role为governance及Current；行为Reprojection显式标记；turn内同layer最后一次control激活，旧row LogOnly；step边界后GoalDefinition立即进入surface而Behavior等TurnEnded，混合control row仅部分项Current也保持Current；model迁移摘要；behavior/goal创建及token checkpoint；request terminal继承scope与TTFT/usage摘要；tool call/completion/message使用相同call ID；not_dispatched虽state completed仍Error outcome并保留tool producer与reason；用户标题为lifecycle/user。所有2890行已完整读取，测试仅静态核对，尚未执行。
+
+当前完整读取13/17份Rust，余timeline、sideband、compaction_utils与actor/tests；包正式feature映射与测试尚未完成，因此inventory保持pending。
+
+- `crates/codegen/chat-state/src/trajectory.rs` SHA256 `b62d2b5bedcade4b18553effc4eb2dbc009ffad446c11f59231929d577bcc99e`
+
+
+## sideband.rs 部分读取（1–480/1339行）
+
+独立Sideband schema6，15种purpose用kebab-case：compaction/range summary、permission judgment、session title/recap、side question、prompt suggestion、laziness judgment、memory dream/flush/rewrite、image description、info request、progress report、context recall。range ref仅显式validate非空trim timeline ID及first<=last，不归一ID。spawn validate检查canonical sideband ID及每个source ref，本段不要求非空来源。materialization普通Clone/Debug结构同时提供surface/IDs与typed权限/control上下文；recall附branch transcript/IDs/unloaded IDs。
+
+request冻结purpose prompt、source_refs、budget、route(model/backend)、initiator/executor、可选schema；budget for_request仅取当前输入估算、输出上限及调用者max_attempts，不自行验证正值。attempt携attempt_no、input refs、assembly策略/version/revision、context与selected IDs、输入tokens及输出上限、feedback；result含raw/structured、四类usage、finish、[request seq,attempt seq]及evidence refs；End outcome completed/failed/cancelled与可选error。序列化结构deny_unknown_fields，event kind用type/event snake_case；业务validate与serde读取是不同步骤。
+
+SidebandTimeline缓存ID/events/latest attempt/result seq/ended；new验证ID，from_events拒空列表并逐event accept，具体accept逻辑待读。validate_parent先拒任何foreign timeline source，再检查request存在、sideband ID/purpose/source_refs精确相等、initiator精确t:parent/sideband:id、parent指定索引真实对应同spawn seq且内容相等；不从目录猜父子关系。所有attempt的context及selected IDs均须在parent存在。ContextRecall额外重放source最大last_seq之前的parent prefix，准备branch/unloaded/live集合，后续验证从481行继续。包完整阅读仍13/17，不提前登记此文件哈希或完成。
+
+
+## sideband.rs 续读（481–950行）
+
+ContextRecall parent校验要求source_revision等于冻结prefix revision，context IDs属于冻结live集合，selected IDs属于branch transcript与completed compaction unloaded交集。prepare建立当前version/ID、seq=events.len、墙钟毫秒，clone accept验证，不修改self。accept先检查version、ID、连续seq、非负时间，再拒已ended；不要求时间单调。Request仅首事件，model/initiator/executor trim非空，max_attempt/input非0、output非Some0，schema可编译；prompt可空、source refs可空，本函数未验证真实provider请求。
+
+Attempt要求已有request且无result，编号从1依次saturating_add；输入token不得超过冻结上限，输出None只接受None，Some只接受不超过上限的Some且非0；attempt_no不超max_attempts。每个input ref须被某一个同timeline source ref完整覆盖，不拼多个范围覆盖；strategy非空/version非0。context/selected各自唯一，未要求两组互斥或排序；context事件seq落在request refs，selected落在attempt refs，这里不检查item实际存在，交给validate_parent。materialized_input_tokens可0。
+
+Result只能一个且需latest attempt，source_event_seqs精确[0,last_attempt_seq]，raw_output和finish trim非空；evidence逐项须被某一个成功attempt input覆盖；schema存在才要求structured并校验，无schema不检查raw/structured一致性，也不验证usage是否符合预算。Completed须有result且error None（Some空串也拒）；Failed/Cancelled只要求非空error，可在result后出现，甚至空ledger首事件也未显式要求request。成功后ended且push事件，后续事件拒。
+
+surface_id_exists仅识别Messages、ImageProjection和Control项，未识别Input/Notification Consumed产生的SurfaceId；这与先前trajectory的映射范围不同，需结合Timeline及shell调用核对，暂记疑点不修。UUID只要求parse后标准字符串精确相等，不限v7（nil等canonical UUID也可）；wall time早于epoch取0，过大截i64::MAX。生产逻辑已读完；前三项测试完整核对生命周期serde重放、错误result来源、未知顶层wire字段，第4旧schema测试尚未完成。当前sideband已读1–950/1339，不计完整文件。
+
+
+## sideband.rs 完整读取收尾（951–1339行）
+
+剩余测试确认旧schema拒绝；三种零预算拒绝；外部URL $ref schema拒绝；schema要求structured output及类型符合，失败prepare不改变events长度；attempt次数/input/output越界、Some cap丢失及None policy出现Some cap均拒绝；input越source、selected ID越input、evidence越最新attempt均拒绝。ContextRecall不能把仍live未unloaded项作为selected；control-owned ID可作为context，允许input_refs与selected为空。这些测试均为内存prepare/accept/parent验证，没有真实provider请求或磁盘写入，名称中的durable不构成实际持久化测试。Input/Notification Consumed坐标与无request终止边界未在本文件测试覆盖，待Timeline/调用方核对。全部1339行已完整读取，尚未运行本包测试。
+
+当前完整读取14/17份Rust，余timeline、compaction_utils、actor/tests；正式契约映射尚未完成，包仍pending。
+
+- `crates/codegen/chat-state/src/sideband.rs` SHA256 `29905e52dddae8a03d3ab03aa6202bee97b5205b03ad23eee46905f2f46055ef`
+
+
+## compaction_utils.rs 分段读取（1–440/2952行）
+
+complete_turn_ends扫描至User，把连续User作为起始块；至少一个Assistant且工具ID集合全部被ToolResult消除才记exclusive end，下一Assistant前有pending即停止全部后续轮次判定；System亦终止当前块，前置非User跳过。重复ID被HashSet合并，此函数不检验工具名称/身份合法性，Reasoning/BackendTool透明、孤立ToolResult无影响。它不是is_real_user_turn判定。
+
+摘要prep删除全部ToolResult（连其图片一起删除），Assistant工具名顺序拼Called tools提示并清calls，随后删除Reasoning；User图片保留，注释Images never erased不能泛化为ToolResult图片也保留。verbatim prep按bool可去Reasoning，再仅循环删除尾部有tool_calls的Assistant，若尾部其他类型就不扫描内部悬空配对。
+
+fit预算内直接原样返回；超预算只保留首项System，用剩余预算从尾逐item累积，碰超额即停，再跳过起点连续ToolResult；不按complete_turn_ends分组，因此注释oldest whole turns不代表实现严格保留整轮。若无可用后缀，fallback取末连续ToolResult及紧邻有calls的Assistant，owner不截断，剩余budget均分结果且最少1；无结果仅截最后item。截断仅改ToolResult.content、Assistant.content、User每个Text独立套完整上限，不改图片/arguments/Reasoning/System，因此不是严格整体token上限。文本保留max_bytes减64的UTF8安全前缀后加完整marker，小预算仍可能被marker超过。
+
+extract_user_query优先第一个完整user_query块，内文trim并剔13种固定metadata标签块；无完整wrapper则处理全文。不支持标签属性/大小写/嵌套解析，未闭合块保留。last query先选最后User再提取，空则None，不继续查更早User，不检查synthetic_reason。synthetic文本识别为空、__auto_continue__、两个固定继续提示精确相等；is_real_user_turn拒所有synthetic_reason，非synthetic图片项直接true，否则依提取文本判断。CompactionRangePlan含稳定target与物化indices/token数，plan函数从441行继续。当前完整文件14/17不变。
+
+
+## compaction_utils.rs 续读（441–850行）
+
+plan_compaction_range拒绝surface/IDs长度不等或少于2项，没有带prompt_index的User则None；suffix估算饱和累加。source_start吸收首prompt前紧邻的连续CompactionMeta项，其他前缀不进入旧轮摘要。尾部从最新prompt往前找suffix至少retain_tokens，若可留下比first_prompt更晚的边界且源tokens达到min则返回稳定IDs闭区间。否则在最新prompt后尝试单轮response-group边界：候选须Assistant/Reasoning/BackendTool且前项非Reasoning/BackendTool，suffix至少retain；不直接验证工具配对完成。range_plan复制指定IDs，不校验全局唯一或真实Timeline归属。
+
+extract_real_user_queries按is_real_user_turn筛后提取；图片only真实User可能得到空字符串，last_real同样可Some空串，不保证有文字。TodoSummaryStatus只有Pending/InProgress actionable，四状态固定tag；CompactionInputs默认、编辑路径BTreeSet转有序Vec，build虽async但无await/I/O，将输入任务/subagent/server/todos原样搬入，不实际查询运行状态、不过滤completed todo；last query从conversation提取，cwd generation与destination instructions原样保留。格式化summary等函数reexport自compaction，不在本包重复实现。
+
+validate/sanitize_compacted_history均左到右累计Assistant tool IDs，不消费ID、不在User边界清除；因此只保证每个保留结果存在任意先前声明，不检重复结果或严格相邻配对。validate返回非法ID列表且保留重复，sanitize删除先于声明/从未声明的结果并返回剥离ID列表，保留pending assistant calls。HistoryRepairReport.changed是四类计数/列表OR；repair_history默认HarnessHalted history_repair reason，with_reason先quarantine再pairing，剩余实现从851行继续。当前已读1–850/2952，不标完整。
+
+
+## compaction_utils.rs 续读（851–1100行）
+
+历史修复顺序为quarantine→重复结果去重→移除displaced结果→补悬空结果；pairing helper独立保留，不将已有IntegrityRepair证明语义混同新隔离逻辑。malformed范围以每个Assistant为单位，只检查trim空id/name或全扫描已见的精确重复ID，空字段早返不加入seen；参数非法JSON及当前工具不可用不属identity错误。坏Assistant向前吸收连续Reasoning/BackendToolCall、向后吸收全部连续ToolResult，不要求结果ID能关联；隔离从后向前splice避免偏移变化。
+
+隔离替代为AutoRecovery User文本，JSON保留范围内除Reasoning之外全部items（含工具参数/结果/后端工具），明确历史数据不具指令或可执行工具权威，并提示未知结果不能证明未执行。原Timeline保留由调用方负责，该纯函数仅改Vec，不自行持久化。strip_displaced规则比sanitize更严格：Assistant重设允许ID集合、ToolResult只保留集合成员且不消费ID，任何其他类型清集合；连续非法结果剥除不清集合，重复同ID需前置dedup处理。
+
+已完整静态核对4项测试：模糊ID结果保留为非执行证据且Reasoning不进入公开文本，AutoRecovery无permission/prompt_index、重复修复无变化；空白id/name隔离；兄弟重复ID整exchange隔离；未知工具/非法参数原样留给preflight。第五partial compaction测试刚进入构造，未读完。生产逻辑已完整分段阅读，测试剩余从1101行继续；文件未标完成。
+
+
+## compaction_utils.rs 测试续读（1101–1600行）
+
+完整核对范围规划案例：保留system/project前缀和最新prompt；吸收旧CompactionMeta摘要；长轮tool call/result整体进源范围；保留Reasoning与其Assistant；IDs长度不匹配拒绝；有prompt_index的Goal合成继续作为边界；无prompt_index的中途reminder不作新轮。测试使用人工SurfaceId映射，并不证明真实Timeline事务提交或异常身份场景。
+
+查询提取测试覆盖user_query多行/纯文本/无wrapper、runtime metadata为空、wrapper内reminder剥离、各已知tag、连续重复与空tag、关闭先于打开保留前部、不同tag嵌套、未闭合保留；不同tag例不证明同名嵌套XML解析。last query取最新User或无User None；real query序列剔metadata、sentinel、固定auto continue，空/无User返回空；synthetic判定两个继续常量与sentinel；last real跳过继续及无真实项None；is_real对普通query为true，对reminder、auto recovery、auto continue、metadata-only为false。non_user_items测试读至Assistant断言，余从1601行继续。尚未执行本包测试，文件已读1–1600/2952，完整文件计数14/17不变。
+
+
+## compaction_utils.rs 测试续读（1601–2070行）
+
+静态核对图片only/图文User为真实输入、CompactionMeta及metadata提醒被排除；context build保留最后真实query、编辑路径、任务command、subagent全部摘要字段和todo顺序。此处async测试只构造数据，不启动真实后台任务。
+
+reexport的compaction摘要测试覆盖退化短文、499/500字符边界、analysis-only或空summary拒绝；格式化剔analysis、保持summary和普通文本、合并空行；标签被分析文本提及、analysis嵌入summary、Markdown Analysis头、多个前导analysis块、未闭合summary、正文引用未配对/倒序/跨章节analysis或summary标签、summary_request中和、Markdown编号章节保留。断言关注真实第1/9等章节未丢、scratchpad不泄漏、标签中和和倒序引用不重复，不能据此宣称任意畸形文本都正确。该批测试所属实现仍在compaction crate，本包覆盖其调用可见行为，避免重复归属实现。文件已读1–2070/2952；本包测试尚未运行，完整文件计数14/17不变。
+
+
+## compaction_utils.rs 测试续读（2071–2550行）
+
+摘要格式化追加测试核对多字节邻接标签、continued前言、剔analysis、正文指令回声中和为含零宽字符的标签、错误标签顺序不panic且保留两端正文。sanitize/validate测试覆盖孤立结果、结果先于调用、合法配对、保留未回答调用；历史repair覆盖User或Assistant打断邻接、晚一组结果、孤立结果删除和补HarnessHalted history_repair结果，重复结果保留后一个内容，重复修复无变化。
+
+wrap_user_query保持多行；单独strip tool保留Reasoning，而strip_reasoning仅删除该变体；组合摘要prep删除工具结果与Reasoning、清calls并加工具名注释，普通助手文本不变。测试模拟数据，不调用真实provider验证400；mixed conversation测试读至构造中段，后续从2551行继续。文件当前1–2550/2952已读，本包测试尚未执行。
+
+
+## compaction_utils.rs 完整读取收尾（2551–2952行）
+
+剩余测试核对混合Assistant摘要prep与JSON重复转换幂等；所谓never erases images测试仅覆盖User图片，未覆盖被删除ToolResult图片。verbatim保留tool name/arguments/result且不加Called tools提示，Reasoning是否删除由显式bool决定，测试名Messages backend不是函数内部route检测；尾部无结果Assistant删除、完整工具组保留。fit预算内原样、超预算保留System和较新内容、剥后缀起点孤立结果、超大尾结果与owner保留并截文本、超大助手文本裁剪、旧图片与可见Reasoning计入估算。尾结果测试允许预算额外64 tokens松弛，不能作为严格预算保证；没有覆盖超大owner args、多个User Text分别套上限或System本身超预算等边界。全部2952行已分段完整读取，尚未运行本包测试。
+
+当前完整读取15/17份Rust，余timeline.rs与actor/tests.rs。完整性审阅和契约映射未完成，inventory保持pending。
+
+- `crates/codegen/chat-state/src/compaction_utils.rs` SHA256 `6832d5d203cf9407a316f83d2e2cb9c76b1707141140fdb54affe4367e4dc0b3`
+
+
+## timeline.rs 部分读取（1–500/12595行）
+
+schema25；常量约束声明workflow ID128B/initial manifest512KiB、notification ID128B/payload1MiB、hook ID128B/name256B/control4KiB/handlers256、input payload1MiB/turn inputs256、每任务pending monitor16。实际生效位置待读，常量存在不等于所有入口已验证。EventSeq透明u64可new任意值；TurnId序列化十进制字符串，反序列化必须String再parse u64，不直接接受JSON number；StepId/SurfaceId严格字段，后者event+item。SurfaceRange含start/end和完整shadowed IDs，语义验证尚未读取。
+
+图片shadow来源目前仅Description(result_ref)，包含source/fingerprint/image_count/replacement；工具shadow含owner source、tool_call_ids及carrier sources，projection含trigger runtime、source revision及两组shadow。不可逆保证是注释，后续折叠实现必须核对。MessageCause12项及Append/Replace op；消息typed items搭cause，serde deny_unknown_fields不代替cause/shape验证。
+
+TurnIdentity带origin/kind及可省略goal ID/revision/stage；TurnStarted输入IDs、model、prompt坐标/text/kind与可选redirect，Ended outcome/duration/tool_count/terminal及取消类别/details；Step Started/Ended；Request Started/Retrying/Completed/Failed/Cancelled，usage四项可选u64，failed带retryable；Tool Started输入JSON与Completed结果JSON可选。
+
+Workflow Spawn保存epoch/name/objective/script与args hash、initial_manifest JSON；Resumed/Ended/Closed明确区分运行结束与永久关闭，status十类（四pause、blocked、budget_limited、interrupted、complete、failed、cancelled），handoff独立None/Completion/AttentionRequired，不应仅由终态推断后继turn。Compaction Foreground/Background，事件started/promoted/summary/completed/failed；Summary仅引用input/result ranges、稳定target及统计，不内嵌summary文本。Recovery/Observation为审计字段。Control说明读取至开头，后续从501行继续；文件尚未完整，包仍15/17。
+
+
+## timeline.rs 续读（501–750行）
+
+Control四layer（AgentRole/GoalDefinition/PlanPhase/Behavior）及Transition/Reprojection；ActiveControlContext仅Clone/Debug的ID+item。ControlEvent要求revision/snapshot/retired_context_layers，model_contexts默认空并省略空序列化；retired字段无serde default。SessionTitle来源User或带sideband result/terminal seq的Generated/Fallback，状态验证后续核对。
+
+SubagentContextSource New/Forked/Resumed；spawn显式区分child session、security parent与可能的生命周期owner，记录source/ref/normalized/resumed_from、parent prompt、权限/capability/workflow/goal、surface_completion、cwd/worktree、有效model与精确transport key/effort。必填surface_completion决定是否应有模型可见完成receipt，但执行保证仍待读。parent terminal含child ID、outcome、耗时/调用/轮次/token、可选error/result/snapshot引用；child result另含output_ref，seed关联parent timeline/spawn seq及security parent。上述引用仅类型声明，未读跨ledger内容校验，不提前宣称不可伪造。
+
+NotificationSource六变体记录task/subagent owner或plan artifact hash/revision/handoff、workflow run/handoff。TaskStillRunning注释声明仅为下轮上下文、不自行起turn，需核对调度。PlanHandoffKind Execute/Revise。producer identity注释说明owner不进入dedup key，但该enum正文从751行继续，尚未核实实现。已读1–750/12595，包仍15/17。
+
+
+## timeline.rs 续读（751–1000行）
+
+NotificationSource.identity明确剔除Monitor/Task/Subagent的owner，保留类型及task_kind、主体ID；Plan保留hash/revision/handoff，Workflow保留run/handoff。owner()对普通来源克隆owner，Plan由source字段构造Plan owner，Workflow恒Session；with_owner只修改普通task/subagent来源，Plan/Workflow忽略传入owner。该函数已核实，但最终receipt ID哈希/唯一性入口仍待读。
+
+NotificationOwner默认Session，另Goal ID+definition_revision、Plan artifact hash/revision/handoff；source version为Ordinal u64或Opaque String。payload ref含blake3与bytes，非内容本体。Consumed将批量IDs、turn与可选input放同一事件；input None表示payload已由工具结果呈现的设计语义，实际fold待审。Dismissed两类GoalOwnedAutostart和PlanSuperseded，各带归属坐标。
+
+HookEventType共15种并有ALL完整数组，gate()明确UserPromptSubmit→Prompt、PreToolUse→Tool、Stop/SubagentStop→Stop，其余SessionStart/PostToolUse/PostToolUseFailure/PermissionDenied/StopFailure/StopCancelled/Notification/SubagentStart/PreCompact/PostCompact/SessionEnd→Observe。这是类型方法的实行为，并非所有Hook都有阻止执行权限。已读1–1000/12595；完整文件计数15/17不变。
+
+
+## timeline.rs 续读（1001–1260行）
+
+HookCause显式Session/Input/Tool/Turn/Notification/Subagent/Compaction关联；handler provenance六种UserConfig/UserFile/ProjectFile/Plugin/Agent/Client，执行kind Command/Http/Client，failure policy Allow/Block。plan含index/run ID/name/provenance/kind/policy和Execute或Skip(reason)，skip五类MatcherMiss/Disabled/PolicyDisabled/PriorBlock/ProcessInterrupted。这些为已冻结计划字段，不包含命令体或HTTP参数。
+
+RunOutcome区分Success/Blocked/Failed(message)/TimedOut/Cancelled/InterruptedOutcomeUnknown；control None/Block/StopKeepWorking/StopForce，与outcome分离。StopKeepWorking的reason/additional_context和StopForce reason使用deserialize_required_option，允许显式null但字段不能省略；聚合ForceStop也相同。聚合decision分Observe、Prompt/Tool(Allow或Block)、Stop(AllowStop/KeepWorking多reasons+context/ForceStop)，真正聚合优先级待读。Hook事件记录Triggered计划及config generation、Started、Finished耗时/outcome/control、Skipped和Completed决策。
+
+输入Intent Prompt/Steer/Followup，route Fifo或Steer(target_turn)，payload为hash/bytes；Admission Allow或Block(Hook reason/StaleSteerTarget/ProcessInterrupted)。Dismiss原因UserRemoved/SessionClosing/RouteSuperseded/Invalidated。InputEvent已读Submitted/AdmissionResolved/Rerouted/Consumed，Admission route为必须出现的Option字段，supersedes必填Vec；Consumed携精确item与turn。后续从1261继续，尚未读取状态验证实现，文件保持pending。
+
+
+## timeline.rs 续读（1261–1700行）
+
+Input Handled与Dismissed无消息item；公开生命周期投影分Submitted/Allowed(route)/Blocked(reason)/Consumed(route)/Dismissed，Hook runs为Pending/Started/Finished或Skipped，decision单独Option。notification_id验证owner_session_id、source主体标识和source version后，将(owner_session_id, source.identity(), version)JSON字节blake3全hex加notification-前缀；因此source中的NotificationOwner不进key，但owner_session_id进入。字段有效性helper尚未阅读。
+
+TimelineEventKind19种，TimelineEvent序列化flatten type/event；自定义Deserialize先strict顶层Wire，再重构enum，未知字段拒绝但此步骤不检查schema版本/序号/时间业务约束。messages()仅返回Messages；appended_message_items也识别带input的Notification Consumed及Input Consumed，进一步确认它们是消息来源，与Sideband surface_id_exists覆盖差异待整体验证。
+
+LifecycleFold保存active/seen turn、step、request/tool/compaction、workflow/open subagent、Hook plans/runs、input admission/route/reservation及pending通知等；Timeline另保存canonical events、surface/IDs/revision、prompt坐标、pending control、收到及待通知索引、每monitor队列和terminal集合。OpenCompaction.blocks_foreground当Foreground或已有任何summary时true，背景summary就绪也阻塞前台，具体使用点待读。错误enum已读取至SubagentTimelineEnded/MissingSubagentResult开头，涵盖replacement/身份、lifecycle、workflow epoch、compaction顺序、标题及子代理边界；错误名不作为已实现验证证据。当前1–1700/12595已读，文件未完成。
+
+
+## timeline.rs 续读（1701–1950行）
+
+from_events从default逐条accept，空列表合法；from_seed逐item清User.prompt_index再Seed append，因此继承用户不占子分支prompt坐标，每个item各事件。pending_notifications克隆并按received_seq排序；received查询用source.identity/version索引，忽略传入source owner，submitted input查询线性寻找首Submitted；next_seq为事件数。session_title逆序取最新事件。
+
+active_control_contexts每次重放全部events，retired layer从active与pending都删；新context按boundary规则激活或按layer覆盖pending。StepEnded激活AgentRole、GoalDefinition、PlanPhase三类，TurnEnded激活全部。此处与trajectory projector的StepEnded只处理前两类存在明确差异，且trajectory已读Control分支未处理retired layers；需结合主surface fold进一步验证显示偏差，暂记债务候选，不修改运行时代码。
+
+validate_subagent_seed_link在child找到首seed，精确比parent timeline/spawn seq、subagent ID、security parent、context source、source ref及normalized；该函数不接收真实parent ledger，只校验传入spawn与child seed一致。result link先调用seed校验，再要求terminal.result_ref并转换first_seq为usize，余逻辑从1951继续。错误enum已读完，但仍不把错误声明当行为证据。已读1–1950/12595，包保持15/17。
+
+
+## timeline.rs 续读（1951–2200行）
+
+result link要求引用准确单事件、timeline ID等于spawn.child_session_id、实际seq一致，parent terminal/subagent/child身份与child result一致，并精确比outcome/duration/tool_calls/turns/tokens/error；不比snapshot_ref或output_ref内容，也不在这里读取artifact。branch transcript及unloaded IDs委托fold_branch_provenance（待读）；rewind先要求选定branch中有target prompt marker再调用conversation_truncate_for_prompt。
+
+prompt_records仅收identity.origin精确user的TurnStarted，按prompt_index覆盖并排序；Rewind根据replacement User最高prompt_index+1裁掉之后记录。typed权限证据从branch User.permission_evidence取非空文本重建User，保留typed evidence，不使用原User显示文本；但permission_classifier_context对有tool_calls的Assistant整项克隆，包括content，注释所说仅保留calls是下游责任，不能声称本函数已去助手prose。direct_user_permission_evidence实际也接纳Interjection typed evidence，并非只DirectUser变体。
+
+prompt坐标接受TurnStarted后插set并递增至首未占用位置；Rewind删>=replacement推导next的坐标并令当前next=min(current,next)，没有从零重算。最近完成compaction索引遍历Started/Completed，Rewind清latest；失败不更新。compaction_summary_awaits_recovery要求同ID、summary恰1、replacement0、target精确相等。surface长度/索引只读。已读1–2200/12595；包仍15/17，后续继续生命周期读取。
+
+
+## timeline.rs 续读（2201–3040行）
+
+completed_hook_projections按持久Hook Completed事件顺序返回当前fold投影，未完成occurrence不进入列表。input_state优先Dismissed，其次Submitted/Blocked/Allowed/Consumed；Allowed与Consumed要求已有route，否则expect。pending_allowed_inputs按Submitted事件顺序筛选Allow、未消费、未dismiss、未reserved_turn；payload hash集合包含全部已提交输入而非仅pending。workflow_lifecycle从首次匹配Spawned读元数据，从fold读epoch/open/closed，仅在非open时反向取Ended或Closed终态。
+
+recover_interrupted保留独立subagent，以及拥有open child的workflow；只关闭无open child的open workflow。存在待处理生命周期时先追加Recovery，再依次结算hooks、未admit输入、requests、tools、compaction、workflows、step、turn，每次record可失败，因此整批不是原子事务。Hook Pending尊重原Skip，否则按此前decisive决定PriorBlock或ProcessInterrupted；Started变InterruptedOutcomeUnknown且elapsed=0/control=None，再派生aggregate。未admit输入无prompt hook时补确定性blake3 ID的空handler Allow hook，但最终输入仍Block(ProcessInterrupted)；已有Hook Block保留其reason。Request取消、Tool完成outcome_unknown；compaction仅summary=1且replacement=1时Completed，否则Failed；workflow Interrupted/Completion；step/turn interrupted，turn工具数填0。
+
+settle_open_compaction同样按summary/replacement各1选择Completed，否则Failed(reason)，无open返回None。recover_surface_integrity先在副本repair，改变时追加Recovery再replace_all；显式repair_surface_history则只追加一个IntegrityRepair替换事件，避免两事件部分提交。turn_items_since委托branch provenance，筛leaf birth>=start且为message，具体fold仍待读。
+
+append_many包装Messages Append；record先prepare再accept，prepare分配当前seq/时间/schema并validate、不改fold。replace_all与replace_range禁止Compaction cause；空surface的replace_all转Append。range先检查两端存在再检查反序，shadowed取当前闭区间IDs。compaction专用入口使用外部稳定SurfaceRange，交由validator验证。accept先validate得到生命周期候选再按event应用；ImageProjection先冻结leaf到当前surface index映射，避免同summary多个leaf因首轮ID变化而丢失后续投影；替换图像、清引用并仅在确有修改时换SurfaceId，工具引用会扫描全部surface清除。此分支尚未读完，不能据此认定整个accept行为。
+
+已顺序读至3040/12595行；chat-state仍15/17份Rust完整审阅，inventory保持pending。本轮仅文档记录，无Cargo构建。
+
+
+## timeline.rs 续读（3041–3910行）
+
+accept完成图像投影后无条件饱和递增surface_revision；Notification Consumed(Some)与Input Consumed追加surface，Consumed(None)、Handled、Dismissed不追加。Control退休仅移除pending，已有surface项不在该分支删除；context按旧生命周期的turn/step边界决定延迟或追加，Step/Turn Ended释放pending。最终应用notification索引、subagent result封口标志、prompt坐标，再替换生命周期并push事件；所有可返回验证错误发生在应用前，不能扩展为panic也可回滚的保证。
+
+通知Received总是先登记已收ID和source/version索引。TaskCompleted去同task StillRunning；Monitor终态还删除该task全部pending progress。终态后收到Progress/StillRunning仍进入已收索引但不再pending；每monitor最多16条progress，溢出删最早pending，不删物理历史。Consume/Dismiss移除pending及monitor队列成员。
+
+validate先拒绝SubagentResult之后所有事件，再要求schema精确25、seq=events.len、timestamp非负；没有时间单调要求。Turn goal字段须同时无或同时有且revision>0，goal_continuation不能无owner。先在生命周期副本accept，再做事件专有检查，失败不写回副本。Compaction Summary要求合法refs、单result事件、summary_chars>0、已有CompactionSummary sideband且source_refs含精确input_ref、当前有效target；此函数未读外部sideband结果。
+
+图像投影要求合法runtime、精确surface_revision、非空shadows、全部替换编号可容纳u32；branch image group来源唯一、fingerprint及image_count精确、replacement trim非空。Description result_ref要求合法单事件且已有ImageDescription spawn，其source区间覆盖图片source event；不在此读取结果正文。实际tool call集合及有序carrier_sources须与从branch推导值精确一致，重复source/ID/carrier拒绝。
+
+ContextRebuild在next_prompt_index非0或历史已有ImageProjection后拒绝。Control有contexts须surface首项System，退休layer不重复且不能同时重加，context自身合法；Reprojection要求active层存在且其surface_id已不在当前surface。Sideband ID不能重复、每source last_seq必须小于本spawn seq。SessionTitle按trim后字符数1–160验证但未替换原title；Generated/Fallback要求有效sideband ID、结果/终态seq非0且有SessionTitle spawn，任意历史User title会永久阻止后续自动title；未验证外部结果事件存在。
+
+Subagent Spawn必填身份/描述/prompt/cwd/model trim非空及transport合法，可选字符串存在时非空、goal ID/revision成对，关联workflow须open且非closed，全历史subagent ID与child session ID均唯一。Ended匹配spawn child、result_ref若有须同child单事件；Completed必须result_ref且无error，Failed/Cancelled须非空error但可无result_ref；不在此读取child ledger。Seed仅一次，parent/subagent/security ID非空，source_ref结构合法。Result要求已有同subagent seed，outcome/error规则同上；output_ref可无，有则固定artifact:subagent-output:blake3:前缀与64 ASCII十六进制（允许大写）；此处未读取artifact。
+
+Notification Received验证ID/owner/subject、payload bytes 1..1MiB及hash/source版本/owner、确定性ID一致；拒绝ID或source/version重复。Consume要求当前active turn、非空唯一已收且pending ID列表；普通有效输入若有Plan owner，必须plan_handoff turn且整批相同Plan identity；goal输入须goal_continuation同goal revision且所有owner匹配。input=None不进入这两类输入owner校验。Dismiss仅支持匹配GoalOwnedAutostart或PlanSuperseded owner的pending通知，列表非空唯一。Messages验证已进入，当前只读到Seed Append要求既有事件全Seed Append及valid_system_layout，MemoryContext分支未读完。
+
+已完整顺序读取timeline.rs 1–3910/12595；本包仍15/17，尚未正式登记完成；下一段从3911继续。
+
+
+## timeline.rs 续读（3911–4580行）
+
+Messages Append按cause限定形状：MemoryContext单个对应synthetic User且文本trim非空；User不允许permission_evidence、Interjection或ProjectInstructions/SessionRules/MemoryContext；Assistant只允许Assistant/BackendToolCall/Reasoning；ToolResult只能同类。ContextRebuild Append须空surface和合法System布局；IntegrityRepair/Compaction/Prune/Rewind禁止Append。Replace要求两端当前可见、方向正确、shadowed与当前整个闭区间精确相等，并保持System head；Compaction非空且专用形状合法，Prune/ContextRebuild/IntegrityRepair/Rewind必须全量替换，后两者另验证内容。
+
+DirectUser必须当前user-origin turn、单User、无synthetic、prompt_index精确匹配及DirectUser evidence；Interjection须active turn、单User、synthetic Interjection、无prompt_index及对应evidence。两者evidence文本空时要求至少Image，非空时只要求至少一个非空Text，并未比较evidence正文与content文本相等。Rewind验证枚举0..next_prompt_index的合法rewind输出，按conversation_slices_match匹配。Append为每项生成(event,item)并增revision；Replace splice并重建IDs，再增revision。
+
+HookFold handler按index位置及run_id双匹配；aggregate须全部handler关闭。Prompt/Tool取顺序首个block，Observe固定Observe。Stop优先成功StopForce，否则收集所有成功KeepWorking reason/context，均空才AllowStop。decisive_before对Stop只认Force或带Some(reason)的KeepWorking，只有additional_context并不阻止后续handler执行。Execute在中断unknown或ProcessInterrupted skip时产生固定block；Failed/TimedOut/Cancelled仅failure_policy Block且control Block才贡献reason。
+
+Hook gate/cause映射除UserPromptSubmit外必须等于event默认gate。PromptSubmit对未admit输入是Prompt，对当前pending notification或当前internal turn是Observe。Session Hook要求无active turn并保持已知session ID一致；PreTool要求open tool，Post/Failure/Denied要求seen且已closed；Stop要求active turn，StopFailure/Cancelled要求seen非active；Notification要求occurrence_id=notification_id且未用过cause；SubagentStart要求open child，SubagentStop要求active turn及本seed；PreCompact要求同open id，PostCompact要求无任何open compaction且id曾出现。
+
+Input Submitted检查ID、hash、payload 1..1MiB及唯一ID。AdmissionResolved须已有已完成prompt hook且admission未定；Allow必须原子附合法初始route，Block无route/supersedes。supersedes非空须合法批次且不含自身，目标均Allow/Fifo、未消费/未dismiss/未reserved，随后一起标RouteSuperseded。Reroute先验证整批状态及每个转换，再批量改route。Consumed同样先整批验证：Steer要求target=当前turn且未reserve，Fifo要求reserve=当前turn；都要求Allow、未消费/未dismiss及合法item，成功后全部consumed并清reserve。Handled仅允许当前turn已reserve的Allow/Fifo批次，同样消费清reserve但不追加surface。Dismiss分支未读完。
+
+已顺序读至4580/12595行；chat-state保持15/17、pending。后续从4581继续；本轮无构建或运行时代码改动。
+
+
+## timeline.rs 续读（4581–5180行）
+
+Input Dismiss整批要求Allow且未消费/未dismiss/未reserve，之后统一设置reason。Hook Triggered要求occurrence唯一、cause/gate合法、handler不超过256；Input cause只能关联一次prompt hook。handler.index必须对应数组位置，run ID全生命周期唯一，并验证name/plan；初始化所有Pending。RunStarted仅要求Execute+Pending，未要求前序handler已结束或无decisive结果，不能把串行执行视为此fold保证。RunFinished须Started且结果/control组合合法。RunSkipped仅Pending：计划Skip必须同reason，Execute可ProcessInterrupted/PolicyDisabled，PriorBlock必须已有前序decisive。Completed必须与全部handler关闭后派生结果精确相等，完成后不再接收run修改。
+
+Turn Started要求无active、ID未见过；turn_kind只接受user（1..256 inputs）或internal（空inputs），输入唯一且Allow/Fifo、未消费/未dismiss/未reserve，全部reserve给turn。Turn Ended必须当前ID，拒绝active step、open request/tool或阻塞foreground的compaction；不检查open workflow/subagent/hook，释放未消费reserved输入供后续turn使用。Step Started要求同active turn、无active step、ID全历史唯一且无阻塞compaction；Ended要求同step且其request/tool全关闭及无阻塞compaction。
+
+Request/Tool Started要求当前turn与step精确匹配、各自ID全历史唯一（结束后也不可重用）；Request Retrying仅要求open，三种terminal删open。Tool Completed还须name匹配。这里没有验证非空request/tool ID、重试次数或terminal统计字段，不把类型中字段当成已校验契约。LifecycleFold在Timeline.validate副本上运行，因此内部先remove后错误不会破坏主fold。
+
+Workflow Spawn要求合法ID、epoch=0、name/objective非空、hash/manifest合法且run唯一。Resume只允许非open且非closed，epoch严格checked_add(1)。Ended须合法status/handoff及可选message非空、无所属open subagent、当前open且epoch一致；将open=false，Interrupted/Complete/Cancelled同时永久closed，其余状态仍可Resume。Closed只接受Interrupted/Cancelled，要求已非open但未closed、epoch一致、无open child，再永久closed。
+
+Compaction Background Started要求无active step/open request/tool，Foreground无此分支检查；所有compaction ID不可重用且最多一个open，初始化summary/replacement=0、target=None。Promoted要求同open ID、Background、summary=0，并且无active step/request/tool；余逻辑从5181继续。已顺序读至5180/12595，chat-state保持15/17，pending；本轮没有构建。
+
+
+## timeline.rs 续读（5181–5760行）
+
+Compaction Promoted改Foreground。Summary要求同open ID且首次，Background发布时不得有step/request/tool，记录唯一target；Completed要求replacement恰1，Failed要求replacement0。Compaction Replace必须summary1、replacement0、稳定range与summary target精确一致；其他Replace在blocks_foreground时拒绝，Append与ImageProjection没有此LifecycleFold分支限制。Control revision必须严格递增，但首次可0。LifecycleFold的pending_notifications仅收/消费/撤销ID集合，不实现Timeline.apply_notification的终态淘汰与16条上限，因而Hook gate所用pending与对外pending可能不同；登记为待跨调用验证的债务候选。
+
+标识符trim非空、128字节上限、拒绝ASCII控制字符；handler name上限256字节；Hook文本trim非空、4KiB上限且仅额外拒绝NUL，允许换行。Hook plan只允许Execute或MatcherMiss/Disabled/PolicyDisabled预设Skip；Client kind必须Client provenance，Command/Http只能配置/文件/插件/Agent provenance；Block failure policy只允许UserPromptSubmit/PreToolUse事件。InterruptedOutcomeUnknown只能control None；失败/超时/取消在Prompt/Tool且Block策略时必须Block(reason)，其他只能None；Observe只接受Success/None，Prompt/Tool另接受Blocked/Block；Stop接受Success下None、至少reason/context之一的KeepWorking或可无reason的Force。
+
+Input admission只有Prompt Allow可转Allow或StaleSteerTarget/ProcessInterrupted Block；Hook Block必须reason精确匹配。三种intent在初始route规则上相同：Fifo总可，Steer要求当前target；reroute只允许Fifo到当前Steer，或已结束且seen的Steer到Fifo，不允许同route重复及Steer换target。input批次1..256且唯一。valid_consumed_input_item仅要求User且content非空，没有DirectUser/Interjection入口的typed evidence、synthetic或prompt校验，最终权限语义须结合输入构造调用方核验。
+
+Compaction replacement必须单CompactionMeta User、纯非空文本、无permission/goal/cwd/interrupt/prompt元数据。IntegrityRepair接受旧dedup+UserCancelled配对结果，或三种reason的pairing/history repair结果，或确实改变的malformed quarantine结果；按serde_json Value精确比较。Blake3格式接受64 ASCII十六进制含大写。通知版本：Progress/StillRunning用非空Opaque，WorkflowHandoff还要求handoff非None；完成通知用正Ordinal，Plan版本必须等于artifact_revision。
+
+普通通知输入必须TaskCompleted/SubagentCompleted/NotificationDrain synthetic、纯非空文本、Some(prompt_index)且无权限/goal/cwd/interrupt；Goal通知要求SystemReminder和合法正revision goal tag，其helper只返回goal_id，调用方此前读取turn revision并比较receipt owner，未将输入tag.definition_revision与turn revision直接比对，此差异保留为候选。Control context为SystemReminder纯非空文本，无权限/cwd/interrupt/prompt；GoalDefinition必须合法goal tag，其余三层禁止tag。下一段从fold_control_context_activation继续。已顺序读至5760/12595；本包仍15/17、pending。
+
+
+## timeline.rs 续读（5761–6390行）
+
+Control Transition的AgentRole/GoalDefinition/PlanPhase等待active step，Behavior等待active turn；非Transition立即生效。pending按层覆盖，退休删除pending；Step释放前三层，Turn释放全部，按源event seq排序。已确认主Surface与branch共用的step释放包含PlanPhase，支持此前trajectory缺失该层的差异证据。
+
+fold_branch_provenance预扫描所有Completed compaction ID，再顺序重放：所有appended_message_items（包括Input/Notification消费）成为message leaf；control生效项成为非message leaf。Rewind/ContextRebuild直接reset整个branch，从替换事件重新分配leaf身份及birth。其他Replace按当前boundary查找，无法定位或反序则跳过（已验证timeline理论上应一致）；Compaction节点携带原区间全部去重排序leaf，Prune等长时保留原leaf，IntegrityRepair按原序贪心精确JSON匹配保留来源，新增项新leaf。
+
+图像投影同时重写leaf和拥有它的surface entry，转移unloaded身份，清除图像、工具参数及响应carrier引用；工具结果引用清理遍历所有leaf_values与surface。replace_branch_leaves继承被替换leaf最早birth与任一is_message，插入原首位置，不把投影时间当原消息出生时间。只有最终有Completed的Summary且当时range完整精确，才把对应leaf登记unloaded；失败或未完成压缩不列入。
+
+IntegrityRepair重建仅保留当前surface引用的leaf，隔离项继承malformed区间最早birth；单leaf更新当前value，多leaf压缩节点保留旧leaf_order展开；最终顺序去重，unloaded剔除不再引用项。ToolResultPrune保留旧leaf_values，意味着branch transcript仍可保留未裁剪原文，区别于当前surface的裁剪文本；需以测试核验预期而非推断为数据丢失。
+
+wall_time在系统早于epoch时返回0，毫秒溢出夹至i64::MAX；duration缺start、负差或溢出均0。Workflow manifest只要求JSON object且序列化<=512KiB，不校验字段schema；workflow hash限定64小写十六进制，与通知hash允许大写不同；run ID为1..128 ASCII字母数字下划线连字符。handoff规则仍未读完，从6391继续。已顺序读至6390/12595，chat-state仍15/17、pending；本轮未构建。
+
+
+## timeline.rs 续读（6391–7030行）
+
+Workflow handoff完整矩阵：Closed只None；Ended的None对应UserPaused/BackOffPaused/NoProgressPaused/InfraPaused/Blocked/Cancelled，Completion对应BudgetLimited/Interrupted/Complete/Failed，AttentionRequired对应前五种暂停或Blocked。valid_system_layout只限制System出现位置必须0，不要求一定有System；替换从现有System head开始必须保留唯一首System且content相同，其他位置不允许引入System。Prune要求等长、非ToolResult项JSON完全相同、ToolResult call_id和images不变且至少一项content改变；不检查新内容更短或包含裁剪标记，故函数验证的是允许修改字段而非严格减量。
+
+进入#[cfg(test)]部分，测试helper构造compaction/image description引用只记录spawn而不创建独立sideband结果，支持此前validator不读取外部结果的范围判断；helper user_identity的origin=user但turn_kind=internal，不能把两字段等价解释。Hook矩阵helper构造15种合法cause环境，包括PostCompact完整压缩链、SubagentStop seed+active turn。
+
+已完整读取prompt_coordinate_handles_holes_and_replays_incrementally、prompt_coordinate_rewinds_and_reuses_branch_indices、hook_event_type_all_is_exhaustive_and_gate_stable：分别断言稀疏坐标2/0/1填洞与逐次重放、rewind后复用坐标再重放、15种Hook唯一及主要gate固定。every_hook_event_records_and_replays_a_complete_typed_lifecycle已读到全部事件的Trigger/Start/Success Finish/Complete构造，后续断言尚未读完，暂不计完整覆盖。本轮只静态阅读测试，没有执行。已顺序读至7030/12595；本包仍15/17，pending。
+
+
+## timeline.rs 测试续读（7031–7680行）
+
+every_hook_event_records_and_replays_a_complete_typed_lifecycle已读完：15事件逐一断言事件顺序Trigger/Start/Finish/Complete，from_events重放后event/gate/cause/config_generation/decision和run elapsed/outcome/control一致。completed_hook_projection_snapshot_replays_only_committed_occurrences_in_order仅构造一个已完成blocked和一个in-flight，证明排除未完成并保留其单独查询；虽名称含in_order，此样例不直接证明多个Completed之间排序，排序证据仍来自实现。
+
+hook_terminal_matrix_closes_empty_skipped_and_non_decisive_failures覆盖空handler Observe完成、三种预设Skip关闭、Allow策略下Failed/TimedOut/Cancelled以None control完成并重放。hook_causes_are_bound_to_the_exact_lifecycle_identity直接构造LifecycleFold正反矩阵，检验输入/通知/工具open与closed/turn/子代理seed/压缩/session身份，以及Notification cause重复拒绝；这些是gate helper测试，不是所有路径的持久事件集成测试。
+
+hook_lifecycle_requires_exact_plan_and_typed_completion验证未关闭所有handler时拒绝Completed，首handler Block后第二PriorBlock可跳过，aggregate精确保留reason。execution_plan_can_fail_closed_after_source_revalidation实际断言Execute计划允许PolicyDisabled skip且最终Prompt Allow；测试名的fail_closed指不执行被撤销handler，并不意味着阻断用户输入，规范应描述此区分。blocking_failure_policy_uses_the_persisted_control_reason只读到Started构造，余断言从7681继续。
+
+已顺序读至7680/12595；本轮静态阅读测试未执行，chat-state仍15/17、pending。
+
+
+## timeline.rs 测试续读（7681–8270行）
+
+blocking_failure_policy_uses_the_persisted_control_reason完整断言aggregate使用control中的configured failure block，而非Failed.message。stop_reason_is_decisive_but_additional_context_alone_is_not正反验证有reason可PriorBlock跳过后继、仅context不允许；synthetic_user_prompt_is_observe_only_and_source_bound验证internal workflow_handoff可Observe但拒绝Prompt gate。
+
+input_inbox_routes_restores_consumes_and_dismisses_exactly_once实际覆盖Fifo转Steer、消费一项生成surface并清pending、active target期间禁止回Fifo、turn结束后允许回Fifo及UserRemoved状态；未显式再次Consume，不能仅凭名称声称测试覆盖重复消费拒绝。user_turn_atomically_consumes_every_combined_fifo_input验证含missing输入的TurnStarted失败不改变已有输入且同TurnId随后可成功；Started只reserve，state仍Allowed但不再pending，单Consumed事件消费整个批次；user-kind空输入拒绝。
+
+interrupted_user_turn_releases_unconsumed_fifo_reservation验证recover_interrupted补TurnEnded并恢复未消费输入的Fifo pending，surface始终空。admission_atomically_supersedes_the_previous_queue_identity验证新Allow与旧RouteSuperseded在同准入事件后呈现，pending只留新ID。input_batch_transitions_validate_every_identity_before_mutating分别给Reroute/Consume/Dismiss混入missing ID，断言失败后已有输入原状态保持，再验证合法双输入批次成功且合并消费只追加一项surface。input_batch_rejects_empty_duplicate_and_oversized_identities覆盖空/重复/257项批次拒绝，状态保持；超限样例同时含重复，独立长度检查证据来自实现。
+
+恢复Hook与未决输入测试只读到初始化，从8271继续。本轮静态审阅未运行测试；timeline已读1–8270/12595，chat-state仍15/17完整文件、pending。
+
+
+## timeline.rs 测试续读（8271–8590行）
+
+recovery_closes_hook_runs_and_fails_unresolved_human_input_closed完整验证一个Started和一个Pending的prompt hook经恢复分别成为InterruptedOutcomeUnknown和PriorBlock，输入Blocked、aggregate已决，重放保留两run状态。schema_24_requires_explicit_turn_input_ids名称保留旧版本号但构造使用当前TIMELINE_SCHEMA_VERSION，实际测试删除input_ids导致反序列化失败；schema_23_is_deliberately_rejected仅测试23版本accept返回UnsupportedVersion，不代表24兼容。control_revision_must_increase断言重复7拒绝。
+
+control_context_is_an_append_only_replayable_surface_fact验证无active turn时Behavior立即追加，后续Assistant保持前缀，第二Behavior追加不删除旧项，branch与surface及重放一致；control_context_cannot_bypass_the_typed_surface_boundary验证无System头拒绝context。in_turn_control_context_activates_after_terminal_and_latest_wins验证active turn中两次Behavior不立即进surface，旧Behavior输出之后TurnEnded仅追加最新normal，branch与重放一致。下一项按层latest测试只读到初始化循环，不能计为完整证据。
+
+已顺序读至8590/12595；chat-state仍15/17、pending。本轮仅静态测试审阅，无Cargo运行。
+
+
+## timeline.rs 测试续读（8591–9250行）
+
+in_turn_control_context_keeps_the_latest_transition_per_layer验证AgentRole在StepEnded追加、Behavior在TurnEnded追加，各自latest胜出且旧surface保留，active map、branch、重放一致。plan_phase_activates_at_step_boundary_and_latest_transition_wins直接断言PlanPhase两次pending最终仅executing在StepEnded进surface和active map。edited_goal_definition_activates_after_step_not_after_turn验证step未结束前无新active Goal，结束后goal ID/revision原样保留，branch和重放一致。
+
+shadow_reprojection_activates_immediately_at_an_in_turn_compaction_boundary实际用ContextRebuild移除旧role surface（未创建Compaction事件），active step中pending role-v2仍以role-v1为effective，Reprojection立即补role-v1，StepEnded再追加role-v2，TurnEnded不重复；规范不得将该样例描述为真实压缩集成测试。control_reprojection_cannot_duplicate_a_current_context拒绝仍可见的active层重投影；retired_control_context_cannot_be_resurrected_by_reprojection验证退休Goal从active map消失，ContextRebuild后仍不能复活。
+
+workflow_lifecycle_is_epoch_strict_and_cannot_resume_after_close验证spawn投影、Failed可Resume到epoch1且清展示status，旧epoch terminal拒绝，Complete永久closed且不能再resume。interrupted_workflow_execution_is_closed_by_recovery验证仅workflow时返回Recovery+Interrupted两事件、无open workflow、message process_interrupted。interrupted_subagent_is_left_open_for_backend_reconciliation验证只有open child时恢复返回空，之后backend取消终态仍可接受。paused_workflow_can_only_close_once_without_fake_resume已读到UserPaused后Closed Cancelled和重复Close构造，断言从9251继续。
+
+已顺序读至9250/12595；本轮静态阅读无Cargo运行，chat-state仍15/17完整、pending。
+
+
+## timeline.rs 测试续读（9251–9600行）
+
+paused_workflow_can_only_close_once_without_fake_resume完成读取，重复Closed明确拒绝。workflow_owned_subagent_requires_an_open_run覆盖不存在workflow拒绝、spawn owner后成功；未单独覆盖paused owner，后者依据实现。workflow_cannot_end_before_its_subagents验证open child阻止Ended，child Cancelled后Failed workflow可结束。
+
+replacement_keeps_transcript_immutable验证完整压缩后events=8、surface=2且summary可见、branch transcript仍3项；这里只断言branch长度，没有逐项验证原文，原文保留细节仍来自fold实现。lifecycle_rejects_unpaired_children仅覆盖open Request阻止StepEnded；causal_identifiers_cannot_be_reused_after_terminal_events仅覆盖Turn ID复用拒绝，不将名称扩大成所有ID的测试。schema_v1_is_deliberately_rejected覆盖v1重放拒绝；prompt_records_keep_typed_user_inputs_and_skip_synthetic_gaps保留user Prompt/Bash及原坐标0/2，跳过goal continuation坐标1。turn_ids_are_wire_strings_so_javascript_cannot_round_them验证u64::MAX编码字符串、字符串42可读、数值42拒绝。
+
+recovery_closes_open_request_step_and_turn_by_appending断言恢复顺序Recovery→Request Cancelled→StepEnded→TurnEnded，物理历史长度增加4且active turn/open request清空。declared但未Started工具修复测试只读完构造，从9601继续。timeline已顺序读至9600/12595；chat-state仍15/17完整、pending，本轮无构建。
+
+
+## timeline.rs 测试续读（9601–9930行）
+
+recovery_materializes_results_for_declared_but_unstarted_tools验证补2事件、surface新增同call ID的ToolResult且文本明确may not have started。explicit_surface_repair_is_one_atomic_replacement_event验证orphan被剥离且显式修复只有单IntegrityRepair Replace。poisoned_history_replays_its_original_repair_and_recovers_without_resurrection验证历史旧配对修复可重放、新隔离修复不改原events前缀、二次恢复无操作；重放branch保留old real outcome，turn_items_since不把旧exchange重生为当前turn，rewind保留quarantine且无unloaded压缩项。
+
+rewind_projection_uses_timeline_branch_not_compaction_surface验证压缩后prompt记录仍0..3，rewind到2展开原文前缀system/user-info/p0/p1，重新提交new-p2后记录裁旧分支且latest compaction坐标清空。pre_turn_context_rebuild_finalizes_the_rewind_preamble验证初始重建指令保留在rewind前言，已有prompt时拒绝ContextRebuild，rewind到0后重新允许重建并重置branch。context_rebuild_cannot_replace_or_insert_a_system_head拒绝更换既有System正文或给非空无System surface插头。memory_context_appends_without_mutating_the_stable_system_head验证Memory追加与branch一致。child_prompt_zero_does_not_collide_with_inherited_seed_markers验证seed User坐标清除，子prompt0回退保留完整父前言。
+
+compaction_requires_exactly_one_replacement读至完成事件构造：已确认无replacement拒绝Completed，summary后一次replace成功，再次replace拒绝；后续unloaded断言从9931继续。已顺序读至9930/12595，chat-state保持15/17完整、pending；本轮无Cargo构建。
+
+
+## timeline.rs 测试续读（9931–10270行）
+
+compaction_requires_exactly_one_replacement结尾断言Completed的unloaded等于原target shadowed。failed_compaction_never_creates_recall_evidence验证Summary后Failed不产生unloaded；completed_compaction_resolves_content_rewrites_to_original_branch_leaves验证Prune改变surface IDs后再压缩，branch IDs与unloaded仍原始IDs，支持此前Prune保留原来源的解释（断言未比较原文内容）。
+
+message_causes_cannot_impersonate_other_surface_operations覆盖User伪装Assistant/Memory/SessionRules、空Memory、User替换、晚Seed及Memory塞System拒绝。image_only_direct_user_input_is_causal_but_grants_no_text_authority与image_only_interjection_is_causal_but_grants_no_text_authority验证仅图可追加但权限证据/分类上下文为空；仅图却带非空权限正文拒绝，空图空文也拒绝。
+
+image_shadow_is_irreversible_and_bound_to_a_live_surface_item验证投影去surface/branch图片、revision+1、物理seed原始图数据不变；ContextRebuild不能复原图片，伪造Rewind/IntegrityRepair复原拒绝，rewind_surface输出描述无图。样例prompt坐标为1且next仍0，因此连合法描述rewind提交也被valid_rewind_replacement枚举范围拒绝，不能将此断言概括为所有图像投影后禁止rewind。末尾错误投影样例同时包含旧revision/无图source等多种错误，不单独证明fingerprint或空model一项的拒绝。parallel工具路径原子投影测试仅开始构造，从10271继续。
+
+已顺序读至10270/12595，chat-state仍15/17完整、pending；本轮无构建。
+
+
+## timeline.rs 测试续读（10271–10620行）
+
+image_projection_atomically_redacts_parallel_tool_call_paths完整验证两张tool图片共享Assistant，缺BackendToolCall carrier的投影拒绝；补齐Reasoning/BackendToolCall/Reasoning三个carrier后成功。surface及branch序列化均不含六个源路径，raw events保留全部路径及carrier_sources，重放surface和branch精确一致。此处路径清理是有确定来源的图像投影，不是任意秘密信息通用脱敏保证。
+
+image_projection_scrubs_tool_source_paths_from_completed_compaction_summary验证完成压缩后仍可从原branch图片投影，summary保留无关架构/query文本、去工具图片路径并补投影标记，raw events继续保留源路径；branch断言使用text_content而非全JSON，参数清理实现和上一测试提供补充证据。image_projection_composes_multiple_leaves_owned_by_one_compaction_summary验证两张User图共用一个summary时两个描述均组合进入summary、两路径均删除、branch无图片，重放surface/branch一致，直接覆盖此前冻结ownership修复意图。response carrier压缩summary清理测试仅完成seed构造，从10621继续。
+
+已顺序读至10620/12595，chat-state仍15/17完整、pending；本轮静态审阅未运行Cargo。
+
+
+## timeline.rs 测试续读（10621–10960行）
+
+image_projection_scrubs_response_carrier_paths_from_compaction_summary完成读取，断言summary和完整branch JSON清除carrier/tool路径，保留投影标记且重放surface/branch相等。image_projection_survives_intermediate_surface_identity_replacement_and_rewind验证等值IntegrityRepair更换surface ID后仍可按原leaf来源投影，branch与rewind_surface均无图片并保留描述；只计算rewind未提交Rewind事件。
+
+latent_image_projection_updates_completed_compaction_recall_coordinates验证摘要没有源路径时surface文字summary保持不变，但branch原图变描述且leaf ID更新，unloaded同步更新为新ID。image_projection_scrubs_exact_asset_paths_from_completed_compaction_summary验证摘要保留架构文本、插入图片描述、去已知asset精确路径，branch text与重放surface也无路径。下一项linked summary测试读到无Summary时replace尝试，断言从10961继续。
+
+已顺序读至10960/12595；本轮静态阅读未执行测试，chat-state仍15/17完整、pending。
+
+
+## timeline.rs 测试续读（10961–11300行）
+
+compaction_replacement_requires_a_linked_summary断言Summary前替换拒绝。compaction_replacement_must_match_the_summarized_range覆盖目标子区间不匹配拒绝且surface长度不变；compaction_summary_requires_its_sideband_spawn覆盖缺spawn拒绝；compaction_rejects_a_second_summary覆盖重复Summary拒绝。committed_compaction_cannot_be_relabelled_failed验证已替换后不能Failed但可Completed。recovery_completes_a_compaction_whose_replacement_was_committed验证恢复补Completed及source/result计数。
+
+in_process_stop_fails_an_uncommitted_compaction_without_closing_the_turn验证settle仅Failed compaction并保留active turn/step。background_compaction_allows_steps_until_publication_or_promotion遍历直接发布和先Promoted两路径，后台summary前可启动后续step，active step中Promoted拒绝；Summary后阻止新step，完成后可继续；trajectory状态顺序分别started/summary/completed及含promoted，记录Background和duration。background_compaction_recovery_never_applies_unpublished_summary两路径都已有Summary，published变量实际表示是否已Replace，不是是否已有Summary事件；已读恢复terminal随Replace存在与否选择Completed/Failed，剩余surface断言从11301继续。
+
+已顺序读至11300/12595；chat-state仍15/17完整、pending，本轮无Cargo构建。
+
+
+## timeline.rs 测试续读（11301–11670行）
+
+background_compaction_recovery_never_applies_unpublished_summary结尾验证有Replace保summary、无Replace保original，并清open compaction。background_compaction_rejects_rewritten_target在Background未Summary时允许ContextRebuild，再验证旧range stale；没有实际提交旧Summary，故限定为range helper证据。in_process_stop_completes_a_compaction_after_replacement_commit验证settle在Replace后选择Completed。
+
+标题测试覆盖Generated后User覆盖、User后Generated/Fallback拒绝且历史长度不变、空title和无效source拒绝不写入、缺sideband或purpose错误拒绝；sideband_spawn_identity_is_unique_per_timeline覆盖重复spawn拒绝且只留首事件。subagent_security_parent_must_be_nonempty_in_both_ledgers验证parent Spawn与child Seed均拒绝空security parent。subagent_parent_and_child_ledgers_close_through_exact_result_ref构造双ledger，child Seed→Result后调用显式result link验证，再parent Ended；artifact仅格式化引用，无外部文件验证。child_hook_facts_cannot_be_copied_into_the_parent_timeline已读parent无seed的SubagentStop拒绝及child seed link成功，后半从11671继续。
+
+已顺序读至11670/12595；chat-state仍15/17完整、pending，本轮无Cargo运行。
+
+
+## timeline.rs 测试续读（11671–12020行）
+
+child_hook_facts_cannot_be_copied_into_the_parent_timeline完成读取，child active turn下SubagentStop Trigger/Complete成功，parent events/trajectory无hook，child两条hook事实。one_child_timeline_can_belong_to_only_one_parent_spawn只证明同parent ledger内child ID不能被第二spawn复用，不是跨所有parent ledger的全局唯一证明。cross_timeline_link_rejects_a_foreign_seed_and_terminal_drift覆盖foreign parent seed拒绝与tokens_used漂移8→9拒绝。schema_v5_rejects_unknown_event_fields使用当前schema，验证Observation内及envelope未知字段反序列化拒绝。
+
+child_result_requires_one_matching_seed_and_closes_the_timeline覆盖无seed拒绝、有效Cancelled result后重复result及Observation一律SubagentTimelineEnded；completed_parent_terminal_requires_child_result_reference覆盖Completed无result_ref拒绝且parent历史不变。通知helper按session-1确定性ID及payload hash构造；notification_inbox_replays_from_received_minus_consumed目前已读收到可pending、重复Received拒绝、Consumed追加一项surface并清pending但保留source/version去重索引，剩余重复消费/重放断言从12021继续。
+
+已顺序读至12020/12595；chat-state仍15/17完整、pending，本轮未运行Cargo。
+
+
+## timeline.rs 完读（12021–12595行）
+
+notification_inbox_replays_from_received_minus_consumed结尾验证重放保留去重索引与surface，重复Consume明确NotificationAlreadyConsumed。Dismiss重放无surface输入且保留source索引；Goal dismissal拒绝Session/foreign goal、pending不变。Goal输入测试覆盖正确goal/turn/receipt接受、foreign goal拒绝、turn及input一起升revision而receipt旧revision拒绝；没有单独覆盖仅input tag revision漂移，先前候选仍未消除。Plan输入测试覆盖专用plan_handoff接受、notification_drain拒绝。
+
+StillRunning与WorkflowHandoff版本测试拒绝Ordinal、不同Opaque形成不同ID并保留多条；Opaque里的epoch/status拼接只是样例字符串，本层不解析其语法。monitor terminal替代未消费progress；task terminal替代checkpoint且重放后迟到checkpoint虽Received成功却不进pending，不应描述为事件写入拒绝。monitor最近窗口测试提交21条保留16条event-5..20；已消费terminal仍抑制迟到progress。terminal容量测试证明64条全部保留且按received_seq递增；无上限结论另依实现，不能仅凭64样例推导。
+
+文件末尾architecture_document_names_current_timeline_schema使用include_str绑定docs/architecture/agent-core-timeline.md，要求存在以当前schema标记开头的行；后续文档调整须保持该开发者镜像标记。timeline.rs现1–12595完整逐段审阅（含实现及所有内嵌测试）；本包提升为16/17份Rust完整阅读，尚余actor/tests.rs，inventory仍pending且没有提前登记全文件证据完成。
+
+本次完整文件SHA256：`c189487d6ab7f67064ed984f8e02a2908dc7de561d4dbf1d6f8fcb59ca767b54`。本轮未运行Cargo。
+
+
+## actor/tests.rs 开始审阅（1–600行）
+
+测试harness使用MockTimelinePersistence，按ChatState::new实际bootstrap事件数跳过初始记录；manual ack可指定初始live自动确认数量。next_event测试超时1秒，不能作为生产查询超时契约；失败重试helper发送Error::other后下一次ack成功。compaction helper先materialize选System头之后body，记录sideband+summary，再专用replace；prompt helper只记录Turn Started/Ended，origin=user而kind=internal，没有生成真实input准入链。
+
+compaction_accepts_unrelated_appends_without_hiding_late_messages验证冻结target后新增User不阻止替换，最终system/summary/late User都保留。partial_compaction_preserves_unselected_surface_identity验证仅选旧task/answer，未选System/rules/recent IDs不变，摘要ID改变；branch展开六项原文、unloaded只选中两项，branch/source_ref及当前surface IDs与materialization一致。
+
+actor_spawns_and_shuts_down_via_cancellation与actor_shuts_down_when_all_handles_dropped只cancel/drop后sleep50ms，没有join或closed断言，不能作为严格停机时限证据。restored_actor_replays_surface_and_continues_event_sequence验证恢复已压缩timeline可见summary、恢复不重写持久事实、后续Assistant持久seq接原next_seq。restored_actor_durably_repairs_dangling_tool_surface_before_launch只读完seed与mock构造，余逻辑从601继续。
+
+actor/tests.rs已读1–600/6406；chat-state保持16/17完整，inventory pending。本轮仅静态阅读，无Cargo运行。
+
+
+## actor/tests.rs 续读（601–930行）
+
+restored_actor_durably_repairs_dangling_tool_surface_before_launch结尾验证恢复后surface含补齐ToolResult、mock收到Recovery和Replace两条。基本push User/Assistant/ToolResult测试验证追加及单持久记录；push_user_message_durably_waits_for_timeline_commit使用自动ack，只验证成功结果，未单独控制等待时间。
+
+response_repair_retains_raw_fact_and_allows_the_next_request验证畸形response返回隔离计数1，原Assistant事实与IntegrityRepair两条分别落盘，native continuation不安装，capture含单隔离User且非compaction；重放无需再修复、branch=surface、无unloaded，后续正常response返回0并可构建request。repaired_history_stays_non_executable_across_all_backend_switches遍历三backend的六种不同source→target组合，递归检查wire没有可执行工具字段/类型且有untrusted historical evidence；不是远程provider调用测试。
+
+response_repair_waits_for_both_durable_acknowledgements通过手动ack证明raw确认前、repair确认前、repair临时失败重试前task均未完成，成功后返回1；重试比较MessageEvent正文一致（不是完整envelope）。failed_response_repair_can_recover_from_only_the_durable_raw_prefix验证raw已确认而repair InvalidData导致调用失败，只用raw重放可再恢复2事件、二次修复无操作、原raw不改。健康pending工具保护测试仅初始化，从931继续。
+
+actor/tests.rs已读1–930/6406；chat-state仍16/17完整、pending，本轮没有Cargo执行。
+
+
+## actor/tests.rs 续读（931–1250行）
+
+response_admission_does_not_close_healthy_pending_calls断言非空call ID/name即使工具未注册、arguments不是合法JSON仍原样接受、隔离数0、仅一个事件；响应准入不替代工具注册及参数验证。provider_context_anchor_emits_event验证压力事件与查询1000一致；provider_anchor_below_final_request_estimate_is_ignored以大tool schema构造request后拒绝过低anchor。
+
+last_turn_usage覆盖初始None、写入及后写覆盖。prompt_usage_ledger_via_handle_resets_and_clears验证两次调用累计、prompt坐标推进清prompt账本但session仍2次，rewind再清prompt账本。压力测试覆盖ToolResult/User/Assistant增长的bytes/4估计，后续provider anchor覆盖已有估计避免重复；无provider usage时保留估计，含Reasoning响应后接受新anchor。所谓synthetic消息增长测试实际用普通ConversationItem::user四百万字符，不经过Notification payload上限，不能据此声称通知允许4MB。
+
+rewind_applies_signed_surface_delta验证减去被移除surface估计但保留provider额外开销；timeline_turn_start_emits_prompt_projection_event验证PromptIndexChanged=1且查询一致。replace_conversation_persists_and_emits_reset只读到记录断言开头，从1251继续。actor/tests.rs已读1–1250/6406，chat-state仍16/17完整、pending；本轮无Cargo构建。
+
+
+## actor/tests.rs 续读（1251–1580行）
+
+replace_conversation_persists_and_emits_reset结尾只断言单持久记录，没有检查reset事件，名称超出实际断言。image_projection_preserves_raw_events_and_never_restores_images_to_surface通过actor投影User一图+ToolResult两图，报告described_images=3，保User synthetic/prompt坐标和Tool call ID，保images字段内非Image Text及原result正文，去路径；capture与request无图，切vision model仍不恢复，持久记录同时含ImageProjection及原始图片Messages。
+
+image_projection_retries_an_uncertain_persistence_failure手动首ack临时失败、第二成功，报告1图且查询/materialization无图；此测试不直接比较两次完整event。durable_rewind_retries_an_uncertain_persistence_failure验证同样临时失败后成功返回；durable_user_message_retries_an_uncertain_persistence_failure还断言surface最终2项。lost_timeline_ack_retries_the_exact_event_once已读丢弃首ack、第二成功及两次持久记录数量断言，完整事件比较从1581继续。
+
+actor/tests.rs已读1–1580/6406，chat-state仍16/17完整、pending；本轮未构建。
+
+
+## actor/tests.rs 续读（1581–1900行）
+
+lost_timeline_ack_retries_the_exact_event_once结尾比较两次完整event JSON相同且surface仅一项。bootstrap_persists_strictly_one_event_at_a_time手动确认seed：首seq0失败后仅重试相同完整事件，确认后才发seq1，最后surface2项。dropping_last_handle_cancels_an_unacknowledged_pending_event在持久ack悬置时drop最后handle，并通过1秒内event channel关闭断言停机，补足前面仅sleep测试的证据。
+
+permanent_persistence_failure_poison_closes_the_actor_mailbox给首写InvalidData，验证事件通道关闭且排队第二命令不再持久化。storage_full_failure_poison_closes_the_actor_without_retrying_forever验证StorageFull原错误返回、通道关闭及无重试；不是实际填满磁盘实验。transient_persistence_retry_is_cancelled_by_actor_shutdown验证WouldBlock后取消中断退避，durable调用返回Cancelled。buffered_append_recovers_from_io_failure_without_breaking_sequence验证TimedOut后首次追加相同字节event重试，随后第二追加seq1，持久attempt序列0/0/1而surface仅2项。conditional_tool_result_rejects_stale_recall_and_closes_the_call只读到冻结revision后追加sibling开头，从1901继续。
+
+actor/tests.rs已读1–1900/6406，chat-state仍16/17完整、pending；本轮未运行Cargo。
+
+
+## actor/tests.rs 续读（1901–2230行）
+
+conditional_tool_result_rejects_stale_recall_and_closes_the_call验证sibling结果使revision变化后拒绝旧recall，返回RejectedSurfaceChanged且request只有调用方提供的拒绝ToolResult。conditional_tool_result_rechecks_headroom_at_commit验证revision未变但provider anchor升至7900时候选超空间，返回RejectedHeadroom并用拒绝结果闭合工具调用。两项均未证明拒绝文本自身重新预算。
+
+压力测试覆盖等大小压缩保留provider额外开销、40k→3k内容变化使87k→50k、响应后工具增长只计算一次、12个大型ToolResult预裁剪显著减量且仅扣signed surface delta；无anchor时压缩后增长到2000也跟随估计，普通等长替换保留51000压力。flush_calls_persistence_flush通过查询屏障验证单Flush记录，不代表fsync结果可观测。snapshot验证prompt_index/压力/会话/prompt记录/无最近compaction坐标。
+
+查询测试覆盖当前会话及空状态默认值；auto_compact低压力不触发、8600/10000在85阈值触发并报告86%，名称at_threshold实际不覆盖恰8500边界。edited path去重测试读至数量2，后续内容断言从2231继续。actor/tests.rs已读1–2230/6406，chat-state仍16/17完整、pending，本轮无Cargo执行。
+
+
+## actor/tests.rs 续读（2231–2560行）
+
+prompt_records投影测试验证三个Turn顺序坐标；route查询测试仅断言model/window，未逐字段验证全部config。notification_meta验证两种start时间独立保存。handle_clone测试证明clone可用但无成本测量；multiple_push_and_query_interleave实际十次顺序push后单query，没有跨任务并发交错，不能扩大为并发顺序证明。completed_compaction snapshot记录坐标3。
+
+truncate到1验证只保sys/q1/a1、坐标1、prompt记录只q1且持久Rewind存在；到0保System；当前或未来target拒绝、坐标不变且无UI事件。snapshot_combines...覆盖会话、压力、prompt记录、edited paths数量及时间，注释EVERY field并不包含credentials等全部结构字段。auto_compact 84%低于85不触发；初始会话保留测试仅断言数量。
+
+请求测试覆盖空会话、完整两项、System正文保留，memory reminder追加为MemoryContext User且不改System头。actor/tests.rs已读1–2560/6406；chat-state仍16/17完整、pending，本轮未运行Cargo。
+
+
+## actor/tests.rs 续读（2561–2860行）
+
+build_request_injects_memory_when_no_system验证无System也追加MemoryContext。build_request_repairs_dangling_tool_calls的修复实际发生ChatState::new，测试注释明确request阶段无操作，不能算request时修复持久化证据。工具定义传入测试断言数量/name。request_projection_tracks_tool_schema_delta_from_provider_anchor验证首次压力等于最终request估计、provider anchor后工具schema变化只补差值，重复构建相同request不重复累加。
+
+final_request_projection_accounts_for_goal_shadows_and_json_schema验证过期goal正文变SUPERSEDED_GOAL_DIRECTIVE且最终请求压力与含JSON schema的估计相同。build_request_uses_sampling_config断言model/temperature/max_output_tokens/top_p映射。无memory的构建测试仅检查会话数量和System正文，不代表actor所有runtime字段不变；有memory测试验证请求与actor都追加记忆、保System及持久MemoryContext事件。persistent_memory_context_retries_an_uncertain_commit尚在构造，从2861继续。
+
+actor/tests.rs已读1–2860/6406，chat-state仍16/17完整、pending，本轮未运行Cargo。
+
+
+## actor/tests.rs 续读（2861–3180行）
+
+persistent_memory_context_retries_an_uncertain_commit结尾验证临时持久失败重试后构建成功且会话不同于原System。多tool calls/results请求测试仅断言六项透传。parallel_tool_calls_accept_first_reject_second_skip_third手工推入三个调用及成功/拒绝/取消结果，逐项断言ID/name/content和六项结构；注释描述shell执行策略，但没有调用shell或实际权限执行器，不能据此替代shell审计。parallel_tool_calls_with_rejection_has_no_dangling_calls验证构建请求不增加合成结果，保留三条结果原内容和ID。持久化同场景测试刚开始构造，从3181继续。
+
+actor/tests.rs已读1–3180/6406；chat-state仍16/17完整、pending，本轮无Cargo运行。
+
+
+## actor/tests.rs 续读（3181–3500行）
+
+parallel_tool_calls_with_rejection_persists_all_items完整读取，持久Messages item总数6，未逐字段比较持久内容。dangling_tool_calls_after_crash_are_repaired_on_load通过seed模拟三调用仅一个结果，初始化补另外两条，保首真实结果/各ID，构建请求仍六项不重复修复；不涉及真实进程崩溃或磁盘重启。dangling_tool_calls_repair_is_consistent_between_state_and_request仅比较两者各五项数量。all_tool_calls_dangling_after_crash验证三条全缺时按调用顺序补cancelled/not executed结果，request六项。
+
+后续live_cancel测试注释称push_user_message即修复，尚未读到实际断言；需以实现与测试实际同步点为准，不能把该注释直接升格规范。已读到三工具构造中部，从3501继续。actor/tests.rs已读1–3500/6406；chat-state仍16/17完整、pending，本轮未构建。
+
+
+## actor/tests.rs 续读（3501–3820行）
+
+live_cancel_before_any_tool_execution_repairs_on_next_user_message明确断言get_conversation和snapshot只读不修复，后续push User后已有5项变9项、3合成结果位于新User之前，request不再次补齐。live_cancel_after_partial_tool_results_repairs_remaining验证首真实结果正文保留，仅补后两调用。这些是无实际abort的输入序列模拟；与已读actor写入边界实现一致，消除上一段关于注释的待确认项。
+
+turn_capture_collects_all_message_types覆盖User/Assistant/ToolResult三类（名称all并不涵盖所有枚举类型）；压缩期间capture保原消息及后续User且compaction flag=true；普通ContextRebuild不设flag。未begin取None，take第二次None，重新begin只捕一条后续User（未比正文），rewind清capture。prefix shrink测试只读到构造，从3821继续。
+
+actor/tests.rs已读1–3820/6406；chat-state仍16/17完整、pending，本轮未运行Cargo。
+
+
+## actor/tests.rs 续读（3821–4140行）
+
+turn_capture_survives_integrity_repair_prefix_shrink验证旧前缀3条重复结果被移除后capture仍准确包含turn-1/turn-2，不混入旧项；注释offset/snapshot机制是历史描述，当前实现证据应以已读event birth fold为准。integrity_repair_does_not_flag_compaction样例本身无需修复，证明无操作修复不置flag，不独立覆盖实际发生替换的flag。memory capture测试验证持久MemoryContext作为第三条捕获消息追加。
+
+查询测试覆盖len一致、悬空call从false→true→有结果false、末Assistant空/无Assistant返回None、跳过空白返回之前正文；in_turn查询遇普通新User止步、穿过stop_hook_feedback但TaskCompleted合成User作为边界。first_user只覆盖普通文本/空/无User，未覆盖首User首part Image的既有债务。item_at覆盖三种项及越界None；不改状态测试读到len断言，结尾从4141继续。
+
+actor/tests.rs已读1–4140/6406；chat-state仍16/17完整、pending，本轮无Cargo运行。
+
+
+## actor/tests.rs 续读（4141–4460行）
+
+新增三项first_user多模态测试分别覆盖仅图、图后文本返回None、文本后图返回首文本；均只有一个User，仍未覆盖首User图开头而后续User有文本的find_map跨消息跳过债务。last_user_query覆盖空与最新普通User；counts混合样例total6但user2+assistant2+tool1=5，System只计总数。System查询覆盖缺失与正文；空timeline可seed System、已有System不得换成child head且旧正文/会话长度保持。
+
+last_model_metadata覆盖最后Assistant的model/fingerprint及无Assistant默认空。sampling_config_survives_compaction_replacement已读压缩前配置/metadata与压缩后model/context_window不变断言，后续backend/metadata断言从4461继续。actor/tests.rs已读1–4460/6406；chat-state仍16/17完整、pending，本轮未运行Cargo。
+
+
+## actor/tests.rs 续读（4461–4780行）
+
+sampling_config_survives_compaction_replacement结尾验证backend保持Responses，而当前surface无Assistant时model metadata为空；下一测试验证新Assistant可恢复metadata。其pager/catalog注释未实际调用pager，不作为显示逻辑证据。context_window_downgrade_triggers_auto_compact直接update_sampling_config将500k降128k，217k压力保持，触发auto compact；所谓session只允许响应header升级仍须shell另审，当前测试仅actor层。
+
+进入prefix稳定测试：serialize_via_public_api通过Responses公开转换+patch_reasoning_text_types，断言无旧placeholder。assert_prefix_stable_pair比较JSON Value input数组前缀，注释byte-stable并非原始序列化字节比较，也非真实provider KV命中测试。reasoning_sibling忽略_encrypted参数，仅创建可见合成Reasoning。prefix_stable_across_user_assistant_turns覆盖连续三请求的前缀不变；相同memory前缀测试只开始构造，从4781继续。
+
+actor/tests.rs已读1–4780/6406；chat-state仍16/17完整、pending，本轮无Cargo运行。
+
+
+## actor/tests.rs 续读（4781–5100行）
+
+相同memory注入、工具schema变化及model switch测试均仅比较Responses input JSON前缀，不保证请求整体或远程缓存命中。prefix_stable_with_reasoning_siblings_through_build_request通过push_tool_result传Reasoning，encrypted参数由helper忽略，且未断言Reasoning实际进入timeline；结合cause验证与actor分发需核验该样例是否真正覆盖所称Reasoning路径，不能直接视为加密续传证据。
+
+native_fragment_for分别构造ChatCompletions reasoning字段、Responses encrypted reasoning+Assistant、Messages签名Thinking+Text；wire helper使用三种公开转换。endpoint_switch_matrix_strips_native_reasoning_and_diagnostics读至六种source→target方向的同route含native_secret及切换后无native，wire排除secret/native ID/visible thought/source诊断字段；A→B→A和缓存key后半断言从5101继续。
+
+actor/tests.rs已读1–5100/6406；chat-state仍16/17完整、pending，本轮无Cargo执行。
+
+
+## actor/tests.rs 续读完成（5101–6406行）
+
+endpoint_switch_matrix结尾验证A→B→A也不复用原native片段，缓存key与最初不同。sampling_config_updates_preserve_same_route_native_continuation覆盖只改变context_window/output_limit/reasoning_effort时native与cache key保持，wire仍含native_secret；不据此保证任意update_sampling_config路由修改安全。restored_session_starts_with_portable_history_only通过with_config初始items模拟恢复，不是磁盘重启集成测试：三后端均去掉Reasoning、model诊断、原provider call ID及历史工具协议字段，保留标注为不可信历史的工具名、参数和结果正文。
+
+reset_continuation等待确认后native消失、cache key改变且actor仍可用。cache lineage测试验证普通追加key保持、换model/rewind/不同timeline ID改变key；model切换后再rewind的组合不单独隔离rewind贡献。synthetic User追加测试比较Responses input前缀。大图裁剪测试仅断言System保留、项数增加，以及content为字符串的role项构成子序列；未覆盖数组content中全部文本，也不是完整字节前缀保证。小旧图测试确认请求仍有图片。
+
+repair_history测试确认恢复时孤儿结果仍在，dry-run只报告，实际修复持久化IntegrityRepair，二次无操作不写；显式共享active flag为true拒绝，false成功；不确定提交失败精确重试。prune测试覆盖head+marker+tail、保留call ID及images字段中的Text、压力下降、单次Timeline替换且不发UI事件；重复计划不写、低报anchor忽略、不确定提交重试、并发追加结果不丢。并发样例通过yield偏置调度，不证明穷举两种调度顺序。越界/非ToolResult条目跳过、过期tokens_before以实际正文处理、重复索引只剪一次；零预算夹到1 token，具体ASCII样例结果HH\nT；空会话EmptyConversation、非空会话空计划无操作、noop handle ActorUnavailable。
+
+notification测试验证source/version重试返回原seq，owner从Goal退到Session仍复用原receipt，payload冲突拒绝，pending只有一项；input测试验证同ID/intent/payload只提交一次及payload冲突拒绝。live_tool_images_are_budgeted_without_changing_timeline_evidence对三后端逐次加入4张约15MiB图：每次公开转换后序列化body不超过MAX_REQUEST_BODY_BYTES、最新图仍在、估算至少含一个图片成本、至少一次ImageBudget报告驱逐，最终timeline仍有4个含图ToolResult。该固定样例不证明所有文本/schema/单张超大图组合都满足硬上限；NullTimelinePersistence也不证明磁盘耐久性。
+
+actor/tests.rs已读1–6406/6406；chat-state全部17/17 Rust文件及manifest阅读完成，仍pending：尚需整理正式功能映射、核验候选债务和执行包测试。本轮仅阅读与记录，未运行Cargo。
+
+actor/tests.rs 完整阅读 SHA256：`407e40ca2893d0f361cbddb268613a9ad75582df3af4bab7c602df96f0deeae2`。
+
+
+## Reasoning 写入疑点核验
+
+重新核对actor/mod.rs的PushToolResult分派及mutations.rs的push_message → append_message_fact → message_cause：cause依据ConversationItem实际变体推导，Reasoning归为Assistant，不依据命令名强制ToolResult。因此此前“push_tool_result传Reasoning可能未写入”的候选疑点解除；命令名称不是此路径类型限制。prefix测试仍只证明JSON input前缀，helper忽略encrypted参数，不能改称原生加密续传测试。
+
+已启动cargo test --locked --offline -p chat-state --all-features，独立target且关闭incremental/dev/test debug；日志/tmp/grow-chat-state-tests.log，session97732。命令在测试退出后自动cargo clean本工作树target；此时尚未取得测试结果，不计验证通过。
+
+
+## 包测试与契约整理进度
+
+cargo test --locked --offline -p chat-state --all-features退出0，460 passed、0 failed/ignored，doc-tests 0；session97732已终止，日志/tmp/grow-chat-state-tests.log。随后的cargo clean删除4474文件、1.5GiB，未清理main产物。固定本机测试不证明真实provider缓存、磁盘故障及跨平台场景。chat-state-feature-draft.json现14项契约，来源路径/符号存在性与名称唯一性检查通过；未正式计入feature-map，包保持pending。
+
+
+## 请求与裁剪契约整理
+
+chat-state-feature-draft.json增至25项，补充条件工具准入、裁剪计划、provider anchor、请求封装压力、memory持久注入、图片投影及字节下界、cache lineage、ContinuationLane、token估算与first_user实际扫描。重新核对条件拒绝替代项无二次预算检查、低报anchor忽略以及压力差替换源码；全部草稿来源路径/符号与唯一键检查通过。Timeline、sideband、trajectory等仍待完整映射，包继续pending。本轮无运行时代码变更，无新增Cargo构建。
+
+
+## Timeline契约初步映射
+
+草稿增至36项，覆盖schema/seq/封口、prepare/replay、seed坐标、恢复边界、稳定range、cause形状、DirectUser证据校验限度、控制激活、输入预留、workflow epoch与压缩结算。再次读取validate/prepare/recover_interrupted确认schema25、时间非负而非单调，以及保留open child及所属workflow。来源符号/唯一键检查和git diff --check通过；尚待通知、Hook、图片投影、子账本、sideband、trajectory等映射，未标reviewed。无新增构建产物。
+
+
+## 通知、Hook与Sideband契约映射
+
+草稿增至48项，补充通知身份及pending保留、消费归属、Hook gate/计划/聚合/失败策略、sideband独立ledger/冻结预算/来源覆盖/result与terminal/parent recall链接。保留重要限制：pending物理历史不删除，Hook fold不强制串行启动，sideband无schema不验证raw/structured一致且失败终止不强制先有Request。来源符号与唯一键检查、git diff --check通过。尚需trajectory、图片与子代理链接及剩余公开查询映射，不标reviewed。本轮无Cargo构建。
+
+
+## Trajectory与跨事件来源映射
+
+草稿增至59项，补充子代理seed/result精确链接、图片投影身份、branch原始来源、Completed压缩卸载、用户标题、trajectory details/dirty/可见性/修复链接/严重级别/Unicode摘要。明确跨ledger引用校验不等同读取artifact内容，ToolCompleted展示state不代表成功。源码符号与草稿唯一键检查及git diff --check通过；仍需公开接口覆盖收尾及债务归档核查，保持pending。无新增构建。
+
+
+## compaction_utils契约补齐
+
+草稿增至68项，加入轮次判定、摘要准备、预算fit、query提取、真实User、range规划、状态组装、sanitize与修复顺序。符号校验发现拟用CompactionContext不存在，重新核对实际类型CompactionStateContext后修正，失败批次未写入草稿。新增9项来源核验及唯一键检查通过；usage/capture/查询接口仍待映射收尾，包保持pending。本轮无Cargo构建。
+
+
+## 用量、capture与查询映射
+
+草稿增至77项，补充actor用量归属、独立incomplete开关、rewind账本边界、capture来源、不可用返回区分、助手文本、model metadata、自动压缩查询及surface/revision同次读取。重新核对用量与queries实现，来源符号/名称唯一性及git diff --check通过。first_user债务已在backlog；其他已确认投影不一致单独补记，不混入运行时修复。仍待覆盖收尾与正式登记。
+
+
+## 正式功能映射登记
+
+17份Rust及manifest已完整阅读，460项all-features单测通过，构建后清理1.5GiB。83项契约现已登记feature-map与chat-state delta，逐包inventory标reviewed；这是活动change内完成，不代表已归档主规范。以下保留规范链接，历史阅读进度只作过程记录。
+
+- [Conversation item determines buffered message cause](../specs/chat-state/spec.md#requirement-conversation-item-determines-buffered-message-cause)
+- [Durable response admission and native fragment installation](../specs/chat-state/spec.md#requirement-durable-response-admission-and-native-fragment-installation)
+- [Empty response resets native continuation](../specs/chat-state/spec.md#requirement-empty-response-resets-native-continuation)
+- [Explicit history repair dry run](../specs/chat-state/spec.md#requirement-explicit-history-repair-dry-run)
+- [Usage token arithmetic](../specs/chat-state/spec.md#requirement-usage-token-arithmetic)
+- [Usage ledger model aggregation](../specs/chat-state/spec.md#requirement-usage-ledger-model-aggregation)
+- [Partial cost and incomplete usage](../specs/chat-state/spec.md#requirement-partial-cost-and-incomplete-usage)
+- [Persistence port acknowledgement](../specs/chat-state/spec.md#requirement-persistence-port-acknowledgement)
+- [Permanent persistence error classification](../specs/chat-state/spec.md#requirement-permanent-persistence-error-classification)
+- [Serial actor bootstrap](../specs/chat-state/spec.md#requirement-serial-actor-bootstrap)
+- [Durable commit retry and cancellation](../specs/chat-state/spec.md#requirement-durable-commit-retry-and-cancellation)
+- [Handle lifetime and query failure](../specs/chat-state/spec.md#requirement-handle-lifetime-and-query-failure)
+- [Sampling route replacement resets continuation](../specs/chat-state/spec.md#requirement-sampling-route-replacement-resets-continuation)
+- [Snapshot projection boundary](../specs/chat-state/spec.md#requirement-snapshot-projection-boundary)
+- [Conditional tool result admission](../specs/chat-state/spec.md#requirement-conditional-tool-result-admission)
+- [Tool result pruning plan execution](../specs/chat-state/spec.md#requirement-tool-result-pruning-plan-execution)
+- [Provider pressure anchor lower bound](../specs/chat-state/spec.md#requirement-provider-pressure-anchor-lower-bound)
+- [Request pressure envelope replacement](../specs/chat-state/spec.md#requirement-request-pressure-envelope-replacement)
+- [Durable memory request injection](../specs/chat-state/spec.md#requirement-durable-memory-request-injection)
+- [Request image projection scope](../specs/chat-state/spec.md#requirement-request-image-projection-scope)
+- [Image body estimate limitation](../specs/chat-state/spec.md#requirement-image-body-estimate-limitation)
+- [Prompt cache lineage key](../specs/chat-state/spec.md#requirement-prompt-cache-lineage-key)
+- [Continuation projection reconciliation](../specs/chat-state/spec.md#requirement-continuation-projection-reconciliation)
+- [Request token estimate components](../specs/chat-state/spec.md#requirement-request-token-estimate-components)
+- [First user text actual scan](../specs/chat-state/spec.md#requirement-first-user-text-actual-scan)
+- [Timeline schema sequence and sealing](../specs/chat-state/spec.md#requirement-timeline-schema-sequence-and-sealing)
+- [Timeline prepare and replay](../specs/chat-state/spec.md#requirement-timeline-prepare-and-replay)
+- [Seed prompt coordinate reset](../specs/chat-state/spec.md#requirement-seed-prompt-coordinate-reset)
+- [Interrupted lifecycle recovery boundary](../specs/chat-state/spec.md#requirement-interrupted-lifecycle-recovery-boundary)
+- [Stable surface replacement range](../specs/chat-state/spec.md#requirement-stable-surface-replacement-range)
+- [Message cause shape validation](../specs/chat-state/spec.md#requirement-message-cause-shape-validation)
+- [Direct user evidence validation boundary](../specs/chat-state/spec.md#requirement-direct-user-evidence-validation-boundary)
+- [Control context activation boundaries](../specs/chat-state/spec.md#requirement-control-context-activation-boundaries)
+- [Input admission routing and reservation](../specs/chat-state/spec.md#requirement-input-admission-routing-and-reservation)
+- [Workflow execution epochs and closure](../specs/chat-state/spec.md#requirement-workflow-execution-epochs-and-closure)
+- [Compaction summary replacement settlement](../specs/chat-state/spec.md#requirement-compaction-summary-replacement-settlement)
+- [Notification deterministic identity](../specs/chat-state/spec.md#requirement-notification-deterministic-identity)
+- [Notification inbox retention](../specs/chat-state/spec.md#requirement-notification-inbox-retention)
+- [Notification consumption ownership](../specs/chat-state/spec.md#requirement-notification-consumption-ownership)
+- [Hook gate classification](../specs/chat-state/spec.md#requirement-hook-gate-classification)
+- [Frozen hook handler lifecycle](../specs/chat-state/spec.md#requirement-frozen-hook-handler-lifecycle)
+- [Hook aggregate decisions](../specs/chat-state/spec.md#requirement-hook-aggregate-decisions)
+- [Hook failure policy restriction](../specs/chat-state/spec.md#requirement-hook-failure-policy-restriction)
+- [Sideband independent event ledger](../specs/chat-state/spec.md#requirement-sideband-independent-event-ledger)
+- [Sideband frozen request budget](../specs/chat-state/spec.md#requirement-sideband-frozen-request-budget)
+- [Sideband attempt source containment](../specs/chat-state/spec.md#requirement-sideband-attempt-source-containment)
+- [Sideband result and terminal validation](../specs/chat-state/spec.md#requirement-sideband-result-and-terminal-validation)
+- [Sideband parent and recall linkage](../specs/chat-state/spec.md#requirement-sideband-parent-and-recall-linkage)
+- [Subagent seed linkage](../specs/chat-state/spec.md#requirement-subagent-seed-linkage)
+- [Subagent terminal result linkage](../specs/chat-state/spec.md#requirement-subagent-terminal-result-linkage)
+- [Image projection identity and provenance](../specs/chat-state/spec.md#requirement-image-projection-identity-and-provenance)
+- [Branch transcript preserves pruning provenance](../specs/chat-state/spec.md#requirement-branch-transcript-preserves-pruning-provenance)
+- [Completed compaction unloaded history](../specs/chat-state/spec.md#requirement-completed-compaction-unloaded-history)
+- [User title override permanence](../specs/chat-state/spec.md#requirement-user-title-override-permanence)
+- [Trajectory projection and snapshot hydration](../specs/chat-state/spec.md#requirement-trajectory-projection-and-snapshot-hydration)
+- [Trajectory surface visibility](../specs/chat-state/spec.md#requirement-trajectory-surface-visibility)
+- [Trajectory repair provenance links](../specs/chat-state/spec.md#requirement-trajectory-repair-provenance-links)
+- [Trajectory state outcome and severity](../specs/chat-state/spec.md#requirement-trajectory-state-outcome-and-severity)
+- [Trajectory summary truncation](../specs/chat-state/spec.md#requirement-trajectory-summary-truncation)
+- [Complete turn boundary heuristic](../specs/chat-state/spec.md#requirement-complete-turn-boundary-heuristic)
+- [Summary preparation modes](../specs/chat-state/spec.md#requirement-summary-preparation-modes)
+- [Conversation budget fitting heuristic](../specs/chat-state/spec.md#requirement-conversation-budget-fitting-heuristic)
+- [User query metadata extraction](../specs/chat-state/spec.md#requirement-user-query-metadata-extraction)
+- [Real user query classification](../specs/chat-state/spec.md#requirement-real-user-query-classification)
+- [Compaction range planning](../specs/chat-state/spec.md#requirement-compaction-range-planning)
+- [Compaction state context assembly](../specs/chat-state/spec.md#requirement-compaction-state-context-assembly)
+- [Compacted history sanitation scope](../specs/chat-state/spec.md#requirement-compacted-history-sanitation-scope)
+- [History quarantine and pairing sequence](../specs/chat-state/spec.md#requirement-history-quarantine-and-pairing-sequence)
+- [Actor usage attribution](../specs/chat-state/spec.md#requirement-actor-usage-attribution)
+- [Independent incomplete usage flags](../specs/chat-state/spec.md#requirement-independent-incomplete-usage-flags)
+- [Durable rewind bookkeeping](../specs/chat-state/spec.md#requirement-durable-rewind-bookkeeping)
+- [Turn capture event provenance](../specs/chat-state/spec.md#requirement-turn-capture-event-provenance)
+- [Unavailable query return distinctions](../specs/chat-state/spec.md#requirement-unavailable-query-return-distinctions)
+- [Latest assistant text query](../specs/chat-state/spec.md#requirement-latest-assistant-text-query)
+- [Latest model metadata projection](../specs/chat-state/spec.md#requirement-latest-model-metadata-projection)
+- [Automatic compaction query delegation](../specs/chat-state/spec.md#requirement-automatic-compaction-query-delegation)
+- [Atomic surface and revision query](../specs/chat-state/spec.md#requirement-atomic-surface-and-revision-query)
+- [Request and tool lifecycle ownership](../specs/chat-state/spec.md#requirement-request-and-tool-lifecycle-ownership)
+- [Input submission idempotence](../specs/chat-state/spec.md#requirement-input-submission-idempotence)
+- [Explicit repair active turn guard](../specs/chat-state/spec.md#requirement-explicit-repair-active-turn-guard)
+- [Surface replacement no operation](../specs/chat-state/spec.md#requirement-surface-replacement-no-operation)
+- [Chat state feature and metadata surfaces](../specs/chat-state/spec.md#requirement-chat-state-feature-and-metadata-surfaces)
+- [Input reroute transitions](../specs/chat-state/spec.md#requirement-input-reroute-transitions)

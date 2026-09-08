@@ -1,0 +1,99 @@
+[
+  {
+    "sql": "create virtual table t using vec0(v float[2], f float, b boolean, +body text, chunk_size=8)",
+    "rows": []
+  },
+  {
+    "sql": "insert into t(rowid,v,f,b,body) values(1,'[1,2]',1.0,1,'x')",
+    "rows": []
+  },
+  {
+    "sql": "insert into t(rowid,v,f,b,body) values(2,'[2,3]',2,1,'x')",
+    "error": "Expected float for FLOAT metadata column f, received INTEGER"
+  },
+  {
+    "sql": "select rowid from t",
+    "rows": [
+      [
+        1
+      ],
+      [
+        2
+      ]
+    ]
+  },
+  {
+    "sql": "update t set body=42 where rowid=1",
+    "rows": []
+  },
+  {
+    "sql": "select typeof(body),body from t where rowid=1",
+    "rows": [
+      [
+        "integer",
+        42
+      ]
+    ]
+  },
+  {
+    "sql": "update t set v=NULL where rowid=1",
+    "rows": []
+  },
+  {
+    "sql": "select vec_to_json(v) from t where rowid=1",
+    "rows": [
+      [
+        "[1.000000,2.000000]"
+      ]
+    ]
+  },
+  {
+    "sql": "update t set b=4294967296 where rowid=1",
+    "rows": []
+  },
+  {
+    "sql": "select b from t where rowid=1",
+    "rows": [
+      [
+        0
+      ]
+    ]
+  },
+  {
+    "sql": "alter table t rename to renamed",
+    "rows": []
+  },
+  {
+    "sql": "select rowid,vec_to_json(v) from renamed",
+    "rows": [
+      [
+        1,
+        "[1.000000,2.000000]"
+      ],
+      [
+        2,
+        "[2.000000,3.000000]"
+      ]
+    ]
+  },
+  {
+    "sql": "delete from renamed",
+    "rows": []
+  },
+  {
+    "sql": "select count(*) from renamed_chunks",
+    "rows": [
+      [
+        0
+      ]
+    ]
+  },
+  {
+    "sql": "select count(*) from renamed_vector_chunks00",
+    "rows": [
+      [
+        0
+      ]
+    ]
+  }
+]

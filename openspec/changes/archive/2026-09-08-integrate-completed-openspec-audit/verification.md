@@ -1,0 +1,2 @@
+# Verification
+Source branch: codex/openspec-sdd at 45e3a161. Target main before merge: 2bd502e9. Static inventory: 61 crates, 4285 contracts, no duplicate keys; 10 absent source paths and 275 changed source hashes relative to main are recorded separately. Original audit integration tasks remain pending. Merged strict validation: 20 passed, 0 failed. Archived validation: 280 passed, 0 failed. git diff --cached --check passed.

@@ -1,0 +1,6226 @@
+{
+  "command": "all-features test binary; each listed test in separate process with --exact --test-threads=1; timeout 60s; ignored not enabled",
+  "platform": "macOS",
+  "passed": 1034,
+  "ignored": 2,
+  "failed": 0,
+  "timeout": 0,
+  "tests": [
+    {
+      "name": "appearance::cache::tests::cache_initial_defaults_match_ui_config_default",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::caches_are_independent",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::first_load_seeds_then_subsequent_loads_are_stable",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::prime_resolves_word_select_from_keep_text_selection",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::prime_seeds_all_caches",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::render_mermaid_config_seed_parse",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_scroll_lines_round_trips_and_clamps_to_bounds",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_scroll_speed_clamps_to_bounds",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_combine_queued_prompts",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_compact",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_group_tool_verbs",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_invert_scroll",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_keep_text_selection",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_page_flip_on_send",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_prompt_suggestions",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_render_mermaid",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_scroll_mode",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_scroll_speed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_show_thinking_blocks",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_simple_mode",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_timestamps",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::cache::tests::set_then_load_round_trips_vim_mode",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::edit_shape_defaults_to_collapsed_with_diffstat",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::minimal_collapse_thinking_defaults_off",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::minimal_collapse_thinking_opt_in_parses",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::removed_prompt_invert_key_is_ignored",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::template_documents_edit_shape_defaults",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::template_has_no_active_value_lines",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::template_parses_to_builtin_defaults",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::terminal_alt_screen_always",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::terminal_alt_screen_auto_default",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::terminal_alt_screen_auto_explicit",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::terminal_alt_screen_never",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::terminal_config_to_runtime_conversion",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::terminal_section_appears_in_generated_toml",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_default_config",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_deserialize_full_config",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_deserialize_hex_string",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_deserialize_named_color",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_deserialize_none_color",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_deserialize_rgb_array",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_parse_hex_color",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_parse_named_color",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_respect_manual_folds_defaults_off_and_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_to_toml_with_comments",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::test_upsert_respect_manual_folds_writes_key_and_preserves_siblings",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::thinking_body_treatment_is_off_by_default_and_not_a_toml_key",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::config::tests::upsert_into_inert_template_inserts_active_key",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::permission_cursor::tests::canonical_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::permission_cursor::tests::from_config_value_accepts_one_canonical_per_variant",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::permission_cursor::tests::from_kind_is_total_and_collapses_reject",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::permission_cursor::tests::last_used_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::permission_cursor::tests::matches_kind_targets_the_right_rows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::permission_cursor::tests::resolve_sticky_reject_lands_on_reject_always_only_prompt",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::permission_cursor::tests::resolve_sticky_skips_always_approve_row",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::permission_cursor::tests::resolve_unset_lands_on_always_approve_row",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::permission_cursor::tests::resolve_without_always_approve_row_falls_back_to_index_0",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::render_mermaid::tests::canonical_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::render_mermaid::tests::default_is_auto",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::render_mermaid::tests::unknown_canonical_is_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::scroll_mode::tests::canonical_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::scroll_mode::tests::default_is_auto",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::scroll_mode::tests::junk_and_case_variants_are_rejected",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::text_selection::tests::canonical_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::text_selection::tests::default_is_flash",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::text_selection::tests::unknown_canonical_is_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::text_selection::tests::word_select_implies_hold_and_word_select",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "appearance::watcher::tests::test_watcher_start",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::attachment_probe_gate_returns_snapshot_baseline",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::attachment_probe_route_matrix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::bracketed_payload_empty_matches_textless_clipboard",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::bracketed_payload_from_clipboard_uses_clipboard_text_seam",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::bracketed_payload_ime_commit_never_matches",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::bracketed_payload_match_exact_and_normalized",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::bracketed_two_line_https_still_probes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_feedback_contract",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_byobu_screen_no_tmux_buffer_no_osc52",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_matrix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_native_always_true",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_native_never_disabled",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_no_osc52_kill_switch_forces_off",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_non_tmux_never_tmux_buffer",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_osc52_always_for_tmux_backed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_osc52_tmux_passthrough_truth_table",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_plain_screen_no_tmux_buffer",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_tmux_backed_all_three_legs",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_route_tmux_buffer_only_for_tmux_backed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::clipboard_text_read_preserves_failure_for_typed_callers",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::copy_file_is_owner_only_0600",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::default_copy_fallback_path_is_grow_home",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::default_copy_fallback_path_respects_grow_copy_file",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::delivery_both_failed_is_failed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::delivery_clipboard_failure_yields_file",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::delivery_clipboard_success_carries_backup_file",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::delivery_clipboard_success_survives_file_write_failure",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::display_copy_path_abbreviates_home",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::empty_clipboard_still_probes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::file_url_in_text_skips_furl_probe_only",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::lone_http_url_skips_attachment_probe",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::plain_text_skips_furl_probe_size_and_line_boundaries",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::primary_guidance_rejects_every_non_x11_display_server",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::prose_skips_furl_but_still_probes_image_on_cmd_v",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::short_bracketed_caption_without_url_still_probes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::should_run_attachment_probe_matrix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::toast_message_names_backup_only_for_unverified_or_file_fallback",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::unverified_clipboard_delivery_composes_as_clipboard",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::write_copy_fallback_uses_env_override",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::tests::write_text_to_copy_file_creates_parent_and_writes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::active_wrap_sink_with_osc_is_confirmed_for_any_brand",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::container_unknown_brand_osc_is_unverified",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::container_with_detected_unsupported_brand_is_failed_remote",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::diagnostics_projection_labels_and_historical_boolean_are_pinned",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::expected_delivery_matches_preflight_routes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::known_osc_capable_terminal_is_confirmed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::known_unsupported_terminal_osc_is_failed_remote",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::local_trusted_native_is_confirmed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::native_preflight_matches_observed_wayland_trust_matrix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::no_successful_local_leg_is_failed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::remote_and_container_prefer_container_feedback_and_diagnostics_branch",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::remote_native_write_only_uses_failed_remote",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::ssh_unknown_brand_osc_is_unverified",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::tmux_success_wins_over_unverified_osc",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::vscode_ssh_non_ascii_stays_confirmed_with_warning_toast",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::wayland_native_requires_verified_destination",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "clipboard::trust::tests::wrap_sink_without_osc_write_is_failed_remote",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::assets::tests::every_sprite_palette_char_is_used_in_art",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::assets::tests::font_covers_required_strings",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::assets::tests::sprites_have_consistent_rows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::assets::tests::textures_have_expected_size",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::assets::tests::xorshift_is_nondegenerate",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::engine::tests::fire_sim_burns_upward",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::engine::tests::render_game_fills_framebuffer",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::engine::tests::render_survives_extreme_sizes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::engine::tests::zbuffer_occludes_sprites_behind_walls",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::all_imp_spawns_reachable_from_player_start",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::fire_respects_cooldown",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::held_forward_reaches_and_sustains_target_speed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::imp_chases_and_bites_player",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::los_blocked_by_walls_and_open_in_room",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::map_border_is_solid",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::movement_decays_to_rest",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::player_cannot_walk_through_walls",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::release_all_un_latches_movement",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::release_aware_supports_simultaneous_move_and_turn",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::shooting_an_imp_in_front_damages_and_eventually_kills",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::sustained_speed_is_independent_of_repeat_cadence",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::game::tests::win_condition_when_all_imps_dead",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::clear_mouse_region_disables_aim_and_fire",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::click_fires_only_playing_in_region",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::dump_frames_for_visual_inspection",
+      "status": "ignored",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::end_screens_have_dismissal_grace_period",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::esc_and_q_close_in_every_phase",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::frame_png_is_cached_until_state_changes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::frame_png_produces_valid_png_at_requested_size",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::frame_size_mapping_respects_caps_and_aspect",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::mouse_aim_baseline_reseeds_on_discontinuity",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::mouse_aim_delta_matches_column_delta",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::mouse_aim_only_while_playing",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::out_of_region_motion_does_not_aim",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::playing_to_dead_transition",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::playing_to_won_transition_after_corpses_settle",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "gboom::tests::starts_on_title_and_any_key_starts_game",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::button_variants_have_stable_width",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::chrome_glyph_variants_are_one_column",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::collapsed_accent_variants_are_one_column",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::diamond_variants_are_one_column",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::forced_legacy_console_override_parses_known_values",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::glyph_helpers_return_fancy_on_non_legacy",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::icon_fallback_variants_are_one_column",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::legacy_glyph_fallback_is_borrow_on_non_legacy",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::modern_emulators_on_windows_are_not_legacy",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::non_windows_is_never_legacy",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::prompt_arrow_variants_are_two_columns",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::sanitize_toast_message_borrows_when_clean",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::sanitize_toast_message_maps_controls_to_spaces",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::spinner_frames_are_one_column",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::to_legacy_glyphs_maps_known_glyphs",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::unfamiliar_brands_on_windows_default_to_legacy",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::vscode_family_on_windows_is_not_legacy",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::windows_terminal_is_not_legacy",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "glyphs::tests::windows_unknown_is_legacy",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::backend_error",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::boundary_hz_accepted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::host_os_other_unsupported",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::indeterminate_is_skipped_not_error",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::linux_no_display",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::linux_wayland_unsupported",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::linux_x11_unsupported",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::missing_platform_hz_is_error",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::ok_120_macos",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::ok_144_windows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::out_of_range_high",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::out_of_range_low",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::outcome_tokens",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::probe_display_refresh_never_panics",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::source_strum_snake_case_stable",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::ssh_skips_before_platform",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::display_refresh::tests::wsl_skips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "host::unicode_env_tests::unicode_env_from_os_skips_non_unicode_key_or_value",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::browser_available_with_browser_env_override",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::browser_available_with_wayland",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::browser_available_with_x11_display",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::browser_unavailable_message_includes_full_url",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::browser_unavailable_when_display_vars_empty_or_missing",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::data_scheme_blocked",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::editor_schemes_blocked_by_standard_filter",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::editor_schemes_with_extended_filter",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::empty_and_garbage_rejected",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::fallback_colon_slash_slash_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::fallback_scheme_case_insensitive",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::file_scheme_blocked_by_standard",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::ftp_scheme_blocked",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::javascript_scheme_blocked",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::mailto_allowed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::non_mailto_colon_without_slashes_rejected",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::open_path_command_passes_path_as_a_single_arg",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::scheme_case_sensitivity",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::standard_http_schemes_allowed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::try_open_url_rejects_unsafe_scheme_without_opening",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::url_with_fragment_and_query",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "link_opener::tests::whitespace_trimmed_before_parse",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::bash_mode_prefix_not_treated_as_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_canonicalizes_source_only_for_wire_uri",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_no_workspace_falls_back_to_legacy_behavior",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_omits_uri_for_stale_source_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_one_bad_one_good",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_orphan_aggregate_cap_breaks_loop",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_orphan_aggregate_cap_inclusive_boundary",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_orphan_aggregate_cap_inclusive_boundary_rejects_at_one_below",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_orphan_placeholder_loaded_from_disk",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_orphan_placeholder_missing_file_is_stripped_with_warn",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_orphan_skipped_when_pasted_image_present",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_sets_display_number_meta",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_skips_missing_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_strips_path_when_pasted_image_attached",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_text_only",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_uri_prefers_durable_session_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_with_file_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::build_blocks_with_in_memory_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::clear_deletes_staged_temp_file",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::clear_preserves_session_persisted_file",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::clear_resets_images_and_counter",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::collapse_strip_seam_preserves_code_block_indentation",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::collapse_strip_seam_preserves_double_space_elsewhere",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::deferred_finish_loading_idempotent",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::deferred_finish_loading_missing_file_fails",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::deferred_finish_loading_succeeds",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::deferred_open_starts_in_loading_state",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::display_text_format",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_bare_cwd_relative_image_name_not_intercepted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_directory_via_bare_path_intercepted_as_non_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_directory_via_file_url_intercepted_as_non_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_double_space_between_file_urls_tolerated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_empty_line_between_file_urls_tolerated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_extension_says_image_bytes_say_no_falls_to_non_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_image_file_url_returns_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_invalid_percent_sequence_tolerated_outcome",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_mixed_case_percent_hex_equivalent",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_multi_file_mixed_image_and_non_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_multi_file_url_mixed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_multibyte_utf8_percent_encoded_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_non_image_bare_path_returns_decoded_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_non_image_file_url_returns_decoded_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_nonexistent_bare_path_not_intercepted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_nonexistent_file_url_still_intercepted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_per_line_partial_resolution_falls_through",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_percent_encoded_hash_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_percent_encoded_question_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_percent_encoded_space_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_plus_sign_not_decoded_as_space",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_prose_not_intercepted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_prose_with_embedded_existing_path_not_truncated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_single_token_existing_bare_path_intercepted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_trailing_crlf_tolerated_non_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_trailing_newline_tolerated_non_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_trailing_spaces_tolerated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_trailing_tab_and_newline_tolerated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_two_non_image_file_urls_both_intercepted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_url_plus_caption_falls_through_for_plain_paste",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::dropped_path_url_plus_prose_falls_through",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::extension_for_known_mimes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::extension_for_unknown_mime",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::extract_bare_absolute_jpeg_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::extract_bare_absolute_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::extract_deduplicates_same_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::extract_markdown_image_ref",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::extract_skips_nonexistent_paths",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::extract_skips_undecodable_image_paths",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::file_url_lookalike_scheme_rejected",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::file_url_single_slash_rejected_at_anchor_gate",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::file_url_with_empty_or_root_path_is_rejected",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::file_url_with_fragment_accepted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::file_url_with_localhost_host",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::file_url_with_nul_byte_path_is_rejected",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::file_url_with_query_string_accepted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::free_prose_containing_slash_returns_empty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::from_clipboard_data_populates_fields",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::from_clipboard_marks_corrupt_preview_failed_without_losing_send_bytes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::from_clipboard_prepares_preview_before_render",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::image_source_path_preserves_user_visible_symlink",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::leading_space_before_single_path_attaches",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::load_from_file",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::load_rejects_image_below_eight_pixel_minimum",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::load_returns_none_for_missing_data",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::load_small_image_passes_through",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::looks_like_windows_path_negative_cases",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::looks_like_windows_path_positive_cases",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::media_only_markdown_accepts_image_ref_only",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::media_only_markdown_rejects_mixed_text",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::missing_single_path_returns_empty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_file_urls_and_bare_paths_interleaved",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_missing_middle_path_falls_through",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_mixed_line_endings",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_mixed_newline_and_space_separated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_newline_separated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_non_image_middle_still_emits_all_entries",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_space_separated_absolute_paths",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_space_separated_bare_then_file_url",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_space_separated_both_file_urls",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_space_separated_file_url_then_bare",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::multi_file_valid_line_plus_prose_line_falls_through",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::newline_wins_space_inside_line_not_split",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::open_from_path_missing_file",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::open_from_path_valid_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::open_from_path_valid_jpeg_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::paste_anchor_kind_classifies_each_form",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_cleans_up_tmp_on_create_failure",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_clipboard_image_keeps_source_path_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_creates_directory",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_fails_without_bytes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_file_image_keeps_original_and_durable_paths_distinct",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_no_bytes_returns_err",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_preserves_original_source_path_for_file_paste",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_readonly_dir_returns_err",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_then_load_for_send_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_to_session_writes_full_bytes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::persist_writes_file_and_clears_bytes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::prose_ending_in_png_is_not_attached",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::quoted_path_with_internal_backslash_escape",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::random_multi_line_text_returns_empty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::reconcile_deletes_staged_temp_for_removed_chip",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::reconcile_keeps_live_images",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::reconcile_noop_on_empty_images",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::reconcile_noop_when_all_live",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::reconcile_preserves_session_file_for_removed_chip",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::reconcile_removes_all_when_empty_live_set",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::relative_path_returns_empty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::scrollback_ref_accepts_valid_jpeg_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::scrollback_ref_from_valid_image_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::scrollback_ref_rejects_missing_file",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::scrollback_ref_rejects_non_image_extension",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::scrollback_ref_rejects_undecodable_image_extension",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::session_images_dir_keys_off_the_passed_cwd",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::shell_unescape_literal_backslash",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::shell_unescape_no_escapes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::shell_unescape_parens",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::shell_unescape_preserves_windows_drive_letter",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::shell_unescape_preserves_windows_unc",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::shell_unescape_spaces",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::shell_unescape_trailing_backslash",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::starts_with_path_anchor_accepts_unc",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::strip_verbatim_prefix_normalizes_paths",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::svg_extension_not_intercepted_as_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::token_to_path_round_trips_quoted_windows_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_bare_absolute_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_double_quoted_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_file_url",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_file_url_percent_encoded",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_file_url_quoted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_file_url_trailing_newline",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_single_quoted_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_trailing_crlf",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_trailing_newline",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_with_escaped_parens",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_image_with_escaped_spaces",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::try_read_images_from_paste_equals_image_filtered_dropped_paths",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "prompt_images::tests::unsupported_image_extensions_fall_to_non_image",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_area_bg_only",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_area_both",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_area_fg_only",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_area_indexed_colors_blended",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_area_named_color_skipped",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_area_none_none_is_noop",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_channel_extremes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_channel_midpoint",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_channel_partial",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_color_indexed_returns_indexed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_color_mixed_returns_indexed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_color_named_returns_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_blend_color_rgb",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_fade_region",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_fade_region_partial_area",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_nearest_indexed_exact_cube_values",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_nearest_indexed_grayscale",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::color::tests::test_nearest_indexed_roundtrip",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::apply_hide_clears_last_pos",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::apply_none_preserves_state",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::apply_reposition_updates_last_pos",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::apply_show_updates_last_pos",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::drain_observes_reservation_before_payload_is_consumed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::hidden_no_changes_stays_hidden",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::hidden_to_visible_shows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::hidden_to_visible_with_changes_shows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::hidden_with_changes_stays_hidden",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::idle_frame_emits_zero_bytes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::term_writer_send_failure_is_published_and_not_acknowledged",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::visible_new_pos_no_changes_repositions",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::visible_new_pos_with_changes_repositions",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::visible_same_pos_no_changes_preserves_blink",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::visible_same_pos_with_changes_repositions",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::visible_to_hidden_hides",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::visible_to_hidden_with_changes_hides",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::writer_drain_timeout_is_bounded_and_retryable",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::writer_failure_is_not_acknowledged",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::writer_flush_failure_is_not_acknowledged",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::writer_success_is_acknowledged_after_flush",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::writer_sync_rejects_multiple_live_producers",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::draw::tests::writer_thread_preserves_multibyte_utf8",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::gboom_overlay::tests::renders_popup_with_title_and_hud",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::gboom_overlay::tests::returns_none_when_area_too_small",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::image_overlay::tests::failed_preview_uses_stable_metadata_fallback",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::image_overlay::tests::formatting_helpers_cover_known_and_unknown_values",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::image_overlay::tests::geometry_honors_plan_specific_minima",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::image_overlay::tests::geometry_keeps_metadata_compact_and_pixels_larger",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::image_overlay::tests::paint_metadata_with_path_shows_all_fields",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::image_overlay::tests::paint_pixels_with_path_returns_footer_and_exact_transmission",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::image_overlay::tests::paint_pixels_without_path_has_no_footer",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::image_overlay::tests::plan_covers_pixels_by_path_matrix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::image_overlay::tests::plan_displays_only_user_visible_source_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::cascade_truncate_all_empty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::cascade_truncate_all_fit",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::cascade_truncate_avail_one",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::cascade_truncate_desc_gone_meta_truncated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::cascade_truncate_desc_truncated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::cascade_truncate_meta_and_activity_gone",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::cascade_truncate_overhead_equals_avail",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::cascade_truncate_type_truncated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::cascade_truncate_unicode",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::cascade_truncate_zero_avail",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::fit_line_clips_grapheme_straddle_in_later_span",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::fit_line_clips_long_line_no_ellipsis",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::fit_line_does_not_split_emoji_grapheme",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::fit_line_drops_subsequent_spans_after_clip",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::fit_line_exact_width_unchanged",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::fit_line_pads_short_line",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::fit_line_preserves_span_styles_when_padding",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::fit_line_takes_partial_of_later_span",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::fit_line_zero_width_returns_empty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::is_unsafe_display_char_covers_controls_and_bidi_format",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::legacy_tool_path_api_remains_available_at_line_utils_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::truncate_line_cuts_mid_span",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::truncate_line_drops_later_spans",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::truncate_line_fits",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::truncate_line_zero_width",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::truncate_str_empty_and_zero",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::truncate_str_fits",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::truncate_str_multibyte",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::truncate_str_truncates",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::line_utils::tests::truncate_str_width_1",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::explicit_anchored_link_preserves_a_missing_full_target",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::file_presentation_requires_exact_path_shaped_resolution",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::local_link_file_url_preserves_percent_encoded_absolute_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::local_link_ignores_web_anchor_and_unknown",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::local_link_missing_project_file_can_still_resolve_generated_media",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::local_link_relative_project_file_resolves_against_cwd",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::local_link_relative_rejects_ambiguous_and_traversal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::local_link_relative_resolves_to_generated_media",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::official_vscode_remote_file_delegation_is_exact",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::open_target_preserves_a_relative_file_that_cannot_be_encoded_for_osc8",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::overlaps_detects_exact_match",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::overlaps_detects_partial",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::overlay_empty_by_default",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::overlay_push_and_access",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::resolve_target_keeps_standard_scheme_filter_and_file_open_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_across_multiple_spans",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_adds_non_overlapping_url_alongside_existing",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_columns_beyond_u16_max_skipped",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_content_x_offset_applied",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_detects_absolute_file_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_detects_grow_session_media_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_detects_media_path_soft_wrapped_across_rows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_detects_multiple_urls_on_one_line",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_detects_relative_path_when_generated_media",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_detects_tilde_file_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_detects_url_in_plain_text",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_does_not_turn_abbreviated_path_suffix_into_a_root_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_file_path_does_not_overlap_url",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_file_path_space_does_not_swallow_trailing_sentence",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_file_path_stops_at_colon",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_file_path_with_at_sign",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_file_path_with_dots_and_hyphens",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_file_path_with_space_in_segment_quoted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_file_path_with_space_in_segment_unquoted",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_hard_break_rows_not_joined",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_ignores_relative_path_when_not_generated_media",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_ignores_single_component_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_multiple_rows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_no_urls_produces_empty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_path_split_across_styled_spans_single_row",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_relative_path_not_partially_linkified",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_single_component_tilde_path_not_linkified",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_skips_file_path_overlapping_existing_link",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_skips_unsafe_schemes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_skips_url_overlapping_existing_link",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_tilde_after_alnum_not_linkified",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_tilde_path_at_line_start",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_trailing_punctuation_excluded",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_url_and_file_path_coexist",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_url_soft_wrapped_across_rows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_url_with_path_and_query",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_word_break_joiner_restores_source_space",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_wrapped_path_trailing_sentence_period_excluded",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::scan_wrapped_relative_media_path_resolves",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::tool_path_file_target_accepts_absolute_without_existing_file",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::tool_path_file_target_preserves_non_utf8_cwd_bytes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::tool_path_file_target_preserves_parent_segments_for_os_resolution",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::tool_path_file_target_resolves_relative_against_cwd",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::osc8::tests::unresolved_tilde_never_manufactures_a_cwd_file_url",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_area_too_small_returns_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_custom_preview_lines",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_empty_content_returns_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_few_lines_no_dots",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_hint_costs_no_height",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_hint_none_keeps_plain_border",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_hint_renders_in_bottom_border",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_hint_skipped_when_ultra_narrow",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_hint_truncated_at_narrow_width",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_long_line_truncated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_many_lines_shows_dots",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_single_line_renders",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::preview_overlay::tests::test_width_ratio",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::renderable::tests::line_has_height_one",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::renderable::tests::option_none_has_zero_height",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::renderable::tests::option_some_delegates_height",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::renderable::tests::renderable_item_borrowed_delegates",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::renderable::tests::renderable_item_owned_delegates",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::renderable::tests::span_has_height_one",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::renderable::tests::str_has_height_one",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::renderable::tests::string_has_height_one",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::renderable::tests::unit_has_zero_height",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::scrollbar::tests::test_is_at_bottom",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::scrollbar::tests::test_maybe_split_full_width_when_not_needed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::scrollbar::tests::test_maybe_split_reserves_when_needed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::scrollbar::tests::test_needs_scrollbar",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::scrollbar::tests::test_render_scrollbar_following_vs_not",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::scrollbar::tests::test_render_scrollbar_no_area",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::scrollbar::tests::test_render_scrollbar_no_overflow",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::scrollbar::tests::test_scrollbar_thumb_position",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::scrollbar::tests::test_split_area_normal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::scrollbar::tests::test_split_area_too_narrow",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::ansi16_mapping",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::carriage_return_overwrites_in_place",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::cursor_up_then_carriage_return_and_erase",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::empty_input_yields_no_lines",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::ext_color_subparam_forms",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::forced_sgr_over_crlf_renders_styled",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::git_bash_gnu_grep_color",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::idempotent_line_count",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::ignores_cursor_save_restore_and_absolute_positioning",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::ignores_dec_private_modes_and_osc",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::malformed_escape_does_not_panic",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::newline_splits_lines",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::powershell_truecolor_psstyle",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::progress_bar_collapses_to_final_state",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::progress_erase_entire_line_collapses",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::sgr_splits_into_styled_spans",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::strips_sgr_to_plain_text",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::tab_advances_to_next_stop",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::trailing_newline_adds_no_blank_line",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::terminal_output::tests::windows_crlf_line_endings",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::collapsed_surface_is_basename",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::expanded_outside_cwd_stays_normalized_target",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::expanded_surface_does_not_dereference_symlink_aliases",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::expanded_surface_normalizes_and_classifies_against_cwd",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::expanded_surface_uses_worktree_cwd",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::filesystem_target_preserves_symlink_sensitive_parent_segments",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::fullscreen_surface_uses_anchored_or_honestly_relative_target",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::home_relative_target_preserves_filesystem_spelling_for_io",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::path_basename_handles_native_and_mixed_separators",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::path_basename_truncates_to_budget",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::shorten_path_fish_style",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::shorten_path_fits",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::shorten_path_front_truncate",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::shorten_path_no_separator",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::shorten_path_zero_budget",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::tool_paths::tests::tilde_expansion_uses_native_components_and_fails_closed_without_home",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::blockquote_line_wraps_with_prefix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::blockquote_prefix_only_no_crash",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::break_words_false_allows_overflow_for_long_word",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::empty_input_yields_single_empty_line",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::heavy_vertical_not_treated_as_table",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::highlight_match_at_row_boundary",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::highlight_match_spanning_two_rows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::highlight_match_spans_three_rows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::highlight_match_starts_at_row_boundary",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::highlight_no_overlap",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::highlight_single_row_match",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::highlight_with_multibyte_chars",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::highlight_with_wide_emoji",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::hyphen_splitter_breaks_at_hyphen",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::is_table_line_detection",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::leading_spaces_preserved_on_first_line",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::many_spans_many_rows_wrap_preserves_text_and_style",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::multi_link_paragraph_underline_boundaries",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::multiple_spaces_between_words_dont_start_next_line_with_spaces",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::nested_blockquote_wraps_with_prefix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::normal_text_still_wraps",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::real_markdown_link_underline_does_not_leak_after_wrap",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::short_blockquote_no_wrap",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::simple_styled_wrap_preserves_styles",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::simple_unstyled_wrap_narrow_width",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::slice_line_spans_cursor_matches_naive_over_monotonic_ranges",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::styled_split_within_span_preserves_style",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::table_border_bottom_not_wrapped",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::table_border_top_not_wrapped",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::table_line_box_drawing_not_wrapped",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::table_row_padded_to_content_width",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::table_row_with_emoji_and_em_dash_fills_content_width",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::table_separator_not_wrapped",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::trivial_unstyled_no_indents_wide_width",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::wide_unicode_wraps_by_display_width",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::with_initial_and_subsequent_indents",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::wrap_byte_ranges_blockquote_matches_visual",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::wrap_line_with_joiners_includes_skipped_spaces",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::wrap_line_with_joiners_matches_word_wrap_line_output",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::wrap_line_with_joiners_uses_empty_joiner_for_mid_word_split",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::wrap_lines_accepts_str_slices",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "render::wrapping::tests::wrap_lines_with_joiners_marks_hard_breaks_between_input_lines",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "syntax::tests::highlight_line_fallback_when_no_highlighter",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "syntax::tests::highlight_line_under_native_lock_avoids_white_tokens",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "syntax::tests::polarity_safe_chromatic_buckets",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "syntax::tests::polarity_safe_grays_are_reset",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "syntax::tests::polarity_safe_never_emits_white_or_black",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "syntax::tests::syntect_rgb_to_fg_uses_polarity_safe_when_locked",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::da2::tests::another_emulators_da2_is_not_a_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::da2::tests::no_brand_is_probed_by_both_xtversion_and_da2",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::da2::tests::packed_version_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::da2::tests::undecodable_payloads_are_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::embedded_editor::tests::empty_value_treated_as_absent",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::embedded_editor::tests::inside_emacs_detected_as_emacs",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::embedded_editor::tests::no_editor_markers_is_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::embedded_editor::tests::nvim_beats_vim_and_emacs",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::embedded_editor::tests::nvim_detected_as_neovim",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::embedded_editor::tests::nvim_listen_address_detected_as_neovim",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::embedded_editor::tests::vim_terminal_detected_as_vim",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::hyperlinks::tests::apple_terminal_hostile_parser",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::hyperlinks::tests::iterm2_native_with_id",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::hyperlinks::tests::native_plain_url_open_only_warp",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::hyperlinks::tests::scheme_filter_extended_allows_editor_schemes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::hyperlinks::tests::scheme_filter_standard_allows_http",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::hyperlinks::tests::unknown_terminal_unknown_support",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::hyperlinks::tests::warp_unsupported",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::image::tests::force_off_overrides_capability",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::image::tests::iterm_escape_preserves_requested_geometry",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::image::tests::iterm_place_can_skip_inline_data",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::image::tests::kitty_escape_chunks_and_preserves_cursor",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::image::tests::kitty_format_and_conversion_produce_png",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::image::tests::low_level_overlay_separates_transmit_from_placement",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::image::tests::placement_only_steady_state_removes_payload_cost",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::image::tests::protocol_matrix_matches_supported_terminals",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::image::tests::scrollback_overlay_excludes_warp",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::keyboard::tests::alacritty_keeps_cmd_drops_opt",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::keyboard::tests::apple_terminal_cmd_unrecoverable_opt_dropped",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::keyboard::tests::ghostty_and_kitty_native_no_rescue",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::keyboard::tests::iterm_and_vscode_readline_no_rescue",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::keyboard::tests::rio_keeps_cmd_drops_opt",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::keyboard::tests::unknown_brands_skip_rescue",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::keyboard::tests::wezterm_drops_cmd_keeps_opt",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::kitty_keyboard::tests::a_skip_reason_pushes_nothing",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::kitty_keyboard::tests::absent_version_does_not_downgrade",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::kitty_keyboard::tests::downgrade_boundary_is_the_last_broken_library_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::overlay::tests::committed_clear_and_volatile_frame_invalidate_owner",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::overlay::tests::discarded_clear_does_not_invalidate_static_owner",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::overlay::tests::discarded_static_escape_does_not_replace_owner",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::overlay::tests::failed_post_flush_write_does_not_commit_transition",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::overlay::tests::static_owner_reuses_consecutive_frames_after_commit",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::a_probed_version_outranks_env",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::blank_version_is_absent",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::diagnostics_snapshot_carries_version_and_source",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::iterm2_in_tmux_falls_through_to_lc_terminal_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::lc_terminal_version_ignored_without_lc_terminal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::lc_terminal_version_wins_when_term_program_version_is_absent",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::source_labels_are_pinned",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::surrounding_whitespace_is_trimmed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::term_program_version_wins_over_wezterm_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::term_program_version_wins_when_term_program_names_the_brand",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::the_vscode_widening_is_one_directional",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::tmux_term_program_version_is_not_the_terminal_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::vscode_and_its_forks_keep_the_vscode_host_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::vte_version_ignored_for_a_non_vte_brand",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::vte_version_wins_for_a_vte_brand",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::wezterm_version_ignored_for_another_brand",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::term_version::tests::wezterm_version_wins_over_vte_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::alt_screen_policy_matrix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::auto_byobu_screen_is_fullscreen",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_alacritty_from_socket",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_alacritty_from_term",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_apple_terminal_from_session_id",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_cursor_from_askpass_main",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_cursor_from_cursor_trace_id",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_foot_direct_from_term",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_foot_extra_from_term",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_foot_from_term",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_ghostty_from_term_program",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_iterm2_from_lc_terminal_over_ssh",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_iterm2_from_session_id",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_jetbrains_beats_term_session_id",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_jetbrains_case_insensitive",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_jetbrains_from_terminal_emulator",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_kitty_from_term",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_kitty_from_window_id",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_not_foot_for_foot_prefixed_out_of_set_term",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_not_foot_for_unrelated_term",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_not_iterm2_for_foreign_lc_terminal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_otty_from_term_program",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_rio_from_term",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_term_program_takes_precedence_over_other_vars",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_terminator_from_term_program",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_unknown_empty_env",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_vscode_from_askpass_without_term_program",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_vscode_from_term_program",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_vscode_when_askpass_does_not_match_ide",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_vscode_when_no_ide_markers",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_vte_from_vte_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_wezterm_from_version_var",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_windows_terminal_from_wt_session",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_windsurf_from_askpass_main",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::brand_zed_from_term_program",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::byobu_inferred_screen_from_distro",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::byobu_inferred_tmux_from_config_dir",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::byobu_markers_but_no_mux_markers_returns_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::byobu_screen_beats_tmux_marker",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::byobu_screen_explicit_backend",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::byobu_tmux_explicit_backend",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::byobu_tmux_explicit_with_sty_stays_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::byobu_unknown_backend_no_mux_returns_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::byobu_unknown_backend_string_with_sty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::byobu_unknown_backend_string_with_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_ambiguous_byobu_screen_with_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_byobu_screen",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_byobu_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_empty_env_values_ignored",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_is_byobu_returns_false_without_byobu_markers",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_is_byobu_returns_true_for_both_backends",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_iterm2_lc_terminal_version_fallback_over_ssh",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_jetbrains_terminal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_official_vscode_remote_from_askpass_and_ssh",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_plain_screen_no_byobu",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_plain_terminal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_plain_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_screen_does_not_populate_tmux_meta",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_sty_takes_screen_when_no_tmux_or_zellij",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_tmux_config_path_is_byobu_for_byobu_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_tmux_config_path_is_standard_for_plain_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_tmux_inside_zellij",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_tmux_meta_not_populated_for_non_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_unofficial_vscode_remote_markers_are_not_official",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_windows_terminal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::context_zellij",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::ctrl_dot_reliable_on_iterm2_tmux_extended_keys_on",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::ctrl_dot_reliable_on_kitty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::ctrl_dot_unreliable_on_jetbrains",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::ctrl_dot_unreliable_on_unknown_no_multiplexer",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::ctrl_dot_unreliable_on_vscode_forks",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::ctrl_dot_unreliable_on_vte",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::ctrl_dot_unreliable_on_windows_terminal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::ctrl_dot_unreliable_when_tmux_extended_keys_off",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::ctrl_dot_unreliable_when_vte_version_set",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::env_brand_holds_raw_detection_independent_of_refinement",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::foot_ctrl_dot_is_reliable",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::graphics_protocol_skip_reason_plain_kitty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::graphics_protocol_skip_reason_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::herdr_over_ssh_pane_does_not_skip_kitty_keyboard",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_allowed_foot_no_multiplexer",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_allowed_known_good_terminal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_allowed_modern_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_allowed_modern_tmux_extended_keys_non_off_values",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_allowed_modern_tmux_letter",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_allowed_tmux_4",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_allowed_zellij",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_apple_terminal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_byobu_screen",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_cursor",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_foot_over_old_tmux_uses_mux_logic",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_jetbrains",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_modern_tmux_extended_keys_off",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_old_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_old_tmux_takes_precedence_over_extended_keys",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_screen",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_tmux_no_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_unknown_terminal_no_multiplexer",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_vscode",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_vscode_over_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_vte_brand",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_vte_takes_precedence_over_screen",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_vte_takes_precedence_over_tmux_extended_keys_off",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_vte_takes_precedence_over_tmux_old",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_vte_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_windows_terminal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_windsurf",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::kitty_skip_zed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mouse_reporting_leaks_only_for_jetbrains_on_windows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_cmux_from_bundle_id",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_cmux_from_panel_id",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_cmux_from_socket_path",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_empty_cmux_socket_alone_is_undetected",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_herdr_from_herdr_env",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_herdr_nested_inside_cmux_wins",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_none_empty_env",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_plain_screen",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_plain_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_tmux_nested_inside_cmux_wins",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_tmux_nested_inside_herdr_wins",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_zellij",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_zellij_from_session_name",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::mux_zellij_not_from_version_only",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::no_byobu_markers_returns_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::official_vscode_server_marker_without_ssh_is_not_remote",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::otty_delivers_ime_as_bracketed_paste_only",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::otty_is_capability_unclassified_like_unknown",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::otty_skips_kitty_keyboard_like_unknown",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_semver_empty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_semver_garbage",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_semver_high_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_semver_major_only",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_semver_standard",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_semver_two_part",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_tmux_version_empty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_tmux_version_garbage",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_tmux_version_missing_prefix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_tmux_version_next_gen",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_tmux_version_no_minor",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_tmux_version_old",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_tmux_version_standard",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_tmux_version_trailing_dot",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::parse_tmux_version_with_letter_suffix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::refine_unknown_brand_defaults_to_wt_only_on_windows",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::repaints_pane_out_of_band_per_arm",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_available_future_vte",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_available_kkp_terminals",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_available_modern_vte",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_available_on_foot",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_available_positively_detected_windows_terminal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_available_unknown_with_multiplexer",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_unavailable_just_below_cutoff",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_unavailable_legacy_vte_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_unavailable_unknown_no_multiplexer",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_unavailable_unparseable_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_unavailable_vscode_family",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_unavailable_vte_brand_no_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::shift_enter_unavailable_windows_refined_brand_stays_env_unknown",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::standalone_context_does_not_run_live_tmux_queries",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::terminator_focus_tracking",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::terminator_over_ssh",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::terminator_vte_version_interaction",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::terminator_with_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::test_terminal_name_from_term_program",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::tmux_beats_zellij_when_both_set",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::tmux_meta_empty_outside_tmux",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::tmux_meta_populated",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::test::zellij_version_is_never_the_terminal_version",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::tmux_probe::tests::command_protocol_uses_exact_argv_and_pager_env",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::tmux_probe::tests::nonzero_and_execution_failure_remain_fail_open_facts",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::tmux_probe::tests::successful_near_deadline_exit_still_returns_captured_output",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::tmux_probe::tests::support_query_accepts_both_known_spellings_only",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::tmux_probe::tests::value_and_control_queries_use_the_injected_runner",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::xtversion::tests::diagnostics_snapshot_includes_recorded_reply",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::xtversion::tests::gate_allows_unknown_and_allowlisted_brands",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::xtversion::tests::sanitize_empty_is_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::xtversion::tests::sanitize_plain_payload",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "terminal::xtversion::tests::sanitize_strips_controls_and_whitespace",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::auto_mode_default_is_false",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::auto_theme_config_defaults_to_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::auto_theme_config_filter_accepts_concrete_theme",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::auto_theme_config_filter_rejects_auto_value",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::invalidate_clears_cached_config",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::reset_for_test_clears_terminal_native_lock",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_auto_dark_system_returns_grownight",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_auto_detection_failure_returns_grownight",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_auto_light_system_returns_growday",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_auto_with_custom_dark_config",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_auto_with_custom_light_config",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_from_config_auto_detection_failure",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_from_config_auto_sets_auto_mode_dark",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_from_config_auto_with_light_system",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_from_config_explicit_theme_returns_it",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_from_config_no_config_returns_grownight",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::resolve_no_osc11_explicit_auto_and_default",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::set_auto_mode_toggles",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::set_flips_loaded_flag_so_current_kind_skips_disk_reseed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::set_then_current_kind_round_trips",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::terminal_native_lock_caps_quantize_at_ansi16",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::terminal_native_lock_enables_polarity_safe_syntax",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::terminal_native_lock_pins_kind_and_blocks_apply_kind",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::cache::tests::terminal_native_lock_serves_terminal_default_palette",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::ansi16_roundtrip_first_16",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::ansi256_passes_indexed_through",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::ansi256_quantizes_rgb_to_indexed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::basic_quantizes_indexed_to_named",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::basic_quantizes_to_named",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::level_ordering",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::named_colors_pass_through_all_levels",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::none_resets_everything",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::standalone_color_uses_controlling_terminal_when_stderr_is_piped",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::standalone_color_uses_known_terminal_brand_without_colorterm",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::standalone_color_uses_stderr_terminal_not_stdout",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::color_support::tests::truecolor_passes_through",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::grownight::tests::test_grownight_theme",
+      "status": "ignored",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::md_style::tests::named_colors_map_concretely",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::md_style::tests::reset_maps_to_no_color",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::md_style::tests::terminal_default_body_text_has_no_fg",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::channel_2digit_max",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::channel_2digit_zero",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::channel_4digit_max",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::channel_4digit_zero",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::channel_with_whitespace",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::classify_dark_gray_is_dark",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::classify_light_gray_is_light",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::classify_mid_gray_boundary",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::classify_pure_black_is_dark",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::classify_pure_white_is_light",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::classify_solarized_dark_is_dark",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::classify_solarized_light_is_light",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::detect_returns_none_when_not_tty",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::make_raw_termios_clears_only_canonical_echo_signal_extended",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::make_raw_termios_preserves_other_flag_words",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_1digit_channel",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_2digit_dark",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_2digit_light",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_3digit_channel",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_4digit_black",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_4digit_midrange",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_4digit_white",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_empty_response",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_invalid_hex",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_missing_rgb_prefix",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_st_terminator",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::parse_too_few_channels",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::read_osc_response_with_fd_returns_none_for_non_tty_fd",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::srgb_to_linear_high_value",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::srgb_to_linear_low_value",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::srgb_to_linear_max",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::srgb_to_linear_zero",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::osc11::tests::unterminated_reply_is_rejected",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::clear_mock_restores_real_detection",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::mock_dark_appearance",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::mock_detection_failure",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::mock_light_appearance",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::start_if_auto_returns_none_when_not_auto",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::start_if_auto_returns_some_when_auto",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::to_theme_kind_custom_both",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::to_theme_kind_custom_dark_theme",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::to_theme_kind_custom_light_theme",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::to_theme_kind_dark_defaults_to_grownight",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::to_theme_kind_dark_ignores_light_override",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::to_theme_kind_light_defaults_to_growday",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::to_theme_kind_light_ignores_dark_override",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::watcher_detects_appearance_change",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::watcher_detects_recovery_from_failure",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::watcher_does_not_send_when_unchanged",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::watcher_reports_initial_appearance",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::system_appearance::tests::watcher_reports_none_on_detection_failure",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::terminal_default::tests::rgb_theme_muted_keeps_explicit_gray_without_forced_dim",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::terminal_default::tests::terminal_default_backgrounds_are_transparent",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::terminal_default::tests::terminal_default_leaves_cursor_color_alone",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::terminal_default::tests::terminal_default_muted_and_dim_use_sgr_dim_not_bright_black",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::terminal_default::tests::terminal_default_primary_is_reset_not_dark_gray",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::terminal_default::tests::terminal_default_survives_quantization",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::terminal_default::tests::terminal_default_uses_only_reset_and_named_ansi",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::all_excludes_auto",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_accent_user_uses_high_contrast",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_blue_family_pins_system_skill_fuzzy",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_border_hierarchy_is_distinct",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_canvas_matching_surfaces_use_theme_polarity",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_cyan_family_absorbs_teal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_dark_uses_bright_white_high_contrast",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_diff_fg_uses_polarity_aware_red_green",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_extended_dark_pins_elevated_bg_to_dark_gray",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_extended_light_pins_elevated_bg_to_gray",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_gray_hierarchy_collapses_to_two_slots",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_light_inverts_high_contrast_and_elevated_bg",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_magenta_family_shares_slot",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_preserve_bg_base",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_scrollbar_thumb_visible_against_canvas",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_state_accents_pin_to_polarity_aware_hue",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_overrides_yellow_family_absorbs_orange_and_gold",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::ansi16_quantize_without_override_collapses_grownight_backgrounds",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::auto_does_not_require_truecolor",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::available_excludes_auto",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::display_name_auto",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::from_name_auto",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::from_name_auto_case_insensitive",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::from_name_concrete_variants_still_work",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::from_name_system",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::from_str_matches_from_name_for_all_canonicals",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::is_auto_returns_false_for_concrete_variants",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::is_auto_returns_true_for_auto",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::is_dark_classifies_built_in_themes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::resolve_to_rgb_handles_rgb_indexed_named_and_reset",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tests::scrollbar_thumb_contrasts_with_track_in_all_themes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "theme::tokyonight::tests::test_tokyonight_theme",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::abbreviate_path_empty_home_does_not_fake_tilde",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::abbreviate_path_uses_home_when_under_default_grow",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::decode_html_entities_amp",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::decode_html_entities_multiple",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::decode_html_entities_no_entities",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::decode_html_entities_quotes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::display_grow_home_prefix_default_install",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::display_user_grow_path_for_custom_home_uses_override_label",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::display_user_grow_path_joins_relative",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::group_thousands_inserts_separators",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::hours",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::instant_projection_uses_the_supplied_clock_pair",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::minutes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::parses_every_10s",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::parses_every_1_day",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::parses_every_1_hour",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::parses_every_5_minutes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::parses_every_5m_short",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::seconds_no_decimal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::subsecond",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::system_time_from_instant_reflects_elapsed",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::system_time_from_unix_ms_future_renders_just_now",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::system_time_from_unix_ms_renders_real_age",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::system_time_from_unix_ms_zero_falls_back_to_now",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::ten_seconds_no_decimal",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::thirty_seconds",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::time_ago_days",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::time_ago_deadline_tracks_the_next_visible_bucket",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::time_ago_hours",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::time_ago_just_now",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::time_ago_minutes",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::time_ago_months",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::time_ago_years",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::under_ten_seconds",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    },
+    {
+      "name": "util::tests::unknown_schedule_returns_none",
+      "status": "passed",
+      "returncode": 0,
+      "output": ""
+    }
+  ]
+}

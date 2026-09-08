@@ -1,19 +1,20 @@
 # PTY benchmark baselines
 
 Baselines are per-platform (macOS arm64 has very different timing from an
-Linux arm64 CI runner) and per-scenario. CI compares the current run
-against the matching platform file and fails if any scenario's p99 frame
-time grows by more than 15% (default; `--threshold` overrides).
+Linux arm64 CI runner) and per-scenario. The runner compares the current run against the file explicitly supplied
+with `--baseline` and fails if any comparable scenario's p99 frame time
+grows by more than 15% (default; `--threshold` overrides). It does not select
+a platform file automatically.
 
-File naming: `<platform>.json` where `<platform>` matches the CI artifact
-arch name — `linux-x86_64`, `linux-aarch64`, `macos-aarch64`.
+Use `<platform>.json` to distinguish baselines, for example
+`linux-x86_64`, `linux-aarch64`, or `macos-aarch64`.
 
 ## Producing a baseline
 
 Run the full bench suite on a quiet machine:
 
 ```bash
-cargo run -p pager --release --bin pty-bench -- \
+cargo bench -p pager-pty-harness --bench pty_bench -- \
   --all \
   --write-baseline crates/codegen/pager-pty-harness/benches/pty_baselines/<platform>.json
 ```
@@ -26,5 +27,6 @@ the PR body so reviewers can sanity-check the new numbers.
 
 ## First run
 
-Platform files are seeded on first CI run (see `pager-bench` job). Until
-then, `--baseline <missing-file>` will fail loudly with a clear error.
+The current checked-in `.github/workflows` do not run `pty_bench` or seed
+platform baselines. Generate a baseline explicitly with the command above.
+`--baseline <missing-file>` returns an error; it does not create the file.

@@ -1,0 +1,4 @@
+# Integration boundary
+The documentation baseline 6805f638 was already imported into main without the branch ancestry. All add/add conflicts except backlog are unchanged on the audit branch since that baseline, so retain main's newer documents. Backlog changes are append-only on the audit branch; preserve both main and audit additions.
+
+Retain the inventory as a source snapshot, not a claim of current main coverage. It contains 61 reviewed crates and 4285 feature-map contracts, with no duplicate crate/requirement keys. Compared with current main, 10 recorded paths are absent and 275 file hashes differ. Preserve the original audit evidence and leave its integration/archival tasks pending until affected contracts are reconciled; do not overwrite current canonical specifications with stale deltas. See inventory-drift.json for exact paths. No Cargo regression is needed for this documentation-only merge; the preceding R27 deletion has its own completed regression.

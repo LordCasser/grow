@@ -1,0 +1,3559 @@
+[
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Embedded syntax theme selection",
+    "contract": "语法高亮 SHALL 按当前ThemeKind懒初始化并复用三个独立Syntect实例；GrowNight、RosePineMoon、OscuraMidnight和Auto使用grow-night资源，TokyoNight使用tokyo-night，GrowDay使用grow-day。",
+    "scenarios": [
+      [
+        "Tokyo syntax resource",
+        "当前kind为TokyoNight",
+        "使用独立tokyo-night嵌入资源，不共享GrowNight实例。"
+      ],
+      [
+        "Shared night syntax resource",
+        "当前kind为RosePineMoon或OscuraMidnight",
+        "使用grow-night资源，不为该kind加载独立语法主题。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/syntax.rs",
+        "pub fn get_syntect"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Syntax foreground and font modifiers",
+    "contract": "syntect到ratatui转换 SHALL 传递映射后的前景色以及BOLD、ITALIC、UNDERLINE，不传递背景色。",
+    "scenarios": [
+      [
+        "Syntax font modifier preservation",
+        "syntect style同时包含bold与italic及背景色",
+        "输出包含BOLD与ITALIC，背景保持默认。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/syntax.rs",
+        "pub fn syntect_to_ratatui_fg"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Terminal native syntax hue mapping",
+    "contract": "终端原生锁开启时语法RGB SHALL 直接按chroma及整数HSV映射：chroma小于40返回Reset，否则仅返回基础Red、Yellow、Green、Cyan、Blue或Magenta；不经常规theme quantize。",
+    "scenarios": [
+      [
+        "Neutral native syntax",
+        "原生锁开启且RGB三通道最大最小差小于40",
+        "返回终端默认前景Reset。"
+      ],
+      [
+        "Chromatic native syntax",
+        "原生锁开启且RGB为彩色",
+        "按色相区间返回六种基础ANSI色之一，不返回黑白或亮色变体。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/syntax.rs",
+        "pub fn polarity_safe_syntax_fg"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Ordinary syntax color quantization",
+    "contract": "终端原生锁关闭时语法RGB SHALL 经theme quantize处理，颜色能力判定由该管线负责。",
+    "scenarios": [
+      [
+        "Unlocked syntax color",
+        "原生锁关闭并转换RGB",
+        "调用theme quantize而非原生锁色相映射。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/syntax.rs",
+        "pub fn syntect_rgb_to_fg"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Stateful syntax line fallback",
+    "contract": "highlight_line SHALL 为有状态highlighter附加换行，去除每个返回segment尾部CR/LF并跳过空segment；没有highlighter、高亮失败或全部segment为空时返回原始text和调用方fallback样式。",
+    "scenarios": [
+      [
+        "No syntax highlighter",
+        "传入None highlighter",
+        "返回包含原始文本和fallback样式的单个span。"
+      ],
+      [
+        "Successful syntax segments",
+        "高亮成功并返回带尾换行的非空segment",
+        "删除尾CR/LF后按语法style生成拥有内容的span。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/syntax.rs",
+        "pub fn highlight_line"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Host environment unicode collection",
+    "contract": "host环境收集 SHALL 跳过非Unicode键或值，使用vars_os避免因非Unicode环境项而终止收集。",
+    "scenarios": [
+      [
+        "Non unicode environment entry",
+        "环境中存在不能转为Unicode的键或值",
+        "该项不进入收集结果，其余Unicode项保留。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/host/mod.rs",
+        "collect_unicode_env"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Display server first observation",
+    "contract": "DisplayServer SHALL 缓存首次平台判断；macOS为Quartz、Windows为Win32、Linux优先非空WAYLAND_DISPLAY再非空DISPLAY，否则Unknown；该判断不验证显示服务可连接性。",
+    "scenarios": [
+      [
+        "Linux display precedence",
+        "Linux同时有非空WAYLAND_DISPLAY与DISPLAY",
+        "首次结果为Wayland。"
+      ],
+      [
+        "Display observation cache",
+        "首次观察后环境变量改变",
+        "后续current仍使用首次缓存结果。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/host/mod.rs",
+        "impl DisplayServer"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Display refresh probe cache and remote gate",
+    "contract": "刷新率探测 SHALL 缓存首次完整结果，远程会话优先于WSL跳过平台探测，并仅接受30至500Hz的最终结果。",
+    "scenarios": [
+      [
+        "Remote refresh skip",
+        "处于SSH远程会话且也被识别为WSL",
+        "按远程原因跳过，不调用平台刷新率探测。"
+      ],
+      [
+        "Refresh result reuse",
+        "第一次探测完成后再次调用",
+        "复用含首次耗时的结果，不重新测量显示器。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/host/display_refresh.rs",
+        "probe_display_refresh"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "URL opening outcome boundary",
+    "contract": "try_open_url SHALL 先执行scheme过滤并区分RejectedScheme、BrowserUnavailable与Opened；Opened只表示opener启动成功，不表示浏览器已展示目标。",
+    "scenarios": [
+      [
+        "Rejected URL scheme",
+        "URL不满足scheme过滤",
+        "不调用系统opener，返回RejectedScheme。"
+      ],
+      [
+        "Spawned opener",
+        "允许的URL成功启动系统opener",
+        "返回Opened，不等待子进程退出或页面加载。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/link_opener.rs",
+        "try_open_url"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Legacy console glyph override",
+    "contract": "legacy控制台判定 SHALL 缓存首次结果，GROW_FORCE_LEGACY_CONSOLE只接受精确1、true、0、false；没有有效覆盖时按编译平台及环境终端品牌判定。",
+    "scenarios": [
+      [
+        "Explicit legacy override",
+        "GROW_FORCE_LEGACY_CONSOLE为精确true",
+        "强制选择legacy字形，包括非Windows平台。"
+      ],
+      [
+        "Invalid legacy override",
+        "覆盖值包含额外空白或不同大小写",
+        "不把该值当作有效布尔覆盖。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/glyphs.rs",
+        "is_legacy_windows_console"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Toast control character sanitization",
+    "contract": "toast清理 SHALL 先执行legacy字形回退，再把每个char::is_control字符替换为空格；不将其视为完整终端转义序列解析器。",
+    "scenarios": [
+      [
+        "Control characters in toast",
+        "toast含换行或ESC",
+        "各控制字符被空格替代，其他载荷字符保留。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/glyphs.rs",
+        "sanitize_toast_message"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Pager render feature surfaces",
+    "contract": "pager-render SHALL 提供test-support辅助接口feature，default-bazel启用test-support；无default feature，optional notify形成隐式notify feature。依赖feature存在不等于运行时自动启用配置热加载。",
+    "scenarios": [
+      [
+        "Bazel helper feature",
+        "启用default-bazel",
+        "同时启用test-support。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/Cargo.toml",
+        "default-bazel = [\"test-support\"]"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard delivery classification",
+    "contract": "投递结果 SHALL 区分Confirmed、Unverified、Failed；reported_success对前两者返回true，因此该布尔值不等于确认剪贴板内容可取回。",
+    "scenarios": [
+      [
+        "Clipboard delivery classification",
+        "结果为Unverified",
+        "is_confirmed为false而reported_success为true。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/trust.rs",
+        "pub enum ClipboardDelivery"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard route and OSC disable precedence",
+    "contract": "复制路由 SHALL 始终启用native，仅Tmux启用tmux buffer；OSC在未禁用且Linux、Tmux、远程、无显示容器或显式sink任一条件成立时启用；DCS passthrough还要求无embedded editor。",
+    "scenarios": [
+      [
+        "Clipboard route and OSC disable precedence",
+        "显式禁止OSC52且当前位于Tmux",
+        "关闭OSC及DCS，保留native与tmux buffer。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "fn resolve_clipboard_route_with"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard expectation is preflight",
+    "contract": "expected_delivery SHALL 根据native可用性、路由和环境给出预期；启用tmux路由即可形成Confirmed预期，不执行写入验证。",
+    "scenarios": [
+      [
+        "Clipboard expectation is preflight",
+        "tmux路由启用但尚未写入",
+        "预期可为Confirmed，该值不能充当tmux写入成功证据。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/trust.rs",
+        "pub fn expected_delivery"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard native trust boundary",
+    "contract": "可信native结果 SHALL 排除远程、容器及未启用native路由；Linux Wayland要求wl-copy成功或arboard成功且具有data-control，其他平台分支按CLI或arboard成功判定。",
+    "scenarios": [
+      [
+        "Clipboard native trust boundary",
+        "远程环境中native系统写入成功",
+        "不将远端native写入认定为用户本地剪贴板确认。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/trust.rs",
+        "fn trusted_native"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard actual feedback precedence",
+    "contract": "复制反馈 SHALL 先使用可信native，再处理成功OSC的环境策略，之后使用成功tmux buffer；未知OSC的Unverified在tmux成功时由CopiedTmux取代。",
+    "scenarios": [
+      [
+        "Clipboard actual feedback precedence",
+        "OSC投递策略为Unverified且tmux成功",
+        "返回CopiedTmux而非Unverified OSC反馈。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/trust.rs",
+        "fn resolve_copy_decision"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Tmux copy process success",
+    "contract": "tmux复制 SHALL 将文本spool为stdin并运行tmux load-buffer -，只有启动及子进程成功退出才报告成功，等待调用设置2秒deadline。",
+    "scenarios": [
+      [
+        "Tmux copy process success",
+        "tmux子进程非零退出",
+        "该写入腿返回失败，不能仅以spawn成功认定复制成功。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "fn write_tmux_buffer"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard backup attempted after copy",
+    "contract": "copy_text_or_file SHALL 先复制文本，再尝试写备用文件；Confirmed或Unverified均保留Clipboard结果，即使备用文件失败，只有剪贴板Failed且文件失败才形成Failed。",
+    "scenarios": [
+      [
+        "Clipboard backup attempted after copy",
+        "剪贴板Unverified且备用文件写入失败",
+        "返回没有备用路径的Clipboard结果，其success仍为true。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "fn resolve_delivery"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard typed text read errors",
+    "contract": "system_clipboard_read_text SHALL 保留读取错误与无文本的区别；system_clipboard_get将错误降为None。",
+    "scenarios": [
+      [
+        "Clipboard typed text read errors",
+        "系统读取发生错误",
+        "typed入口返回Err，Option入口返回None。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn system_clipboard_read_text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard payload origin comparison",
+    "contract": "粘贴payload比对 SHALL 将CRLF和CR归一为LF并去除末尾空白；这是文本相等判断，不证明实际事件来源。",
+    "scenarios": [
+      [
+        "Clipboard payload origin comparison",
+        "payload与剪贴板文本只在换行编码或尾部空白不同",
+        "比较结果相同，不能据此确认物理粘贴事件来源。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn bracketed_payload_matches_clipboard_text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard attachment routing",
+    "contract": "附件探测 SHALL 对lone HTTP URL跳过，对空文本或不能跳过file URL探测的文本先查file URLs再查图片，其余文本只查图片。",
+    "scenarios": [
+      [
+        "Clipboard attachment routing",
+        "文本被识别为lone HTTP URL",
+        "返回Skip，不尝试附件探测。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn attachment_probe_route"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard snapshot gate and baseline",
+    "contract": "附件gate SHALL 读取一次snapshot并返回是否探测及该次changeCount；ImageOnly仅在snapshot受支持、可用且无图时跳过，FileUrlsThenImage不因无图而跳过。",
+    "scenarios": [
+      [
+        "Clipboard snapshot gate and baseline",
+        "ImageOnly但snapshot changeCount不可用",
+        "仍安排探测，返回Some(None)，由调用方负责后续过期校验。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn attachment_probe_gate"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard attachment file precedence",
+    "contract": "实际附件探测 SHALL 在通过gate后执行路由；FileUrlsThenImage返回file_urls为Some时优先该值并不给出image，即使file_urls字符串为空。",
+    "scenarios": [
+      [
+        "Clipboard attachment file precedence",
+        "底层同时提供file_urls和image",
+        "返回file_urls，image为None。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn system_clipboard_probe_attachments"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard probe prewarm lifecycle",
+    "contract": "图片探测预热 SHALL 仅在平台支持时通过Once启动后台线程，不提供join或完成确认。",
+    "scenarios": [
+      [
+        "Clipboard probe prewarm lifecycle",
+        "预热线程已经启动但尚未完成",
+        "调用返回不代表探测资源初始化完成。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn prewarm_image_probe"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard probe test hook scope",
+    "contract": "test-support剪贴板hook SHALL 为线程局部，仅覆盖显式包装入口；设置及清除重置调用计数，不自动传播到其他线程。",
+    "scenarios": [
+      [
+        "Clipboard probe test hook scope",
+        "在当前线程设置hook后另起工作线程",
+        "不能假定工作线程继承该模拟结果。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn set_clipboard_probe_hook"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Deferred image viewer loading",
+    "contract": "延迟viewer SHALL 仅建立loading状态及源路径，不自行启动线程；take_source_path在loading时消费路径一次，apply_loaded填充数据并结束loading。",
+    "scenarios": [
+      [
+        "Deferred image viewer loading",
+        "创建deferred viewer但未运行加载",
+        "保持loading，图片内容尚未读取。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn open_from_path_deferred"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Deferred image viewer failure state",
+    "contract": "finish_loading SHALL 在加载失败时返回false；消费掉的源路径不自动恢复，loading也不在失败分支自动清除。",
+    "scenarios": [
+      [
+        "Deferred image viewer failure state",
+        "首次延迟加载失败后再次尝试消费源路径",
+        "无法取得已消费路径，调用方需处理失败状态。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn finish_loading"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image preview first completion",
+    "contract": "图片preview SHALL 通过共享OnceLock保存Ready、Failed或Unsupported，首次设置胜出，后续完成或mark_failed不覆盖已有结果。",
+    "scenarios": [
+      [
+        "Image preview first completion",
+        "预览已Ready后调用mark_failed",
+        "仍保留Ready内容。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn mark_failed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image preview preparation inputs",
+    "contract": "preview_preparation SHALL 仅在preview pending且存在内存encoded_bytes时构建工作，捕获当前协议与尺寸；不从会话文件回读以创建该工作。",
+    "scenarios": [
+      [
+        "Image preview preparation inputs",
+        "图片只有session路径且无内存字节",
+        "不产生preview preparation。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn preview_preparation"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image preview execution boundary",
+    "contract": "预览准备run SHALL 同步执行；Kitty按需要转换图片，ITerm2复用原字节，无协议则记录Unsupported，函数本身不保证后台调度。",
+    "scenarios": [
+      [
+        "Image preview execution boundary",
+        "协议为None并执行preparation",
+        "得到Unsupported而非Ready图片序列。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn run(self)"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Prompt image reconciliation cleanup",
+    "contract": "reconcile SHALL 按live ElementId保留附件并清理移除项；cleanup仅在没有session_image_path时尝试删除staged_temp_path，删除错误忽略。",
+    "scenarios": [
+      [
+        "Prompt image reconciliation cleanup",
+        "附件同时拥有session路径及staged路径后被移除",
+        "不会由该cleanup删除staged文件或session文件。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn cleanup_temp_file"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Prompt image counter reset",
+    "contract": "drain_and_cleanup SHALL 清空图片但不重置编号计数；clear同时清空并重置计数。",
+    "scenarios": [
+      [
+        "Prompt image counter reset",
+        "调用clear清除全部附件",
+        "列表为空且计数归零。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn clear("
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Dropped path batch all or nothing",
+    "contract": "拖放批次解析 SHALL 在任一token不能解析时返回整个空列表，供调用方保留全文处理；它不是通用shell解析器。",
+    "scenarios": [
+      [
+        "Dropped path batch all or nothing",
+        "同一批次包含可读图片和不能解析的caption",
+        "整个结果为空，不只取出图片。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn try_read_dropped_paths"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Single image extraction from mixed drops",
+    "contract": "try_read_image_from_path SHALL 先过滤NonImage再要求图片数量恰为一，因此允许一个图片与非图片路径混合。",
+    "scenarios": [
+      [
+        "Single image extraction from mixed drops",
+        "已解析批次包含一张图片和一个非图片文件",
+        "返回该唯一图片。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn try_read_image_from_path"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard image construction dimensions",
+    "contract": "from_clipboard_data SHALL 保留字节及MIME，尺寸解码失败时允许dimensions为None，不以Result拒绝构造。",
+    "scenarios": [
+      [
+        "Clipboard image construction dimensions",
+        "剪贴板字节无法解码尺寸",
+        "仍构造附件且dimensions为None。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn from_clipboard_data"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image session persistence commit",
+    "contract": "persist_to_session SHALL 要求内存字节，创建images目录并用UUID命名，临时文件write_all与sync_all后rename，成功才设置session路径并释放内存字节。",
+    "scenarios": [
+      [
+        "Image session persistence commit",
+        "写入或rename失败",
+        "不执行成功后的session路径与内存释放状态更新。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn persist_to_session"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image send byte and dimension limits",
+    "contract": "load_for_send SHALL 优先内存否则完整读取session文件，再拒绝超过50000000字节或已知任边小于8像素的图片；dimensions为None时不在此重新验证尺寸。",
+    "scenarios": [
+      [
+        "Image send byte and dimension limits",
+        "图片识别成功但已知尺寸为2乘2",
+        "发送加载返回None，识别成功不代表可发送。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn load_for_send"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image content block order and skips",
+    "contract": "ACP图片内容构建 SHALL 先生成Text block，再放入可加载附件，最后恢复的孤立图片；加载失败附件跳过，编号通过metadata传递。",
+    "scenarios": [
+      [
+        "Image content block order and skips",
+        "输入文本为空但存在可用附件",
+        "仍先生成Text block，图片随后。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn build_content_blocks_with_prefixes_and_caps"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image orphan budget scope",
+    "contract": "孤立占位符恢复 SHALL 仅累计恢复图片的预算；超过上限立即停止后续恢复，已有PastedImage不计入该预算。",
+    "scenarios": [
+      [
+        "Image orphan budget scope",
+        "第二个孤立图片使累计值超过cap",
+        "停止恢复第二个及后续图片，不把该预算解释为全部附件总上限。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn build_content_blocks_with_prefixes_and_caps"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image placeholder path stripping",
+    "contract": "内容构建 SHALL 剥除占位符路径，即使未提供恢复前缀；未恢复或超预算标签可能仍保留编号锚点。",
+    "scenarios": [
+      [
+        "Image placeholder path stripping",
+        "没有允许恢复前缀而文本含带路径图片占位符",
+        "输出Text去掉路径，但不保证存在对应Image block。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn build_content_blocks_with_prefixes_and_caps"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Scrollback image reference extraction order",
+    "contract": "extract_image_refs SHALL 先处理Markdown图片再处理裸路径，按原始路径字符串去重，不保证全文出现顺序或canonical文件身份去重。",
+    "scenarios": [
+      [
+        "Scrollback image reference extraction order",
+        "裸路径先于Markdown图片出现在文本中",
+        "结果仍先包含匹配的Markdown引用。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn extract_image_refs"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Media only markdown count boundary",
+    "contract": "is_media_only_markdown SHALL 要求全串仅包含匹配图片引用，并比较唯一原始路径数与调用方resolved_ref_count；数量一致不验证附件身份。",
+    "scenarios": [
+      [
+        "Media only markdown count boundary",
+        "纯图片文本的唯一原始路径数与resolved_ref_count不同",
+        "返回false。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn is_media_only_markdown"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Render writer drain acknowledgement",
+    "contract": "WriterSync SHALL 仅在输出线程write_all及flush成功后推进written计数；wait_drained超时不取消已排队输出，也不包含尚未flush的TermWriter缓冲。",
+    "scenarios": [
+      [
+        "Render writer drain acknowledgement",
+        "等待drain超时",
+        "返回超时结果，队列仍可能继续输出。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/draw.rs",
+        "pub fn wait_drained"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Render writer ownership and buffering",
+    "contract": "TermWriter SHALL 对同一个WriterSync限制一个活跃writer；flush将缓冲提交到通道，不等于物理终端写入完成，discard仅丢弃当前未提交缓冲。",
+    "scenarios": [
+      [
+        "Render writer ownership and buffering",
+        "数据已提交后调用discard",
+        "已排队payload不会被撤销。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/draw.rs",
+        "pub fn discard"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Scrollbar hiding and layout reservation",
+    "contract": "隐藏滚动条 SHALL 只控制绘制，不使split_area_for_scrollbar自动回收预留列；分割在宽度不超过2时不提供滚动条区域。",
+    "scenarios": [
+      [
+        "Scrollbar hiding and layout reservation",
+        "设置隐藏后仍调用分割函数且宽度足够",
+        "布局仍可预留滚动条及间隔列。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/scrollbar.rs",
+        "pub fn split_area_for_scrollbar"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Terminal output bounded virtual grid",
+    "contract": "命令输出渲染 SHALL 对每次输入创建新的VTE解析网格，最多50000行和8192列，以字符单元处理而非完整grapheme或终端宽字符模型。",
+    "scenarios": [
+      [
+        "Terminal output bounded virtual grid",
+        "输入超出最大列数",
+        "超出列容量的字符不继续扩展网格。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/terminal_output.rs",
+        "pub fn render_terminal_lines"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Terminal output control interpretation",
+    "contract": "命令输出渲染 SHALL 解释换行、回车、退格、8列tab及实现支持的CSI移动、清行清屏和SGR；该解析器不构成完整终端仿真。",
+    "scenarios": [
+      [
+        "Terminal output control interpretation",
+        "进度文本以回车返回行首再写入",
+        "后续字符覆盖当前行起始单元。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/terminal_output.rs",
+        "pub fn render_terminal_lines"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Color indexed conversion palette",
+    "contract": "indexed_to_rgb SHALL 使用固定xterm色表；nearest_indexed在16至255的颜色立方与灰阶中选择，不探测用户自定义终端调色板。",
+    "scenarios": [
+      [
+        "Color indexed conversion palette",
+        "用户修改终端基础色palette",
+        "该转换仍使用固定RGB映射。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/color.rs",
+        "pub fn indexed_to_rgb"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Color blending supported representations",
+    "contract": "blend_color SHALL 仅对RGB与Indexed颜色混合，任一Indexed输入使结果重新量化；opacity不在此验证或夹到0至1。",
+    "scenarios": [
+      [
+        "Color blending supported representations",
+        "混合基础命名颜色而非RGB或Indexed",
+        "不能将该接口当作所有Color变体均可混合的保证。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/color.rs",
+        "pub fn blend_color"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Line width fitting span boundaries",
+    "contract": "fit_line_to_width SHALL 在每个span内按grapheme截断并补足宽度，保留Line元数据；跨span组成的grapheme不作为一个整体处理。",
+    "scenarios": [
+      [
+        "Line width fitting span boundaries",
+        "宽度不足且单个span含组合字素",
+        "按该span的grapheme边界截断。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/line_utils.rs",
+        "pub fn fit_line_to_width"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Styled wrapping hard and soft breaks",
+    "contract": "多行word wrap SHALL 用None joiner表示每个输入行的硬断行，用Some边界文本表示软断行；只有第一输入采用initial indent，其余输入首行使用subsequent indent。",
+    "scenarios": [
+      [
+        "Styled wrapping hard and soft breaks",
+        "传入两个独立输入行",
+        "第二行的首个输出保持硬断行标记。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/wrapping.rs",
+        "pub fn word_wrap_lines_with_joiners"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Table wrapping special case",
+    "contract": "表格启发式识别到的行 SHALL 单行fit到宽度，不使用普通换行indent选项；ASCII竖线开头被视为表格，ASCII加号不因此自动识别。",
+    "scenarios": [
+      [
+        "Table wrapping special case",
+        "ASCII竖线开头的长表行传入wrapper",
+        "执行单行裁剪或补空格，不按普通文本生成续行。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/wrapping.rs",
+        "pub fn word_wrap_line_with_joiners"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Matching wrap helper scope",
+    "contract": "wrap_byte_ranges_matching SHALL 在width为0时返回完整文本范围；不复现所有表格、用户indent和自定义wrap选项，因此调用方不能据此假定与任意视觉换行完全一致。",
+    "scenarios": [
+      [
+        "Matching wrap helper scope",
+        "width为0且文本非空",
+        "返回全范围而非空范围。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/wrapping.rs",
+        "pub fn wrap_byte_ranges_matching"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Remote editor self resolving links",
+    "contract": "官方VSCode远程上下文中的SelfResolvingPath文件链接 SHALL 同时不给出OSC URL及应用open target，由终端自行识别；Opaque文件链接不采用此委托。",
+    "scenarios": [
+      [
+        "Remote editor self resolving links",
+        "官方VSCode remote展示可自解析文件路径",
+        "解析结果不为该显示创建OSC或应用打开目标。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/osc8.rs",
+        "pub fn resolve_link_target_for_context"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "File link target conversion boundary",
+    "contract": "文件目标转换 SHALL 不要求canonicalize或存在性；当无法生成file URL时仍可保留应用File目标。",
+    "scenarios": [
+      [
+        "File link target conversion boundary",
+        "文件Path无法转换为file URL",
+        "不因此丢弃可用的应用打开目标。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/osc8.rs",
+        "pub fn resolve_link_target_for_context"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Local link existing file and media fallback",
+    "contract": "local_link_to_file_target SHALL 对解析目标要求is_file；相对目标不存在时才按media路径组件后缀寻找唯一候选，重复候选也形成歧义。",
+    "scenarios": [
+      [
+        "Local link existing file and media fallback",
+        "相对目标已在cwd存在且media也有后缀候选",
+        "优先使用cwd目标。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/osc8.rs",
+        "pub fn local_link_to_file_target"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Explicit anchored file link existence",
+    "contract": "显式本地链接 SHALL 允许anchored路径或file URL目标不存在，相对路径仍采用保守查找；该机制不是文件访问授权边界。",
+    "scenarios": [
+      [
+        "Explicit anchored file link existence",
+        "显式Markdown链接指向尚不存在的绝对路径",
+        "仍可生成文件目标。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/osc8.rs",
+        "pub fn explicit_local_link_to_file_target"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Link scanning priority and existence scope",
+    "contract": "文本链接扫描 SHALL 依URL、引号绝对或home路径、非引号路径、相对media路径顺序处理；绝对路径扫描不要求is_file，URL范围优先避免重复路径匹配。",
+    "scenarios": [
+      [
+        "Link scanning priority and existence scope",
+        "文本含不存在的可匹配绝对路径",
+        "仍可能生成文件链接，不能套用local_link的存在性保证。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/osc8.rs",
+        "pub fn scan_text_for_links"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Wrapped link overlay atomic projection",
+    "contract": "跨软行链接 SHALL 先验证所有投影段，任一段重叠或u16列溢出时整体不插入；joiner中的字节不归属可点击行段。",
+    "scenarios": [
+      [
+        "Wrapped link overlay atomic projection",
+        "链接跨多行且其中一段与已有overlay重叠",
+        "整个候选链接不加入overlay。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/osc8.rs",
+        "pub fn scan_lines_for_url_overlays"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance watcher static snapshot",
+    "contract": "ConfigWatcher SHALL 在启动时尝试读取pager.toml并转换配置，失败使用默认值；当前实现只保留静态watch sender，不提供文件热加载。",
+    "scenarios": [
+      [
+        "Appearance watcher static snapshot",
+        "启动后修改pager.toml",
+        "该watcher不因此发布更新，不能依据dev模式注释声称热加载。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/watcher.rs",
+        "fn start_static"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance cache thread local setters",
+    "contract": "外观cache SHALL 在线程局部保存读取结果，setter仅更新缓存，不直接持久化到配置文件。",
+    "scenarios": [
+      [
+        "Appearance cache thread local setters",
+        "调用set_timestamps改变显示偏好",
+        "当前线程缓存改变，不由该setter写盘。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/cache.rs",
+        "pub fn set_timestamps"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance scroll line zero distinction",
+    "contract": "滚动行数读取 SHALL 将环境配置中的0解释为None；set_scroll_lines将0收紧为1，读取与setter不共享零值语义。",
+    "scenarios": [
+      [
+        "Appearance scroll line zero distinction",
+        "调用set_scroll_lines(0)",
+        "缓存保存至少1行，而不是None。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/cache.rs",
+        "pub fn set_scroll_lines"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Permission sticky cursor lifetime",
+    "contract": "上次权限选择 SHALL 存于线程局部状态而非绑定会话，resolve_initial_cursor按偏好选择首个匹配的非global选项，再考虑global与索引0回退。",
+    "scenarios": [
+      [
+        "Permission sticky cursor lifetime",
+        "同线程切换会话但未重置选择偏好",
+        "不能假定sticky选择自动清空。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/permission_cursor.rs",
+        "pub fn resolve_initial_cursor"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Theme availability color capability",
+    "contract": "ThemeKind::available SHALL 在truecolor提供五个具体主题，在其他颜色能力仅提供Night与Day；Auto不在具体主题列表中。",
+    "scenarios": [
+      [
+        "Theme availability color capability",
+        "终端不支持truecolor",
+        "可选列表仅包含Night和Day。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/mod.rs",
+        "pub fn available"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Theme name parsing whitespace boundary",
+    "contract": "ThemeKind::from_name SHALL 对名称大小写归一并识别实现的别名，但不自动trim输入。",
+    "scenarios": [
+      [
+        "Theme name parsing whitespace boundary",
+        "主题名称前后带空白",
+        "不能作为无空白有效名称自动接受。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/mod.rs",
+        "pub fn from_name"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Theme application native lock",
+    "contract": "Theme::apply_kind SHALL 在terminal native锁定时不应用外部主题；未锁定时把不支持truecolor的受限主题收紧为Night，更新内存及cursor，不直接持久化。",
+    "scenarios": [
+      [
+        "Theme application native lock",
+        "原生锁定时请求其他主题",
+        "维持原生主题路径。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/mod.rs",
+        "pub fn apply_kind"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Theme current palette auto fallback",
+    "contract": "Theme::current SHALL 在普通主题路径将Auto按Night palette处理；它本身不等于运行系统极性检测来解析Auto。",
+    "scenarios": [
+      [
+        "Theme current palette auto fallback",
+        "当前kind仍为Auto且调用current",
+        "使用Night palette，而非在此触发OS自动检测。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/mod.rs",
+        "pub fn current()"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Theme cursor sequence delivery",
+    "contract": "apply_cursor_color SHALL 在颜色可转RGB时向stderr写OSC12并flush，忽略写入错误；reset_cursor_color写OSC112，不在这些函数内检查TTY品牌或复用器。",
+    "scenarios": [
+      [
+        "Theme cursor sequence delivery",
+        "stderr写入cursor序列失败",
+        "函数不返回投递失败结果，不能据调用完成认定终端已更新。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/mod.rs",
+        "pub fn apply_cursor_color"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "System appearance OSC fallback scope",
+    "contract": "detect_with_osc11_fallback SHALL 先查询系统外观，仅在无结果时尝试OSC11，系统结果优先。",
+    "scenarios": [
+      [
+        "System appearance OSC fallback scope",
+        "系统探测已得到Dark或Light",
+        "不需要OSC11结果覆盖系统结果。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/system_appearance.rs",
+        "pub fn detect_with_osc11_fallback"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Terminal context cached observation",
+    "contract": "terminal_context SHALL 缓存首次终端上下文；环境品牌与effective品牌是不同字段，不能把能力回退品牌当作实际环境识别证据。",
+    "scenarios": [
+      [
+        "Terminal context cached observation",
+        "首次取得上下文后环境改变",
+        "后续访问仍使用缓存上下文。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/mod.rs",
+        "pub fn terminal_context"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Alternate screen selection priority",
+    "contract": "alternate screen策略 SHALL 优先遵守CLI no-alt-screen，再按Always/Never/Auto；Auto在Zellij或tmux-backed control mode关闭，其余开启。",
+    "scenarios": [
+      [
+        "Alternate screen selection priority",
+        "CLI禁用alt screen且配置Always",
+        "返回false。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/mod.rs",
+        "pub fn determine_alt_screen_policy"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Hyperlink standard scheme filter",
+    "contract": "Standard scheme过滤 SHALL 只接受精确小写http、https、mailto；EditorExtended额外接受file、vscode、cursor、idea、zed，品牌能力表不自动启用Extended。",
+    "scenarios": [
+      [
+        "Hyperlink standard scheme filter",
+        "直接向Standard传入file或大写HTTP",
+        "返回不允许。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/hyperlinks.rs",
+        "pub fn allows"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Hyperlink capability declaration boundary",
+    "contract": "hyperlink_capabilities SHALL 按品牌返回能力表，不实时探测终端；AppleTerminal为HostileParser，Warp为Unsupported但支持native plain URL打开。",
+    "scenarios": [
+      [
+        "Hyperlink capability declaration boundary",
+        "查询Warp能力",
+        "OSC8为Unsupported，不因此否认裸URL原生打开。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/hyperlinks.rs",
+        "pub fn hyperlink_capabilities"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Overlay ownership delayed commit",
+    "contract": "overlay序列构造 SHALL 不自动提交owner；PostFlush::write_to仅在write_all成功后提交owner，不调用flush，也不回滚部分输出。",
+    "scenarios": [
+      [
+        "Overlay ownership delayed commit",
+        "write_all返回错误",
+        "不提交该owner，但已写出的字节不由此回滚。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/overlay.rs",
+        "pub fn write_to"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Overlay explicit commit boundary",
+    "contract": "Escapes::commit SHALL 更新线程局部owner并返回序列字符串；此操作不执行I/O，不证明终端已绘制。",
+    "scenarios": [
+      [
+        "Overlay explicit commit boundary",
+        "仅调用commit而未发送返回字符串",
+        "owner已变化但没有由此产生终端输出。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/overlay.rs",
+        "pub fn commit(self)"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Scrollback image disable scope",
+    "contract": "inline overlay强制关闭开关 SHALL 用于scrollback overlay判定，不等同全局禁用所有图形协议。",
+    "scenarios": [
+      [
+        "Scrollback image disable scope",
+        "设置scrollback force off",
+        "scrollback overlay关闭，不能据此声称所有图片渲染入口均禁用。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/image.rs",
+        "pub fn set_inline_overlay_force_off"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Kitty image format sniff boundary",
+    "contract": "kitty_format_from_bytes SHALL 按PNG签名字节判定直接格式，不以此完成整张图片解码验证。",
+    "scenarios": [
+      [
+        "Kitty image format sniff boundary",
+        "字节具有PNG头但后续数据损坏",
+        "格式识别成功不证明可显示完整图片。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/image.rs",
+        "pub fn kitty_format_from_bytes"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Kitty image transmission chunking",
+    "contract": "Kitty图像传输 SHALL 对base64数据按4096字节分块生成序列，空输入不生成数据块；生成字符串不执行终端写入。",
+    "scenarios": [
+      [
+        "Kitty image transmission chunking",
+        "传入空图片数据",
+        "得到空传输串。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/image.rs",
+        "pub fn transmit_kitty_image"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image fit minimum cells",
+    "contract": "fit_image_to_cells SHALL 根据像素尺寸及cell比例拟合，结果至少一列一行，即使给定最大可用维度为0。",
+    "scenarios": [
+      [
+        "Image fit minimum cells",
+        "最大可用列或行为0",
+        "不能把返回值当作严格零空间裁剪结果。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/image.rs",
+        "pub fn fit_image_to_cells"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Modal chrome initial state",
+    "contract": "ModalWindowState SHALL 初始化为空命中区域、无focus和hover、active_tab为0；with_tabs仅设置数量及等长None rects，不注册事件或保证索引有效性。",
+    "scenarios": [
+      [
+        "Modal chrome initial state",
+        "使用with_tabs(3)",
+        "tab_count为3且三个tab rect均为None，active_tab为0。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/modal_window_state.rs",
+        "pub fn with_tabs"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Tool path filesystem target spelling",
+    "contract": "工具路径目标 SHALL 展开独立首组件~并对相对路径拼接cwd，保留点段及符号链接语义，不canonicalize或检查存在性。",
+    "scenarios": [
+      [
+        "Tool path filesystem target spelling",
+        "相对路径含..且提供cwd",
+        "目标保留拼接后的..，不以展示归一结果替代OS路径。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/tool_paths.rs",
+        "pub fn resolve_tool_path_target"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Tool path expanded display",
+    "contract": "工具路径Expanded展示 SHALL 使用词法归一目标，在cwd下且相对结果非空时显示相对路径，否则显示归一目标；展示结果不构成安全边界。",
+    "scenarios": [
+      [
+        "Tool path expanded display",
+        "目标词法归一后恰等于cwd",
+        "不显示空相对字符串，回退完整展示路径。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/tool_paths.rs",
+        "fn path_for_expanded_header"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Tool path component shortening",
+    "contract": "shorten_path SHALL 在预算0时返回空串，否则先尝试保留完整路径、缩短斜线组件、保留尾部路径，再执行字符串截断。",
+    "scenarios": [
+      [
+        "Tool path component shortening",
+        "路径已在显示宽度预算内",
+        "原样返回路径。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/tool_paths.rs",
+        "pub fn shorten_path"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Safe buffer helper coordinate scope",
+    "contract": "SafeBuf SHALL 跳过y在buffer上下界外或x达到右界的写入；当前实现不检查x低于左界，也不提供全部坐标输入无panic保证。",
+    "scenarios": [
+      [
+        "Safe buffer helper coordinate scope",
+        "y处于buffer之外",
+        "跳过底层set_line/set_span/set_string调用。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/safe_buf.rs",
+        "pub trait SafeBuf"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Mermaid preference canonical values",
+    "contract": "RenderMermaid SHALL 默认为Auto，精确接受auto/on/off并输出对应canonical字符串，其他输入返回None；类型解析不执行图形渲染。",
+    "scenarios": [
+      [
+        "Mermaid preference canonical values",
+        "输入Auto或yes",
+        "返回None，由调用方处理回退。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/render_mermaid.rs",
+        "pub fn from_canonical"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Scroll mode canonical values",
+    "contract": "ScrollMode SHALL 默认为Auto，精确接受auto/wheel/trackpad；本类型只保存分类偏好，不实现输入时序检测。",
+    "scenarios": [
+      [
+        "Scroll mode canonical values",
+        "输入WHEEL或track pad",
+        "返回None。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/scroll_mode.rs",
+        "pub fn from_canonical"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Text selection preference predicates",
+    "contract": "TextSelection SHALL 默认为Flash，精确接受flash/hold/word_select；Hold和WordSelect的holds为true，仅WordSelect的selects_word为true。",
+    "scenarios": [
+      [
+        "Text selection preference predicates",
+        "模式为Hold",
+        "holds为true而selects_word为false，不由此类型直接执行鼠标动作。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/text_selection.rs",
+        "pub const fn holds"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Global tab width atomic setting",
+    "contract": "tab_width SHALL 使用默认4的全局AtomicU8，以Relaxed读取和设置；setter接受0且不持久化或主动触发重绘。",
+    "scenarios": [
+      [
+        "Global tab width atomic setting",
+        "调用set_tab_width(0)",
+        "随后读取为0，不自动夹到最小1。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/mod.rs",
+        "pub fn set_tab_width"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Terminal version source precedence",
+    "contract": "终端版本 SHALL 优先使用DA2结果，其次环境版本，否则返回空字符串及None来源；XTVERSION文本不进入该选择函数。",
+    "scenarios": [
+      [
+        "Terminal version source precedence",
+        "DA2与环境版本同时存在",
+        "返回DA2及Da2来源。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/term_version.rs",
+        "fn best_term_version"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Terminal environment version corroboration",
+    "contract": "环境版本 SHALL 仅在env_brand与变量品牌相符时使用，TERM_PROGRAM=vscode可对应VSCode、Cursor、Windsurf；版本值trim后保留原格式，不强制semver。",
+    "scenarios": [
+      [
+        "Terminal environment version corroboration",
+        "tmux的TERM_PROGRAM_VERSION与残留其他终端品牌同时存在",
+        "不将tmux版本归属给其他终端。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/term_version.rs",
+        "fn detect_env_term_version"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "DA2 startup probe gate",
+    "contract": "DA2启动探测 SHALL 仅针对Alacritty、未被CSI拦截的复用器环境且stdin为TTY；非Unix不执行定时读取，拒绝或无结果也可缓存None。",
+    "scenarios": [
+      [
+        "DA2 startup probe gate",
+        "终端品牌不是Alacritty",
+        "跳过查询并记录无版本结果。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/da2.rs",
+        "pub fn probe_at_startup"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "XTVERSION startup allowlist",
+    "contract": "XTVERSION启动探测 SHALL 对Unknown、Kitty、WezTerm、Ghostty、Iterm2、Rio且无CSI拦截复用器、stdin为TTY时尝试发送；回复由外部事件过滤器记录，不在此同步等待。",
+    "scenarios": [
+      [
+        "XTVERSION startup allowlist",
+        "Alacritty终端调用XTVERSION启动入口",
+        "品牌门禁拒绝查询。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/xtversion.rs",
+        "fn gate_allows_probe"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "XTVERSION first recorded outcome",
+    "contract": "XTVERSION SHALL 通过OnceLock保留首次记录结果，reply_pending要求已发查询且尚无结果；record_no_reply依赖调用方触发，不是独立超时任务。",
+    "scenarios": [
+      [
+        "XTVERSION first recorded outcome",
+        "查询发出后会话完全空闲且无人记录结果",
+        "可能持续pending，不由本模块定时写入NoReply。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/xtversion.rs",
+        "pub fn reply_pending"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Keyboard capability host scope",
+    "contract": "键盘能力表 SHALL 仅对macOS提供品牌分类，Linux、Windows及Other返回全Unknown默认值；该表不执行按键探测。",
+    "scenarios": [
+      [
+        "Keyboard capability host scope",
+        "在Linux查询Kitty能力",
+        "返回Unknown分类，不能据此推导Kitty不支持协议。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/keyboard.rs",
+        "pub fn keyboard_capabilities_for_host"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Keyboard modifier rescue classification",
+    "contract": "修饰键rescue谓词 SHALL 仅对Dropped返回true，Native、Unrecoverable和Unknown均为false；组合delivery任一键Dropped即可受益。",
+    "scenarios": [
+      [
+        "Keyboard modifier rescue classification",
+        "macOS AppleTerminal的Cmd为Unrecoverable、Opt为Dropped",
+        "组合rescue为true，但不是Cmd可恢复的保证。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/keyboard.rs",
+        "pub fn benefits_from_rescue"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Kitty keyboard negotiated version boundary",
+    "contract": "Kitty协商flags SHALL 在skip_reason存在时为空，否则启用DISAMBIGUATE_ESCAPE_CODES；只有已知DA2 packed不大于2401时不启用REPORT_EVENT_TYPES，未知版本保留它。",
+    "scenarios": [
+      [
+        "Kitty keyboard negotiated version boundary",
+        "skip_reason为空且packed为2401",
+        "返回非空disambiguation flags但没有event types。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/kitty_keyboard.rs",
+        "pub fn negotiated_kitty_flags"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Kitty keyboard recorded state predicates",
+    "contract": "Kitty状态 SHALL 按记录的flags分别判断已push、含REPORT_EVENT_TYPES及非空但withheld；这些谓词不实际观察释放事件到达。",
+    "scenarios": [
+      [
+        "Kitty keyboard recorded state predicates",
+        "仅记录DISAMBIGUATE_ESCAPE_CODES",
+        "flags_pushed为true、releases_reported为false、event_types_withheld为true。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/kitty_keyboard.rs",
+        "pub fn kitty_event_types_withheld"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Kitty keyboard teardown consume once",
+    "contract": "take_kitty_flags_pushed SHALL 通过原子swap清空记录并返回此前是否非空，防止多个teardown根据同一记录重复pop。",
+    "scenarios": [
+      [
+        "Kitty keyboard teardown consume once",
+        "连续两次take且中间未set",
+        "第一次消费非空记录返回true，第二次返回false。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/kitty_keyboard.rs",
+        "pub fn take_kitty_flags_pushed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom phase and tick lifecycle",
+    "contract": "GboomState SHALL 从Title开始，tick将dt夹到0.1秒；Playing处理游戏后优先判死，胜利还需敌人死亡动画完成；其他阶段每tick推进一次火焰。",
+    "scenarios": [
+      [
+        "Gboom phase and tick lifecycle",
+        "长时间暂停后tick",
+        "phase_time只累计夹限后的dt，火焰仅推进一次。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/mod.rs",
+        "pub fn tick"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom keyboard phase handling",
+    "contract": "GBOOM键处理 SHALL 对Esc/q/Q始终返回Close；Title其他键只开始游戏，结束阶段其他键需phase_time严格大于0.8才关闭；上游负责key kind分发。",
+    "scenarios": [
+      [
+        "Gboom keyboard phase handling",
+        "Title阶段按Space",
+        "只进入Playing，不同时射击。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/mod.rs",
+        "pub fn handle_key"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom PNG cache and caller size limit",
+    "contract": "frame_png SHALL 按sim_gen及尺寸缓存PNG，尺寸小于8返回None；480乘320上限由frame_size_for_cells提供，frame_png本身不强制该上限。",
+    "scenarios": [
+      [
+        "Gboom PNG cache and caller size limit",
+        "相同generation及尺寸再次请求帧",
+        "返回缓存PNG；调用方仍需约束任意输入尺寸。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/mod.rs",
+        "pub fn frame_png"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom queued fire coalescing",
+    "contract": "Game SHALL 用布尔值合并排队射击，每step最多消费一次，冷却中请求被丢弃而非延后。",
+    "scenarios": [
+      [
+        "Gboom queued fire coalescing",
+        "同一step前多次queue_fire",
+        "最多触发一次射击。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "pub fn queue_fire"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom held movement modes",
+    "contract": "Game按键 SHALL 在timer模式以0.16秒桥接重复事件，在release-aware模式保持至release；切换模式不自动清空已有hold，release_all不立即清零速度。",
+    "scenarios": [
+      [
+        "Gboom held movement modes",
+        "移动中调用release_all",
+        "停止保持输入，但速度仍通过后续step平滑衰减。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "pub fn release_all"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom procedural assets",
+    "contract": "GBOOM资源 SHALL 由源码纹理算法与字符图生成，不读取外部图片；Texture按64乘64循环采样，Renderer实例持有生成资源。",
+    "scenarios": [
+      [
+        "Gboom procedural assets",
+        "构造Renderer",
+        "生成所需纹理和精灵，不要求下载图片。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/engine.rs",
+        "pub fn new()"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom random float actual range",
+    "contract": "XorShift64::next_f32 SHALL 按当前next_u32再右移8除以2的24次方生成值，实际落在0至0.5的半开区间；不能以旧注释声称覆盖0至1。",
+    "scenarios": [
+      [
+        "Gboom random float actual range",
+        "调用next_f32生成游戏随机值",
+        "值严格小于0.5；该事实待独立债务修复，不在文档迁移改算法。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/assets.rs",
+        "pub fn next_f32"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom rendering layer order",
+    "contract": "游戏渲染 SHALL 依墙、地板天花板、敌人、世界暗角、枪与准星、全帧受伤及低血效果绘制；精灵使用远到近顺序及逐列墙深度。",
+    "scenarios": [
+      [
+        "Gboom rendering layer order",
+        "枪已绘制后存在受伤红闪",
+        "红闪也影响枪，不受世界暗角的枪仍受后续效果。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/engine.rs",
+        "pub fn render_game"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Renderable basic height contracts",
+    "contract": "Renderable标准实现 SHALL 对unit及None报告0高度，对str、String、Span、Line固定报告1且不随width变化；Option Some及包装项委托内部实现。",
+    "scenarios": [
+      [
+        "Renderable basic height contracts",
+        "空String在width为0时查询desired_height",
+        "仍返回1，不代表实际可见一行文字。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/renderable.rs",
+        "pub trait Renderable"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Renderable owned and borrowed delegation",
+    "contract": "RenderableItem SHALL 同时支持Owned Box和Borrowed引用，render与desired_height均委托内部对象，不自行缓存布局。",
+    "scenarios": [
+      [
+        "Renderable owned and borrowed delegation",
+        "使用Borrowed包装自定义Renderable",
+        "高度与渲染调用传给原对象。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/renderable.rs",
+        "pub enum RenderableItem"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Search highlight reverse modifier",
+    "contract": "搜索高亮 SHALL 对regex非重叠匹配的显示列插入REVERSED modifier，不切换已有REVERSED状态；以纯文本字节范围映射显示列。",
+    "scenarios": [
+      [
+        "Search highlight reverse modifier",
+        "同一单元格重复应用匹配高亮",
+        "REVERSED保持开启，不因第二次应用取消。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/highlight.rs",
+        "fn invert_cell"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Search highlight viewport branch scope",
+    "contract": "搜索高亮 SHALL 在wrapped分支跳过skip行并在viewport_bottom停止；single_row分支不应用这两个纵向限制，调用方需提供有效buffer坐标。",
+    "scenarios": [
+      [
+        "Search highlight viewport branch scope",
+        "single_row为true",
+        "仅按该分支横向范围处理，不自动执行wrapped的纵向裁剪。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/highlight.rs",
+        "pub fn paint_match_highlights"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Embedded editor environment precedence",
+    "contract": "嵌入编辑器识别 SHALL 按非空NVIM或NVIM_LISTEN_ADDRESS、VIM_TERMINAL、INSIDE_EMACS的顺序返回Neovim、Vim、Emacs，否则None；此环境启发式不验证实际进程或区分编辑器与tmux的嵌套方向。",
+    "scenarios": [
+      [
+        "Multiple editor markers",
+        "三个编辑器标记同时非空",
+        "优先返回Neovim。"
+      ],
+      [
+        "Empty editor markers",
+        "全部标记为空或不存在",
+        "返回None，TMUX单独存在不构成编辑器识别。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/embedded_editor.rs",
+        "pub fn embedded_editor_from_env"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Terminal query render fd gate",
+    "contract": "write_query SHALL 在共享render stderr锁内检查实际输出fd为TTY，write_all及flush均成功才返回true。",
+    "scenarios": [
+      [
+        "Terminal query render fd gate",
+        "实际render fd不是TTY",
+        "不发送查询并返回false。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/probe.rs",
+        "fn write_query"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Terminal reply bounded buffer semantics",
+    "contract": "Unix read_tty_reply SHALL 读取stdin至终止条件、256字节上限或deadline；已消费部分字节时可返回Some，消费窗口内键入内容不会重新注入输入流。",
+    "scenarios": [
+      [
+        "Terminal reply bounded buffer semantics",
+        "读取部分回复后发生错误",
+        "返回已消费字节而非证明完整协议回复。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/probe.rs",
+        "fn read_tty_reply"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Tmux probe process and drain deadlines",
+    "contract": "tmux查询 SHALL 使用2秒leader等待及独立300毫秒退出后清理窗口，清理进程组先TERM等待100毫秒再KILL；pipe read_to_end没有字节上限，child.wait也未单独设deadline。",
+    "scenarios": [
+      [
+        "Tmux probe process and drain deadlines",
+        "leader在主deadline前成功退出但后代持有pipe",
+        "使用退出后清理窗口，不把主deadline剩余量当全部drain预算。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/tmux_probe.rs",
+        "fn run_tmux_bounded"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Tmux typed query result projection",
+    "contract": "TmuxQueryResult SHALL 区分Available、Unsupported、Unavailable、Error；into_option仅保留Available值。",
+    "scenarios": [
+      [
+        "Tmux typed query result projection",
+        "查询结果为Error",
+        "into_option返回None，具体错误需在投影前处理。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/terminal/tmux_probe.rs",
+        "pub enum TmuxQueryResult"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Grow home display containment",
+    "contract": "is_under_user_grow_home SHALL 使用词法路径前缀判断，不解析符号链接或父目录段，不能作为文件授权检查。",
+    "scenarios": [
+      [
+        "Grow home display containment",
+        "路径词法上位于grow home但包含逃逸父段",
+        "不得仅凭此谓词授权访问。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/util.rs",
+        "pub fn is_under_user_grow_home"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Relative time calendar approximation",
+    "contract": "format_time_ago SHALL 以固定30天月、365天年展示相对时间，不使用日历月份；360至364天可显示12mo。",
+    "scenarios": [
+      [
+        "Relative time calendar approximation",
+        "年龄为360天",
+        "按固定月单位显示12mo。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/util.rs",
+        "pub fn format_time_ago"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Monotonic wall clock projection",
+    "contract": "system_time_from_instant_at SHALL 使用传入单调时钟与wall clock对投影，未来instant夹到wall_now，减法失败也回退wall_now。",
+    "scenarios": [
+      [
+        "Monotonic wall clock projection",
+        "instant晚于捕获的单调now",
+        "返回wall_now。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/util.rs",
+        "pub fn system_time_from_instant_at"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Limited HTML entity replacement",
+    "contract": "decode_html_entities SHALL 按固定顺序替换amp、lt、gt、quot及实现支持的单引号实体，不是完整HTML解码器；连续替换可能继续解码amp暴露出的实体。",
+    "scenarios": [
+      [
+        "Limited HTML entity replacement",
+        "输入包含&amp;lt;",
+        "连续替换可得到小于号。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/util.rs",
+        "pub fn decode_html_entities"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Schedule interval parser scope",
+    "contract": "parse_schedule_interval_secs SHALL 要求trim_start后精确every前缀及u64数量，支持秒分时天单位并允许0；乘法与UTF8切片未全面防护，Option返回值不保证任意输入安全失败。",
+    "scenarios": [
+      [
+        "Schedule interval parser scope",
+        "输入every 0s",
+        "返回Some(0)，不拒绝零间隔。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/util.rs",
+        "pub fn parse_schedule_interval_secs"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Color detection first observation and native cap",
+    "contract": "颜色detect SHALL 缓存首次raw探测，NO_COLOR存在优先返回None；无supports-color证据时默认TrueColor，原生锁动态将结果上限收紧到Basic。",
+    "scenarios": [
+      [
+        "Color detection first observation and native cap",
+        "首次探测时NO_COLOR存在且原生锁开启",
+        "结果仍为None，不由锁提升为Basic。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/color_support.rs",
+        "pub fn detect"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Standalone color evidence input",
+    "contract": "standalone颜色诊断 SHALL 使用stderr或独立控制终端证据，不依赖stdout是否TTY；NO_COLOR可明确提供None颜色证据。",
+    "scenarios": [
+      [
+        "Standalone color evidence input",
+        "JSON stdout被管道接收但stderr仍为TTY",
+        "不单凭stdout管道判定完全无终端颜色证据。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/color_support.rs",
+        "pub fn standalone"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Initial theme configuration resolution",
+    "contract": "resolve_initial_theme SHALL 读取有效配置，Auto开启auto mode并探测外观，具体主题直接返回，无配置默认Night；当前函数不读取注释所称环境主题覆盖。",
+    "scenarios": [
+      [
+        "Initial theme configuration resolution",
+        "没有有效theme配置",
+        "返回GrowNight。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/cache.rs",
+        "pub fn resolve_initial_theme"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Runtime auto theme resolution",
+    "contract": "resolve_auto SHALL 仅用系统API解析外观并按配置映射，失败回退Night，不调用OSC11，也不自行设置current kind或auto mode。",
+    "scenarios": [
+      [
+        "Runtime auto theme resolution",
+        "运行时系统外观未知",
+        "返回GrowNight，调用方负责应用返回主题。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/cache.rs",
+        "pub fn resolve_auto"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Color level explicit initialization precedence",
+    "contract": "颜色set SHALL 直接初始化同一OnceLock，首次成功后其他set返回Err；若set早于detect，则detect不执行环境探测闭包，NO_COLOR不会重新覆盖已初始化raw值，原生锁仍限制有效级别。",
+    "scenarios": [
+      [
+        "Color level explicit initialization precedence",
+        "首次set为TrueColor后环境存在NO_COLOR",
+        "未锁定时get仍读取已设置TrueColor，不重新检测环境。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/color_support.rs",
+        "pub fn set(level"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Color quantization representation matrix",
+    "contract": "quantize_color SHALL 在TrueColor原样返回，在Ansi256仅转换RGB，在Basic将RGB经indexed再映射ANSI16并转换Indexed，在None将所有颜色变Reset；已有命名颜色在Basic保留。",
+    "scenarios": [
+      [
+        "Color quantization representation matrix",
+        "Basic级别下输入命名Red",
+        "保留Red；None级别下则返回Reset。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/color_support.rs",
+        "pub fn quantize_color"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image overlay readiness and displayed path",
+    "contract": "图片弹窗计划 SHALL 仅在协议支持图片且preview已prepared时展示像素；显示路径只取source_path，不用session路径代替。",
+    "scenarios": [
+      [
+        "Image overlay readiness and displayed path",
+        "有encoded_bytes但preview未prepared",
+        "选择元数据布局，不仅因内存图片存在就显示像素。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/image_overlay/geometry.rs",
+        "fn plan_image_preview"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image overlay minimum geometry",
+    "contract": "图片弹窗 SHALL 要求至少28列，像素模式至少8行、元数据模式至少6行；像素居中并预留路径footer，元数据框宽约75%且靠底。",
+    "scenarios": [
+      [
+        "Image overlay minimum geometry",
+        "区域高度6且preview未ready",
+        "可构造元数据布局，但不满足像素模式最小高度。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/image_overlay/geometry.rs",
+        "fn overlay_geometry"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image overlay escapes result boundary",
+    "contract": "render_image_overlay SHALL 返回可选post-flush像素序列；返回None也可能已绘制元数据弹窗，不代表没有任何buffer变化。",
+    "scenarios": [
+      [
+        "Image overlay escapes result boundary",
+        "成功渲染元数据模式",
+        "返回None像素序列，buffer内仍有边框与元数据。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/image_overlay.rs",
+        "pub fn render_image_overlay"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image overlay metadata formatting",
+    "contract": "图片元数据 SHALL 按MIME简称、可用尺寸、字节数、可选basename顺序以中点连接；PNG/JPEG/TIFF/GIF/WebP/BMP精确MIME映射，其余原样显示，KB及MB按1024进制且保留一位小数。",
+    "scenarios": [
+      [
+        "Image overlay metadata formatting",
+        "图片1024字节且尺寸不可用",
+        "显示1.0 KB而不补造尺寸。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/image_overlay/content.rs",
+        "fn build_meta_line"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Image overlay path character truncation",
+    "contract": "路径裁剪 SHALL 先按Unicode char数量预算，预算0为空、最多3时取开头，其他超长路径以三个点连接头尾；paint_path_line再按显示列裁剪整个Path标签。",
+    "scenarios": [
+      [
+        "Image overlay path character truncation",
+        "路径包含宽字符且字符数量符合预算",
+        "仍可能在最终显示列裁剪中被截断，不保证尾部始终保留。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/image_overlay/content.rs",
+        "fn truncate_path_for_overlay"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Text preview overlay truncation and configuration",
+    "contract": "文本preview SHALL 默认取首尾各3行、宽度比0.75、最小区域20乘5且无hint；内容超过2N行时插入省略行，实际高度可能进一步裁掉尾部。width_ratio及bottom_gap未作通用范围校验，调用方须提供有效布局。",
+    "scenarios": [
+      [
+        "Empty text preview",
+        "content.lines结果为空",
+        "返回None且不绘制弹窗。"
+      ],
+      [
+        "Long text preview",
+        "总行数超过两倍preview_lines",
+        "选择首N行、省略行及尾N行，但不保证受限高度下全部选中行可见。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/preview_overlay.rs",
+        "pub fn render_preview_overlay"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Markdown theme style conversion",
+    "contract": "Markdown style SHALL 每次从Theme::current新建，Reset颜色转为未设置颜色，保留对应RGB/Indexed/ANSI颜色；modifier转换支持bold、italic、underline、dim、hidden、strikethrough，不转换reverse或blink。标题内层按六级颜色及modifier，外层标记dim并hidden。",
+    "scenarios": [
+      [
+        "Default color bridge",
+        "主题字段为Reset",
+        "anstyle颜色为None，而非指定黑白RGB。"
+      ],
+      [
+        "Heading marker style",
+        "构建标题外层样式",
+        "应用标题颜色及dim/hidden，内层使用独立级别modifier。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/md_style.rs",
+        "pub fn style()"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/md_style.rs",
+        "fn modifier_to_anstyle"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Built in theme palette and heading modifiers",
+    "contract": "内置Theme构造器 SHALL 提供独立固定palette及语义样式字段，不在构造器内探测终端。Night/Day的H1至H5加粗、H6无附加modifier；Tokyo全部标题加粗；Rose的H2另加下划线且H4另加斜体，Oscura的H4另加斜体；terminal_default使用Reset背景，H1加粗下划线。",
+    "scenarios": [
+      [
+        "Day heading six",
+        "构造GrowDay palette",
+        "H6 modifier为空，不能用语法主题资源中的H6 bold替代该值。"
+      ],
+      [
+        "Native canvas palette",
+        "构造terminal_default",
+        "bg_base为Reset，跟随终端默认背景。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/grownight.rs",
+        "pub const fn grownight"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/growday.rs",
+        "pub const fn growday"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/rosepine.rs",
+        "pub const fn rosepine_moon"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/oscura.rs",
+        "pub const fn oscura_midnight"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/terminal_default.rs",
+        "pub const fn terminal_default"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/tokyonight.rs",
+        "pub const fn tokyonight"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "OSC11 reply parsing scope",
+    "contract": "OSC11读取 SHALL 要求完整BEL或ST尾及有效UTF8，RGB解析寻找rgb:后前三个分隔通道，不验证完整OSC11信封；通道trim后以u16十六进制解析，长度大于2取高字节，否则直接取值。",
+    "scenarios": [
+      [
+        "OSC11 reply parsing scope",
+        "通道为fff",
+        "取高字节得到15，不扩展成255。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/osc11.rs",
+        "fn parse_osc11_rgb"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "OSC11 luminance polarity",
+    "contract": "OSC11极性分类 SHALL 对sRGB作gamma逆变换后按0.2126/0.7152/0.0722计算亮度，低于0.5为Dark，否则Light。",
+    "scenarios": [
+      [
+        "OSC11 luminance polarity",
+        "RGB为全黑",
+        "返回Dark。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/osc11.rs",
+        "fn classify_luminance"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "OSC11 terminal mode restoration scope",
+    "contract": "OSC11探测 SHALL 先检查stdin TTY并发送查询，再在Unix读取时保存termios并清除ICANON/ECHO/ISIG/IEXTEN，退出时尝试恢复原快照；恢复错误不返回给调用方，非Unix读取返回None。",
+    "scenarios": [
+      [
+        "OSC11 terminal mode restoration scope",
+        "Unix读取完成或提前返回",
+        "guard尝试恢复进入该读取前的termios，不调用crossterm全局disable_raw_mode。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/osc11.rs",
+        "fn read_osc_response_with_fd"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance animation conversion bounds",
+    "contract": "RawAnimationConfig转换 SHALL 将fps夹到1至60、wave_rows至少1，并保留show_fps；不将该局部限幅推导为所有配置字段均受范围校验。",
+    "scenarios": [
+      [
+        "Appearance animation conversion bounds",
+        "raw fps为0且wave_rows为0",
+        "转换得到fps1、wave_rows1。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl From<RawAnimationConfig>"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Manual fold preference persistence",
+    "contract": "persist_respect_manual_folds SHALL 在user grow home缺失时拒绝写入；持有进程内锁读取并更新scrollback.scroll.respect_manual_folds，临时写入后rename替换，不提供跨进程锁或fsync保证。",
+    "scenarios": [
+      [
+        "Manual fold preference persistence",
+        "原pager.toml内容无法解析",
+        "返回InvalidData，不把坏文件直接重写为默认配置。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "pub fn persist_respect_manual_folds"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Manual fold config table shape",
+    "contract": "manual folds配置更新 SHALL 要求scrollback与scrollback.scroll为普通可修改table，不兼容的节点形状返回错误，保留其他可解析文档内容。",
+    "scenarios": [
+      [
+        "Manual fold config table shape",
+        "scrollback字段是非table值",
+        "返回错误，不强制转换并覆盖该节点。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "fn upsert_respect_manual_folds"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom overlay chrome and health thresholds",
+    "contract": "GBOOM弹窗 SHALL 在区域小于30列或8行时不绘制，否则居中使用约90%区域并调暗背景；只绘制边框标题HUD，像素帧由调用方发送。HP大于60用绿、大于30用黄、其余用红，控制提示仅在剩余宽度足够时显示。",
+    "scenarios": [
+      [
+        "Minimum game overlay",
+        "区域为29列8行",
+        "返回None，不绘制弹窗。"
+      ],
+      [
+        "Critical health boundary",
+        "HP恰为30",
+        "HUD使用红色而非黄色。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/gboom_overlay.rs",
+        "pub fn render_gboom_overlay"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance optional color parsing",
+    "contract": "OptionalColor SHALL 接受三元素u8 RGB数组或字符串；字符串trim并小写，none/null为无颜色，其他按十六进制或固定命名表解析；命名色不随当前Theme变化。",
+    "scenarios": [
+      [
+        "Appearance optional color parsing",
+        "当前使用Day主题且配置BLUE",
+        "解析固定命名表RGB，不从Day palette查询BLUE。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "pub enum OptionalColor"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance optional color serialization loss",
+    "contract": "OptionalColor序列化 SHALL 将None写为none、RGB写数组、Indexed转固定RGB数组，其他Color变体写unknown；不保证所有可解析命名色或Color身份完整往返。",
+    "scenarios": [
+      [
+        "Appearance optional color serialization loss",
+        "BLACK解析为Color::Black后序列化并重读",
+        "序列化为unknown，后续按命名色解析会失败。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl Serialize for OptionalColor"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance optional color quantization access",
+    "contract": "OptionalColor::to_option SHALL 对Some颜色执行全局quantize，而to_option_raw保留原始Color；None保持None，不等同Some Reset。",
+    "scenarios": [
+      [
+        "Appearance optional color quantization access",
+        "颜色能力为None且OptionalColor包含RGB",
+        "to_option返回Some Reset，to_option_raw仍返回原RGB。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "pub fn to_option(&self)"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Scroll speed environment parsing order",
+    "contract": "scroll speed首次读取 SHALL 先直接解析未trim的GROW_SCROLL_SPEED为u8，有效后夹到1至100，无效回有效配置；超出u8范围不等同夹到100。",
+    "scenarios": [
+      [
+        "Scroll speed environment parsing order",
+        "环境值为300或带空白数字",
+        "环境解析失败，回配置而非直接取100。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/cache.rs",
+        "pub fn load_scroll_speed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Scroll mode environment fallback",
+    "contract": "scroll mode首次读取 SHALL 先trim环境值并严格解析，无效回配置；配置字符串不trim，仍无效才Auto。",
+    "scenarios": [
+      [
+        "Scroll mode environment fallback",
+        "环境值无效但配置为wheel",
+        "采用Wheel，不直接回Auto。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/cache.rs",
+        "pub fn load_scroll_mode"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance cache prime split behavior",
+    "contract": "prime SHALL 用传入UiConfig覆盖compact、timestamps、timeline、page flip、combine、simple及selection，其余设置调用各自lazy load；已设置的lazy项保留，非一次统一复制或读盘。",
+    "scenarios": [
+      [
+        "Appearance cache prime split behavior",
+        "调用prime前scroll speed已设置",
+        "lazy load保留该speed，但显式UiConfig覆盖组重新赋值。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/cache.rs",
+        "pub fn prime(ui"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Permission cursor environment default sentinel",
+    "contract": "默认权限光标首次加载 SHALL 将环境字符串解析后过滤AlwaysAllowAllSessions值，再回有效配置；因此显式always_allow_all_sessions环境值和未知字符串均不能据此压过磁盘偏好。",
+    "scenarios": [
+      [
+        "Permission cursor environment default sentinel",
+        "环境指定always_allow_all_sessions而配置为reject",
+        "使用配置Reject。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/permission_cursor.rs",
+        "pub fn load_default_selected_permission"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Permission cursor unmatched sticky fallback",
+    "contract": "resolve_initial_cursor SHALL 在非默认sticky存在时直接使用sticky；无匹配普通选项时回global选项再索引0，不再尝试配置偏好，空选项列表也返回0。",
+    "scenarios": [
+      [
+        "Permission cursor unmatched sticky fallback",
+        "sticky在选项中不存在但配置偏好存在",
+        "不重新匹配配置，按global或0回退。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/permission_cursor.rs",
+        "pub fn resolve_initial_cursor"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "System appearance watcher lifecycle",
+    "contract": "SystemAppearanceWatcher SHALL 仅在start_if_auto参数为true时创建，先同步detect作为初始值，再在异步循环sleep后同步detect，仅Option外观变化时send；不在循环重新读取auto开关，Drop abort任务但不能立即中断正在执行的同步detect。",
+    "scenarios": [
+      [
+        "Disabled auto watcher",
+        "start_if_auto传入false",
+        "返回None，不启动轮询任务。"
+      ],
+      [
+        "Unchanged appearance",
+        "新探测结果与当前Option值一致",
+        "不发送watch更新。"
+      ],
+      [
+        "Auto preference changes after startup",
+        "watcher已启动但其他位置关闭auto",
+        "该对象不自行检查新偏好停止，调用方需管理其生命周期。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/system_appearance.rs",
+        "pub fn start_if_auto"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance scroll conversion limits",
+    "contract": "ScrollConfig转换 SHALL 仅将min_page_fraction上限限制为100，margin与follow/fold布尔字段按raw传递。",
+    "scenarios": [
+      [
+        "Appearance scroll conversion limits",
+        "raw min_page_fraction超过100",
+        "结果为100，不改变margin。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl From<RawScrollConfig>"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance execute preview conversion",
+    "contract": "ExecuteConfig转换 SHALL 将first_lines和last_lines至少设为1，缺少running_accent时使用当前Theme accent_running，其余开关及header style转换保留。",
+    "scenarios": [
+      [
+        "Appearance execute preview conversion",
+        "running_accent为None且first_lines为0",
+        "使用主题accent并将first_lines设为1。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl From<RawExecuteConfig>"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance edit optional defaults",
+    "contract": "EditBlockConfig转换 SHALL 对未指定line_summary取true、expanded_by_default取false、hunk_separator取省略号；显式值优先，不把缺省与false混同。",
+    "scenarios": [
+      [
+        "Appearance edit optional defaults",
+        "raw未提供三个可选字段",
+        "转换得到true、false及…分隔符。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl From<RawEditBlockConfig>"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance thinking conversion and fixed flags",
+    "contract": "ThinkingConfig转换 SHALL 将bg_blend上限100再除100、truncated_lines至少1，缺少accent使用主题gray_dim；body_dim_italic和collapsed_expand_hint固定false。",
+    "scenarios": [
+      [
+        "Appearance thinking conversion and fixed flags",
+        "raw bg_blend超过100且truncated_lines为0",
+        "得到blend1.0及1行，同时两个固定标志为false。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl From<RawThinkingConfig>"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom crosshair target selection",
+    "contract": "准星目标 SHALL 在alive敌人中筛选前向投影大于0、垂距不超过HIT_WIDTH且LOS通畅者，取前向距离最小目标，同距保留枚举顺序；无额外射程上限。",
+    "scenarios": [
+      [
+        "Gboom crosshair target selection",
+        "两个合格目标前向距离相同",
+        "保留先枚举者。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "pub fn target_in_crosshair"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom damage and death transition",
+    "contract": "射击 SHALL 在无冷却时设置冷却与枪口闪光，无命中也设置；命中扣基础伤害加随机项，HP耗尽进入Dying并立即增加kills，否则进入Pain。",
+    "scenarios": [
+      [
+        "Gboom damage and death transition",
+        "最后敌人刚进入Dying",
+        "kills已增加，但外层Won阶段仍需等待死亡动画。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "fn try_fire"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom game victory predicate",
+    "contract": "Game::won SHALL 仅比较kills与敌人总数，dead仅比较玩家HP不大于0；Game step本身不依这两个谓词自动停止。",
+    "scenarios": [
+      [
+        "Gboom game victory predicate",
+        "kills等于敌人总数但尸体动画未结束",
+        "Game::won为true，不等同外层已切Won阶段。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "pub fn won"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom enemy state transitions",
+    "contract": "敌人 SHALL 从Idle在视距内且LOS成立时进入Chasing，近战范围内冷却结束进入Attacking；蓄力结束回Chasing并设置冷却，仅按扩大后的距离判断伤害，不复查LOS。Pain到期回Chasing，Dying到期Dead，Dead不再行动；本step总伤害最后统一扣玩家HP且下限0。",
+    "scenarios": [
+      [
+        "Attack expires outside hit distance",
+        "Attacking计时到期但玩家已离开命中距离",
+        "不造成伤害，仍回Chasing并设置冷却。"
+      ],
+      [
+        "Dying enemy expires",
+        "死亡动画计时耗尽",
+        "转Dead，后续step跳过该敌人。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "fn step_imps"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Frame draw sequencing and idle discard",
+    "contract": "draw_frame SHALL 先排同步更新开始、autoresize并渲染，设置链接后flush并交换buffer；无变化、无post-flush且无cursor动作时丢弃当前writer缓冲，否则发送post-flush、cursor、同步结束并flush。函数忽略这些I/O错误，flush_with_links错误按无变化处理，不返回整帧投递确认。",
+    "scenarios": [
+      [
+        "Completely idle frame",
+        "内容未变且无post-flush及cursor动作",
+        "discard未提交缓冲并返回，不提交仅含同步控制序列的空帧。"
+      ],
+      [
+        "Frame flush error",
+        "flush_with_links返回错误",
+        "按false继续并swap buffers，不通过返回值向调用方报告该错误。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/render/draw.rs",
+        "pub fn draw_frame"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance layout padding and compact projection",
+    "contract": "布局转换 SHALL 仅把左右 outer horizontal padding 提升到至少 1，保留 outer_vpad 和 block padding；compact 投影返回外部垂直 padding 0、左右水平 padding 1，非 compact 返回配置值。默认外部垂直 padding 为 1，其余四项为 2。",
+    "scenarios": [
+      [
+        "Zero padding conversion",
+        "raw layout 的五项 padding 均为 0",
+        "左右外部水平 padding 变为 1，其余仍为 0。"
+      ],
+      [
+        "Compact projection",
+        "对任意布局请求 compact 有效 padding",
+        "外部垂直为 0，左右水平为 1，不修改原配置。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl LayoutConfig"
+      ],
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl From<RawLayoutConfig>"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance terminal defaults and runtime initialization",
+    "contract": "RawAppearanceConfig 转换 SHALL 将未设置的 minimal_live_rows 和 minimal_max_commit_rows 分别解析为 10 和 2000，显式值原样保留；复制 minimal_collapse_thinking 与 alt_screen。转换初始化 prompt.compact=false、show_timestamps=true、show_timeline=UiConfig::SHOW_TIMELINE_DEFAULT 和默认 turn_status；这些初始化不代表后续持久化加载结果。",
+    "scenarios": [
+      [
+        "Absent versus explicit zero rows",
+        "行数选项分别为 None 或 Some(0)",
+        "缺省分别为 10/2000，显式零保持为零，本转换不施加下限。"
+      ],
+      [
+        "Fresh appearance runtime state",
+        "将 raw appearance 转为运行时配置",
+        "compact 初始 false，timestamps 初始 true，timeline 取共享默认值。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl From<RawAppearanceConfig>"
+      ],
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl Default for RawTerminalConfig"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Appearance scrollback display optional conversion",
+    "contract": "scrollback display 转换 SHALL 对缺省项使用 dim_accent=0.5、group_selection_split=true、highlight_overlays_border=false、expandable_indicator=true、expandable_indicator_running=true、indicator_char=›、selection_buttons=false、sticky_headers=true、tab_width=4、group_max_visible=10；collapsed_accent_char 缺省取当前 glyph helper。显式值直接保留，不在该转换中裁剪数值或限制字符串长度。",
+    "scenarios": [
+      [
+        "Missing optional display values",
+        "所有 optional display 字段未设置",
+        "按各字段独立默认值填充，collapsed accent 通过 glyph helper 取得。"
+      ],
+      [
+        "Explicit display values",
+        "提供 tab_width=0、group_max_visible=0 或空 indicator 字符串",
+        "转换保留这些值，不以默认值替换。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/appearance/config.rs",
+        "impl From<RawAppearanceConfig>"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard write legs execute without success short circuit",
+    "contract": "clipboard_write_with_route SHALL 按 native、tmux buffer、OSC52 顺序同步执行所有已启用路径，分别记录结果；前一路径成功或失败均不跳过后续已启用路径，最终反馈由收集到的结果另行判定。",
+    "scenarios": [
+      [
+        "Native write succeeds",
+        "native 写入成功且 tmux 与 OSC52 路由均启用",
+        "仍尝试 tmux buffer 和 OSC52，不能将 native 成功解释为仅写入一个目标。"
+      ],
+      [
+        "Disabled route leg",
+        "某条路由未启用",
+        "跳过该路径，保留其初始失败/未成功标志。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "fn clipboard_write_with_route"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Clipboard backup path and write boundary",
+    "contract": "复制备份路径 SHALL 优先采用 trim 后非空的 GROW_COPY_FILE 并展开 tilde，否则使用 user_grow_home/last-copy.txt；无法解析路径时返回 NotFound。当前 Unix 写入采用 create/truncate、设置 0600 后 write_all；备用入口递归创建缺失父目录时使用 0700，通用显式路径入口使用 create_dir_all。当前实现不提供原子替换、符号链接拒绝或失败时保留旧内容的保证。",
+    "scenarios": [
+      [
+        "Empty override",
+        "GROW_COPY_FILE 仅含空白",
+        "回退到 grow home，无法取得 home 时备份报 NotFound。"
+      ],
+      [
+        "Existing Unix copy file",
+        "向已有文件写入新内容",
+        "先打开并截断，再设为 0600 并写入；写入失败不能保证旧内容仍在。"
+      ],
+      [
+        "Generic explicit path",
+        "直接调用 write_text_to_copy_file",
+        "展开 tilde 并创建父目录，但不使用备用入口的 0700 DirBuilder。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn default_copy_fallback_path"
+      ],
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn write_text_to_copy_file"
+      ],
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "fn write_owner_only"
+      ],
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn write_copy_fallback"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Bracketed paste attachment probe size and line gates",
+    "contract": "paste_payload_needs_clipboard_attachment_probe SHALL 对空 payload 返回 true；trim 后无换行且以小写 http:// 或 https:// 开头的文本返回 false，其余 trim 后 UTF-8 长度至少 4096 字节返回 false；剩余文本仅在至多四行或含 :// 时返回 true。URL 分支只检查前缀和换行，不验证完整 URL。",
+    "scenarios": [
+      [
+        "Multibyte payload reaches byte limit",
+        "trim 后文本字符数少于 4096 但 UTF-8 字节数达到 4096",
+        "跳过附件探测。"
+      ],
+      [
+        "Long caption with URI marker",
+        "trim 后少于 4096 字节、超过四行且含 ://",
+        "允许附件探测；同样行数但无该标记则跳过。"
+      ],
+      [
+        "Whitespace-only bracketed paste",
+        "payload 非空但 trim 后为空",
+        "按至少一行处理并允许附件探测。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "fn lone_http_url_trimmed"
+      ],
+      [
+        "crates/codegen/pager-render/src/clipboard/mod.rs",
+        "pub fn paste_payload_needs_clipboard_attachment_probe"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Dropped path token decoding boundary",
+    "contract": "拖放 token SHALL trim 并去除一对匹配 ASCII 引号；file:// 通过 URL 解析与 to_file_path 解码，失败即拒绝。其他路径仅反转义反斜杠后一个字符，末尾单个反斜杠保留；Windows drive 或 UNC 形式不反转义。此函数不展开 tilde 或环境变量。",
+    "scenarios": [
+      [
+        "Windows separators",
+        "token 使用 drive-letter 或 UNC 路径",
+        "保留反斜杠分隔符，不当作 shell escape 删除。"
+      ],
+      [
+        "Home anchor is not expansion",
+        "token 为 ~/image.png",
+        "产生含字面 ~ 的 PathBuf，后续存在检查不隐式展开 home。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "fn token_to_path"
+      ],
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "fn shell_unescape"
+      ],
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "fn strip_matching_quotes"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Dropped image and nonimage path distinction",
+    "contract": "拖放路径 SHALL 先要求 file:// 或绝对/tilde/Windows anchor，拒绝空路径、/ 和包含 NUL/CR/LF 的解码路径。扩展名受支持且存在可读非空文件、字节 MIME 可识别、尺寸可解码时作为 Image 并保留输入路径；其他候选中 bare path 必须存在，file URL 可指向缺失目标，NonImage 尽量 canonicalize，失败保留原路径。",
+    "scenarios": [
+      [
+        "Missing file URL",
+        "有效 file URL 指向不存在且非根的目标",
+        "返回 NonImage 路径；等价 bare path 不存在时拒绝。"
+      ],
+      [
+        "Image symbolic link",
+        "输入路径是可读取并通过图片检查的符号链接",
+        "Image.source_path 保留输入路径，不走 NonImage 的 canonicalize 分支。"
+      ],
+      [
+        "Encoded newline",
+        "file URL 解码后路径含 CR 或 LF",
+        "拒绝路径，不进入图片或 NonImage 分类。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "fn try_read_dropped_path"
+      ],
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "fn read_image_at_path"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Session media directory identity prerequisite",
+    "contract": "session_images_dir 与 session_mermaid_dir SHALL 在没有 SessionId 时返回 None；有 SessionId 时把该 ID 和 cwd 的 lossy 字符串交给 session_dir，再分别追加 images 或 mermaid；两个 helper 仅派生路径，不创建目录。",
+    "scenarios": [
+      [
+        "No session identity",
+        "SessionId 为 None",
+        "两种媒体目录均为 None，不回退到临时缓存路径。"
+      ],
+      [
+        "Known session identity",
+        "传入 SessionId 和 cwd",
+        "分别返回同一会话目录下 images 与 mermaid 路径，不通过此调用写磁盘。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn session_images_dir"
+      ],
+      [
+        "crates/codegen/pager-render/src/prompt_images.rs",
+        "pub fn session_mermaid_dir"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Theme helper styles preserve native foreground",
+    "contract": "Theme 辅助样式 SHALL 让 fg 和 primary 直接设置给定颜色或 text_primary，不额外量化；muted/dim 在对应 gray/gray_dim 为 Reset 时仅添加 DIM 而不设置前景，否则仅设置该颜色。link_style 设置 link_fg 并添加 UNDERLINED；bold 仅添加 BOLD。",
+    "scenarios": [
+      [
+        "Native muted color",
+        "gray 或 gray_dim 为 Reset",
+        "相应 helper 产生 DIM modifier，前景保持未设置。"
+      ],
+      [
+        "Explicit gray color",
+        "gray 为 RGB 或命名颜色",
+        "muted 使用显式前景，不额外添加 DIM。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/tokyonight.rs",
+        "pub const fn muted"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/tokyonight.rs",
+        "pub const fn dim"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/tokyonight.rs",
+        "pub fn link_style"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/tokyonight.rs",
+        "pub const fn primary"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/tokyonight.rs",
+        "pub const fn bold"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Theme diff and polarity helper predicates",
+    "contract": "diff_uses_line_fg SHALL 仅在 diff_delete_bg 与 diff_insert_bg 同时为 Reset 时返回 true；ghost_text_style 设置 gray_dim 和 ITALIC，不通过 dim helper 添加 DIM。is_dark 对 RGB 或转换后的 Indexed 颜色按 classify_luminance 分类，对命名颜色和 Reset 直接返回 true。",
+    "scenarios": [
+      [
+        "Only one diff background resets",
+        "删除背景为 Reset 而插入背景不是 Reset",
+        "diff_uses_line_fg 返回 false。"
+      ],
+      [
+        "Named background polarity",
+        "bg_base 是 White 等命名色或 Reset",
+        "is_dark 返回 true；此 helper 不解析命名颜色亮度。"
+      ],
+      [
+        "Native ghost style",
+        "gray_dim 为 Reset",
+        "ghost text 显式设置 Reset 前景并加 ITALIC，不添加 DIM。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/theme/mod.rs",
+        "pub fn diff_uses_line_fg"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/mod.rs",
+        "pub fn ghost_text_style"
+      ],
+      [
+        "crates/codegen/pager-render/src/theme/mod.rs",
+        "pub fn is_dark"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom map collision and wall visibility",
+    "contract": "Map SHALL 将越界 cell 视为墙，非零 cell 视为 solid；blocked 检查中心加减 radius 形成的轴对齐方框所覆盖的全部格子，并非精确圆形相交。los 使用格子 DDA 仅检查墙，不检查敌人；距离小于 1e-4 直接可见，起点格不先检查，到达目标距离即返回可见。",
+    "scenarios": [
+      [
+        "Outside map",
+        "查询负坐标或超出宽高的 cell",
+        "返回墙材质 1，solid 为 true。"
+      ],
+      [
+        "Coincident visibility points",
+        "两个点距离小于 1e-4",
+        "直接返回 true，不先检查点所在格是否为墙。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "pub fn cell"
+      ],
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "fn blocked"
+      ],
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "pub fn los"
+      ]
+    ]
+  },
+  {
+    "crate": "pager-render",
+    "capability": "client-surfaces",
+    "requirement": "Gboom player integration and simulation ordering",
+    "contract": "Game.step SHALL 先增加 time，再更新玩家，消费一次 queued fire，最后更新敌人。玩家移动先衰减 hold timers，再归一化 forward/strafe 目标向量，使对角目标速度不超过直行；移动和旋转分别以 0.08/0.07 秒时间常数指数平滑，先积分角度再按 X、Y 分轴检查终点碰撞。bob 按速度累计，即使位置被墙阻止也继续；本 step 不校验或限幅传入 dt。",
+    "scenarios": [
+      [
+        "Diagonal held movement",
+        "同时持续按前进与横移",
+        "目标向量先归一化，再以 3.3 tiles/s 设置平移目标速度。"
+      ],
+      [
+        "Wall stops translation",
+        "分轴终点碰撞检查阻止位置更新但速度仍非零",
+        "bob 仍随速度和 dt 增加；碰撞不把对应速度直接归零。"
+      ],
+      [
+        "Queued shot after movement",
+        "本步开始时 fire_queued 为 true",
+        "先完成玩家积分，再清除队列标记并尝试开火，最后推进敌人。"
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "pub fn step"
+      ],
+      [
+        "crates/codegen/pager-render/src/gboom/game.rs",
+        "fn step_player"
+      ]
+    ]
+  }
+]
