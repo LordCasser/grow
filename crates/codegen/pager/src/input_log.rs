@@ -207,13 +207,6 @@ pub fn sanitize_key_code(code: &KeyCode) -> String {
     }
 }
 #[cfg(test)]
-pub fn format_key_code_raw(code: &KeyCode) -> String {
-    match code {
-        KeyCode::Char(c) if c.is_ascii_graphic() || *c == ' ' => format!("Char({c:?})"),
-        other => format!("{other:?}"),
-    }
-}
-#[cfg(test)]
 mod tests {
     #[test]
     fn input_dump_same_timestamp_preserves_each_private_snapshot() {
@@ -280,19 +273,6 @@ mod tests {
     fn sanitize_control_chars_preserved() {
         assert_eq!(sanitize_key_code(&KeyCode::Char('\x08')), "Char(BS)");
         assert_eq!(sanitize_key_code(&KeyCode::Char('\x7f')), "Char(DEL)");
-    }
-    #[test]
-    fn format_key_code_raw_shows_punctuation() {
-        assert_eq!(format_key_code_raw(&KeyCode::Char(';')), "Char(';')");
-        assert_eq!(
-            format_key_code_raw(&KeyCode::Char('\'')),
-            format!("Char({:?})", '\'')
-        );
-        assert_eq!(
-            format_key_code_raw(&KeyCode::Char('\\')),
-            format!("Char({:?})", '\\')
-        );
-        assert_eq!(format_key_code_raw(&KeyCode::Enter), "Enter");
     }
     #[test]
     fn sanitize_named_keys_use_debug() {

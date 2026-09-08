@@ -1,6 +1,6 @@
 # Tasks
 - [x] R12: review, remove within approved boundary, run relevant regression and commit.
-- [ ] R13: review, remove within approved boundary, run relevant regression and commit.
+- [x] R13: review, remove within approved boundary, run relevant regression and commit.
 - [ ] R14: review, remove within approved boundary, run relevant regression and commit.
 - [ ] R15: review, remove within approved boundary, run relevant regression and commit.
 - [ ] R16: review, remove within approved boundary, run relevant regression and commit.

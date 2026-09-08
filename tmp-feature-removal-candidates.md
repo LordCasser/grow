@@ -135,7 +135,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：全 crates 引用仅有定义及该函数自身的测试；生产 snapshot_entries 使用 sanitize_key_code，其他测试也不依赖原始格式化函数。
 - 删除理由：维护一个不参与产品或测试夹具的原始输出格式及自证测试，没有验证生产行为。
 - 拟删除范围：仅此辅助函数与专属测试。保留 input recorder、RawInputEntry、脱敏函数、环形容量测试、导出与真实快捷键。
-- 状态：等待用户确认，尚未删除。审计见 audit-input-recorder-boundary。
+- 状态：已获批并删除，输入日志回归 7/7 通过。审计见 audit-input-recorder-boundary。
 
 ## R14 · 未注册的输入日志 ActionId 占位
 
