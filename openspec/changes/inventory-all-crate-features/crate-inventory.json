@@ -3625,7 +3625,22 @@
       "Usage legends, details, and aligned columns",
       "Responsive wide and narrow bar geometry",
       "Responsive legend wrapping and theme colors",
-      "Theme-reactive BlockContent output and truncation contract"
+      "Theme-reactive BlockContent output and truncation contract",
+      "Sticky prompt descriptors and rendered-header helpers preserve height, clipping, and scratch-buffer invariants",
+      "Sticky headers select the last eligible prompt and apply gradual collapse bounded by configured and inline heights",
+      "Sticky push transitions keep gaps in content, clip only visible prior content, and hand off to the next prompt smoothly",
+      "Sticky scroll mapping preserves bottom-line continuity during c-j/c-k and gradual collapse",
+      "Sticky header hit mapping identifies pinned/pushed content and separates gaps from prompt rows",
+      "Welcome state routing and terminal overlay cleanup",
+      "Folder trust gate content, menu, version, and safe stacked geometry",
+      "Authenticated home hero menu and quit shortcut policy",
+      "Responsive welcome layout sizing and tip-slot precedence",
+      "Welcome version badges and hover styling",
+      "Session picker effective-query filtering and content-header gate",
+      "Grouped session picker headers, repo pinning, and row indentation",
+      "Resume picker row construction, expansion, and shortcut surface",
+      "Announcement, promo CTA, startup warning, and tip rendering",
+      "Session picker hit areas and render-result ownership contract"
     ],
     "reviewed_files": [
       {
@@ -5619,6 +5634,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
         "sha256": "5086432dfc754572b3a95d30fe0f503eca9dd55ae12f96baa44d53395d513c95"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "sha256": "b3ddb587c931facbaf2d7d691caa9819e8a42cc51644c39ab58514bff1d9e98f"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/sticky.rs",
+        "sha256": "e757db7e4b3194b35a49976626812155ac7cf5bb34364c61faa56c27b0c61313"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/welcome/mod.rs",
+        "sha256": "40e606a2fbec0c4344ca2d5b7028841bb74b8412370da7676a15040f3f2d47af"
       }
     ],
     "review": "reviews/pager.md"

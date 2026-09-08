@@ -74940,6 +74940,26 @@
         "Reuse and empty boundary",
         "scratch storage is prepared or rendering receives no drawable area",
         "stale buffer cells are reset, while empty entries or zero width/height yield the default result."
+      ],
+      [
+        "Zero-sized viewport",
+        "the supplied Rect has zero width or height",
+        "rendering returns the default output without painting or reading the view mode."
+      ],
+      [
+        "View-mode dispatch",
+        "the area is drawable and state.view_mode() is SingleTurn or AllTurns",
+        "the pane delegates to the corresponding sticky-header path, with SingleTurn using state.visible_entry_range() and AllTurns using 0..state.len()."
+      ],
+      [
+        "Scroll metadata",
+        "a drawable render completes",
+        "the output carries the scroll offset, viewport height and total height read from state.scroll_info()."
+      ],
+      [
+        "Scratch ownership",
+        "the caller reuses the supplied scratch buffer across frames",
+        "the pane passes that buffer through to the sticky/header render path and does not replace the caller-owned object."
       ]
     ],
     "sources": [
@@ -75018,6 +75038,14 @@
       [
         "crates/codegen/pager/src/scrollback/render.rs",
         "test_partial_visibility_top_clipped"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_with_scratch"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_with_scratch_and_selection_boundaries"
       ]
     ]
   },
@@ -75051,6 +75079,21 @@
         "Hidden-content isolation",
         "an entry slot is replaced by a synthetic header",
         "hidden body links, search matches, selectable lines and media placements do not project onto that header or following rows."
+      ],
+      [
+        "Shared range rendering",
+        "SingleTurn or AllTurns mode supplies an entry range",
+        "the same render_with_sticky_headers path renders that range and passes the visible range to render_content."
+      ],
+      [
+        "Group span forwarding",
+        "content rendering has cached group spans",
+        "render_content supplies state.group_spans() and the paint-range start to the delegated renderer."
+      ],
+      [
+        "Synthetic-header boundary",
+        "the delegated renderer returns a group-header selection or other post-render projection",
+        "the pane preserves the returned projection and does not independently fabricate hidden-member links, labels or media."
       ]
     ],
     "sources": [
@@ -75173,6 +75216,18 @@
       [
         "crates/codegen/pager/src/scrollback/wrappers/entry_renderer.rs",
         "group_header_chrome_prefix_width"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_single_turn"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_with_sticky_headers"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_content"
       ]
     ]
   },
@@ -75201,6 +75256,26 @@
         "Boundary sidecar",
         "cached structured boundaries accompany a clipped visible line",
         "the boundary is keyed to the resolved hit and retains source indentation; ordinary selectable output has no synthetic sidecar."
+      ],
+      [
+        "Cache precondition",
+        "render_content runs without a cached entry-layout vector",
+        "the explicit layout-cache expectation fails because prepare_layout is required before rendering."
+      ],
+      [
+        "Viewport paint window",
+        "a visible range and content viewport are supplied",
+        "paint_window determines the bounded paint range and the renderer receives its relative content_y0 and entry_index_base."
+      ],
+      [
+        "Singleton selection",
+        "the active selection resolves to one visible entry",
+        "the entry area becomes the selection box and top/bottom clipping is retained."
+      ],
+      [
+        "Grouped selection",
+        "the active selection spans multiple entries and cached virtual positions exist",
+        "the group virtual span is clipped to the content viewport and converted through HorizontalLayout into one selection area."
       ]
     ],
     "sources": [
@@ -75255,6 +75330,10 @@
       [
         "crates/codegen/pager/src/scrollback/render.rs",
         "ordinary_render_has_no_resolved_selection_boundaries"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_content"
       ]
     ]
   },
@@ -75288,6 +75367,21 @@
         "No double scan",
         "an authoritative Markdown link overlaps text recognizable by the generic scanner",
         "one semantic link group owns those cells rather than a duplicate generic link."
+      ],
+      [
+        "Source context forwarding",
+        "content rendering invokes the lower scrollback renderer",
+        "the renderer receives the exact media path list, group-span context and cwd held by ScrollbackPane and ScrollbackState."
+      ],
+      [
+        "Link overlay preservation",
+        "the lower renderer returns a link overlay",
+        "render_content places that overlay into the returned RenderOutput without rebuilding or filtering its links."
+      ],
+      [
+        "Hidden-row boundary",
+        "group or collapsed-row visibility affects link projection",
+        "the pane relies on the lower renderer and only supplies the authoritative paint range/group context."
       ]
     ],
     "sources": [
@@ -75458,6 +75552,14 @@
       [
         "crates/codegen/pager/src/app/agent_view/mouse.rs",
         "AgentView::handle_mouse"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::with_media_paths"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_content"
       ]
     ]
   },
@@ -75486,6 +75588,21 @@
         "Remote presentation policy",
         "official VS Code remote resolves a file overlay",
         "only fully self-resolving path paint is delegated; opaque basename or clipped paint keeps OSC/open ownership in Grow."
+      ],
+      [
+        "Bounded link input",
+        "paint_window returns a range inside the requested visible range",
+        "only entries and layout records from that paint range are passed to the lower renderer."
+      ],
+      [
+        "Tool link output",
+        "the lower renderer returns a tool-file or generic content overlay",
+        "the overlay is retained in RenderOutput alongside selection and media output."
+      ],
+      [
+        "Ownership boundary",
+        "a caller needs terminal link presentation or activation",
+        "this pane supplies render-time context but leaves scanning, target validation and activation to other layers."
       ]
     ],
     "sources": [
@@ -75576,6 +75693,10 @@
       [
         "crates/codegen/pager/src/app/agent_view/links.rs",
         "single_click_on_plan_tool_group_header_does_not_open_plan_preview"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_content"
       ]
     ]
   },
@@ -75604,6 +75725,21 @@
         "Diagram affordance",
         "an enabled Mermaid fence reserves its action row",
         "one visible blank-row placement carries the source and no inline-media placement is emitted."
+      ],
+      [
+        "Inline media projection",
+        "the lower renderer reports visible inline media placements",
+        "RenderOutput.inline_media contains that returned collection."
+      ],
+      [
+        "Diagram affordance projection",
+        "the lower renderer reports Mermaid or diagram affordances",
+        "RenderOutput.diagram_affordances contains that returned collection."
+      ],
+      [
+        "Placement ownership",
+        "media or diagram geometry requires source dimensions, viewport cropping or fallback controls",
+        "this layer forwards the context and preserves the result while the lower renderer owns the geometry."
       ]
     ],
     "sources": [
@@ -75638,6 +75774,10 @@
       [
         "crates/codegen/pager/src/scrollback/render.rs",
         "tool_media_overlay_exposes_filepath_click_rect"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_content"
       ]
     ]
   },
@@ -77134,6 +77274,26 @@
         "Lazy prompt seed",
         "an old one-line prompt is pinned before exact measurement",
         "the visible sticky height is clamped to its full height instead of the maximum truncated seed."
+      ],
+      [
+        "Compact header policy",
+        "sticky_headers is disabled or prompt.compact is enabled",
+        "the sticky layout is empty and content uses the full supplied area."
+      ],
+      [
+        "Pushed prompt",
+        "the sticky layout contains a pushed prompt with visible rows",
+        "the header is rendered at its computed screen row, clipped rows are faded, and a selected pushed header produces a top-clipped selection box when clip_top is positive."
+      ],
+      [
+        "Pinned prompt",
+        "the sticky layout contains a pinned prompt with visible rows",
+        "the header is rendered at its computed row and its selection area is derived through HorizontalLayout with a top-clipping flag only at the viewport origin."
+      ],
+      [
+        "Selection precedence",
+        "pushed, pinned and content selection candidates coexist",
+        "the returned selection box chooses pushed first, then pinned, then content."
       ]
     ],
     "sources": [
@@ -77224,6 +77384,18 @@
       [
         "crates/codegen/pager/src/scrollback/state/layout.rs",
         "permission_member_expanded_group_maps_rows_to_members"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_with_sticky_headers"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::build_prompt_descriptors_for_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_sticky_header"
       ]
     ]
   },
@@ -87997,6 +88169,21 @@
         "Link map generation",
         "scrollback generation changes",
         "visible citation and overlay links are rebuilt; otherwise the map is truncated to the prior scrollback-visible boundary before BTW links append."
+      ],
+      [
+        "Render input capture",
+        "a caller configures frame, focus, dimming, hover, search or media state",
+        "the corresponding builder stores the value on the pane and the later render path forwards or applies it."
+      ],
+      [
+        "Timestamp overlay",
+        "show_timestamps is enabled and a message-style entry has created_at and at least one output line",
+        "the first content row receives a gray timestamp if it fits in the content width."
+      ],
+      [
+        "Timestamp hover",
+        "the mouse is on the first content row inside the rightmost ten timestamp columns",
+        "the detailed timestamp format is used; otherwise the short format is used."
       ]
     ],
     "sources": [
@@ -88283,6 +88470,46 @@
       [
         "crates/codegen/pager/src/app/agent_view/mouse.rs",
         "AgentView::handle_mouse"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::active"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::with_frame"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::with_mouse_pos"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::with_dim_from"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::with_hovered_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::with_search_highlight"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::with_media_paths"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_entry_with_ctx_static"
       ]
     ]
   },
@@ -94117,6 +94344,26 @@
         "Exact text hit",
         "a pointer is tested for text ownership",
         "only a cell inside a nonempty selectable span returns a hit; surrounding chrome and gaps return None."
+      ],
+      [
+        "Inactive pane",
+        "is_active is false",
+        "relative_selected is absent and the content post-pass does not paint the selected-entry background or selection box."
+      ],
+      [
+        "Header-owned selection",
+        "a pushed or pinned header already owns the selected entry",
+        "content selection calculation is skipped to avoid a duplicate selection box."
+      ],
+      [
+        "Collapsed selected row",
+        "the active selection is a collapsed ToolCall, Thinking block or multi-entry group",
+        "the selected area receives a bg_dark fill clipped to content bounds, with border columns preserved unless configured otherwise."
+      ],
+      [
+        "Persistent output model",
+        "the lower renderer supplies selected area and selection model data",
+        "the pane preserves selected_entry_area and the delegated model in RenderOutput for later overlay consumers."
       ]
     ],
     "sources": [
@@ -94183,6 +94430,10 @@
       [
         "crates/codegen/pager/src/scrollback/text_selection.rs",
         "hit_test_text_exact_multiple_ranges_same_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_content"
       ]
     ]
   },
@@ -96652,6 +96903,31 @@
         "Non-header",
         "选中普通可见成员且不在展开组 collapse 路径",
         "toggle 返回 false，不修改 expansion。"
+      ],
+      [
+        "Hover eligibility",
+        "no entry is hovered, the hovered entry is selected, its block is not one of the supported header-style blocks, or its display mode is not Collapsed",
+        "the hover pass returns without changing the buffer."
+      ],
+      [
+        "Hover affordance",
+        "a supported collapsed header entry has an on-screen area",
+        "the pane paints a blended hover background with optional border inset and invokes the shared indicator helper."
+      ],
+      [
+        "Selected indicator",
+        "an active selected entry is foldable and at minimum fold mode",
+        "the pane paints the configured indicator on the bullet row, subject to the content-area bounds."
+      ],
+      [
+        "Verb member row",
+        "an expanded verb slot is selected or hovered",
+        "the indicator row is one below the slot top when the header is visible, and equals the slot top when the header is top-clipped."
+      ],
+      [
+        "Header clipping regression",
+        "verb_member_indicator_row is called with plain, expanded-visible and expanded-top-clipped inputs",
+        "the helper returns the tested rows 4, 5 and 4 respectively."
       ]
     ],
     "sources": [
@@ -96674,6 +96950,22 @@
       [
         "crates/codegen/pager/src/scrollback/state/selection.rs",
         "ScrollbackState::collapse_group_if_expanded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "ScrollbackPane::render_tool_call_hover"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "paint_expandable_indicator"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "verb_member_indicator_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/scrollback_pane.rs",
+        "tests::verb_member_indicator_row_tracks_header_clipping"
       ]
     ]
   },
@@ -170765,6 +171057,1038 @@
       [
         "crates/codegen/pager/src/scrollback/blocks/context_info.rs",
         "is_groupable"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Sticky prompt descriptors and rendered-header helpers preserve height, clipping, and scratch-buffer invariants",
+    "contract": "PromptDescriptor SHALL carry entry index, virtual Y, full and minimum heights, and sticky eligibility. RenderedPrompt::visible_height SHALL saturating-subtract clip_top from render_height, and needs_scratch_buffer SHALL be true exactly when clipping is required. StickyHeaderLayout SHALL expose header presence, content start/height, pinned/pushed entry positions, gap rows, and content-to-scroll mapping without exposing renderer internals.",
+    "scenarios": [
+      [
+        "Rendered prompt",
+        "a header has render_height and clip_top",
+        "visible_height is render_height minus clipping with saturation and scratch buffering is requested only for positive clipping."
+      ],
+      [
+        "Empty timeline",
+        "no prompts or no scroll has been passed",
+        "layout is default with no header and zero header rows."
+      ],
+      [
+        "Header helpers",
+        "a pinned/pushed layout is queried",
+        "content height/start, pinned/pushed rows, gaps and entry identity report the computed geometry."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "PromptDescriptor"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "RenderedPrompt"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "RenderedPrompt::visible_height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "RenderedPrompt::needs_scratch_buffer"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::header_screen_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::content_start_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::content_height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::scroll_for_content"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::has_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::pinned_entry_idx"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::pinned_screen_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::gap_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::pushed_screen_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::gap_between_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_no_prompts"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_no_scroll"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_rendered_prompt_helpers"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_helper_methods"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Sticky headers select the last eligible prompt and apply gradual collapse bounded by configured and inline heights",
+    "contract": "compute_sticky_layout SHALL find the last sticky prompt with y_virtual below scroll_offset, ignore non-sticky prompts for pinning while allowing them to push an earlier sticky prompt, and compute a 1:1 gradual collapse from full_height down to min_height. min_height SHALL be floored to one row and capped by full_height; the resulting render height SHALL also be capped by viewport_height.",
+    "scenarios": [
+      [
+        "Just past prompt",
+        "scroll has passed a sticky prompt by a small amount",
+        "the prompt is pinned at full_height minus rows scrolled past."
+      ],
+      [
+        "Minimum floor",
+        "scroll passes enough rows to collapse below min_height or min_height is zero",
+        "render_height stops at configured min_height, at least one row."
+      ],
+      [
+        "Stale minimum",
+        "min_height exceeds full_height",
+        "the pinned render height never exceeds full inline height."
+      ],
+      [
+        "Non-sticky prompt",
+        "a non-sticky prompt is scrolled past",
+        "it can push the prior sticky prompt but never becomes pinned itself."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "compute_sticky_layout"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "calculate_render_height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "MIN_PINNED_HEIGHT"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_gradual_collapse_just_scrolled_past"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_gradual_collapse_more_scrolled"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_gradual_collapse_reaches_minimum"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_gradual_collapse_stays_at_minimum"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_custom_min_height_small"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_min_height_clamped_to_full_height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_custom_min_height_zero_floor"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_gradual_collapse_trace"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_non_sticky_prompt_pushes_but_never_pins"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Sticky push transitions keep gaps in content, clip only visible prior content, and hand off to the next prompt smoothly",
+    "contract": "When the next prompt approaches the current header, compute_sticky_layout SHALL emit a pushed RenderedPrompt with the prior prompt's visible rows and clip_top, leave the approaching prompt inline until it is scrolled past, and return no header when only the gap or the next prompt's row occupies the top. Pushed render_height SHALL be min(full_height, collapsed render_height), preventing inflated padding for short prompts and preserving truncated rendering for long prompts. Once the next sticky prompt crosses the top, it SHALL become pinned.",
+    "scenarios": [
+      [
+        "Push begins",
+        "the next prompt lies within current header plus gap",
+        "the prior prompt is pushed and the next remains inline."
+      ],
+      [
+        "Gap only",
+        "the next prompt is at row zero or only the inter-entry gap is visible",
+        "no sticky header is emitted."
+      ],
+      [
+        "Short prompt",
+        "prior full_height is below collapsed minimum",
+        "pushed render_height uses full_height and clip_top exposes real content."
+      ],
+      [
+        "Long prompt",
+        "prior full_height exceeds collapsed render height",
+        "pushed render_height uses collapsed height and clips from the top."
+      ],
+      [
+        "Handoff",
+        "the next sticky prompt has crossed the top",
+        "the next prompt is pinned with its own gradual collapse."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "compute_sticky_layout"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_push_effect"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_next_prompt_becomes_pinned"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_pushed_visible_excludes_gap"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_pushed_header_small_prompt_uses_full_height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_pushed_header_large_prompt_uses_collapsed_height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_pushed_header_render_height_invariant"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_adjacent_small_prompts_smooth_scroll"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_two_prompt_scenario"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Sticky scroll mapping preserves bottom-line continuity during c-j/c-k and gradual collapse",
+    "contract": "StickyHeaderLayout::scroll_for_content SHALL add header_screen_rows to the logical scroll offset, and content_height SHALL subtract the header from viewport height. During gradual collapse, header shrink and scroll offset changes SHALL preserve the viewport bottom-line invariant; during reverse c-k transitions header rows SHALL change smoothly, scroll_for_content SHALL not increase in the tested reverse sequence, and adjacent small prompts SHALL expose actual content rather than inflated empty padding.",
+    "scenarios": [
+      [
+        "Forward scroll",
+        "the viewport scrolls past a prompt while its header collapses",
+        "bottom_line equals scroll_offset + viewport_height - 1 and scroll_for_content stays constant until the minimum is reached."
+      ],
+      [
+        "Reverse scroll",
+        "c-k moves from the next prompt toward the previous one",
+        "pushed visible rows grow one at a time, header row changes are at most one, and content mapping remains continuous."
+      ],
+      [
+        "Small adjacent prompts",
+        "several short prompts approach each other",
+        "the pushed header uses real full heights and exposes bottom content without empty inflated rows."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::scroll_for_content"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::content_height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_bottom_line_continuity"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_scroll_for_content_during_gradual_collapse"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_ck_from_gll"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_ck_header_rows_smooth_transition"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_ck_scroll_for_content_never_increases"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_ck_bottom_line_continuity"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_ck_next_prompt_not_clipped"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_adjacent_small_prompts_smooth_scroll"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Sticky header hit mapping identifies pinned/pushed content and separates gaps from prompt rows",
+    "contract": "entry_at_header_row SHALL return the pushed or pinned entry index only for visible prompt rows, returning None for inter-header/after-header gaps and out-of-range rows. header_entry_area SHALL return start row, visible height, and pushed flag only for a visible matching prompt. A pinned-only header SHALL place the prompt at row zero with a trailing gap; a pushed/pinned layout SHALL separate the two regions with a gap.",
+    "scenarios": [
+      [
+        "Pinned hit test",
+        "a row falls inside a pinned prompt, trailing gap, or after the header",
+        "only pinned rows resolve to the pinned entry; gaps and outside rows return None."
+      ],
+      [
+        "Pushed/pinned hit test",
+        "both regions are present",
+        "pushed rows resolve to the earlier entry, the gap resolves None, and pinned rows resolve to the later entry."
+      ],
+      [
+        "Entry area",
+        "a matching/nonmatching entry is queried",
+        "visible matching prompts return geometry with pushed status; absent/hidden entries return None."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::entry_at_header_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "StickyHeaderLayout::header_entry_area"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_entry_at_header_row_pinned_only"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_entry_at_header_row_pushed_and_pinned"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/sticky.rs",
+        "test_header_entry_area_pinned"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Welcome state routing and terminal overlay cleanup",
+    "contract": "render_welcome SHALL apply the current theme/background and margins, render the top bar, route TrustState::Pending to the folder-trust gate and all other states to the authenticated home/picker view, and return a paired post-flush overlay clear whenever the selected renderer did not supply one.",
+    "scenarios": [
+      [
+        "Trust pending",
+        "trust_state is Pending",
+        "the trust renderer receives the workspace, selection, compactness, and frame."
+      ],
+      [
+        "Authenticated",
+        "trust_state is Done",
+        "the normal hero or session picker renderer is selected."
+      ],
+      [
+        "Overlay cleanup",
+        "a renderer returns no post-flush escape",
+        "render_welcome attaches terminal overlay::clear() to the result."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "TrustState::Pending"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome_trust"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome_done"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "Theme::current"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "overlay::clear"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "post_flush_escapes"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Folder trust gate content, menu, version, and safe stacked geometry",
+    "contract": "render_welcome_trust SHALL center the directory trust question, workspace path, two-line security warning, and y/n menu, render the full version badge, return menu hit rectangles, and use WelcomeLayout::compute_stacked to preserve the version row while dropping the logo when the chrome cannot fit or when compact mode is active.",
+    "scenarios": [
+      [
+        "Normal gate",
+        "a wide non-compact trust area has room",
+        "logo, trust message, y/n menu, and in-bounds version row are rendered."
+      ],
+      [
+        "Overflowing gate",
+        "message and menu consume the available height",
+        "the logo is dropped before clipping the version row."
+      ],
+      [
+        "Compact gate",
+        "compact is true",
+        "the logo is omitted while the menu remains available."
+      ],
+      [
+        "Trust copy",
+        "a workspace path is supplied",
+        "the centered warning says Grow may run or modify directory contents and poses security risks."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome_trust"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "WelcomeLayout::compute_stacked"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "WelcomeLayout::compute_stacked_inner"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "WelcomeLayout::fixed_below"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_logo"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_menu"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_version_badge"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "logo_line_count"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "prompt_inset"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "VersionBadgeMode::Full"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Authenticated home hero menu and quit shortcut policy",
+    "contract": "render_welcome_done SHALL render the borderless home hero with New worktree, Resume session, and Quit actions, omit a prompt/changelog/bottom version footer, and choose ctrl+d for VS Code-family terminals while using ctrl+q elsewhere; menu hit rectangles SHALL be returned and shortcut placement SHALL keep the menu clear of the right screen edge.",
+    "scenarios": [
+      [
+        "Home baseline",
+        "the authenticated home has no picker",
+        "the rendered screen contains the three actions and no prompt placeholder, Beta marker, or Changelog row."
+      ],
+      [
+        "Terminal family",
+        "the terminal is VS Code-family or ordinary",
+        "Quit uses ctrl+d or ctrl+q respectively."
+      ],
+      [
+        "Wide hero",
+        "a wide terminal lays out logo and text side-by-side",
+        "shortcut text remains at least five columns from the screen edge."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome_done"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "welcome_in_vscode_family"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "terminal_context"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "key_w"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "key_s"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "key_q"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "ctrl+w"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "ctrl+s"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "ctrl+d"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "ctrl+q"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_hero"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "menu_rects"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Responsive welcome layout sizing and tip-slot precedence",
+    "contract": "render_welcome_done SHALL reserve content height for startup warnings, picker rows, menus, announcements, and tips; show the session picker in compact full-area mode when entries are loading/present, suppress the bottom tip while the picker is shown, and give pending update notifications precedence over random tips in the bottom slot.",
+    "scenarios": [
+      [
+        "Picker mode",
+        "session_picker is present or loading",
+        "the layout reserves picker height, hides home menu/logo through the picker renderer, and omits the bottom tip."
+      ],
+      [
+        "Loading picker",
+        "session picker loading is true",
+        "one loading row is reserved."
+      ],
+      [
+        "Tip precedence",
+        "no picker is shown and pending_update_version is present",
+        "the bottom slot renders the update version and ctrl+u restart hint."
+      ],
+      [
+        "Random tip",
+        "no update is pending and a tip exists",
+        "tip_height/render_tip use the inset available width."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome_done"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "show_picker"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "welcome_compact"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "picker_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "tip_height"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "pending_update_version"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_tip"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "compute_hero"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Welcome version badges and hover styling",
+    "contract": "render_version_badge SHALL render Grow with the current version and channel in the right-aligned Full mode, or Grow with the current version without channel in left-aligned HeroInline mode; hover_style SHALL promote hovered clickable blocks to text_primary while preserving the supplied base style otherwise.",
+    "scenarios": [],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_version_badge"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "VersionBadgeMode::Full"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "VersionBadgeMode::HeroInline"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "update::channel_label"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "version::VERSION"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "hover_style"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "theme.text_primary"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "theme.gray"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Session picker effective-query filtering and content-header gate",
+    "contract": "render_session_picker SHALL use the effective server-fetched/query value for both fuzzy session filtering and content-search header/row gating, so a live re-search with an equal entries_query does not add a stale Searching header while unstamped loading does; rendered content rows SHALL be deduplicated and indexed after fuzzy rows.",
+    "scenarios": [
+      [
+        "Stamped search",
+        "content loading is true and entries_query equals the live query",
+        "the picker renders server-fetched rows without a Searching session content header."
+      ],
+      [
+        "Unstamped search",
+        "content loading is true, query is nonempty, and entries_query is absent",
+        "the Searching session content header is rendered."
+      ],
+      [
+        "No query",
+        "the effective query is empty",
+        "content results do not create content rows/header."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_session_picker"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "effective_filter_query"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "filter_session_entries"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "build_session_entry_data_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "build_content_entry_data_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "build_content_header_label"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "show_content_header"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "content_start"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "content_loading"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "entries_query"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Grouped session picker headers, repo pinning, and row indentation",
+    "contract": "render_session_picker SHALL optionally group resume entries by repo_name, emit one non-selectable header per group, pin the current working-directory repository group ahead of the remaining alphabetical groups, preserve selectable rows beneath headers, and indent grouped rows by one level; empty input SHALL produce no entries or non-selectable indices.",
+    "scenarios": [
+      [
+        "Multiple groups",
+        "entries belong to multiple repositories",
+        "each group has one header and headers sort alphabetically unless the current repo is pinned first."
+      ],
+      [
+        "Current repo",
+        "cwd resolves to one group",
+        "that group is the first header."
+      ],
+      [
+        "Single group",
+        "all entries share a repository",
+        "exactly one header precedes all selectable rows."
+      ],
+      [
+        "Empty",
+        "no entries are supplied",
+        "the picker entry and non-selectable lists are empty."
+      ],
+      [
+        "Row presentation",
+        "a grouped row is rendered",
+        "its indent is one."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_session_picker"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "SessionPickerRenderCtx::grouped"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "build_grouped_picker_entries"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "repo_name_from_cwd"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "non_selectable_indices"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "PickerEntry::Header"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "PickerEntry::Row"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "PickerRow::indent"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Resume picker row construction, expansion, and shortcut surface",
+    "contract": "render_session_picker SHALL construct PickerRow data from filtered SessionEntryData, retain selection/expansion/fields/badges, append content matches with match badges and snippets, expose Esc/Enter/worktree/navigation/filter shortcuts, and configure picker input so `e` expands a selected row while `e` becomes query text when search input is active.",
+    "scenarios": [
+      [
+        "Normal selection",
+        "picker input is not active and e is pressed",
+        "the picker returns Expand for the selected entry."
+      ],
+      [
+        "Search selection",
+        "picker input is active and e is pressed",
+        "the picker returns QueryChanged and appends e to the query."
+      ],
+      [
+        "Rendered rows",
+        "session entries/content hits exist",
+        "rows carry their built labels, fields, badges, snippets, selection and expansion state."
+      ],
+      [
+        "Shortcuts",
+        "fullscreen picker is rendered",
+        "back/select/worktree/navigate/filter hints are present and vim mode is read from appearance cache."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "resume_picker_config"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "PickerConfig"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "PickerRow"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "PickerField"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "build_session_entry_data_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "build_content_entry_data_at"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "collapsible"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "snippet_preview"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "HintItem"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "handle_picker_input"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "PickerOutcome::Expand"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "PickerOutcome::QueryChanged"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "load_vim_mode"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Announcement, promo CTA, startup warning, and tip rendering",
+    "contract": "render_welcome_done SHALL render startup warnings in the hero error slot with severity-aware colors, pass announcements and expansion/CTA state into the hero, return announcement truncation/click and promo CTA rectangles, and render either the pending-update banner or random tip in the bottom slot.",
+    "scenarios": [
+      [
+        "Announcement",
+        "an announcement is supplied on the authenticated home",
+        "its title/message appears in the hero info slot, a click rect is returned, and no changelog fallback is used."
+      ],
+      [
+        "Startup warning",
+        "startup_warnings contain a selected warning",
+        "the message and optional action are centered with warning/info color and spacing."
+      ],
+      [
+        "Promo CTA",
+        "promo_cta is Some(label)",
+        "hero reserves a CTA row and reports its clickable rect."
+      ],
+      [
+        "Update/tip",
+        "pending update or random tip occupies the tip slot",
+        "update text/ctrl+u or the random tip is rendered with the configured inset."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_startup_warnings"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "banner_warning"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "WarningSeverity::Warning"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "WarningSeverity::Info"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_hero"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "announcement_truncated"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "announcement_rect"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "promo_cta_rect"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "promo_cta"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "pending_update_version"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_tip"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome_done"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Session picker hit areas and render-result ownership contract",
+    "contract": "WelcomeRenderResult SHALL expose menu rectangles, optional session-picker hit areas, announcement and promo hit rectangles, announcement truncation state, and post-flush overlay ownership; the trust gate returns only meaningful menu rects while the authenticated picker returns picker hit areas and the home hero returns menu/announcement/CTA rects.",
+    "scenarios": [],
+    "sources": [
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "render_welcome"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "WelcomeRenderResult"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "menu_rects"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "session_picker_hit_areas"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "announcement_truncated"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "announcement_rect"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "promo_cta_rect"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "post_flush_escapes"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "PickerHitAreas"
+      ],
+      [
+        "crates/codegen/pager/src/views/welcome/mod.rs",
+        "picker_close_button"
       ]
     ]
   }
