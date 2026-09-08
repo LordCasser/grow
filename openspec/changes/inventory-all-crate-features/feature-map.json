@@ -212566,5 +212566,794 @@
         "Padded::render"
       ]
     ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Scalable shared-leader fan-out fixture",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The ignored Tokio PTY test sets VIEWERS to two, starts one LeaderCluster at DEFAULT_ROWS by DEFAULT_COLS, and sets the shared mock response to turn_sentinel(1). LeaderCluster::start provides one ContentController-backed home and explicit leader socket; the local worker-thread and viewer count comments require increasing worker_threads together with VIEWERS if the fan-out is scaled.",
+    "scenarios": [
+      [
+        "Viewer fan-out size",
+        "the test starts with VIEWERS = 2",
+        "one driver plus two viewer clients are exercised."
+      ],
+      [
+        "Shared fixture",
+        "the cluster starts and the first response is configured",
+        "all clients use the same mock-backed shared leader/session environment and turn-specific sentinel payload."
+      ],
+      [
+        "Scaling boundary",
+        "a maintainer increases VIEWERS",
+        "the source comment requires increasing the Tokio worker-thread budget and the per-viewer survival pump assumptions together."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/leader_n_clients_shared_session.rs",
+        "VIEWERS"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "DEFAULT_ROWS"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "DEFAULT_COLS"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "turn_sentinel"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/leader.rs",
+        "LeaderCluster::start"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::set_response"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Driver turn and exactly-once replay for every viewer",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The driver spawns the leader with LeaderCluster::spawn_leader, waits for WELCOME_SCREEN_SENTINEL within LEADER_TIMEOUT, submits PROMPT, and waits for turn_sentinel(1) within STREAM_TIMEOUT. For each of the VIEWERS clients, LeaderCluster::attach creates a --resume client through the same leader; the test waits for turn_sentinel(1), pumps 500 ms so later replay batches are observed, and requires the viewer screen to contain the first-turn sentinel exactly once before storing the viewer.",
+    "scenarios": [
+      [
+        "Driver first turn",
+        "the driver reaches the welcome screen and submits PROMPT",
+        "the driver renders turn_sentinel(1) within the streaming timeout."
+      ],
+      [
+        "Viewer replay",
+        "a viewer attaches through the shared leader after turn 1",
+        "the viewer renders the driver transcript and its visible first-turn sentinel occurs exactly once."
+      ],
+      [
+        "Empty or duplicate replay",
+        "a viewer screen lacks the sentinel or contains it more than once after the settle pump",
+        "the corresponding assertion fails with the viewer screen."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "WELCOME_SCREEN_SENTINEL"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "PROMPT"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "LEADER_TIMEOUT"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "STREAM_TIMEOUT"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "turn_sentinel"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/leader.rs",
+        "LeaderCluster::spawn_leader"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/leader.rs",
+        "LeaderCluster::attach"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::wait_for_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::inject_keys"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::update"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::screen_contents"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Driver-to-all-viewers live stream fan-out",
+    "contract": "The implementation SHALL satisfy the following tested behavior: After replay setup, the test changes the shared response to turn_sentinel(2), injects `again` plus carriage return into the driver, and waits for the driver to render turn 2. It then waits for every viewer to render the same sentinel, pumps each viewer for 500 ms to catch delayed duplicate frames, and requires exactly one visible occurrence in each viewer screen.",
+    "scenarios": [
+      [
+        "Driver live turn",
+        "the shared response is set to turn 2 and the driver submits `again`",
+        "the driver observes turn_sentinel(2) within STREAM_TIMEOUT."
+      ],
+      [
+        "All-viewer fan-out",
+        "each attached viewer is waiting for turn 2",
+        "every viewer observes turn_sentinel(2) from the driver-driven stream."
+      ],
+      [
+        "Duplicate live frame",
+        "a viewer screen contains multiple turn-2 sentinels after settling",
+        "the exactly-once assertion fails for that viewer."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "STREAM_TIMEOUT"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "turn_sentinel"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::set_response"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::inject_keys"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::wait_for_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::update"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::screen_contents"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Viewer survival after driver exit and cleanup",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The test drops the spawning driver after turn 2, updates each viewer for three seconds, requires every viewer to remain running, rejects `panicked` on each viewer screen, and requires every viewer to retain turn_sentinel(2). It then consumes the viewer vector and calls PtyHarness::quit for each attached client. The local test is ignored and therefore these lifecycle assertions run only when the documented ignored-test command is selected.",
+    "scenarios": [
+      [
+        "Driver exit",
+        "the driver is dropped while two viewers remain attached",
+        "each viewer remains running after a three-second pump and retains the turn-2 sentinel."
+      ],
+      [
+        "Viewer liveness",
+        "a viewer is checked after driver exit",
+        "its visible screen does not contain `panicked`."
+      ],
+      [
+        "Viewer cleanup",
+        "all survival checks pass",
+        "each viewer is explicitly quit through PtyHarness::quit."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/leader_n_clients_shared_session.rs",
+        "leader_n_clients_shared_session"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::update"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::is_running"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::contains_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::screen_contents"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::quit"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "turn_sentinel"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "The ignored leader PTY scenario SHALL start one shared LeaderCluster at the default 50x120 geometry, configure a sentinel-bearing completed response, elect client A as leader, submit the shared PROMPT, and observe the turn sentinel before attaching another client.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: leader_reattach_completion_roundtrips_durable_log calls LeaderCluster::start(DEFAULT_ROWS, DEFAULT_COLS), configures ContentController::set_response with turn_sentinel(1) followed by `completed turn payload.`, spawns A with spawn_leader(&[]), waits for WELCOME_SCREEN_SENTINEL within LEADER_TIMEOUT, injects PROMPT plus carriage return, and waits for turn_sentinel(1) within STREAM_TIMEOUT. The source does not add a response chunk delay or independently assert a completion marker before reading the durable record.",
+    "scenarios": [
+      [
+        "Shared cluster startup",
+        "the ignored test begins",
+        "one mock-backed leader cluster and fixed 50x120 PTY geometry are created or the test fails."
+      ],
+      [
+        "Completed response fixture",
+        "the content controller is configured",
+        "the mock response contains turn_sentinel(1) and the literal completed-turn payload."
+      ],
+      [
+        "Leader election and prompt",
+        "A reaches the welcome sentinel",
+        "A submits the `go` prompt and waits for the response sentinel."
+      ],
+      [
+        "Turn rendered",
+        "turn_sentinel(1) appears within STREAM_TIMEOUT",
+        "the test proceeds to keep-alive attachment and durable completion checks."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_completion_roundtrips_durable_log.rs",
+        "leader_reattach_completion_roundtrips_durable_log"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "DEFAULT_ROWS"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "DEFAULT_COLS"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "WELCOME_SCREEN_SENTINEL"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "PROMPT"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "LEADER_TIMEOUT"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "STREAM_TIMEOUT"
+      ],
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/common.rs",
+        "turn_sentinel"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/leader.rs",
+        "LeaderCluster::start"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/leader.rs",
+        "LeaderCluster::spawn_leader"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::set_response"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::wait_for_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::inject_keys"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "After the response is rendered and a keep-alive viewer is attached, the leader scenario SHALL poll the durable updates log for turn_completed and require stop_reason=end_turn plus a non-empty prompt_id.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The test attaches keep through the shared LeaderCluster and waits for its replay before calling wait_for_turn_completed(STREAM_TIMEOUT). It asserts rec[\"stop_reason\"] equals end_turn and rec[\"prompt_id\"] is a non-empty string. The record is treated as the producer-side fail-before for durable replay; no other fields or exact envelope are asserted.",
+    "scenarios": [
+      [
+        "Keep-alive before driver exit",
+        "A has rendered turn 1",
+        "a second viewer attaches and observes the same sentinel before A is dropped."
+      ],
+      [
+        "Durable terminal appears",
+        "the cluster polls updates.jsonl",
+        "wait_for_turn_completed returns a turn_completed payload within STREAM_TIMEOUT."
+      ],
+      [
+        "Completed stop reason",
+        "the terminal payload is returned",
+        "stop_reason is exactly end_turn."
+      ],
+      [
+        "Prompt identity present",
+        "the same terminal payload is inspected",
+        "prompt_id is a non-empty string."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_completion_roundtrips_durable_log.rs",
+        "leader_reattach_completion_roundtrips_durable_log"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/leader.rs",
+        "LeaderCluster::attach"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/leader.rs",
+        "LeaderCluster::wait_for_turn_completed"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/leader.rs",
+        "LeaderCluster::session_updates"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "The leader scenario SHALL preserve the leader across the original driver's exit with a keep-alive viewer, then attach a fresh resume client after A exits and require that C replays the completed transcript through the surviving leader.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The keep viewer is attached after the turn and waits for turn_sentinel(1), then the test records inference_request_count. It drops A before calling cluster.attach(&[]) for fresh client C; C must observe turn_sentinel(1) within LEADER_TIMEOUT. This ordering specifically tests reattach after the original driver exits while relying on the keep viewer to hold the leader up.",
+    "scenarios": [
+      [
+        "Keep-alive replay",
+        "A's completed response is visible",
+        "keep attaches to the shared leader and sees turn_sentinel(1)."
+      ],
+      [
+        "Driver exit with keeper",
+        "the keep viewer has replayed the turn",
+        "dropping A does not stop the shared leader before C attaches."
+      ],
+      [
+        "Fresh post-exit reattach",
+        "A is dropped and the leader remains held by keep",
+        "C attaches with resume semantics and sees the prior completed sentinel."
+      ],
+      [
+        "Shared durable rail",
+        "C sees the prior sentinel",
+        "the test treats it as replay of the existing session rather than a newly driven turn."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_completion_roundtrips_durable_log.rs",
+        "leader_reattach_completion_roundtrips_durable_log"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/leader.rs",
+        "LeaderCluster::attach"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/leader.rs",
+        "LeaderCluster::spawn_client"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::wait_for_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::drop"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "After C replays the completed transcript, the scenario SHALL allow the replay to settle and require C to remain running, contain no panic marker, and contain no active-turn Waiting spinner.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The test waits for absence of the bare `Waiting` label with a five-second helper budget, asserts c.is_running(), asserts the screen does not contain `panicked`, and asserts it does not contain `Waiting`. Waiting absence is documented as a regression guard because a finished turn clears the leader prompt slot and a fresh reattach should land Idle; it is not the durable-record fail-before.",
+    "scenarios": [
+      [
+        "Replay settle",
+        "C has observed turn_sentinel(1)",
+        "wait_for_labels_absent pumps C until Waiting is absent or its five-second budget expires."
+      ],
+      [
+        "Client liveness",
+        "the settled screen is checked",
+        "C remains running."
+      ],
+      [
+        "No panic",
+        "the settled screen is checked",
+        "C contains no `panicked` marker."
+      ],
+      [
+        "Idle presentation",
+        "the settled screen is checked",
+        "C contains no `Waiting` active-turn spinner."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_completion_roundtrips_durable_log.rs",
+        "leader_reattach_completion_roundtrips_durable_log"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/flows.rs",
+        "wait_for_labels_absent"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::is_running"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::contains_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::screen_contents"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "The fresh reattach SHALL preserve the mock inference request count and SHALL display the completed turn sentinel exactly once after an additional repaint window.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The test saves inference_request_count(cluster.content()) before dropping A and attaching C, requires the final count to remain equal after replay and liveness assertions, then pumps C for 500 ms, captures screen_contents, and asserts screen.matches(&turn_sentinel(1)).count() == 1. The helper counts only chat completions, Responses, or messages requests, ignoring incidental models/settings GETs.",
+    "scenarios": [
+      [
+        "Capture pre-reattach count",
+        "keep has replayed the completed transcript and before A exits",
+        "the current inference request count is saved."
+      ],
+      [
+        "No inference re-drive",
+        "C reattaches and renders the prior turn",
+        "the final inference count equals the saved count."
+      ],
+      [
+        "Late replay batch window",
+        "C has passed the initial replay and 500 ms is pumped",
+        "the screen is sampled after a bounded extra repaint interval."
+      ],
+      [
+        "Exactly-once sentinel",
+        "the final screen snapshot is captured",
+        "turn_sentinel(1) occurs exactly once in the visible screen."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_completion_roundtrips_durable_log.rs",
+        "leader_reattach_completion_roundtrips_durable_log"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/flows.rs",
+        "inference_request_count"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/content.rs",
+        "ContentController::requests"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::update"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/pty.rs",
+        "PtyHarness::screen_contents"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Minimal PTY flush-left fixture and readiness contract",
+    "contract": "The ignored Tokio PTY test SHALL start an isolated ContentController, set a deterministic MOCK_RESPONSE_SENTINEL response, spawn the pager through spawn_minimal with the minimal/no-leader fixture at DEFAULT_ROWS by DEFAULT_COLS, and enable terminal query responses through the helper. It SHALL wait for MINIMAL_IDLE_SENTINEL before asserting layout so the test observes the native minimal path rather than a cold-start or downgraded screen.",
+    "scenarios": [
+      [
+        "Fixture startup",
+        "minimal_flush_left_no_hpad begins",
+        "ContentController::start succeeds and the response is set to the sentinel plus the alignment-check text."
+      ],
+      [
+        "Minimal process",
+        "the harness is spawned",
+        "spawn_minimal uses the configured minimal/no-leader PTY fixture and query forwarding is enabled."
+      ],
+      [
+        "Readiness gate",
+        "the process has been started",
+        "wait_minimal_ready waits for the minimal idle status before any screen alignment assertion."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "minimal_flush_left_no_hpad"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "ContentController::start"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "ContentController::set_response"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "spawn_minimal"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "MINIMAL_ARGS"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "DEFAULT_ROWS"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "DEFAULT_COLS"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "wait_minimal_ready"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "MINIMAL_IDLE_SENTINEL"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e_minimal.rs",
+        "pty_e2e_minimal"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Minimal live and committed content share the welcome-card left edge",
+    "contract": "After minimal readiness, and again after a completed prompt turn, the test SHALL verify that the first screen line containing each selected live or committed needle has zero leading ASCII spaces. The idle status `minimal · /help`, submitted user line `❯ go`, MOCK_RESPONSE_SENTINEL response and post-turn idle status SHALL therefore be flush-left at column zero, preserving the edge-to-edge minimal layout without the former block padding gutter.",
+    "scenarios": [
+      [
+        "Idle chrome",
+        "minimal reaches MINIMAL_IDLE_SENTINEL before a prompt is submitted",
+        "the status/live region line containing `minimal · /help` has no leading spaces."
+      ],
+      [
+        "Completed turn",
+        "PROMPT is submitted and MOCK_RESPONSE_SENTINEL plus MINIMAL_IDLE_SENTINEL are observed",
+        "the committed `❯ go` row, response row and live idle status each have zero leading ASCII spaces."
+      ],
+      [
+        "Response visibility",
+        "the turn-finished screen is captured",
+        "the screen contains MOCK_RESPONSE_SENTINEL before the flush-left assertions run."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "minimal_flush_left_no_hpad"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "assert_flush_left_live_rows"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "MINIMAL_IDLE_SENTINEL"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "PROMPT"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "MOCK_RESPONSE_SENTINEL"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::screen_contents"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::inject_keys"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::wait_for_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::update"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Minimal slash dropdown preserves flush-left rows",
+    "contract": "After the completed response turn, typing the `/tra` command prefix SHALL open the slash dropdown and the test SHALL wait for the `View the full conversation transcript` entry. The first screen line containing that entry SHALL begin at column zero with no leading ASCII spaces, and Esc SHALL close the dropdown before the next interaction.",
+    "scenarios": [
+      [
+        "Dropdown opens",
+        "the minimal prompt is idle and `/tra` is injected",
+        "the screen eventually contains `View the full conversation transcript`."
+      ],
+      [
+        "Dropdown alignment",
+        "the transcript suggestion is visible",
+        "its first matching screen line has zero leading ASCII spaces."
+      ],
+      [
+        "Dismissal",
+        "the alignment assertion completes",
+        "Esc is injected and a short update settles the closed dropdown before permission testing."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "minimal_flush_left_no_hpad"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "View the full conversation transcript"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "assert_flush_left_live_rows"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::inject_keys"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::wait_for_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::update"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Minimal permission modal flush-left rendering and recovery",
+    "contract": "The test SHALL script a run_terminal_command turn with a deterministic command and response, submit the permission-check prompt, wait for the `No, reject` modal option, and assert that its first screen line has no leading ASCII spaces. It SHALL then inject the allow-once shortcut `1`, wait for PERMISSION_SETTLED and the minimal idle sentinel, reject a visible `panicked` marker, and call quit_minimal for cleanup.",
+    "scenarios": [
+      [
+        "Permission modal",
+        "expect_tool_turn has installed call_flush/run_terminal_command and the prompt is submitted",
+        "the permission modal reaches the visible `No, reject` option within the timeout."
+      ],
+      [
+        "Modal alignment",
+        "`No, reject` is present on screen",
+        "the first matching modal row is flush-left at column zero."
+      ],
+      [
+        "Allow once recovery",
+        "the `1` shortcut is injected",
+        "the scripted turn reaches PERMISSION_SETTLED and then MINIMAL_IDLE_SENTINEL."
+      ],
+      [
+        "No panic and cleanup",
+        "the permission turn returns to idle",
+        "the visible screen has no `panicked` marker and quit_minimal is invoked."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "expect_tool_turn"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "run_terminal_command"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "No, reject"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "PERMISSION_SETTLED"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "expect_tool_turn"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/common.rs",
+        "quit_minimal"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::contains_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::wait_for_text"
+      ],
+      [
+        "crates/codegen/pager-pty-harness/src/lib.rs",
+        "PtyHarness::inject_keys"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "test-harness-runtime",
+    "requirement": "Needle-based flush-left assertion semantics",
+    "contract": "assert_flush_left_live_rows SHALL process needles in order, select the first screen line containing each needle, fail with the phase and full screen when a needle is absent, count only leading ASCII space characters using trim_start_matches(' '), and require that count to be zero. It SHALL therefore validate the selected visible row without treating other whitespace or later duplicate occurrences as equivalent evidence.",
+    "scenarios": [
+      [
+        "First matching row",
+        "a needle occurs in one or more screen lines",
+        "the helper checks the first containing line."
+      ],
+      [
+        "Missing needle",
+        "no screen line contains the requested text",
+        "the helper panics with the phase, needle and captured screen."
+      ],
+      [
+        "Leading spaces",
+        "the selected line begins with one or more ASCII spaces",
+        "the helper fails and reports the measured lead and line."
+      ],
+      [
+        "Flush-left line",
+        "the selected line begins with a non-space character",
+        "the helper accepts it as column-zero alignment."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "assert_flush_left_live_rows"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "trim_start_matches(' ')"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "phase"
+      ],
+      [
+        "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "screen.lines"
+      ]
+    ]
   }
 ]

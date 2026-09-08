@@ -1051,3 +1051,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Exactly-once and liveness contracts are encoded as hard-coded text counts and a `panicked` substring check instead of structured session/replay/frame evidence.
 - Pager 审计债务：The test combines leader startup, replay, bidirectional streaming, viewport expansion, scrolling recovery, and leader-survival lifecycle in one scenario, so failures have a broad diagnosis surface.
 - Pager 审计债务：The wheel/ESC fallback depends on terminal event routing and focus behavior; its local retry helper can mask whether scrolling, focus changes, or event cadence actually caused the recovery.
+- Pager 审计债务：The only N-client regression test is ignored and requires serialized explicit invocation, leaving scaled leader fan-out outside routine automated coverage.
+- Pager 审计债务：Long 240-second and 120-second waits and per-viewer settle/update pumps make runtime sensitive to host scheduling, PTY throughput, and suite contention.
+- Pager 审计债务：Fan-out correctness is encoded as hard-coded sentinel occurrence counts and a `panicked` substring check rather than structured session/replay/frame evidence.
+- Pager 审计债务：VIEWERS, Tokio worker-thread count, and post-driver pump duration are coupled by comments and manual tuning rather than a typed scaling budget or parameterized stress harness.
+- Pager 审计债务：The test combines shared setup, replay, live broadcast, delayed-frame duplicate detection, process lifecycle, and cleanup in one scenario, broadening the failure diagnosis surface.

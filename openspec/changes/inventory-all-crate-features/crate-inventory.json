@@ -4154,7 +4154,21 @@
       "Padded wrapper construction and standard inset contract",
       "Padded Renderable height projection",
       "Padded horizontal layout and inner content rendering",
-      "Padded background fill and content overwrite order"
+      "Padded background fill and content overwrite order",
+      "Scalable shared-leader fan-out fixture",
+      "Driver turn and exactly-once replay for every viewer",
+      "Driver-to-all-viewers live stream fan-out",
+      "Viewer survival after driver exit and cleanup",
+      "The ignored leader PTY scenario SHALL start one shared LeaderCluster at the default 50x120 geometry, configure a sentinel-bearing completed response, elect client A as leader, submit the shared PROMPT, and observe the turn sentinel before attaching another client.",
+      "After the response is rendered and a keep-alive viewer is attached, the leader scenario SHALL poll the durable updates log for turn_completed and require stop_reason=end_turn plus a non-empty prompt_id.",
+      "The leader scenario SHALL preserve the leader across the original driver's exit with a keep-alive viewer, then attach a fresh resume client after A exits and require that C replays the completed transcript through the surviving leader.",
+      "After C replays the completed transcript, the scenario SHALL allow the replay to settle and require C to remain running, contain no panic marker, and contain no active-turn Waiting spinner.",
+      "The fresh reattach SHALL preserve the mock inference request count and SHALL display the completed turn sentinel exactly once after an additional repaint window.",
+      "Minimal PTY flush-left fixture and readiness contract",
+      "Minimal live and committed content share the welcome-card left edge",
+      "Minimal slash dropdown preserves flush-left rows",
+      "Minimal permission modal flush-left rendering and recovery",
+      "Needle-based flush-left assertion semantics"
     ],
     "reviewed_files": [
       {
@@ -6628,6 +6642,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/wrappers/padded.rs",
         "sha256": "3338e43c6b6b61e65e6dc071434ed348acd9905c2e5523facd4081d28889500e"
+      },
+      {
+        "path": "crates/codegen/pager/tests/leader_pty_e2e/leader_n_clients_shared_session.rs",
+        "sha256": "522e086b1cd81a460306af96d3604202dc498657fa5b50a2abd0b49c3f762114"
+      },
+      {
+        "path": "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_completion_roundtrips_durable_log.rs",
+        "sha256": "a4c00568ee6c689d374d290308e1007ec45aaf483528bd26c0cb4ef874a46832"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_flush_left_no_hpad.rs",
+        "sha256": "4a2fa947e70a8526047f94c5078ed666b8f53c17ef004a6f46e32940707557dd"
       }
     ],
     "review": "reviews/pager.md"
