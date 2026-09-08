@@ -248,37 +248,6 @@ pub(super) fn dispatch_show_tasks(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Open the hidden `/gboom` easter egg as a modal over the active agent
-/// view. Requires a graphics-capable terminal (kitty protocol or iTerm2);
-/// otherwise a toast explains why nothing happened. On session-less
-/// surfaces (dashboard, welcome) this is a silent no-op.
-///
-/// Targets the top-level agent view (where the prompt lives), not a
-/// focused subagent view: the modal's tick/draw plumbing runs on the
-/// top-level view, like the other full-screen overlays.
-pub(super) fn dispatch_open_gboom(app: &mut AppView) -> Vec<Effect> {
-    use crate::terminal::image::{GraphicsProtocol, detect_graphics_protocol};
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    if detect_graphics_protocol() == GraphicsProtocol::None {
-        agent.show_toast(
-            "No demons here \u{2014} GBOOM needs a graphics-capable terminal \
-             (kitty, Ghostty, WezTerm, iTerm2)",
-        );
-        return vec![];
-    }
-    // Close other media modals: they share the kitty placement id. Drop the
-    // image viewer's in-flight loader too (its close path clears both —
-    // a stale completion is rejected by the viewer owner id).
-    agent.image_viewer = None;
-    agent.gboom = Some(crate::gboom::GboomState::new());
-    vec![]
-}
-
 /// Emit a `SessionReady` notification for the given agent.
 ///
 /// Takes `&NotificationService` separately from `&AgentView` to avoid

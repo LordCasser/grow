@@ -65,7 +65,7 @@ pub mod tool_usage;
 // `pager-render`. Re-exported at the crate root so existing
 // `crate::<module>::...` references throughout the pager keep resolving.
 pub use pager_render::{
-    appearance, clipboard, gboom, glyphs, host, link_opener, modal_window_state, prompt_images,
+    appearance, clipboard, glyphs, host, link_opener, modal_window_state, prompt_images,
     render, syntax, terminal, theme, util,
 };
 pub mod trace_cmd;

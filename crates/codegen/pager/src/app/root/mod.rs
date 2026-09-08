@@ -3706,66 +3706,6 @@ impl AppView {
         }
         needs_redraw
     }
-    /// Whether the `/gboom` easter egg is open on the active agent view.
-    /// While active it owns input, so the event loop preserves key-release
-    /// events for it and bypasses paste coalescing.
-    pub(crate) fn gboom_active(&self) -> bool {
-        matches!(self.active_view, ActiveView::Agent(id)
-            if self.agents.get(&id).is_some_and(|a| a.gboom.is_some()))
-    }
-
-    /// Gboom is a real simulation, not render-only motion. It owns this
-    /// process-local clock and advances only while its surface is visible.
-    pub(crate) fn simulation_frame_interval(&self, configured: Duration) -> Option<Duration> {
-        self.gboom_active().then_some(configured)
-    }
-
-    pub(crate) fn advance_simulation(&mut self) -> bool {
-        let ActiveView::Agent(id) = self.active_view else {
-            return false;
-        };
-        let Some(game) = self
-            .agents
-            .get_mut(&id)
-            .and_then(|agent| agent.gboom.as_mut())
-        else {
-            return false;
-        };
-        game.tick();
-        true
-    }
-    /// Un-latch held movement on every open `/gboom` game.
-    ///
-    /// In release-aware (Kitty) mode a key stays latched until its release
-    /// event arrives. On window focus loss the active game's release may be
-    /// dropped, so clear all games' holds to stop runaway motion.
-    pub(crate) fn gboom_release_all_games(&mut self) {
-        for agent in self.agents.values_mut() {
-            if let Some(gboom) = agent.gboom.as_mut() {
-                gboom.release_all();
-            }
-        }
-    }
-    /// Un-latch held movement on every `/gboom` game that is *not* the active
-    /// input target. Only the active game receives release events; a key
-    /// still held when the user switches agent tabs (or to any other view)
-    /// would otherwise leave that backgrounded game walking or turning with
-    /// no key down when it is next reopened. Reconciled every event-loop
-    /// iteration while a game is open, so it holds regardless of which view
-    /// becomes active or whether the shared keyboard layer stays pushed.
-    pub(crate) fn gboom_release_backgrounded_games(&mut self) {
-        let active = match self.active_view {
-            ActiveView::Agent(id) => Some(id),
-            _ => None,
-        };
-        for (id, agent) in self.agents.iter_mut() {
-            if Some(*id) != active
-                && let Some(gboom) = agent.gboom.as_mut()
-            {
-                gboom.release_all();
-            }
-        }
-    }
     fn prepare_agent_image_load(
         agent: &mut AgentView,
         agent_id: super::session::AgentId,
@@ -5695,32 +5635,6 @@ pub(crate) mod tests {
             app.visible_frame_interval(TEST_FRAME_INTERVAL),
             Some(TEST_FRAME_INTERVAL),
             "visible child foreground must animate even if the parent index already settled"
-        );
-    }
-    #[test]
-    fn gboom_backgrounded_game_drops_held_movement() {
-        use crate::gboom::GboomState;
-        let mut app = test_app_with_agent();
-        let id = super::super::session::AgentId(0);
-        let mut game = GboomState::new();
-        game.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
-        game.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
-        assert!(
-            game.any_movement_held(),
-            "press should latch a movement hold"
-        );
-        app.agents.get_mut(&id).unwrap().gboom = Some(game);
-        app.active_view = ActiveView::Agent(id);
-        app.gboom_release_backgrounded_games();
-        assert!(
-            app.agents[&id].gboom.as_ref().unwrap().any_movement_held(),
-            "the active game must keep its holds"
-        );
-        app.active_view = ActiveView::Welcome;
-        app.gboom_release_backgrounded_games();
-        assert!(
-            !app.agents[&id].gboom.as_ref().unwrap().any_movement_held(),
-            "a backgrounded game must drop its holds"
         );
     }
     /// `Event::Resize` must close the tip show gate of every agent view —
@@ -8694,35 +8608,6 @@ pub(crate) mod tests {
         assert!(
             matches!(outcome, InputOutcome::Action(Action::DashboardOverlayExit)),
             "Left on an empty focused prompt must exit the overlay, got {outcome:?}",
-        );
-    }
-    /// `/gboom` is opened from an empty prompt — the exact state where the
-    /// dashboard overlay steals Left/Esc as back-out. Both must reach the game.
-    #[test]
-    fn overlay_gboom_owns_left_and_esc() {
-        let (mut app, id) = neutral_overlay_app();
-        {
-            let agent = app.agents.get_mut(&id).unwrap();
-            agent.active_pane = crate::app::agent_view::AgentPane::Prompt;
-            agent.gboom = Some(crate::gboom::GboomState::new());
-        }
-        let left = app.handle_input(&key_event(KeyCode::Left, KeyModifiers::NONE));
-        assert!(
-            !matches!(left, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "Left with /gboom open must reach the game, got {left:?}",
-        );
-        assert!(
-            app.agents.get(&id).unwrap().gboom.is_some(),
-            "Left must not close /gboom",
-        );
-        let esc = app.handle_input(&key_event(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(
-            !matches!(esc, InputOutcome::Action(Action::DashboardOverlayExit)),
-            "Esc with /gboom open must close the game, not the overlay, got {esc:?}",
-        );
-        assert!(
-            app.agents.get(&id).unwrap().gboom.is_none(),
-            "Esc should close /gboom",
         );
     }
     /// Left arrow with an active prompt history search (empty draft) is NOT

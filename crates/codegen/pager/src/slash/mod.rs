@@ -1578,38 +1578,9 @@ mod tests {
         assert!(!snapshot.matches.is_empty());
     }
 
-    #[test]
-    fn gboom_never_appears_in_suggestions() {
-        // The /gboom easter egg is executable but must stay out of the
-        // dropdown: not in the full list, not via prefix, not via exact name.
-        let mut ctrl = SlashController::with_builtins(std::path::PathBuf::from("."));
-        let state = SlashState::default();
-        let models = ModelState::default();
-
-        for query in ["/", "/g", "/gbo", "/gboom"] {
-            ctrl.refresh(&state, query, query.len(), &models);
-            let snapshot = state.snapshot();
-            assert!(
-                snapshot
-                    .matches
-                    .iter()
-                    .all(|row| !row.display.contains("gboom")),
-                "/gboom leaked into suggestions for query {query:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn gboom_still_resolves_for_execution() {
-        // Dispatch resolves via `registry.get()`, which ignores `visible()`.
-        let reg = test_registry();
-        let cmd = reg.get("gboom").expect("/gboom resolvable for dispatch");
-        assert_eq!(cmd.name(), "gboom");
-    }
-
     /// `/debug` lists via `visible()` = cfg!(debug_assertions); tests
     /// compile with debug_assertions, so it must surface here. Release
-    /// builds flip the same constant to false (the /gboom hidden
+    /// builds flip the same constant to false (the command visibility
     /// mechanism), which is untestable from a debug test build — hence
     /// the cfg gate rather than a release-side assertion.
     #[test]

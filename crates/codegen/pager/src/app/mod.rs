@@ -52,34 +52,6 @@ use std::io::{self, IsTerminal, Write};
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
-/// Tracks the extra Kitty keyboard layer pushed while the `/gboom` game is
-/// open (see [`push_gboom_keyboard_flags`]). Kept separate from the base layer
-/// (`terminal::kitty_keyboard`) so teardown pops both, in LIFO order.
-static GBOOM_KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
-/// While the `/gboom` game owns input, additionally request
-/// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` so plain letter keys (WASD) emit
-/// release events — required to track several keys held at once. No-op
-/// unless the Kitty keyboard protocol is active. Balanced by
-/// [`pop_gboom_keyboard_flags`] (and by `restore_terminal` on teardown).
-pub(crate) fn push_gboom_keyboard_flags() {
-    if !kitty_flags_pushed() || GBOOM_KEYBOARD_PUSHED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let flags = event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        | event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        | event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
-    shell::util::with_locked_stderr(|stderr| {
-        let _ = execute!(stderr, event::PushKeyboardEnhancementFlags(flags));
-    });
-}
-/// Pop the extra keyboard layer pushed by [`push_gboom_keyboard_flags`].
-pub(crate) fn pop_gboom_keyboard_flags() {
-    if GBOOM_KEYBOARD_PUSHED.swap(false, Ordering::AcqRel) {
-        shell::util::with_locked_stderr(|stderr| {
-            let _ = execute!(stderr, event::PopKeyboardEnhancementFlags);
-        });
-    }
-}
 /// Tracks whether mouse capture (the five DEC modes enabled by
 /// crossterm `EnableMouseCapture` + bracketed paste) is currently active.
 pub(crate) static MOUSE_CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -1350,7 +1322,6 @@ fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<
     shell::util::with_locked_stderr(|stderr| {
         let _ = execute!(stderr, event::DisableFocusChange);
     });
-    pop_gboom_keyboard_flags();
     if crate::terminal::take_kitty_flags_pushed() {
         shell::util::with_locked_stderr(|stderr| {
             let _ = execute!(stderr, event::PopKeyboardEnhancementFlags);

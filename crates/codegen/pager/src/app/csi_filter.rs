@@ -66,7 +66,7 @@ impl CsiFragmentFilter {
                             filtered_count += 1;
                             self.tentative.clear();
                             result.pop(); // retract the bare Esc
-                            // translate the reassembled report into its focus event so focus-driven UX (prompt refocus, recap away-timer, /gboom key-release) still fires over SSH
+                            // translate the reassembled report into its focus event so focus-driven UX (prompt refocus, recap away-timer) still fires over SSH
                             result.push(TimedInputEvent {
                                 event: if ch == 'I' {
                                     Event::FocusGained

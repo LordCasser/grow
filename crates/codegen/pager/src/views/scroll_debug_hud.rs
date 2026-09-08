@@ -16,7 +16,7 @@
 //!
 //! Unlike the FPS overlay (`render::frame_metrics`, debug/dev builds only), this
 //! compiles into release builds behind its runtime gate (the hidden-command
-//! precedent, e.g. `/gboom`): dev instrumentation alters the frame pipeline
+//! visibility mechanism): dev instrumentation alters the frame pipeline
 //! (phase timings through `draw_frame`), so a dev-only HUD could not probe
 //! the production render path — defeating the zero-fidelity-gap goal — and
 //! the pty e2e suite runs against production-featured binaries.

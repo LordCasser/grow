@@ -32,7 +32,7 @@ impl AgentView {
     /// incremented in place — never persisted to disk).
     ///
     /// No-op while the row cannot paint (an occluding view — permission,
-    /// question, modal, subagent takeover, fullscreen viewer, `/gboom`, the
+    /// question, modal, subagent takeover, fullscreen viewer, the
     /// extensions/agents modals, the goal-detail overlay, or an open prompt
     /// dropdown — a short terminal, the unknown size before the first draw, or a
     /// pending re-measure right after a resize event) so counts, TTL, and
@@ -164,8 +164,6 @@ impl AgentView {
             || self.line_viewer.is_some()
             || self.image_viewer.is_some()
             || self.block_viewer.is_some()
-            // /gboom dims the same down-to-shortcuts region as other viewers.
-            || self.gboom.is_some()
             // Extensions/agents modals are centered popups (render_modal_window)
             // that capture all input and early-return out of draw; distinct
             // from active_modal. A tip could at most peek beside the modal,

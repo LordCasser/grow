@@ -50,7 +50,7 @@ impl CommandKind {
             | "transcript" | "expand" | "context" | "dashboard" | "session-info"
             | "announcements" | "view-plan" | "mcps" | "workflows" | "timeline" | "trajectory"
             | "usage" | "queue" | "tasks" | "release-notes" | "tutorial" | "jump" | "doctor"
-            | "gboom" | "scroll-debug" | "debug" | "agents" => Self::View,
+            | "scroll-debug" | "debug" | "agents" => Self::View,
             "minimal"
             | "fullscreen"
             | "multiline"

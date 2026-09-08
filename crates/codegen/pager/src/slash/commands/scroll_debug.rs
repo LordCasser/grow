@@ -1,7 +1,7 @@
 //! `/scroll-debug` — toggle the scroll-diagnostics HUD
 //! ([`crate::views::scroll_debug_hud`]).
 //!
-//! Hidden diagnostic (the `/gboom` pattern): typeable but never listed in
+//! Hidden diagnostic: typeable but never listed in
 //! the dropdown, and any argument produces a local usage error.
 //! Pairs with `GROW_SCROLL_DEBUG=1`, which enables the HUD from startup;
 //! this command flips it live mid-session.

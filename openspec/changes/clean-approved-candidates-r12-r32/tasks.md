@@ -2,7 +2,7 @@
 - [x] R12: review, remove within approved boundary, run relevant regression and commit.
 - [x] R13: review, remove within approved boundary, run relevant regression and commit.
 - [x] R14: review, remove within approved boundary, run relevant regression and commit.
-- [ ] R15: review, remove within approved boundary, run relevant regression and commit.
+- [x] R15: review, remove within approved boundary, run relevant regression and commit.
 - [ ] R16: review, remove within approved boundary, run relevant regression and commit.
 - [ ] R17: review, remove within approved boundary, run relevant regression and commit.
 - [ ] R18: review, remove within approved boundary, run relevant regression and commit.

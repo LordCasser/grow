@@ -870,8 +870,6 @@ pub enum Action {
     },
     /// Open the memory browser modal.
     OpenMemoryModal,
-    /// Open the hidden `/gboom` easter egg (DOOM-style raycaster modal).
-    OpenGboom,
     /// Open the active session's durable Timeline in the Trajectory web debugger.
     OpenTrajectory,
     /// Suspend the TUI and open a configuration file in `$EDITOR`.

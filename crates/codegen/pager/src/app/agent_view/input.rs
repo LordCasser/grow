@@ -115,7 +115,6 @@ impl AgentView {
             || self.line_viewer.is_some()
             || self.image_viewer.is_some()
             || self.block_viewer.is_some()
-            || self.gboom.is_some()
             || self.show_goal_detail
             || self.btw_focused
             || !self.permission_queue.is_empty()
@@ -149,7 +148,6 @@ impl AgentView {
             && self.line_viewer.is_none()
             && self.active_modal.is_none()
             && self.image_viewer.is_none()
-            && self.gboom.is_none()
             && self.extensions_modal.is_none()
             && self.btw_state.is_none()
             && self.scrollback_search.is_none()
@@ -181,12 +179,11 @@ impl AgentView {
     }
     /// Surfaces that own input ahead of the dashboard overlay cascade.
     /// That cascade runs before `handle_input`, so without this guard Left/Esc
-    /// on an empty prompt would exit the overlay instead of reaching `/gboom`
-    /// (turn/close) or image (close).
+    /// on an empty prompt would exit the dashboard overlay instead of reaching
+    /// the active modal or image viewer.
     fn modal_owns_input(&self) -> bool {
         self.extensions_modal.is_some()
             || self.active_modal.is_some()
-            || self.gboom.is_some()
             || self.image_viewer.is_some()
     }
     /// Prompt pane focused with an empty draft and no overlay or prompt-local
@@ -663,21 +660,6 @@ impl AgentView {
                         _ => InputOutcome::Changed,
                     }
                 }
-                _ => InputOutcome::Changed,
-            };
-        }
-        if self.gboom.is_some() {
-            return match ev {
-                Event::Key(key) if key.kind == KeyEventKind::Release => {
-                    self.handle_gboom_release(key)
-                }
-                Event::Key(key) => {
-                    if key!('q', CONTROL).matches(key) {
-                        return InputOutcome::Unchanged;
-                    }
-                    self.handle_gboom_key(key)
-                }
-                Event::Mouse(mouse) => self.handle_gboom_mouse(mouse),
                 _ => InputOutcome::Changed,
             };
         }
@@ -2393,9 +2375,6 @@ mod btw_focus_tests {
         );
         assert!(!crate::minimal_api::minimal_btw_surface_available(&agent));
         agent.image_viewer = None;
-        agent.gboom = Some(crate::gboom::GboomState::new());
-        assert!(!crate::minimal_api::minimal_btw_surface_available(&agent));
-        agent.gboom = None;
         agent.block_viewer = Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
             "t", "content",
         ));

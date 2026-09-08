@@ -1579,9 +1579,6 @@ pub(super) mod paste_key_tests {
         ));
         assert_refused(&mut agent, &mut counts, "block viewer");
         agent.block_viewer = None;
-        agent.gboom = Some(crate::gboom::GboomState::new());
-        assert_refused(&mut agent, &mut counts, "gboom");
-        agent.gboom = None;
         agent.extensions_modal = Some(crate::views::extensions_modal::ExtensionsModalState::new(
             crate::views::extensions_modal::ExtensionsTab::Hooks,
         ));

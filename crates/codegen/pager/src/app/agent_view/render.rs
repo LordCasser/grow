@@ -735,7 +735,6 @@ impl AgentView {
         > = Vec::new();
         if self.inline_media_active
             && (self.image_viewer.is_some()
-                || self.gboom.is_some()
                 || self.block_viewer.is_some()
                 || self.extensions_modal.is_some()
                 || self.agents_modal.is_some()
@@ -3683,64 +3682,6 @@ impl AgentView {
                 prompt_post_flush = Some(clear.into());
             }
             let hints = vec![HintItem::new(key!(Esc), "close")];
-            ShortcutsBar::new(&hints).render(layout.shortcuts, buf);
-            self.pane_areas = layout.pane_areas();
-            return (None, prompt_post_flush);
-        }
-        if let Some(gboom) = self.gboom.as_mut() {
-            use crate::terminal::image::{GraphicsProtocol, detect_graphics_protocol};
-            use crate::views::shortcuts_bar::HintItem;
-            let overlay_area = Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: layout.shortcuts.y.saturating_sub(area.y),
-            };
-            let mut gboom_escape_emitted = false;
-            let hud = gboom.hud();
-            if let Some(popup_rect) = crate::render::gboom_overlay::render_gboom_overlay(
-                buf,
-                overlay_area,
-                &hud,
-                theme.bg_base,
-                theme.text_primary,
-                theme.gray_dim,
-            ) {
-                gboom.set_mouse_region(
-                    popup_rect.x,
-                    popup_rect.y,
-                    popup_rect.width,
-                    popup_rect.height,
-                );
-                let inner_cols = popup_rect.width.saturating_sub(2);
-                let inner_rows = popup_rect.height.saturating_sub(2);
-                if inner_cols >= 10 && inner_rows >= 4 {
-                    let (px_w, px_h) =
-                        crate::gboom::GboomState::frame_size_for_cells(inner_cols, inner_rows);
-                    if let Some(png) = gboom.frame_png(px_w, px_h)
-                        && let Some(esc) = crate::terminal::overlay::volatile_image(
-                            png,
-                            inner_cols,
-                            inner_rows,
-                            popup_rect.x + 1,
-                            popup_rect.y + 1,
-                        )
-                    {
-                        prompt_post_flush = Some(esc.into());
-                        gboom_escape_emitted = true;
-                    }
-                }
-            } else {
-                gboom.clear_mouse_region();
-            }
-            if !gboom_escape_emitted && detect_graphics_protocol() == GraphicsProtocol::Kitty {
-                let clear = crate::terminal::overlay::clear_kitty();
-                prompt_post_flush = Some(clear.into());
-            }
-            let hints = vec![
-                HintItem::new(key!(Esc), "quit"),
-                HintItem::new(key!(' '), "fire"),
-            ];
             ShortcutsBar::new(&hints).render(layout.shortcuts, buf);
             self.pane_areas = layout.pane_areas();
             return (None, prompt_post_flush);

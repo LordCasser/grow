@@ -504,7 +504,6 @@ impl<'a> EffectiveCommandCatalog<'a> {
             "find",
             "fork",
             "fullscreen",
-            "gboom",
             "help",
             "history",
             "home",

@@ -2,7 +2,7 @@
 //!
 //! Registration/visibility split: the command is registered on EVERY binary
 //! and fully functional in release — like the hidden diagnostics it fronts
-//! (`/scroll-debug`, `/gboom`) — but it is LISTED (dropdown, completion,
+//! (`/scroll-debug`) — but it is LISTED (dropdown, completion,
 //! recognized-token highlight via `visible()`) only on debug binaries
 //! (`cfg(debug_assertions)`). Discoverable where developers live, out of
 //! sight for users, yet still typeable in the field when support asks.

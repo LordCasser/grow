@@ -1258,12 +1258,6 @@ pub(crate) async fn run(
     let mut tick_interval = tick_interval;
     let mut animation_deadline: Option<Instant> = None;
     let mut ui_state_deadline: Option<Instant> = None;
-    let mut simulation_deadline: Option<Instant> = None;
-
-    // Whether the extra Kitty keyboard layer (WASD release events) is
-    // currently pushed for the /gboom game. Synced to `gboom_active` each
-    // iteration so it is popped on every close path.
-    let mut gboom_keyboard_pushed = false;
 
     // Leader-mode roster poll (FleetView dashboard). Only fires while the
     // dashboard is open AND we're connected via a leader. Armed to fire
@@ -1449,7 +1443,6 @@ pub(crate) async fn run(
     // (without waiting for user input).
     schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
     schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
-    schedule_simulation(&mut simulation_deadline, &app, tick_interval);
 
     // Resize debounce: during continuous terminal drags, dozens of resize
     // events fire per second. Each would trigger a full layout rebuild of all
@@ -1503,7 +1496,6 @@ pub(crate) async fn run(
         app.sync_local_drafts(std::time::Instant::now());
         schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
         schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
-        schedule_simulation(&mut simulation_deadline, &app, tick_interval);
         // Pending $EDITOR / $PAGER suspends first: they can be armed by ANY
         // arm of the select below (input, ticks — e.g. minimal's incremental
         // /transcript build finishing inside a tick draw — tasks, ACP), so
@@ -1519,27 +1511,6 @@ pub(crate) async fn run(
             &mut suspend_retry_after,
             &mut suspend_wait_reports,
         )?;
-
-        // Keep the /gboom keyboard layer in sync with whether the game is
-        // open, so WASD emit releases while it runs and the layer is popped
-        // on every close path (Esc, game-over dismiss, session switch).
-        let want_gboom_keyboard = app.gboom_active();
-        if want_gboom_keyboard {
-            if !gboom_keyboard_pushed {
-                crate::app::push_gboom_keyboard_flags();
-                gboom_keyboard_pushed = true;
-            }
-            // Only the active game receives release events; any other open
-            // game must drop its latched holds, or it resumes walking with
-            // no key down when reopened after a tab/view switch.
-            app.gboom_release_backgrounded_games();
-        } else if gboom_keyboard_pushed {
-            crate::app::pop_gboom_keyboard_flags();
-            gboom_keyboard_pushed = false;
-            // No game is the active input target now (switched to a non-game
-            // view); clear every game's holds for the same reason.
-            app.gboom_release_all_games();
-        }
 
         // Re-arm the dashboard roster poll when the dashboard is open but the
         // poll has gone dormant — i.e. the dashboard was just opened. The poll
@@ -1562,13 +1533,6 @@ pub(crate) async fn run(
 
         let ui_state_maintenance = async {
             match ui_state_deadline {
-                Some(at) => sleep_until(at).await,
-                None => std::future::pending().await,
-            }
-        };
-
-        let simulation_frame = async {
-            match simulation_deadline {
                 Some(at) => sleep_until(at).await,
                 None => std::future::pending().await,
             }
@@ -1725,12 +1689,6 @@ pub(crate) async fn run(
                     app.maintain_ui(now.into_std());
                     presenter.request(false);
                     schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
-                }
-                if take_due_deadline(&mut simulation_deadline, now) {
-                    if app.advance_simulation() {
-                        presenter.request(false);
-                    }
-                    schedule_simulation(&mut simulation_deadline, &app, tick_interval);
                 }
                 if lifecycle_deadline_due(lifecycle_tick_at, now.into_std())
                     && let Some(effs) =
@@ -1922,13 +1880,6 @@ pub(crate) async fn run(
                 schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
             }
 
-            _ = simulation_frame => {
-                simulation_deadline = None;
-                if app.advance_simulation() {
-                    presenter.request(false);
-                }
-                schedule_simulation(&mut simulation_deadline, &app, tick_interval);
-            }
 
             trace = tracing_rx.recv(), if tracing_open => {
                 if trace.is_none() {
@@ -2586,22 +2537,6 @@ fn schedule_ui_maintenance(deadline: &mut Option<Instant>, app: &mut AppView, in
         .map(Into::into);
 }
 
-fn schedule_simulation(deadline: &mut Option<Instant>, app: &AppView, cap: Duration) {
-    let now = Instant::now();
-    if deadline.is_some_and(|at| at <= now) {
-        return;
-    }
-    let Some(interval) = app.simulation_frame_interval(cap) else {
-        *deadline = None;
-        return;
-    };
-    let candidate: Instant =
-        crate::motion::next_aligned_deadline(app.motion_origin, now.into_std(), interval).into();
-    if deadline.is_none_or(|current| candidate < current) {
-        *deadline = Some(candidate);
-    }
-}
-
 /// Sync `appearance_watcher` with the current `AUTO_MODE` flag.
 /// Starts or stops the watcher as needed; no-op when consistent.
 fn sync_appearance_watcher(watcher: &mut Option<SystemAppearanceWatcher>) {
@@ -2753,15 +2688,7 @@ async fn drain_and_process(
         }
     }
 
-    // The /gboom game tracks keys by press → release, so it needs the
-    // release events that `coalesce_rapid_keys` strips (and it never
-    // pastes). Skip coalescing while it owns input.
-    let coalesced = if app.gboom_active() {
-        raw_events
-    } else {
-        coalesce_rapid_keys(raw_events)
-    };
-    let coalesced = csi_filter.filter(coalesced);
+    let coalesced = csi_filter.filter(coalesce_rapid_keys(raw_events));
     let coalesced = coalesced
         .into_iter()
         .map(normalize_input_event)
@@ -2849,12 +2776,6 @@ async fn drain_and_process(
             }
             Event::FocusLost => {
                 app.notification_service.focus_tracker.on_focus_lost();
-                // The /gboom game latches held keys until their release; a
-                // release can be lost while unfocused, so stop all movement.
-                if app.gboom_active() {
-                    app.gboom_release_all_games();
-                    needs_draw = true;
-                }
                 return false;
             }
             _ => {}

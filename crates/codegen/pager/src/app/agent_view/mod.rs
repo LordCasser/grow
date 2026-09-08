@@ -869,8 +869,6 @@ pub struct AgentView {
     /// Active image viewer popup. When `Some`, shows an image preview that
     /// intercepts input (Esc to close).
     pub(crate) image_viewer: Option<crate::prompt_images::ImageViewerState>,
-    /// Active `/gboom` easter-egg game modal.
-    pub(crate) gboom: Option<crate::gboom::GboomState>,
     /// Protocol-prepared image bytes keyed by file path. Used for dimension
     /// decoding and iTerm2 re-sends. Kitty transmits once and re-places.
     pub(crate) inline_media_cache: std::collections::HashMap<std::path::PathBuf, Vec<u8>>,

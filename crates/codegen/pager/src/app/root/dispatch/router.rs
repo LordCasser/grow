@@ -81,7 +81,7 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_copy_usage_modal_value, dispatch_open_gboom,
+    dispatch_copy_session_id, dispatch_copy_usage_modal_value,
     dispatch_open_tutorial, dispatch_show_context_info, dispatch_show_queue,
     dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
     dispatch_show_usage,
@@ -1168,7 +1168,6 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             vec![]
         }
-        Action::OpenGboom => dispatch_open_gboom(app),
         Action::SuspendForEditor {
             path,
             refresh_agents_modal,

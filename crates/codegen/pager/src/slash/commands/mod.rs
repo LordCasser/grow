@@ -29,7 +29,6 @@ pub mod export;
 pub mod feedback;
 pub mod find;
 pub mod fork;
-pub mod gboom;
 pub mod help;
 pub mod history;
 pub mod home;
@@ -145,8 +144,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(release_notes::ReleaseNotesCommand),
         Arc::new(tutorial::TutorialCommand),
         Arc::new(config_agents::ConfigAgentsCommand),
-        // Hidden easter egg: never listed, runs on bare `/gboom`.
-        Arc::new(gboom::GboomCommand),
         // Hidden diagnostic: never listed, toggles the scroll-debug HUD.
         Arc::new(scroll_debug::ScrollDebugCommand),
         // Debug toggles: always registered, listed only on debug binaries.
@@ -281,7 +278,6 @@ mod tests {
             "find",
             "fork",
             "fullscreen",
-            "gboom",
             "help",
             "history",
             "home",
@@ -698,33 +694,6 @@ mod tests {
         assert!(reg.get("debug").is_some(), "/debug must be executable");
     }
     #[test]
-    fn gboom_is_registered_and_executable() {
-        let reg = CommandRegistry::new(builtin_commands());
-        assert!(reg.get("gboom").is_some(), "/gboom must be executable");
-    }
-    #[test]
-    fn gboom_is_invisible() {
-        let models = ModelState::default();
-        let ctx = crate::slash::command::AppCtx {
-            models: &models,
-            agents: &[],
-            current_agent: None,
-            behavior_mode: tools::types::BehaviorId::Normal,
-            goal_available: false,
-            current_goal_objective: None,
-            auto_permission_available: false,
-            current_permission: "ask",
-            cwd: std::path::Path::new("."),
-            has_session_announcements: false,
-            workflows_available: true,
-            screen_mode: crate::app::ScreenMode::Fullscreen,
-        };
-        assert!(
-            !gboom::GboomCommand.visible(&ctx),
-            "/gboom must never appear in the dropdown"
-        );
-    }
-    #[test]
     fn minimal_and_fullscreen_are_the_only_screen_commands() {
         let reg = CommandRegistry::new(builtin_commands());
         assert!(reg.get("minimal").is_some());
@@ -742,24 +711,6 @@ mod tests {
             "/recap should be registered in builtins"
         );
         assert!(reg.get("summarize").is_none());
-    }
-    #[test]
-    fn gboom_bare_invocation_opens_game() {
-        let models = ModelState::default();
-        let mut ctx = make_ctx(&models);
-        let result = gboom::GboomCommand.run(&mut ctx, "");
-        assert!(matches!(result, CommandResult::Action(Action::OpenGboom)));
-        let result = gboom::GboomCommand.run(&mut ctx, "   ");
-        assert!(matches!(result, CommandResult::Action(Action::OpenGboom)));
-    }
-    #[test]
-    fn gboom_with_args_returns_usage_error() {
-        let models = ModelState::default();
-        let mut ctx = make_ctx(&models);
-        assert!(matches!(
-            gboom::GboomCommand.run(&mut ctx, "guide me"),
-            CommandResult::Error(message) if message == "Usage: /gboom"
-        ));
     }
     #[test]
     fn recap_returns_manual_send_recap_action() {

@@ -6,7 +6,7 @@ use crate::app::root::InputOutcome;
 use crate::render::SafeBuf;
 use crate::terminal::overlay::{self, PostFlush};
 use crate::theme::Theme;
-use crossterm::event::{KeyEvent, MouseEvent};
+use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -524,43 +524,6 @@ impl AgentView {
                 self.request_mermaid_render(source, action);
             }
         }
-    }
-
-    // -- /gboom easter egg input ------------------------------------------------
-
-    /// Handle a key event in the `/gboom` game modal.
-    pub(super) fn handle_gboom_key(&mut self, key: &KeyEvent) -> InputOutcome {
-        let Some(ref mut gboom) = self.gboom else {
-            return InputOutcome::Unchanged;
-        };
-        match gboom.handle_key(key) {
-            crate::gboom::GboomKeyOutcome::Close => {
-                // Clear the kitty image before closing so no stale frame
-                // lingers in the cell grid.
-                shell::util::with_locked_stderr(|stderr| {
-                    let clear = PostFlush::from(overlay::clear_kitty());
-                    let _ = clear.write_to(stderr);
-                });
-                self.gboom = None;
-            }
-            crate::gboom::GboomKeyOutcome::Changed => {}
-        }
-        InputOutcome::Changed
-    }
-
-    /// Handle a key-release in the `/gboom` modal (un-latch movement).
-    pub(super) fn handle_gboom_release(&mut self, key: &KeyEvent) -> InputOutcome {
-        if let Some(ref mut gboom) = self.gboom {
-            gboom.handle_release(key);
-        }
-        InputOutcome::Changed
-    }
-
-    pub(super) fn handle_gboom_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
-        if let Some(ref mut gboom) = self.gboom {
-            gboom.handle_mouse(mouse);
-        }
-        InputOutcome::Changed
     }
 }
 

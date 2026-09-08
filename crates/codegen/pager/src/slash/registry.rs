@@ -114,7 +114,7 @@ pub struct CommandRegistry {
     /// [`Self::get_for_dispatch`]: a fully-typed invocation still executes.
     ///
     /// Registry-level analogue of the per-command `SlashCommand::visible()`
-    /// gate (the `/gboom` mechanism) for state the command object cannot
+    /// visibility gate for state the command object cannot
     /// see. Menu-only: hidden from completion but still executable via
     /// [`Self::get_for_dispatch`].
     menu_hidden: HashSet<String>,

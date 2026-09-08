@@ -276,7 +276,6 @@ impl AgentView {
             last_prompt_click_ms: None,
             line_viewer: None,
             image_viewer: None,
-            gboom: None,
             inline_media_cache: std::collections::HashMap::new(),
             inline_media_pending: HashSet::new(),
             inline_media_failed: HashSet::new(),
