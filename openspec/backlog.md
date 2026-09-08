@@ -1046,3 +1046,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Probe names are unrestricted static strings and live-TUI classification is a string match, so adding or renaming a probe has no compiler-checked relationship to probe collection.
 - Pager 审计债务：ClipboardFacts retains the legacy optional fix string beside named findings, leaving two remediation representations that can diverge unless view consumers keep them synchronized.
 - Pager 审计债务：The large aggregate structs have no local constructors or invariants; callers assemble public fields directly and can create contradictory combinations that remain Eq/PartialEq-valid.
+- Pager 审计债务：The sole regression test is ignored and requires serialized explicit invocation, leaving multi-client leader behavior outside routine automated coverage.
+- Pager 审计债务：Long 240-second and 120-second waits plus repeated wheel bursts make the test expensive and sensitive to host scheduling, PTY throughput, and suite contention.
+- Pager 审计债务：Exactly-once and liveness contracts are encoded as hard-coded text counts and a `panicked` substring check instead of structured session/replay/frame evidence.
+- Pager 审计债务：The test combines leader startup, replay, bidirectional streaming, viewport expansion, scrolling recovery, and leader-survival lifecycle in one scenario, so failures have a broad diagnosis surface.
+- Pager 审计债务：The wheel/ESC fallback depends on terminal event routing and focus behavior; its local retry helper can mask whether scrolling, focus changes, or event cadence actually caused the recovery.

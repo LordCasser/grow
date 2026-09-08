@@ -4140,7 +4140,21 @@
       "Overlay routing SHALL keep the app-level Ctrl-Q quit binding available and SHALL apply the implementation's explicit modifier rules for fullscreen and prompt-transfer keys.",
       "Pager dashboard module façade and public ownership boundary",
       "Dashboard feature flag precedence and default behavior",
-      "Session switch hint command selection by screen mode and dashboard availability"
+      "Session switch hint command selection by screen mode and dashboard availability",
+      "Shared leader cluster and client attachment setup",
+      "Exactly-once replay visibility for the attached client",
+      "Bidirectional live streaming across leader clients",
+      "Three-turn transcript projection and liveness checks on both panes",
+      "Leader survival after the spawning client exits",
+      "The ignored leader PTY scenario SHALL start one shared LeaderCluster at the suite's default 50x120 geometry, configure a long sentinel-bearing mock response with 40 ms chunk delay, elect client A as leader, submit the shared PROMPT, and wait until the sentinel is visible while streaming before cancellation.",
+      "After observing an active streamed turn, the leader PTY scenario SHALL send Ctrl-C, wait for the visible user-cancelled marker, poll the durable session log for turn_completed, and require stop_reason to equal cancelled.",
+      "Once cancellation is durably recorded, the leader scenario SHALL attach a keep-alive viewer and a fresh resume client through the same leader, and each client SHALL observe the prior turn sentinel without causing a new turn.",
+      "After fresh client C has replayed the cancelled transcript, the scenario SHALL drop the original driver, allow leader disconnect processing, and require C to remain alive with the transcript visible and without active-turn or panic indicators.",
+      "The fresh reattach SHALL be proven to replay from the durable log by preserving the mock inference request count from before C attaches through the post-disconnect assertions.",
+      "Padded wrapper construction and standard inset contract",
+      "Padded Renderable height projection",
+      "Padded horizontal layout and inner content rendering",
+      "Padded background fill and content overwrite order"
     ],
     "reviewed_files": [
       {
@@ -6602,6 +6616,18 @@
       {
         "path": "crates/codegen/pager/src/views/dashboard/mod.rs",
         "sha256": "61100832d4702198cced85c8bf6e5f83e838a4d0a166f4f1647b4e1a7a08ab7d"
+      },
+      {
+        "path": "crates/codegen/pager/tests/leader_pty_e2e/leader_two_clients_shared_session.rs",
+        "sha256": "49fc98c6352f5e5d5f094d2a9ee713fb74bf3e65b4bbf1d5d20b42d256b3f235"
+      },
+      {
+        "path": "crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_cancellation_roundtrips_durable_log.rs",
+        "sha256": "9ecb9699b0f7f83a2c9bc5f7e3cb799c937e5009ddc95a48a1ed8c09d2927f88"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/wrappers/padded.rs",
+        "sha256": "3338e43c6b6b61e65e6dc071434ed348acd9905c2e5523facd4081d28889500e"
       }
     ],
     "review": "reviews/pager.md"

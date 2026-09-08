@@ -29916,3 +29916,285 @@ session_switch_hint_command SHALL return Some(`/resume`) in minimal mode regardl
 - **THEN** minimal banners advertise `/resume`, enabled non-minimal banners may advertise `/agents`, and disabled banners omit the refused command.
 
 证据：`crates/codegen/pager/src/views/dashboard/mod.rs` — `session_switch_hint_command`；`crates/codegen/pager/src/views/dashboard/mod.rs` — `tests::switch_hint_minimal_is_resume_even_with_dashboard_disabled`；`crates/codegen/pager/src/views/dashboard/mod.rs` — `tests::switch_hint_non_minimal_follows_dashboard_flag`；`crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs` — `session_created_banner_advertises_resume_in_minimal_mode`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `build_child_fork_marker_omits_dashboard_tip_when_disabled`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `build_child_fork_marker_minimal_mode_advertises_resume`；`crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs` — `build_child_fork_marker_worktree_format`。
+
+
+### Requirement: Shared leader cluster and client attachment setup
+
+The implementation SHALL satisfy the following tested behavior: The test starts LeaderCluster at DEFAULT_ROWS by DEFAULT_COLS. LeaderCluster::start creates one ContentController-backed shared home, creates a fixed `.grow/leader-e2e.sock`, and resolves the pager binary. It sets the first response to turn_sentinel(1), spawns client A with the leader socket, waits for WELCOME_SCREEN_SENTINEL within LEADER_TIMEOUT, submits PROMPT with carriage return, and waits for A to render turn 1 within STREAM_TIMEOUT. The cluster then attaches client B through the same leader with --resume and waits for B to render the replayed turn.
+
+#### Scenario: Leader client startup
+- **WHEN** the shared cluster starts and client A is spawned
+- **THEN** A uses the explicit leader socket, reaches the welcome sentinel, and completes the first prompt turn.
+
+#### Scenario: Shared-session attach
+- **WHEN** client B is attached through the same LeaderCluster after A has committed turn 1
+- **THEN** B resumes the shared session and observes turn_sentinel(1).
+
+#### Scenario: Content fixture
+- **WHEN** the cluster content response is set before each turn
+- **THEN** the mock server emits a deterministic turn-specific sentinel payload.
+
+证据：`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `WELCOME_SCREEN_SENTINEL`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `LEADER_TIMEOUT`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `STREAM_TIMEOUT`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `turn_sentinel`；`crates/codegen/pager-pty-harness/src/leader.rs` — `LeaderCluster::start`；`crates/codegen/pager-pty-harness/src/leader.rs` — `LeaderCluster::spawn_leader`；`crates/codegen/pager-pty-harness/src/leader.rs` — `LeaderCluster::attach`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`。
+
+
+### Requirement: Exactly-once replay visibility for the attached client
+
+The implementation SHALL satisfy the following tested behavior: After B observes the first turn, the test reads B screen_contents and requires turn_sentinel(1) to occur exactly once. The check is a visible-screen substring count and treats a duplicated replay as a failure; it does not count durable session records or inference requests.
+
+#### Scenario: Single replay
+- **WHEN** B has attached and rendered the first turn
+- **THEN** B screen_contents contains the first-turn sentinel exactly once.
+
+#### Scenario: Duplicated replay
+- **WHEN** the first turn is rendered more than once in B screen_contents
+- **THEN** the exact-count assertion fails with the captured B screen.
+
+证据：`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `turn_sentinel`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: Bidirectional live streaming across leader clients
+
+The implementation SHALL satisfy the following tested behavior: The test changes the shared mock response to turn_sentinel(2), submits `again` through A using submit_turn, and waits for B to observe the second sentinel. It then changes the response to turn_sentinel(3), submits `more` through B, and waits for A to observe the third sentinel. submit_turn re-presses Enter after bounded wait attempts until the sentinel appears or STREAM_TIMEOUT expires, preventing a dropped submit from being mistaken for a streaming failure.
+
+#### Scenario: Leader-to-viewer stream
+- **WHEN** A submits the second prompt after B has attached
+- **THEN** B observes turn_sentinel(2) within STREAM_TIMEOUT.
+
+#### Scenario: Viewer-to-leader stream
+- **WHEN** B submits the third prompt
+- **THEN** A observes turn_sentinel(3) within STREAM_TIMEOUT.
+
+#### Scenario: Dropped submit recovery
+- **WHEN** an initial Enter is dropped while clients contend
+- **THEN** submit_turn may re-inject Enter until the requested sentinel appears, while its helper contract treats an already-sent prompt as an extra no-op.
+
+证据：`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `STREAM_TIMEOUT`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `turn_sentinel`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/flows.rs` — `submit_turn`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_text`。
+
+
+### Requirement: Three-turn transcript projection and liveness checks on both panes
+
+The implementation SHALL satisfy the following tested behavior: For each client A and B, the test resizes the PTY to 200 rows by DEFAULT_COLS, waits 600 ms, and repeatedly injects the SGR mouse-wheel-up sequence in up to four bursts of fifty events with increasing delays, followed by a 500 ms update. If turn 1 remains absent it sends keys::ESC twice with 200 ms updates before another wheel sequence. Within a 20-second deadline it requires each of turn_sentinel(1), turn_sentinel(2), and turn_sentinel(3) to occur exactly once, requires the process to remain running, and rejects a `panicked` marker.
+
+#### Scenario: Transcript recovery to top
+- **WHEN** a client has all three turns but earlier content may be above the viewport
+- **THEN** the resize and wheel/ESC retry loop eventually exposes all three turn sentinels or reaches the 20-second deadline.
+
+#### Scenario: Exactly-once transcript
+- **WHEN** all three sentinels are visible on a client screen
+- **THEN** each sentinel occurs exactly once, rejecting dropped or duplicated turns.
+
+#### Scenario: Pane liveness
+- **WHEN** the client is checked after scrolling
+- **THEN** PtyHarness::is_running is true and the visible screen does not contain `panicked`.
+
+证据：`crates/codegen/pager/tests/leader_pty_e2e/leader_two_clients_shared_session.rs` — `wheel_scroll_to_top`；`crates/codegen/pager/tests/leader_pty_e2e/leader_two_clients_shared_session.rs` — `all_turns_once`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::resize`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::is_running`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::contains_text`。
+
+
+### Requirement: Leader survival after the spawning client exits
+
+The implementation SHALL satisfy the following tested behavior: After both panes have the three-turn transcript, the test drops client A, pumps B for three seconds, requires B to remain running, requires B screen_contents to retain turn_sentinel(3), and then calls B quit. The test function is ignored, so these lifecycle assertions run only when explicitly selected with the documented ignored-test command.
+
+#### Scenario: Spawning client exits
+- **WHEN** A is dropped while B remains attached to the shared leader
+- **THEN** B stays alive after a three-second update and retains the third-turn sentinel.
+
+#### Scenario: Attached client cleanup
+- **WHEN** the survival assertion passes
+- **THEN** B is explicitly quit through PtyHarness::quit.
+
+证据：`crates/codegen/pager/tests/leader_pty_e2e/leader_two_clients_shared_session.rs` — `leader_two_clients_shared_session`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::is_running`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `turn_sentinel`。
+
+
+### Requirement: The ignored leader PTY scenario SHALL start one shared LeaderCluster at the suite's default 50x120 geometry, configure a long sentinel-bearing mock response with 40 ms chunk delay, elect client A as leader, submit the shared PROMPT, and wait until the sentinel is visible while streaming before cancellation.
+
+The implementation SHALL satisfy the following tested behavior: leader_reattach_cancellation_roundtrips_durable_log calls LeaderCluster::start(DEFAULT_ROWS, DEFAULT_COLS), configures ContentController::set_response with turn_sentinel(1) followed by filler repeated 40 times, and sets set_chunk_delay(Some(Duration::from_millis(40))). It spawns the leader client with spawn_leader(&[]), waits for WELCOME_SCREEN_SENTINEL within LEADER_TIMEOUT, injects PROMPT plus carriage return, and waits for turn_sentinel(1) within STREAM_TIMEOUT. The streaming sentinel closes the rewind window before Ctrl-C is sent, so the test exercises cancellation of an active turn rather than rewind handling.
+
+#### Scenario: Shared cluster startup
+- **WHEN** the ignored test begins
+- **THEN** one mock-backed leader cluster and fixed 50x120 PTY geometry are created or the test fails.
+
+#### Scenario: Paced long response
+- **WHEN** the test configures the content controller
+- **THEN** the response contains the turn sentinel plus 40 repeated filler fragments and is emitted with a 40 ms chunk delay.
+
+#### Scenario: Leader election and prompt
+- **WHEN** client A is spawned and the welcome sentinel is visible
+- **THEN** A submits the `go` prompt and waits for the turn sentinel.
+
+#### Scenario: Active streaming boundary
+- **WHEN** turn_sentinel(1) becomes visible within STREAM_TIMEOUT
+- **THEN** the test proceeds to Ctrl-C cancellation after observing an active streamed turn.
+
+证据：`crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_cancellation_roundtrips_durable_log.rs` — `leader_reattach_cancellation_roundtrips_durable_log`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `WELCOME_SCREEN_SENTINEL`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `LEADER_TIMEOUT`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `STREAM_TIMEOUT`；`crates/codegen/pager/tests/leader_pty_e2e/common.rs` — `turn_sentinel`；`crates/codegen/pager-pty-harness/src/leader.rs` — `LeaderCluster::start`；`crates/codegen/pager-pty-harness/src/leader.rs` — `LeaderCluster::spawn_leader`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_chunk_delay`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`。
+
+
+### Requirement: After observing an active streamed turn, the leader PTY scenario SHALL send Ctrl-C, wait for the visible user-cancelled marker, poll the durable session log for turn_completed, and require stop_reason to equal cancelled.
+
+The implementation SHALL satisfy the following tested behavior: The test injects keys::CTRL_C into client A, pumps 200 ms, waits for `Turn cancelled by user` within STREAM_TIMEOUT, then calls LeaderCluster::wait_for_turn_completed(STREAM_TIMEOUT). It asserts rec["stop_reason"] == "cancelled"; the persisted turn_completed record is the producer-side fail-before for later replay. No prompt_id or other record fields are asserted here.
+
+#### Scenario: Cancel active turn
+- **WHEN** A is visibly streaming turn 1
+- **THEN** Ctrl-C is injected while the prompt is empty and the harness pumps the leader for 200 ms.
+
+#### Scenario: User-facing cancellation
+- **WHEN** the cancellation path completes within STREAM_TIMEOUT
+- **THEN** A renders `Turn cancelled by user`.
+
+#### Scenario: Durable terminal exists
+- **WHEN** the cluster's updates log is polled for turn_completed
+- **THEN** wait_for_turn_completed returns a record instead of timing out.
+
+#### Scenario: Cancelled stop reason
+- **WHEN** the terminal record is returned
+- **THEN** its stop_reason field is exactly `cancelled`.
+
+证据：`crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_cancellation_roundtrips_durable_log.rs` — `leader_reattach_cancellation_roundtrips_durable_log`；`crates/codegen/pager-pty-harness/src/leader.rs` — `LeaderCluster::wait_for_turn_completed`；`crates/codegen/pager-pty-harness/src/leader.rs` — `LeaderCluster::session_updates`；`crates/codegen/pager-pty-harness/src/flows.rs` — `wait_for_labels_absent`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::update`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `keys::CTRL_C`。
+
+
+### Requirement: Once cancellation is durably recorded, the leader scenario SHALL attach a keep-alive viewer and a fresh resume client through the same leader, and each client SHALL observe the prior turn sentinel without causing a new turn.
+
+The implementation SHALL satisfy the following tested behavior: The test attaches `keep` after the cancellation, waits for turn_sentinel(1) within LEADER_TIMEOUT to establish replay and retain a second leader client, records inference_request_count, then attaches fresh client C while A is still alive and waits for the same sentinel within LEADER_TIMEOUT. The ordering intentionally avoids a cold --resume handshake racing A's teardown while still exercising durable-log replay through the shared leader.
+
+#### Scenario: Keep-alive replay
+- **WHEN** turn_completed with stop_reason=cancelled has persisted
+- **THEN** cluster.attach(&[]) creates a viewer and it sees turn_sentinel(1) within LEADER_TIMEOUT.
+
+#### Scenario: Fresh reattach while driver remains
+- **WHEN** keep is attached and A is still running
+- **THEN** a new resume client C attaches to the same leader and sees turn_sentinel(1).
+
+#### Scenario: Same session rail
+- **WHEN** keep or C observes the sentinel
+- **THEN** the test treats the replayed shared transcript as evidence that the clients are attached to the existing leader session.
+
+证据：`crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_cancellation_roundtrips_durable_log.rs` — `leader_reattach_cancellation_roundtrips_durable_log`；`crates/codegen/pager-pty-harness/src/leader.rs` — `LeaderCluster::attach`；`crates/codegen/pager-pty-harness/src/leader.rs` — `LeaderCluster::spawn_client`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/leader.rs` — `LeaderCluster::wait_for_turn_completed`；`crates/codegen/pager-pty-harness/src/flows.rs` — `inference_request_count`。
+
+
+### Requirement: After fresh client C has replayed the cancelled transcript, the scenario SHALL drop the original driver, allow leader disconnect processing, and require C to remain alive with the transcript visible and without active-turn or panic indicators.
+
+The implementation SHALL satisfy the following tested behavior: The test drops A, pumps C for 500 ms, asserts c.is_running(), and asserts C still contains turn_sentinel(1). It invokes wait_for_labels_absent for `Waiting` and `Cancelling` with a five-second budget, then independently asserts that C's screen contains neither `panicked`, `Waiting`, nor `Cancelling`. The helper's return value is ignored; the explicit negative assertions are the final guards.
+
+#### Scenario: Driver disconnect
+- **WHEN** client C has replayed turn 1
+- **THEN** dropping A is followed by a 500 ms C update to allow leader disconnect handling.
+
+#### Scenario: Reattached liveness
+- **WHEN** disconnect processing settles
+- **THEN** C remains running and still displays the cancelled transcript sentinel.
+
+#### Scenario: No active spinner
+- **WHEN** C's replay settles within five seconds
+- **THEN** Waiting and Cancelling labels are absent.
+
+#### Scenario: No panic
+- **WHEN** the post-disconnect screen is inspected
+- **THEN** the screen does not contain the `panicked` marker.
+
+证据：`crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_cancellation_roundtrips_durable_log.rs` — `leader_reattach_cancellation_roundtrips_durable_log`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::is_running`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::contains_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::update`；`crates/codegen/pager-pty-harness/src/flows.rs` — `wait_for_labels_absent`。
+
+
+### Requirement: The fresh reattach SHALL be proven to replay from the durable log by preserving the mock inference request count from before C attaches through the post-disconnect assertions.
+
+The implementation SHALL satisfy the following tested behavior: Immediately before creating C, the test records inference_request_count(cluster.content()). After C has replayed the sentinel, A has exited, and spinner/panic guards have run, it requires inference_request_count(cluster.content()) to equal the saved value. The helper counts only chat completions, Responses, or messages paths and intentionally ignores incidental GET requests such as models/settings.
+
+#### Scenario: Capture pre-reattach count
+- **WHEN** keep has replayed the cancelled transcript and before C attaches
+- **THEN** the current inference request count is saved.
+
+#### Scenario: Replay with no re-drive
+- **WHEN** C attaches and renders the prior sentinel
+- **THEN** the final inference request count equals the saved count.
+
+#### Scenario: Incidental HTTP excluded
+- **WHEN** the helper evaluates recorded content-controller requests
+- **THEN** non-inference GETs do not invalidate the no-new-turn assertion.
+
+证据：`crates/codegen/pager/tests/leader_pty_e2e/leader_reattach_cancellation_roundtrips_durable_log.rs` — `leader_reattach_cancellation_roundtrips_durable_log`；`crates/codegen/pager-pty-harness/src/flows.rs` — `inference_request_count`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::requests`。
+
+
+### Requirement: Padded wrapper construction and standard inset contract
+
+Padded::new SHALL retain a borrowed inner renderable and the supplied left/right column counts with no background by default. Padded::standard SHALL be equivalent to left=2 and right=1. with_bg SHALL be a chainable value builder that preserves the inner and padding values while setting the optional background color for the wrapper render.
+
+#### Scenario: Custom padding
+- **WHEN** Padded::new receives an inner renderable and explicit left/right widths
+- **THEN** the wrapper retains those dimensions and starts without a background override.
+
+#### Scenario: Standard padding
+- **WHEN** Padded::standard receives an inner renderable
+- **THEN** the wrapper uses two left columns and one right column.
+
+#### Scenario: Background builder
+- **WHEN** with_bg is chained with a Color
+- **THEN** the same wrapper is returned with that color selected for background filling.
+
+证据：`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Padded`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Padded::new`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Padded::standard`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Padded::with_bg`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `tests::test_standard_padding`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `tests::test_render_with_background`。
+
+
+### Requirement: Padded Renderable height projection
+
+The Padded Renderable implementation SHALL subtract left and right padding from the requested width with saturating subtraction, pass the resulting content width to inner.desired_height, and return the inner height unchanged. Padding therefore affects width available to content but does not add or remove rows.
+
+#### Scenario: Normal width
+- **WHEN** requested width is greater than left plus right padding
+- **THEN** the inner renderable receives exactly the remaining content width.
+
+#### Scenario: Standard height delegation
+- **WHEN** Padded::standard wraps a one-row inner renderable
+- **THEN** desired_height returns one row while reserving three horizontal columns.
+
+#### Scenario: Width below padding budget
+- **WHEN** requested width is smaller than the nominal left plus right padding
+- **THEN** the width passed to the inner renderable is clamped to zero rather than underflowing.
+
+#### Scenario: Composed wrappers
+- **WHEN** Padded wraps another Renderable decorator
+- **THEN** height calculation continues through the inner wrapper without adding a vertical row.
+
+证据：`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Renderable for Padded`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Padded::desired_height`；`crates/codegen/pager-render/src/render/renderable.rs` — `crate::render::Renderable`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `tests::test_desired_height_accounts_for_padding`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `tests::test_standard_padding`；`crates/codegen/pager/src/scrollback/wrappers/mod.rs` — `tests::test_wrapper_composition`；`crates/codegen/pager-render/src/render/renderable.rs` — `Renderable::desired_height`。
+
+
+### Requirement: Padded horizontal layout and inner content rendering
+
+For a positive render area, Padded::render SHALL divide the area horizontally into [left padding, a flexible content region, right padding] using Length(left), Min(0), and Length(right), and SHALL invoke inner.render only when the computed content region has positive width. The inner render receives the full content-region height and begins after the left padding, so content does not paint over the reserved columns.
+
+#### Scenario: Offset content
+- **WHEN** a positive area has left padding and a content width
+- **THEN** inner content starts at area.x plus the left padding and retains the area row range.
+
+#### Scenario: Right reservation
+- **WHEN** a positive area has both left and right padding
+- **THEN** the flexible content region ends before the right padding reservation.
+
+#### Scenario: Insufficient content width
+- **WHEN** the horizontal layout produces a zero-width content region
+- **THEN** the inner render is skipped.
+
+#### Scenario: Empty render area
+- **WHEN** area.width or area.height is zero
+- **THEN** Padded returns before layout or inner rendering.
+
+证据：`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Padded::render`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Layout::horizontal`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Constraint::Length`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Constraint::Min`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `content_area`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `tests::test_render_places_content_with_offset`；`crates/codegen/pager/src/scrollback/wrappers/mod.rs` — `tests::test_wrapper_composition`。
+
+
+### Requirement: Padded background fill and content overwrite order
+
+When with_bg has selected a color, Padded::render SHALL apply a background-only Style to every addressable cell in the supplied area before rendering the inner content, thereby covering both padding and untouched content cells while allowing inner rendering to overwrite its own symbols/styles. Without a background option it SHALL leave existing buffer styles untouched until the inner render runs.
+
+#### Scenario: Background across wrapper area
+- **WHEN** with_bg is set and the area is positive
+- **THEN** all addressable cells in the area receive the selected background, including left/right padding and content cells.
+
+#### Scenario: Inner overwrite order
+- **WHEN** with_bg is set and inner.render paints content
+- **THEN** the background is established first and inner content is rendered afterward in the content region.
+
+#### Scenario: No background override
+- **WHEN** with_bg was not called
+- **THEN** Padded does not prepaint a background and delegates directly to the inner content after layout.
+
+#### Scenario: Buffer cell unavailable
+- **WHEN** the supplied Rect extends beyond the actual Buffer
+- **THEN** the wrapper's background loop skips a missing cell through Buffer::cell_mut instead of dereferencing it.
+
+证据：`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Padded::with_bg`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Style::default().bg`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `buf.cell_mut`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `tests::test_render_with_background`；`crates/codegen/pager/src/scrollback/wrappers/padded.rs` — `Padded::render`。
