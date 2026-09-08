@@ -4085,7 +4085,20 @@
       "Scrollback horizontal column layout contract",
       "Scrollback entry area and content-width projection contract",
       "Scrollback selection area and edge-safety contract",
-      "Scrollback layout width consistency across measurement and rendering contract"
+      "Scrollback layout width consistency across measurement and rendering contract",
+      "File-search dropdown visibility and height budget",
+      "File-search result viewport and scrollbar projection",
+      "Fuzzy path row selection and match styling",
+      "Unicode-aware path truncation and directory marker",
+      "File-search panel chrome ownership boundary",
+      "AgentView SHALL close an open jump picker by consuming its JumpState and restoring the captured selection, width-stable scroll bookmark, and follow mode.",
+      "AgentView SHALL treat rewind, inline edit, BTW, and any pending input overlay as mutually exclusive with jump, and SHALL drop a hidden picker before it can consume input or scrolling.",
+      "AgentView SHALL delegate jump key semantics to pure JumpState helpers, live-scroll moved selection to the transcript top, and map select/dismiss/consumed inputs to shared InputOutcome values.",
+      "AgentView SHALL map mouse movement and left-button activation within the prompt pane to jump cursor updates, live preview, and stable selection/dismiss outcomes while ignoring outside or unsupported mouse events.",
+      "The jump AgentView layer SHALL keep preview and restoration consistent across key/mouse/scroll entry points without duplicating picker geometry, cursor clamping, action dispatch, or overlay admission logic.",
+      "BlockRenderer builder and BlockContext projection contract",
+      "BlockRenderer desired-height and vertical-padding contract",
+      "BlockRenderer background and bounded line rendering contract"
     ],
     "reviewed_files": [
       {
@@ -6499,6 +6512,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/layout.rs",
         "sha256": "863ad75266d7e991b299e41bc872c648ef54dba2bb023b2e7e2a01605c630c7c"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/file_search/dropdown.rs",
+        "sha256": "addeb5090092b7b7febbb5e785a0f620b1a9a5dc376c562347ba0a0998fca692"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/jump.rs",
+        "sha256": "a5a0675dfb9f2e959ffb7643f77c00e0d5f34853dda23a6e9eda16ddb45b7c81"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs",
+        "sha256": "641edc30b1a15dea60033f2d037561a73e88b9a2b2d4971608db6df85275e81c"
       }
     ],
     "review": "reviews/pager.md"

@@ -28556,3 +28556,314 @@ Every scrollback path that paints, measures, hit-tests, or edits an entry SHALL 
 - **THEN** all listed consumers observe the new pads through a fresh HorizontalLayout rather than stale hard-coded offsets.
 
 证据：`crates/codegen/pager/src/scrollback/layout.rs` — `HorizontalLayout::new`；`crates/codegen/pager/src/scrollback/render.rs` — `render_scrolled_entries_with_scratch`；`crates/codegen/pager/src/scrollback/state/layout.rs` — `ScrollbackState::entry_area_width`；`crates/codegen/pager/src/scrollback/state/layout.rs` — `ScrollbackState::entry_text_column_width`；`crates/codegen/pager/src/scrollback/wrappers/entry_renderer.rs` — `EntryRenderer::desired_height`；`crates/codegen/pager/src/app/agent_view/inline_edit.rs` — `render_inline_edit`；`crates/codegen/pager/src/scrollback/scrollback_pane.rs` — `render_sticky_header`。
+
+
+### Requirement: File-search dropdown visibility and height budget
+
+The implementation SHALL satisfy the following tested behavior: render_dropdown returns without writing when the item area has zero height, width below four columns, or FileSearchState::is_visible is false. FileSearchState::is_visible is true only when an @ context exists and the top-k result list is non-empty. dropdown_height returns zero when hidden and otherwise returns one separator row plus min(FileSearchState::result_count, max_rows); the caller-owned panel chrome is outside render_dropdown. MAX_DROPDOWN_ROWS is a public eight-row constant, while dropdown_height accepts its row cap as an argument.
+
+#### Scenario: Hidden or undersized area
+- **WHEN** the file-search state is hidden, the area height is zero, or the area width is below four
+- **THEN** render_dropdown exits before painting result rows.
+
+#### Scenario: Visible height request
+- **WHEN** the state is visible and a max_rows value is supplied
+- **THEN** dropdown_height returns one plus the smaller of the result count and max_rows.
+
+#### Scenario: No results
+- **WHEN** the context is present but the top-k result list is empty
+- **THEN** FileSearchState::is_visible is false and the renderer remains hidden.
+
+证据：`crates/codegen/pager/src/views/file_search/dropdown.rs` — `render_dropdown`；`crates/codegen/pager/src/views/file_search/dropdown.rs` — `dropdown_height`；`crates/codegen/pager/src/views/file_search/dropdown.rs` — `MAX_DROPDOWN_ROWS`；`crates/codegen/pager/src/views/file_search/state.rs` — `FileSearchState::is_visible`；`crates/codegen/pager/src/views/file_search/state.rs` — `FileSearchState::result_count`。
+
+
+### Requirement: File-search result viewport and scrollbar projection
+
+The implementation SHALL satisfy the following tested behavior: render_dropdown reads the top-k results, selected index, scroll offset, hovered index, and directory mode from FileSearchState. It maps each visible row to scroll_offset + row until the top-k list ends, passes selection and hover flags to the row renderer, and reserves two columns whenever top-k length exceeds the item area height. The scrollbar occupies the rightmost one-column Rect and is rendered with total top-k length, the item area height, and the current scroll offset using the theme dark track and dim-gray thumb styles.
+
+#### Scenario: Scrolled result window
+- **WHEN** a visible state has a nonzero scroll offset and enough top-k results to fill the area
+- **THEN** rows begin at the offset index and stop at the result-list end without indexing beyond top-k.
+
+#### Scenario: Overflowing result list
+- **WHEN** top-k length is greater than the item-area height
+- **THEN** two columns are reserved from row content and render_scrollbar_styled receives a right-edge one-column scrollbar area.
+
+#### Scenario: Short result list
+- **WHEN** top-k length is at most the item-area height
+- **THEN** all available rows use the full area width and no scrollbar call is made.
+
+证据：`crates/codegen/pager/src/views/file_search/dropdown.rs` — `render_dropdown`；`crates/codegen/pager/src/views/file_search/dropdown.rs` — `render_scrollbar_styled`；`crates/codegen/pager/src/views/file_search/state.rs` — `FileSearchState::results`；`crates/codegen/pager/src/views/file_search/state.rs` — `FileSearchState::selected`；`crates/codegen/pager/src/views/file_search/state.rs` — `FileSearchState::scroll_offset`；`crates/codegen/pager/src/views/file_search/state.rs` — `FileSearchState::hovered`；`crates/codegen/pager-render/src/render/scrollbar.rs` — `render_scrollbar_styled`。
+
+
+### Requirement: Fuzzy path row selection and match styling
+
+The implementation SHALL satisfy the following tested behavior: render_fuzzy_item returns when the content width is less than PREFIX_WIDTH plus one cell. It normalizes a leading ./ from the path, fills the row with the chosen background, and chooses embedded-row styling first, then selected background, hovered background, or the normal light background. Selected rows use the prompt arrow and bold text; non-selected rows use a two-space gutter. Characters whose zero-based path character index is the next item index receive the fuzzy accent foreground, while other characters use the primary foreground, and selected styling adds bold to both. Wide characters write continuation cells with the same style.
+
+#### Scenario: Selected row
+- **WHEN** a result row is selected and has enough content width
+- **THEN** the row background is selected or embedded-selected styling, the arrow prefix is painted, and rendered path text is bold.
+
+#### Scenario: Hovered row
+- **WHEN** a non-selected row is hovered
+- **THEN** the row uses hover background while retaining the non-selected gutter and primary or fuzzy-match foregrounds.
+
+#### Scenario: Embedded row style
+- **WHEN** modal_window::embedded_row_style returns a style for the row
+- **THEN** that embedded background and foreground override the normal, selected, or hover row colors according to the source precedence.
+
+#### Scenario: Fuzzy match indices
+- **WHEN** the result supplies character indices alongside a path
+- **THEN** matching path characters consume indices in order and use fuzzy accent styling; unmatched characters use normal styling.
+
+证据：`crates/codegen/pager/src/views/file_search/dropdown.rs` — `render_fuzzy_item`；`crates/codegen/pager/src/views/file_search/dropdown.rs` — `ITEM_PREFIX`；`crates/codegen/pager/src/views/file_search/dropdown.rs` — `PREFIX_WIDTH`；`crates/codegen/pager/src/views/file_search/dropdown.rs` — `crate::glyphs::prompt_arrow`；`crates/codegen/pager/src/views/file_search/dropdown.rs` — `crate::views::modal_window::embedded_row_style`；`crates/codegen/pager/src/views/file_search/context.rs` — `normalize_display_path`；`crates/codegen/pager-render/src/glyphs.rs` — `PROMPT_ARROW_WIDTH`；`crates/codegen/pager-render/src/glyphs.rs` — `prompt_arrow`。
+
+
+### Requirement: Unicode-aware path truncation and directory marker
+
+The implementation SHALL satisfy the following tested behavior: render_fuzzy_item measures each path scalar with UnicodeWidthChar, writes characters from byte-aligned slices, and when the next character would exceed max_col replaces the preceding visible cell with an ellipsis when one exists. Wide characters fill their continuation cells with spaces and the same style. When directory mode is true, a slash is appended at the current column only if a cell remains inside the row width.
+
+#### Scenario: Long path
+- **WHEN** a path character would exceed the available row width
+- **THEN** the renderer stops path output and places an ellipsis in the last visible path cell when possible.
+
+#### Scenario: Wide path character
+- **WHEN** a path contains a character whose display width is greater than one and it fits
+- **THEN** the leading cell receives the character and continuation cells receive styled spaces.
+
+#### Scenario: Directory-only query
+- **WHEN** FileSearchState::is_dir_mode is true and a column remains after the path
+- **THEN** the renderer writes a slash with normal row styling.
+
+#### Scenario: No marker space
+- **WHEN** directory mode is true but the path ends at max_col
+- **THEN** no slash is written beyond the row area.
+
+证据：`crates/codegen/pager/src/views/file_search/dropdown.rs` — `render_fuzzy_item`；`crates/codegen/pager/src/views/file_search/dropdown.rs` — `unicode_width::UnicodeWidthChar::width`；`crates/codegen/pager/src/views/file_search/state.rs` — `FileSearchState::is_dir_mode`；`crates/codegen/pager/src/views/file_search/context.rs` — `AtContext::is_dir_mode`；`crates/codegen/pager/src/views/file_search/context.rs` — `normalize_display_path`。
+
+
+### Requirement: File-search panel chrome ownership boundary
+
+The implementation SHALL satisfy the following tested behavior: The dropdown renderer paints result rows only. AgentView::draw creates and clears the surrounding panel, draws the top and bottom border lines and k/n hint, computes the item area with the caller row cap, and records the item area for later interaction; render_dropdown receives that inner Rect and does not render borders, separators, or the count hint.
+
+#### Scenario: Panel composition
+- **WHEN** AgentView::draw displays file search with a positive item count and sufficient panel dimensions
+- **THEN** the caller paints panel chrome and invokes render_dropdown for the inner item area.
+
+#### Scenario: Panel too narrow
+- **WHEN** the computed panel width is not greater than four or the borders cannot be placed
+- **THEN** the caller skips the panel and clears dropdown_items_area rather than invoking the row renderer.
+
+证据：`crates/codegen/pager/src/views/file_search/dropdown.rs` — `render_dropdown`；`crates/codegen/pager/src/app/agent_view/render.rs` — `AgentView::draw`；`crates/codegen/pager/src/views/file_search/state.rs` — `FileSearchState::result_count`；`crates/codegen/pager/src/views/file_search/state.rs` — `FileSearchState::total_items`。
+
+
+### Requirement: AgentView SHALL close an open jump picker by consuming its JumpState and restoring the captured selection, width-stable scroll bookmark, and follow mode.
+
+dismiss_jump_picker SHALL take jump_state and, when present, call restore_jump_viewport. restore_jump_viewport SHALL restore prior selected EntryId, restore_scroll_bookmark when present, and re-enable follow_mode when the captured flag is true. It SHALL be safe when no picker is open; it does not synthesize a new bookmark or disable follow when the captured flag is false.
+
+#### Scenario: Dismiss open picker
+- **WHEN** jump_state contains JumpRestore
+- **THEN** state is removed and prior selection/bookmark/follow are restored.
+
+#### Scenario: Dismiss absent picker
+- **WHEN** jump_state is None
+- **THEN** no scrollback mutation occurs.
+
+#### Scenario: Selection restoration
+- **WHEN** restore.selected is Some or None
+- **THEN** scrollback selection is set to exactly the captured value.
+
+#### Scenario: Follow restoration
+- **WHEN** restore.follow_mode is true
+- **THEN** follow mode is re-enabled after bookmark restoration.
+
+#### Scenario: Resize-safe bookmark
+- **WHEN** preview moved or width changed
+- **THEN** the stored ScrollAnchor is passed to scrollback restoration rather than recomputing by index.
+
+证据：`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::dismiss_jump_picker`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::restore_jump_viewport`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `jump_state`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `JumpRestore::bookmark`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `JumpRestore::selected`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `JumpRestore::follow_mode`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `restore_scroll_bookmark`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `set_selected`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `enable_follow`。
+
+
+### Requirement: AgentView SHALL treat rewind, inline edit, BTW, and any pending input overlay as mutually exclusive with jump, and SHALL drop a hidden picker before it can consume input or scrolling.
+
+jump_slot_taken SHALL return true when rewind_state, inline_edit, or btw_state is present, or no_input_overlay_pending is false. dismiss_jump_picker_if_suppressed SHALL dismiss an existing picker only when that predicate is true and return true iff it dropped one; otherwise it returns false. This lets input/scroll callers spend the current Esc/key on the owning overlay rather than a shadowed picker.
+
+#### Scenario: Rewind takeover
+- **WHEN** rewind_state is present while jump is open
+- **THEN** jump_slot_taken is true and suppression clears jump.
+
+#### Scenario: Inline-edit takeover
+- **WHEN** inline_edit is present
+- **THEN** jump is considered unavailable.
+
+#### Scenario: BTW takeover
+- **WHEN** btw_state is present
+- **THEN** jump is considered unavailable.
+
+#### Scenario: Pending interaction
+- **WHEN** no_input_overlay_pending is false
+- **THEN** jump is suppressed for permission/question/cancel/plan-style ownership.
+
+#### Scenario: No takeover
+- **WHEN** no other overlay owns slot
+- **THEN** an open picker is not dismissed by suppression.
+
+#### Scenario: Hidden picker input
+- **WHEN** overlay appears after picker opened
+- **THEN** caller can clear jump before wheel/key routing reaches picker cursor.
+
+证据：`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::jump_slot_taken`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::dismiss_jump_picker_if_suppressed`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `rewind_state`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `inline_edit`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `btw_state`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `no_input_overlay_pending`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `jump_state`。
+
+
+### Requirement: AgentView SHALL delegate jump key semantics to pure JumpState helpers, live-scroll moved selection to the transcript top, and map select/dismiss/consumed inputs to shared InputOutcome values.
+
+handle_jump_key SHALL return Unchanged when jump_state is absent. For MoveUp/MoveDown it SHALL mutate the selected cursor with move_cursor, call sync_jump_preview, and return Changed. Other JumpInput values SHALL map Select(id) to Action::JumpPickerSelect(id), Dismissed to Action::JumpDismiss, and MoveUp/MoveDown/Consumed to Changed. sync_jump_preview SHALL resolve the selected TimelineEntry prompt_entry_id by stable scrollback EntryId and call scroll_to_entry_top; missing selection or removed entry SHALL be a no-op.
+
+#### Scenario: No picker
+- **WHEN** a key arrives with jump_state None
+- **THEN** InputOutcome::Unchanged is returned.
+
+#### Scenario: Move preview
+- **WHEN** Up or Down is accepted by the picker
+- **THEN** cursor moves through move_cursor, selected prompt is scrolled to top, and outcome is Changed.
+
+#### Scenario: Stable preview
+- **WHEN** selected prompt EntryId no longer exists
+- **THEN** no scroll is performed rather than landing on an unrelated block.
+
+#### Scenario: Select
+- **WHEN** JumpInput::Select(id) is produced
+- **THEN** Action::JumpPickerSelect(id) is returned.
+
+#### Scenario: Dismiss
+- **WHEN** JumpInput::Dismissed is produced
+- **THEN** Action::JumpDismiss is returned.
+
+#### Scenario: Consumed navigation
+- **WHEN** helper returns Consumed
+- **THEN** Changed is returned without dispatch action.
+
+证据：`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::handle_jump_key`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::sync_jump_preview`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::jump_input_to_outcome`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `handle_jump_key`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `move_cursor`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `scroll_to_entry_top`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `index_of_id`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `JumpInput::Select`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `JumpInput::Dismissed`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `InputOutcome::Changed`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `InputOutcome::Unchanged`。
+
+
+### Requirement: AgentView SHALL map mouse movement and left-button activation within the prompt pane to jump cursor updates, live preview, and stable selection/dismiss outcomes while ignoring outside or unsupported mouse events.
+
+handle_jump_mouse SHALL return Unchanged when no picker is open or jump_row_at cannot map the mouse coordinates in pane_areas.prompt. MouseEventKind::Moved SHALL call set_jump_cursor; only a changed cursor triggers sync_jump_preview and Changed, otherwise Unchanged. MouseEventKind::Down(Left) SHALL set cursor, call jump_activate, and map its JumpInput through jump_input_to_outcome. Other buttons/kinds SHALL be ignored.
+
+#### Scenario: Outside picker
+- **WHEN** mouse row/column is outside prompt area
+- **THEN** jump_row_at yields None and outcome is Unchanged.
+
+#### Scenario: Hover move
+- **WHEN** pointer maps to a different row
+- **THEN** cursor changes, selected prompt previews at top, and outcome is Changed.
+
+#### Scenario: Same-row move
+- **WHEN** pointer maps to current row
+- **THEN** no scroll mutation occurs and outcome is Unchanged.
+
+#### Scenario: Left click
+- **WHEN** left button goes down on a mapped row
+- **THEN** cursor is set, row activation runs, and select/dismiss/consumed outcome is returned.
+
+#### Scenario: Other mouse event
+- **WHEN** button or kind is unsupported
+- **THEN** outcome is Unchanged.
+
+证据：`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::handle_jump_mouse`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `jump_row_at`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `set_jump_cursor`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `jump_activate`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `MouseEventKind::Moved`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `MouseEventKind::Down`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `MouseButton::Left`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `pane_areas.prompt`。
+
+
+### Requirement: The jump AgentView layer SHALL keep preview and restoration consistent across key/mouse/scroll entry points without duplicating picker geometry, cursor clamping, action dispatch, or overlay admission logic.
+
+The implementation SHALL satisfy the following tested behavior: sync_jump_preview uses the same selected stable prompt identity that jump_to_turn commits and scrolls it to the viewport TOP; this file delegates row geometry/cursor limits/activation to views::jump and returns Action/InputOutcome for outer dispatch. It does not open the picker, build timeline entries, handle wheel routing, execute selected turns, or decide global overlay priority beyond its jump_slot_taken predicate. The one inline test proves a selected first turn moves the transcript upward from bottom; restoration, action routing, overlay suppression, and mouse paths remain source contracts here.
+
+#### Scenario: Top-anchor preview
+- **WHEN** selected first timeline entry is far above current bottom
+- **THEN** scroll offset decreases because preview uses scroll_to_entry_top.
+
+#### Scenario: Shared helpers
+- **WHEN** key/mouse paths request movement or activation
+- **THEN** both route through common JumpInput mapping instead of duplicating actions.
+
+#### Scenario: Outer admission
+- **WHEN** /jump needs to open or another overlay appears
+- **THEN** root/outer handlers own picker creation and call suppression before input routing.
+
+#### Scenario: Audit boundary
+- **WHEN** the source is inspected with one inline test
+- **THEN** the source-level count is one inline test; broader jump behavior is covered by other modules and not claimed here.
+
+证据：`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::sync_jump_preview`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::jump_input_to_outcome`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::handle_jump_key`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::handle_jump_mouse`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `JumpState`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `JumpInput`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `preview_scrolls_to_cursor_turn`。
+
+
+### Requirement: BlockRenderer builder and BlockContext projection contract
+
+BlockRenderer::new SHALL initialize Expanded mode, is_running=false, raw=false, no explicit background, no max_lines, and AppearanceConfig::default. The mode, running, raw, background, max_lines and appearance builder methods SHALL replace only their corresponding renderer option and return the renderer for chaining. make_context SHALL pass those options plus the requested width into BlockContext, set is_selected=false and cwd=None, and clone the stored appearance.
+
+#### Scenario: Default context
+- **WHEN** a block is wrapped with BlockRenderer::new and rendered or measured
+- **THEN** BlockContent receives Expanded, not running, non-raw context with no max_lines, default appearance, unselected state and no cwd.
+
+#### Scenario: Configured context
+- **WHEN** one or more builder methods are chained
+- **THEN** the block receives the selected display mode, running/raw flags, optional max_lines, explicit appearance and requested width while unrelated defaults remain unchanged.
+
+#### Scenario: Background override
+- **WHEN** background(color) is chained
+- **THEN** resolve_background returns the explicit color without consulting the block's declared background or current theme.
+
+#### Scenario: Block background fallback
+- **WHEN** no explicit background is set and the block reports None, Light, or Dark
+- **THEN** the wrapper resolves None, Theme::current().bg_light, or Theme::current().bg_dark respectively.
+
+证据：`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::new`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::mode`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::running`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::raw`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::background`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::max_lines`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::appearance`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::make_context`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::resolve_background`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::background`。
+
+
+### Requirement: BlockRenderer desired-height and vertical-padding contract
+
+BlockRenderer::desired_height SHALL build a BlockContext for the requested width, obtain BlockContent::output and BlockContent::has_vpad, and return output.lines.len() plus two rows when vertical padding is enabled or no extra rows otherwise. The same has_vpad decision SHALL govern render's top and bottom padding, and a one-line vpad block SHALL therefore measure and render as three rows.
+
+#### Scenario: Padded block
+- **WHEN** output has N lines and has_vpad is true
+- **THEN** desired_height returns N+2; render leaves the first row empty, paints content starting on the second row, and reserves the final row as bottom padding.
+
+#### Scenario: Unpadded block
+- **WHEN** output has N lines and has_vpad is false
+- **THEN** desired_height returns N and render starts content at area.y with no synthetic top/bottom rows.
+
+#### Scenario: Height-limited area
+- **WHEN** the render area has fewer rows than desired_height
+- **THEN** the wrapper paints only content lines that fit after any top pad and stops at max_row without writing below the area.
+
+#### Scenario: Width-sensitive output
+- **WHEN** BlockContent output or has_vpad depends on context width/appearance
+- **THEN** desired_height and render each build the corresponding width-aware context before deciding output and padding.
+
+证据：`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `Renderable::desired_height for BlockRenderer`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `Renderable::render for BlockRenderer`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::output`；`crates/codegen/pager/src/scrollback/block.rs` — `BlockContent::has_vpad`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `tests::test_desired_height_with_vpad`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `tests::test_render_fills_area`。
+
+
+### Requirement: BlockRenderer background and bounded line rendering contract
+
+Renderable::render SHALL return without invoking the block when area.width or area.height is zero. For a nonempty area it SHALL resolve background precedence, apply the resolved background style to every cell without changing the row layout, apply each BlockLine background from area.x + bg_start_col to the remaining row width, and render line.content with SafeBuf::set_line_safe at area.x and the current row bounded by area.width. It SHALL process output lines in order, stop at the area bottom, and leave bottom padding as already-filled background. BlockRenderer SHALL paint all line backgrounds it receives; panel-versus-semantic suppression is a higher-level EntryRenderer concern.
+
+#### Scenario: Empty area
+- **WHEN** render is called with zero width or zero height
+- **THEN** the function returns without block output, background resolution, or Buffer writes.
+
+#### Scenario: Resolved block background
+- **WHEN** the block declares None, Light, or Dark and no explicit override exists
+- **THEN** the entire area receives no background, theme light, or theme dark respectively.
+
+#### Scenario: Explicit background
+- **WHEN** background(color) is configured
+- **THEN** every cell in the area receives the explicit color, including top and bottom vpad rows.
+
+#### Scenario: Line background offset
+- **WHEN** a BlockLine has background Some(color) and bg_start_col
+- **THEN** only the suffix beginning at area.x+bg_start_col receives that line background, while set_line_safe paints content over the bounded row.
+
+#### Scenario: Clipped output
+- **WHEN** output has more lines than area height
+- **THEN** lines after the bottom boundary are not painted and no out-of-area Buffer access occurs.
+
+证据：`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `Renderable::render for BlockRenderer`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `BlockRenderer::resolve_background`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `SafeBuf::set_line_safe`；`crates/codegen/pager/src/scrollback/types.rs` — `BlockLine`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `tests::test_render_with_explicit_background`；`crates/codegen/pager/src/scrollback/wrappers/block_renderer.rs` — `tests::test_different_display_modes`；`crates/codegen/pager/src/scrollback/wrappers/entry_renderer.rs` — `flat_background_suppresses_panel_line_bg`。

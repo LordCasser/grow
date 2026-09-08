@@ -1026,3 +1026,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The fixture writes configuration files directly and selects NO_COLOR through process environment, so configuration precedence and color initialization are exercised implicitly rather than through an explicit test seam.
 - Pager 审计债务：Both end-to-end tests are ignored, leaving the minimal thinking visual and collapse/reopen behavior outside routine automated coverage.
 - Pager 审计债务：The collapse test uses raw byte 0x05 for Ctrl+E and substring-based full_text checks; neither expresses the key binding or fold target as a typed contract.
+- Pager 审计债务：MAX_DROPDOWN_ROWS is exported but render_dropdown uses the supplied Rect height, while AgentView::draw independently applies MAX_DROPDOWN_ROWS and dropdown_height is not used by that caller; the row-cap and height contract is duplicated.
+- Pager 审计债务：dropdown_height includes a separator row although render_dropdown explicitly renders only result rows, so its caller contract depends on undocumented panel arithmetic outside this module.
+- Pager 审计债务：Fuzzy matching indices are consumed against the normalized display path without a local invariant tying them to that transformed string; a path normalization change could silently shift accent positions.
+- Pager 审计债务：The manual cell-by-cell renderer mixes byte indexing, Unicode scalar widths, u16 coordinate arithmetic, and wide-character continuation handling without dedicated property tests in this file.
+- Pager 审计债务：The public height helper and the row renderer have no local tests, leaving visibility, truncation, scrollbar reservation, and styling regressions dependent on higher-level coverage.
