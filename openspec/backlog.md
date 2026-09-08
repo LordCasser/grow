@@ -919,3 +919,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Copy and export each format delivery notices independently while sharing lower-level providers, so wording, fallback semantics, and toast timing can diverge across entry points.
 - Pager 审计债务：The input-log dump writes a timestamped file using a best-effort directory creation and no retention or collision policy; diagnostic persistence concerns are embedded in UI dispatch.
 - Pager 审计债务：The block viewer constructor match is a growing RenderBlock taxonomy switch; new block variants require editing this dispatcher to preserve fullscreen/viewer coverage.
+- Pager 审计债务：The shared module is a broad fixture registry spanning nearly every dispatch domain, so changes to AppView, AgentSession, modal state, ACP DTOs, and global settings all converge here and increase test coupling.
+- Pager 审计债务：test_app manually initializes the full AppView field set; although make_test_agent_session centralizes session construction, root fixture changes still require editing a large literal and can obscure which defaults each test relies on.
+- Pager 审计债务：Several helpers duplicate production assumptions (dashboard focusables, picker modal field layout, permission option classification) rather than exposing reusable production-owned builders, allowing test mirrors to drift.
+- Pager 审计债务：Global theme and mouse-capture state require manual lock/reset conventions. A panic inside the callback or a test bypassing the helper can leak process state into unrelated tests.
+- Pager 审计债务：Helpers use panic-on-invalid-fixture semantics for convenience (`expect`, direct indexing, and explicit assertions), which makes setup failures clear but limits reuse for negative-path tests.

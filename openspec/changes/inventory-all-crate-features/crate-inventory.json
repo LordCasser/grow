@@ -3775,7 +3775,15 @@
       "Goal interrupt panel and pause/cancel/stop-subagent axis mapping",
       "Pristine cancel rewind, committed/drafted prompt safety, and task-result panel cleanup",
       "Prompt lifecycle watchdog and authoritative status reconciliation",
-      "Demote running execute tools and reconcile background-task kill outcomes"
+      "Demote running execute tools and reconcile background-task kill outcomes",
+      "The scrollback verb-group scanner SHALL classify collapsed chromeless tool and subagent members, finished collapsed thinking members, transparent opened/streaming/hidden entries, and breaking entries through one shared RunStep policy; forward scans SHALL report the same claimed end and member count used by layout and range queries, and in-place tool-kind changes SHALL be detectable.",
+      "Folded verb-run labels SHALL rebuild from the bounded run span using the shared grouping vocabulary, including eligible hidden thinking and subagent members without labeling thoughts; the resulting VerbGroupHeaderLabel SHALL expose styled and plain text plus running/failed state for the synthetic header projection.",
+      "Truncation header labeling SHALL walk the hidden participant prefix, count thoughts as participants only when they are visible to the fold policy, bucket tools and subagents through the shared label vocabulary, and return None whenever the prefix is pure thought or contains an unnameable non-thought row so the caller can retain an honest numeric count.",
+      "Verb-group buckets SHALL count ordinary tool calls, count subagent rows by distinct child session id, track any running member, and mark failure only for unsuccessful tools or Failed subagents; cancelled subagents SHALL not be treated as failures.",
+      "Group headers SHALL carry exactly one shared VerbGroupHeaderLabel payload regardless of whether they originate from a verb run or a truncation fold, preserving the styled Line and its plain text for selection/copy while keeping header-family chrome decisions outside this state module.",
+      "The inline grouping contract SHALL be represented by exhaustive tests for first-appearance ordering, skill/file separation, tense and failure changes, separator and thinking transparency, truncation participant limits, action-tool buckets, and distinct subagent identities.",
+      "Project picker recents, guarded selection, and deferred session creation",
+      "Startup fork deferral and parent context propagation"
     ],
     "reviewed_files": [
       {
@@ -5901,6 +5909,18 @@
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/turn.rs",
         "sha256": "9ee73efa954f5f82f948e64df7919fa3cd71fce69b0f86b99f0e48786b7df547"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "sha256": "33d4ec78a6a10043bc1f88576afaa246b3e5a04a92f9225b30625c16d634e8b5"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "sha256": "0257f8e9775caa7da2e61afe890348365cb77de770bec466c151887b91f41d72"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "sha256": "7952557aa8f874fb0dad4b806d1b9db5e6cb59e98f58956618f839647c052f07"
       }
     ],
     "review": "reviews/pager.md"

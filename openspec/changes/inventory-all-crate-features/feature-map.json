@@ -72042,6 +72042,31 @@
         "Extractors",
         "a test reads latest events, messages, todo, tool rows or subagent snapshots",
         "the helper projects only its named narrow view of in-memory state."
+      ],
+      [
+        "Base app",
+        "a dispatch test requests test_app",
+        "it receives a Welcome AppView with deterministic defaults and no implicit agent/session."
+      ],
+      [
+        "Single agent",
+        "a test requests test_app_with_agent",
+        "AgentId(0) is inserted with an empty scrollback and Scrollback active pane, then selected as the active agent."
+      ],
+      [
+        "Multiple agents",
+        "a routing test requests three_agent_app",
+        "placeholder agents 1 and 2 exist beside active agent 0 and switch_to_agent can recognize them."
+      ],
+      [
+        "Session defaults",
+        "a fixture creates an AgentSession through make_test_agent_session",
+        "the session uses the app ACP sender, optional id, default model state, `/tmp`, Ask mode, and deferred CLI model configuration."
+      ],
+      [
+        "Module topology",
+        "the test crate is compiled",
+        "the cta_e2e, dashboard, jump, modes, notes, permissions, rewind, router, session, settings, status, task_result, transcript, turn, and turn_pipeline modules are included under this shared fixture scope."
       ]
     ],
     "sources": [
@@ -72084,6 +72109,94 @@
       [
         "crates/codegen/pager/src/app/acp_handler/tests/mod.rs",
         "make_server_status_notif"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod cta_e2e"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod dashboard"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod jump"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod modes"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod notes"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod permissions"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod rewind"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod router"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod settings"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod status"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod task_result"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod transcript"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mod turn_pipeline"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "control_rpc_accepted"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "local_control_failure"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "test_app"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "make_test_agent_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "test_app_with_agent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "insert_placeholder_agent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "three_agent_app"
       ]
     ]
   },
@@ -79049,6 +79162,36 @@
         "Agents modal",
         "config agents opens with an optional initial tab and a bound session",
         "extensions is closed, state is constructed, the tab is selected, and FetchSessionAgentName carries a new metadata revision."
+      ],
+      [
+        "CTA entry",
+        "a CTA test needs a plugin row",
+        "the helper returns a deterministic marketplace entry with supplied name/status and `plugins/<name>` relative path."
+      ],
+      [
+        "CTA outcome",
+        "a CTA test needs success/error/confirmation",
+        "the helper returns an ActionOutcome with supplied status/message and both reload/restart flags false."
+      ],
+      [
+        "MCP fixture",
+        "an extension test needs a server",
+        "the helper returns an enabled server with supplied status, optional plugin source, zero tools, and no setup form."
+      ],
+      [
+        "Reset confirmation",
+        "a settings test prepares reset confirmation",
+        "settings opens, OpenResetConfirm is dispatched, and the helper asserts ResetSettingsConfirm is active."
+      ],
+      [
+        "Theme isolation",
+        "a test touches global theme cache",
+        "with_theme_test_env acquires the test lock, resets/seeds auto defaults, selects GrowNight, clears system mocks before and after the callback, then resets the cache."
+      ],
+      [
+        "Mouse capture",
+        "a test changes capture state",
+        "reset_mouse_capture_enabled stores the requested flag with Release ordering and mouse_capture_is_enabled reads it with Acquire ordering."
       ]
     ],
     "sources": [
@@ -79207,6 +79350,34 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/transcript.rs",
         "dispatch_open_config_agents_modal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "cta_entry"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "cta_outcome"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "cta_mcp_server"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "setup_reset_confirm_open"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "with_theme_test_env"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "reset_mouse_capture_enabled"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mouse_capture_is_enabled"
       ]
     ]
   },
@@ -80428,6 +80599,26 @@
         "Preview boundary",
         "the two ignored visual preview tests are invoked explicitly",
         "representative dashboard and overlay buffers are printed for human inspection; they are not part of the default test run."
+      ],
+      [
+        "Dashboard open",
+        "a test calls open_dashboard on an existing app",
+        "dispatch_open_dashboard is invoked and dashboard state is available for subsequent assertions."
+      ],
+      [
+        "Visible placeholder",
+        "a placeholder agent must appear in dashboard rows",
+        "mark_agent_nonempty assigns `Session {id}` as generated title."
+      ],
+      [
+        "Roster source",
+        "leader_mode is true or false",
+        "dashboard_row_order selects leader_roster or dashboard_local_sessions respectively."
+      ],
+      [
+        "Selectable order",
+        "dashboard state has rows, grouping/filter, collapsed sections, idle-show-all and search mode",
+        "focusables are derived using those values and only row identities are returned; headers and idle overflow are omitted."
       ]
     ],
     "sources": [
@@ -80602,6 +80793,18 @@
       [
         "crates/codegen/pager/src/views/workflows.rs",
         "empty_state_offers_starters"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "mark_agent_nonempty"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "open_dashboard"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "dashboard_row_order"
       ]
     ]
   },
@@ -93462,6 +93665,31 @@
         "Search focus boundary",
         "Up/Down crosses a non-vim list boundary and text is then entered",
         "focus moves to search, hides row selection, and typing restores meaningful selection."
+      ],
+      [
+        "Picker seed",
+        "a test opens a session picker with entries",
+        "the active agent owns a modal with those entries and clean search/content/delete state."
+      ],
+      [
+        "Picker entry",
+        "a test creates an entry with id and cwd",
+        "summary equals id, timestamps are populated, repo_name is `repo`, and optional model/branch/host/detail fields are empty."
+      ],
+      [
+        "System notice extraction",
+        "a test asks for the latest or offset system text",
+        "the helper indexes from scrollback end and returns Notice text; wrong type or out-of-range index panics."
+      ],
+      [
+        "Toast extraction",
+        "a test expects an agent toast",
+        "the helper returns AgentId(0)'s message and panics if no toast exists."
+      ],
+      [
+        "Project-picker state",
+        "a test requests project_picker_app",
+        "Welcome remains active with `/tmp` cwd, project_picker_shown false, and other test defaults."
       ]
     ],
     "sources": [
@@ -93580,6 +93808,38 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/lifecycle.rs",
         "project_selection_updates_dashboard_cwd_and_git_snapshot"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "make_picker_entry"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "open_session_picker_with"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "last_system_text"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "system_text_from_end"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "project_picker_app"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "read_toast"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "agent_toast"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "agent_scrollback_len"
       ]
     ]
   },
@@ -97238,6 +97498,26 @@
         "Styled character wrapping",
         "ASCII, wide characters, empty text and alternating styles cross row boundaries",
         "the counter, plain wrapper and styled wrapper agree on text and row count while styles survive their splits."
+      ],
+      [
+        "Enable-always option",
+        "a permission test needs the special global approval option",
+        "the queue contains the canonical enable-always id first, a regular allow option second, and reject-once third, with active index zero."
+      ],
+      [
+        "Synthetic options",
+        "a test supplies arbitrary option id/name pairs",
+        "the helper builds options in input order and classifies only id `reject` as RejectOnce."
+      ],
+      [
+        "Response verification",
+        "a permission action is handled",
+        "the returned oneshot receiver remains available for the test to verify the ACP response send."
+      ],
+      [
+        "Unbound session",
+        "push_synthetic_permission is called for an agent without a session id",
+        "the helper panics because synthetic permission requires session identity."
       ]
     ],
     "sources": [
@@ -97348,6 +97628,14 @@
       [
         "crates/codegen/pager/src/views/permission_view.rs",
         "option_label_for_selection_matches_persisted_scope"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "enqueue_permission_with_enable_always_approve"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "push_synthetic_permission"
       ]
     ]
   },
@@ -143019,6 +143307,31 @@
         "Authoritative notification",
         "a Grow SessionUpdate is delivered",
         "apply_grow_session_update serializes the notification and routes it through the ACP handler."
+      ],
+      [
+        "Ask-user request",
+        "a test needs an ACP ask-user-question round trip",
+        "the helper returns a typed ExtRequest and receiver carrying test-session, tool-call id, default mode, and one `ok` option."
+      ],
+      [
+        "Two-agent ownership",
+        "a test needs active/inactive session routing",
+        "agent 0 is active with sess-A while agent 1 owns sess-B and a running background task whose kill request is pending."
+      ],
+      [
+        "Subagent default",
+        "a test constructs a child metadata record",
+        "the record has fixed ids and description, live start/progress times, no workflow/error/tool counters, and no child replay marker."
+      ],
+      [
+        "Fork ancestry",
+        "a test links a child to a parent",
+        "only the child AgentSession forked_from field is set to the parent id."
+      ],
+      [
+        "Control outcome",
+        "a test needs a successful or local failed control result",
+        "control_rpc_accepted returns AuthoritativeUpdatePending and local_control_failure returns the supplied message with terminal_published false."
       ]
     ],
     "sources": [
@@ -143033,6 +143346,26 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs",
         "apply_grow_session_update"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "make_test_subagent"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "make_bg_task"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "two_agent_app_with_bg_task"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "make_ask_user_question_args"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/mod.rs",
+        "set_forked_from"
       ]
     ]
   },
@@ -178662,6 +178995,26 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
         "file_search.retarget"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "dispatch_fork"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "dispatch_fork_resolved"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "open_fork_question"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "apply_persist_worktree_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "worktree_persist_options"
       ]
     ]
   },
@@ -178750,6 +179103,30 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
         "still being created"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "dispatch_fork"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "dispatch_fork_resolved"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "open_fork_question"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "translate_local_submit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "ForkAnswered"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "LocalQuestionKind::Fork"
       ]
     ]
   },
@@ -178842,6 +179219,22 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
         "fork_worktree_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "dispatch_fork_resolved"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "build_fork_placeholder"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "build_child_fork_marker"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "dispatch_startup_fork_session"
       ]
     ]
   },
@@ -178900,6 +179293,10 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
         "worktree"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "build_child_fork_marker"
       ]
     ]
   },
@@ -178962,6 +179359,18 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
         "CreateWorktreeSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "apply_persist_worktree_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "worktree_persist_options"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "dispatch_fork_resolved"
       ]
     ]
   },
@@ -179016,6 +179425,18 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/tests/session/fork.rs",
         "WorktreeMode::Never"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "handle_worktree_forked"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "handle_fork_session_ready"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "handle_fork_session_failed"
       ]
     ]
   },
@@ -185227,6 +185648,593 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/turn.rs",
         "finish_running"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The scrollback verb-group scanner SHALL classify collapsed chromeless tool and subagent members, finished collapsed thinking members, transparent opened/streaming/hidden entries, and breaking entries through one shared RunStep policy; forward scans SHALL report the same claimed end and member count used by layout and range queries, and in-place tool-kind changes SHALL be detectable.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: run_step excludes pending-user-input and hook-annotated chrome from claims. Collapsed tool calls with a VerbGroupKind become Member; manually opened groupable tools are Transparent. Collapsed subagent rows become Member, chrome-bearing subagents Break. Finished collapsed thinking is ThoughtMember only when show_thinking is true; hidden, running, expanded, or otherwise open thinking is Transparent. Other blocks Break. scan_run_forward accepts only Member/ThoughtMember anchors, advances end over claimed members/thoughts, skips transparent entries, stops at Break or missing entry, and returns None for non-anchors. RunScan::folds is true for at least one counted member, so pure-thought runs do not fold. verb_group_kind_changed compares tool group kinds and detects membership transitions while treating non-tool kinds as None.",
+    "scenarios": [
+      [
+        "Collapsed tool run",
+        "a chromeless collapsed tool has a verb group kind",
+        "run_step returns Member(kind) and scan_run_forward counts it."
+      ],
+      [
+        "Opened or chrome tool",
+        "a member is expanded, pending input, or hook annotated",
+        "the entry is Transparent or Break so its own rows/chrome remain visible."
+      ],
+      [
+        "Thinking in a run",
+        "show_thinking is enabled and a finished collapsed thought lies between members",
+        "the thought claims the run end without increasing members or the label bucket."
+      ],
+      [
+        "Streaming/visible thought",
+        "thinking is running, expanded, hidden, or show_thinking is disabled",
+        "the thought is Transparent and does not break an existing run."
+      ],
+      [
+        "Pure thoughts",
+        "a scan starts on only ThoughtMember entries",
+        "folds returns false because members is zero."
+      ],
+      [
+        "Membership refinement",
+        "a tool block changes from one verb kind to another",
+        "verb_group_kind_changed returns true so layout can mark structural dirtiness."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "RunStep"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "run_step"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "verb_group_kind_changed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "RunScan"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "RunScan::folds"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "scan_run_forward"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Folded verb-run labels SHALL rebuild from the bounded run span using the shared grouping vocabulary, including eligible hidden thinking and subagent members without labeling thoughts; the resulting VerbGroupHeaderLabel SHALL expose styled and plain text plus running/failed state for the synthetic header projection.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: verb_group_header_label clamps end to entries.len(), walks the requested header span with the same run_step rules, skips ThoughtMember/Transparent entries, stops at Break, and accumulates Member kinds in first-appearance bucket order. GroupHeaderLabel provides a shared label payload for verb and truncation folds. BucketAccumulator renders tense-aware segments, pluralized counts, a failed suffix, bold gray-bright text spans and error styling while reporting running and failed flags. The downstream renderer owns synthetic selection geometry; this source only supplies the label payload.",
+    "scenarios": [
+      [
+        "Mixed tool run",
+        "a bounded run contains reads, searches, and directory listings",
+        "the label preserves first appearance order with per-kind counts and correct past tense."
+      ],
+      [
+        "Running run",
+        "any claimed member is_running",
+        "all bucket verbs use present tense and running is true."
+      ],
+      [
+        "Hidden thinking",
+        "finished collapsed or hidden thinking occurs inside the run",
+        "the label remains tools-only while the claimed run extent stays correct."
+      ],
+      [
+        "Separator",
+        "a non-groupable entry appears inside the requested span",
+        "label accumulation stops at that entry and excludes following rows."
+      ],
+      [
+        "Failed member",
+        "a grouped tool or failed subagent is unsuccessful",
+        "the plain label receives ` · N failed`, failed is true, and only failed states use error styling."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "VerbGroupHeaderLabel"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "GroupHeaderLabel"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "GroupHeaderLabel::label"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "verb_group_header_label"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "BucketAccumulator"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "BucketAccumulator::into_label"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "buckets_in_first_appearance_order_with_plurality"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "failed_members_append_suffix_and_flag"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "running_flips_tense_only"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "run_ends_at_separator_and_skips_hidden_thinking"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "label_stays_tools_only_across_shown_thinking_states"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Truncation header labeling SHALL walk the hidden participant prefix, count thoughts as participants only when they are visible to the fold policy, bucket tools and subagents through the shared label vocabulary, and return None whenever the prefix is pure thought or contains an unnameable non-thought row so the caller can retain an honest numeric count.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: truncation_header_label clamps the range, stops after limit participants, skips hidden thinking without consuming that limit, counts visible thinking as a participant but never buckets it, and maps ToolCallBlock::label_kind or Subagent to buckets. Any other participant returns None; an empty accumulator also returns None. A limit therefore describes the hidden prefix rather than bucket count, and an unbucketable row after the limit is not inspected.",
+    "scenarios": [
+      [
+        "Command prefix",
+        "a hidden prefix contains commands and thoughts",
+        "the label reports only commands while visible thoughts consume participant slots."
+      ],
+      [
+        "Limit boundary",
+        "limit stops within the range",
+        "only participants before the limit contribute; a thought can consume a slot without appearing in the text."
+      ],
+      [
+        "Hidden thinking",
+        "show_thinking is false and a thought is hidden",
+        "the thought is skipped without consuming the participant limit, allowing tools after it to be labeled."
+      ],
+      [
+        "Pure thought prefix",
+        "the prefix contains only thoughts",
+        "the function returns None and the caller keeps plain `N more`."
+      ],
+      [
+        "Unbucketable row",
+        "a visible system/session row is in the walked prefix",
+        "the function returns None to avoid under-describing hidden content; if the row lies past the limit it is not considered."
+      ],
+      [
+        "Action labels",
+        "the prefix contains Execute/Edit/UseTool/ordinary Other tools",
+        "label_kind supplies Ran commands, Edited files, Called MCP tools, or Ran tools buckets."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_header_label"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "ToolCallBlock::label_kind"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "RunStep::ThoughtMember"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_buckets_commands_and_never_thoughts"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_limit_counts_participants_not_buckets"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_none_for_pure_thought_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_none_for_prefix_with_unbucketable_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_skips_hidden_thinking_without_consuming_limit"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Verb-group buckets SHALL count ordinary tool calls, count subagent rows by distinct child session id, track any running member, and mark failure only for unsuccessful tools or Failed subagents; cancelled subagents SHALL not be treated as failures.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: BucketAccumulator::push creates buckets in first appearance order, increments calls, inserts SubagentBlock child_session_id into a per-bucket source set, checks block_failed for every ToolCallBlock variant, increments failed_count for SubagentBlockKind::Failed only, and sets running when entry.is_running. into_label uses source-set size instead of calls when present, so started plus terminal rows of one child count once; it appends the failure suffix and exposes running/failed flags. block_failed exhaustively delegates is_success for all concrete tool variants and treats Lifecycle as non-failing.",
+    "scenarios": [
+      [
+        "Subagent lifecycle pair",
+        "started and completed rows share one child session id",
+        "the bucket displays one subagent."
+      ],
+      [
+        "Completion burst",
+        "terminal rows have different child session ids",
+        "each distinct subagent contributes to the count."
+      ],
+      [
+        "Failed subagent",
+        "a subagent has Failed kind",
+        "failed count and suffix increase."
+      ],
+      [
+        "Cancelled subagent",
+        "a subagent has Cancelled kind",
+        "it contributes to count but not failed count."
+      ],
+      [
+        "Tool failure",
+        "a concrete tool reports is_success false",
+        "failed count increases and the label is marked failed."
+      ],
+      [
+        "Running member",
+        "a tool or subagent entry is running",
+        "the label uses present tense and running is true."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "Bucket"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "Bucket::sources"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "BucketAccumulator::push"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "BucketAccumulator::into_label"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "block_failed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "subagent_rows_bucket_with_tools_and_count_distinct_subagents"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "subagent_completion_burst_counts_each_subagent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "subagent_failed_feeds_suffix_cancelled_does_not"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "running_subagent_flips_group_tense"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Group headers SHALL carry exactly one shared VerbGroupHeaderLabel payload regardless of whether they originate from a verb run or a truncation fold, preserving the styled Line and its plain text for selection/copy while keeping header-family chrome decisions outside this state module.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: GroupHeaderLabel has VerbRun and Truncation variants and label() returns the inner VerbGroupHeaderLabel by reference. VerbGroupHeaderLabel stores Line<'static> spans, plain text, running state and failed state. into_label creates one styled span per bucket and a separate error-colored failure suffix, so renderers can choose family-specific chrome without reconstructing label content or losing copy text.",
+    "scenarios": [
+      [
+        "Verb run payload",
+        "a folded ordinary run requests a label",
+        "the payload is available through GroupHeaderLabel::VerbRun and label()."
+      ],
+      [
+        "Truncation payload",
+        "a truncation prefix is bucketable",
+        "the payload is available through GroupHeaderLabel::Truncation with the same text and state fields."
+      ],
+      [
+        "Selection/copy text",
+        "a consumer needs the header label as plain text",
+        "VerbGroupHeaderLabel.text exactly concatenates the visible bucket segments and optional failure suffix."
+      ],
+      [
+        "Styled render",
+        "a consumer paints the header",
+        "line contains bold gray-bright bucket spans and an accent-error failed suffix."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "GroupHeaderLabel"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "GroupHeaderLabel::label"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "VerbGroupHeaderLabel"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "BucketAccumulator::into_label"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "VerbGroupHeaderLabel::line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "VerbGroupHeaderLabel::text"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The inline grouping contract SHALL be represented by exhaustive tests for first-appearance ordering, skill/file separation, tense and failure changes, separator and thinking transparency, truncation participant limits, action-tool buckets, and distinct subagent identities.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: The 17 inline tests exercise both verb_group_header_label and truncation_header_label using synthetic ScrollbackEntry/RenderBlock fixtures. They assert exact plain labels, running/failed flags, None fallbacks and count behavior, including hidden versus shown thinking and subagent started/terminal rows. This static requirement records the test evidence; it does not claim the tests were executed in this audit.",
+    "scenarios": [
+      [
+        "Ordering and plurality",
+        "mixed kinds appear in a run",
+        "the exact label preserves first appearance and singular/plural nouns."
+      ],
+      [
+        "Skill distinction",
+        "a skill path is read alongside ordinary files",
+        "skill and file buckets remain separate."
+      ],
+      [
+        "Run transparency",
+        "thoughts, separators, and opened members are interleaved",
+        "only eligible tools/subagents are labeled and the run stops at separators."
+      ],
+      [
+        "Truncation honesty",
+        "thought-only or unbucketable prefixes are supplied",
+        "None is returned; bounded prefixes use participant semantics."
+      ],
+      [
+        "Subagent identity",
+        "started/completed/failed/cancelled rows are supplied",
+        "distinct child ids and failure semantics match the label contract."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "tests"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "buckets_in_first_appearance_order_with_plurality"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "skill_reads_bucket_separately_from_files"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "failed_members_append_suffix_and_flag"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "running_flips_tense_only"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "run_ends_at_separator_and_skips_hidden_thinking"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "label_stays_tools_only_across_shown_thinking_states"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_buckets_commands_and_never_thoughts"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_limit_counts_participants_not_buckets"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_mixes_kinds_in_first_appearance_order"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_none_for_pure_thought_prefix"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_none_for_prefix_with_unbucketable_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_counts_failed_commands"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "truncation_label_skips_hidden_thinking_without_consuming_limit"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "subagent_rows_bucket_with_tools_and_count_distinct_subagents"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "subagent_completion_burst_counts_each_subagent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "subagent_failed_feeds_suffix_cancelled_does_not"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/verb_group.rs",
+        "running_subagent_flips_group_tense"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Project picker recents, guarded selection, and deferred session creation",
+    "contract": "The project picker SHALL open only for an eligible Agent view, refuse conflicting active session/MCP/project-create state, preserve the pending prompt and return/attachment context, refresh recents only while the picker is untouched, and on selection commit the chosen or fallback directory, persist the dont-ask choice when requested, initialize session cwd/MCP state, and create or restore the deferred session prompt without losing images or chips.",
+    "scenarios": [
+      [
+        "Picker guard",
+        "the active view is not an eligible unbound Agent or MCP/project creation is already active",
+        "the picker is refused with no conflicting session effect."
+      ],
+      [
+        "Initial picker",
+        "an eligible Agent invokes project selection",
+        "a current-directory choice is shown, pending project metadata is stashed, prompt input is cleared, and recents fetch is emitted."
+      ],
+      [
+        "Recents refresh",
+        "recents return while the same picker remains untouched at its initial cursor/tab state",
+        "the picker choices and resolved paths are replaced; otherwise the response is ignored."
+      ],
+      [
+        "Directory selection",
+        "a picker choice is submitted",
+        "the selected or application cwd is committed, working directory/MCP/session state is updated, and the deferred prompt plus attachments are submitted or restored."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "open_project_question"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "open_project_question_with_context"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "handle_project_picker_recents_loaded"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "dispatch_project_selected"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "pending_project_create"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "Effect::FetchProjectPickerRecents"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "Effect::SetWorkingDir"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "Effect::CreateSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "mcp_init_progress"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "pending_submit_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "return_to_dashboard"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "attach"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Startup fork deferral and parent context propagation",
+    "contract": "A startup fork SHALL defer its parent session id, parent cwd, and new session id until startup permits session creation; once permitted, it SHALL reuse the newly created agent, remove the placeholder CreateSession effect, resolve cwd with an application fallback, compute parent worktree state, and emit exactly one ForkSession effect carrying the parent context.",
+    "scenarios": [
+      [
+        "Startup blocked",
+        "session startup is not yet allowed",
+        "the fork request is stored as deferred startup state and no fork effect is emitted."
+      ],
+      [
+        "Startup ready",
+        "session startup is allowed and a newest agent exists",
+        "the create-session placeholder is removed and ForkSession carries parent id/cwd/worktree and the child id."
+      ],
+      [
+        "Missing agent",
+        "startup completes without a matching agent",
+        "the handler emits no child session effect and leaves the state available for caller handling."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "dispatch_startup_fork_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "StartupFork"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "Effect::CreateSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "Effect::ForkSession"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "parent_session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "parent_cwd"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "parent_is_worktree"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/session/fork.rs",
+        "new_session_id"
       ]
     ]
   }
