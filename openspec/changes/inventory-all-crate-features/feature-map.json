@@ -57798,6 +57798,10 @@
       [
         "crates/codegen/pager/src/app/actions.rs",
         "PermissionModeKind / PermissionModePersist / Effect::PersistPermissionMode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "regular_allow_once_does_not_trigger_always_approve_persist"
       ]
     ]
   },
@@ -57918,6 +57922,42 @@
       [
         "crates/codegen/pager/src/app/external_editor.rs",
         "resolve_editor_command / PromptEditorFile / revalidate / prepare / finish / apply_prompt_outcome / apply_prompt_text"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "external_prompt_editor_arms_typed_request_and_preserves_composer_modes"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "external_prompt_editor_refuses_nonminimal_and_owned_input"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "external_prompt_editor_refuses_elements_with_visible_message"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "external_prompt_editor_refuses_pending_paste_with_visible_message"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "deferred_paste_completion_after_refused_editor_does_not_implicitly_send_without_stash"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "external_prompt_editor_result_replaces_or_clears_without_sending"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "editor_failure_targets_original_agent_and_vanished_agent_is_safe"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "config_editor_action_still_uses_typed_request"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "send_remember_note_clears_active_ephemeral_tip"
       ]
     ]
   },
@@ -58048,6 +58088,22 @@
       [
         "crates/codegen/pager/src/app/screen_mode_relaunch.rs",
         "exec_screen_mode_relaunch / parse_screen_mode / take_screen_mode_env_override / take_screen_mode_control_handoffs / effective_minimal_preference / resolve_screen_mode"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "trajectory_launch_uses_the_exact_active_session_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "update_restart_intent_survives_terminal_teardown"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "screen_mode_relaunch_transports_a_pending_control_in_an_inactive_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "screen_mode_relaunch_transports_a_pending_control_in_a_child_session"
       ]
     ]
   },
@@ -59004,6 +59060,22 @@
       [
         "crates/codegen/pager/src/slash/commands/debug.rs",
         "LISTED_IN_COMPLETIONS / DebugCommand::visible / suggest_args / run"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "system_texts"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "toggle_fps_hud_round_trips"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "show_debug_status_emits_toggle_states_to_transcript"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "toggle_scroll_log_flips_recorder_and_reports_path"
       ]
     ]
   },
@@ -59228,6 +59300,26 @@
       [
         "crates/codegen/pager/src/slash/commands/fork.rs",
         "ForkArgs / parse_fork_args / ForkCommand::run"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "dispatch_fork_no_flag_always_reopens_modal_after_previous_answer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "translate_local_submit_skipped_returns_changed_with_no_action"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "translate_local_submit_no_selection_returns_changed_no_action"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "translate_local_submit_out_of_range_index_returns_changed_no_action"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "handle_ask_user_question_does_not_push_system_block_when_displaced_acp_modal"
       ]
     ]
   },
@@ -59469,6 +59561,66 @@
       [
         "crates/codegen/pager/src/slash/registry.rs",
         "client_collision_qualified_name / CommandTrigger::new / CommandRegistry::apply_acp_commands / rebuild_triggers / is_builtin / commands_by_index"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "acp_bootstrap_command_appears_in_autocomplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "non_goal_acp_bootstrap_command_uses_command_plane_while_idle"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "goal_command_uses_control_plane_while_idle_without_user_echo"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "first_prompt_after_selecting_goal_stays_an_ordinary_prompt"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "acp_bootstrap_command_uses_control_plane_while_running"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "acp_runtime_update_replaces_commands_in_autocomplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "acp_command_colliding_with_builtin_skipped_in_autocomplete"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "acp_command_with_arg_hint_shows_placeholder"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "acp_command_with_args_preserves_args_on_idle_turn_path"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "generation_lifecycle_bootstrap_through_runtime_update"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "tick_propagates_available_commands_to_bootstrap"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "all_constructor_paths_initialize_slash_fields"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "deferred_switch_overwritten_by_second_switch"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "request_bundle_status_emits_effect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "view_catalog_entry_emits_fetch_effect"
       ]
     ]
   },
@@ -59541,6 +59693,38 @@
       [
         "crates/codegen/pager/src/slash/command.rs",
         "ScheduledTaskPreview / DoctorRequest / HostCommandRequest::new / CommandResult"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "slash_quit_dispatches_quit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "removed_slash_exit_does_not_dispatch_quit"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "slash_new_does_not_cancel_running_turn"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "slash_new_uses_active_agent_cwd"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "slash_model_invalid_arg_produces_scrollback_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "slash_model_no_args_opens_picker_without_scrollback_error"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "slash_hooks_opens_modal"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "quit_returns_quit_effect"
       ]
     ]
   },
@@ -67411,6 +67595,18 @@
       [
         "crates/codegen/pager/src/app/acp_handler/settings.rs",
         "handle_settings_update"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "pr13_each_setter_writes_to_its_own_mirror"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "pager_registry_default_matches_agent_view_new_initializer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "switch_to_agent_reanchors_stale_global_auto"
       ]
     ]
   },
@@ -67566,6 +67762,46 @@
       [
         "crates/codegen/pager/src/app/acp_handler/settings.rs",
         "handle_announcements_update"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "critical_announcement"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "promo_announcement"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "shown_banner_id"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "announcements_open_cta_opens_promo_and_noops_under_critical"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "dispatch_send_prompt_announcements_via_registry"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "announcements_hide_is_per_id_so_new_critical_reappears"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "announcements_show_clears_visible_critical_ids_only"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "announcements_hide_targets_slot_owner_critical_then_promo"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "announcements_hide_noops_for_non_dismissible_owner"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "announcements_show_clears_hidden_promo_ids"
       ]
     ]
   },
@@ -69323,6 +69559,46 @@
       [
         "crates/codegen/pager/src/app/acp_handler/session_notification.rs",
         "sync_child_control_projection"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "switch_model_dispatch_produces_effect_and_sets_pending"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "model_selected_during_reconnect_is_sent_once_after_restore"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "switch_agent_dispatch_preserves_model_and_emits_session_effect"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "pending_agent_switch_fences_the_next_prompt_until_completion"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "pending_behavior_fences_normal_prompts_until_authoritative_admission"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "switch_agent_soft_allows_unknown_name_for_shell_ssot"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "model_and_agent_switches_target_the_visible_subagent_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "behavior_selection_from_child_view_never_mutates_parent_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "deferred_model_switch_still_works_for_cli_override"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "test_helper_agent_uses_generation_zero"
       ]
     ]
   },
@@ -78278,6 +78554,18 @@
       [
         "crates/codegen/pager/src/views/dashboard/render.rs",
         "render_dashboard_paints_full_area_background"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "show_tasks_empty_commits_empty_message"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "show_tasks_lists_a_scheduled_task"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "show_tasks_no_active_agent_is_noop"
       ]
     ]
   },
@@ -78601,6 +78889,34 @@
       [
         "crates/codegen/pager/src/views/dashboard/render.rs",
         "render_narrow_viewport_follows_selected_section_header"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "classify_top_level_branches"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "build_rows_idle_anchor_is_frozen_last_active_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "build_rows_working_anchor_is_turn_started_at"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "build_rows_fallback_anchor_is_frozen_when_last_active_at_is_none"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "peek_label_reflects_last_response_type"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "classify_top_level_question_view_some_is_needs_input"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "top_level_label_strips_control_characters"
       ]
     ]
   },
@@ -82465,6 +82781,30 @@
       [
         "crates/codegen/pager/src/views/dashboard/state.rs",
         "slash_dropdown_mouse_move_sets_hover"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "mouse_event"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "mouse_left_click_attaches_immediately"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "mouse_repeated_click_keeps_attaching"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "mouse_click_after_long_pause_still_attaches"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "mouse_click_on_peek_close_rect_clears_peek"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "expand_build_card_still_loads_detail"
       ]
     ]
   },
@@ -85660,6 +86000,30 @@
       [
         "crates/codegen/pager/src/app/root/dispatch/session/modal.rs",
         "remove_agent_and_cleanup; dispatch_sessions_confirm_close; dispatch_rename_session"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "close_active_agent_no_parent_switches_to_first_surviving_peer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "close_active_agent_with_dead_parent_falls_back_to_surviving_peer"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "entry_title_uses_display_name_when_set"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "find_agent_by_session_id_returns_none_for_unknown"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "find_agent_by_session_id_returns_none_when_session_id_is_none"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "find_agent_by_session_id_finds_inactive_agent"
       ]
     ]
   },
@@ -119234,6 +119598,26 @@
       [
         "crates/codegen/pager/src/app/agent_view/mod.rs",
         "follow_up_chip_click_maps_to_suggestion_text"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "follow_up_chip_does_not_execute_slash_command"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "follow_up_chip_does_not_execute_exit_alias"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "chip_submit_while_running_clears_follow_up_chips"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "chip_submit_while_reconnect_pending_keeps_chips_and_does_not_send"
+      ],
+      [
+        "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "mark_turn_finished_clears_start_and_stamps_active"
       ]
     ]
   },
@@ -152816,6 +153200,694 @@
       [
         "crates/codegen/pager/src/views/list_pane/state/mod.rs",
         "paste_targets_only_active_list_input_and_preserves_comment_newlines"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback turn index and stable turn navigation",
+    "contract": "ScrollbackState SHALL rebuild turns from UserPrompt boundaries, close completed turns at the next prompt, mark the final turn Running, and derive current_turn from the selected entry or the final turn. It SHALL expose turn lookup/iteration, jump to a turn index, and jump to a prompt EntryId without allowing shifted indices or non-prompt ids to select the wrong block. next_turn SHALL activate the next prompt or re-activate the last prompt; prev_turn SHALL first return from a response to its prompt, then move to the prior prompt or selectable pre-turn content.",
+    "scenarios": [
+      [
+        "Turn rebuild",
+        "entries contain multiple user prompts and a final open turn",
+        "turn ranges cover each prompt-to-next-prompt span, prior turns are Completed, and the final turn is Running."
+      ],
+      [
+        "Stable jump",
+        "a captured prompt EntryId still exists after index shifts",
+        "jump_to_entry resolves its current index and activates only that turn prompt; missing/non-prompt ids return false."
+      ],
+      [
+        "Forward boundary",
+        "next_turn is already on the final turn",
+        "the final prompt is reactivated and scrolled rather than failing."
+      ],
+      [
+        "Backward boundary",
+        "prev_turn is inside a response or at the first prompt with pre-turn entries",
+        "it first selects the current prompt, then selects the previous prompt or first selectable pre-turn entry."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::rebuild_turns"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::turn_containing"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::current_turn"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::turn_count"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::turn"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::turns"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::iter_entries"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::jump_to_turn"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::jump_to_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::next_turn"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::prev_turn"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::activate_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::activate_turn"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback response-anchor navigation",
+    "contract": "prev_response and next_response SHALL navigate among the first nonempty AgentMessage of each trailing agent-message run in a turn, skipping structural/session blocks and skipping turns whose trailing work ends in a tool/thinking/subagent/background block. Navigation SHALL require a usable layout and viewport, confine candidates to the visible turn in SingleTurn mode, compare exact sticky-header-adjusted offsets strictly above/below the current scroll, select the anchor, disable follow, and bump generation.",
+    "scenarios": [
+      [
+        "Trailing response run",
+        "a turn ends with multiple AgentMessage blocks after notices",
+        "the first message of that trailing run is the response anchor."
+      ],
+      [
+        "Tool-ended turn",
+        "the final turn entry is a tool call with no trailing response",
+        "neither response direction finds an anchor."
+      ],
+      [
+        "Exact anchor boundary",
+        "the viewport is exactly at an anchor top",
+        "K walks to the previous anchor and J walks to the next; the current anchor is not returned again."
+      ],
+      [
+        "No layout",
+        "viewport height/width or layout cache is unusable",
+        "response navigation returns false without changing selection."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "response_anchor_in_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::prev_response"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::next_response"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::snap_to_response"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "test_response_anchor_trailing_run_skips_interleaved_messages"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "test_no_response_anchor_when_turn_ends_in_tool_call"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "test_response_navigation_walks_anchor_offsets"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "test_response_navigation_single_turn_mode"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback manual scrolling and viewport-edge selection",
+    "contract": "ScrollbackState SHALL support saturating row scroll, half-page movement, top/bottom jumps, full-page movement that subtracts the currently rendered sticky header and keeps a two-row overlap, and viewport-edge selection that picks the first/last selectable visible entry while skipping hidden or nonselectable blocks. goto_top SHALL exit follow and select the first visible selectable; goto_bottom SHALL pin to max offset, enter follow, clear preserve pin, and select the last visible selectable.",
+    "scenarios": [
+      [
+        "Manual scroll",
+        "scroll_up or scroll_down is called with rows",
+        "offsets saturate at zero/max and manual upward movement exits follow."
+      ],
+      [
+        "Page movement",
+        "page_up/page_down runs with sticky headers or disabled sticky headers",
+        "the delta is content viewport minus header minus two overlap rows, or viewport minus two when no header is rendered, with a minimum of one."
+      ],
+      [
+        "Edge selection",
+        "a page lands on a viewport edge containing structural/hidden rows",
+        "selection walks inward to the nearest selectable entry covering that visual edge."
+      ],
+      [
+        "Top/bottom gesture",
+        "goto_top or goto_bottom is invoked",
+        "top selects the first visible item and unfollows; bottom selects the last item, clears preserve pin, and follows the tail."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::scroll_up"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::scroll_down"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::page_scroll_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::current_header_screen_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::page_up"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::page_down"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::select_viewport_edge"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::is_selectable_in_viewport"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::half_page_up"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::half_page_down"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::goto_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::goto_bottom"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "page_up_selects_top_of_viewport"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "page_down_selects_bottom_of_viewport"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "page_down_does_not_skip_lines_behind_sticky_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "page_delta_ignores_header_when_sticky_headers_disabled"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback follow mode, overscroll and turn-start policy",
+    "contract": "Follow mode SHALL represent tail tracking with explicit follow_mode and optional follow_preserve_scroll. A positive scroll_down already clamped at bottom SHALL enter follow on the first fully clamped gesture only when follow_by_overscroll is enabled; a gesture that lands at bottom after moving rows SHALL remain manual until the next clamped gesture. follow_new_turn SHALL page-flip a prompt to the top and arm preserve, preserve existing position for non-page-flip prompts, and arm follow-with-preserve for synthetic/no-prompt turns.",
+    "scenarios": [
+      [
+        "Clamped overscroll",
+        "the viewport is already at max and a positive scroll-down moves zero rows",
+        "follow engages immediately when configured; rows=0 and disabled config do not engage."
+      ],
+      [
+        "Landing at bottom",
+        "scroll-down moves real rows and lands at max",
+        "follow remains off until a later zero-movement scroll gesture."
+      ],
+      [
+        "Page-flip prompt",
+        "a new turn has a prompt and page_flip is true",
+        "the prompt is selected/top-pinned, follow is enabled, and preserve remains armed."
+      ],
+      [
+        "No page-flip prompt",
+        "a prompt exists but page_flip is false",
+        "scroll/follow state is retained while the prompt is selected."
+      ],
+      [
+        "Synthetic turn",
+        "no prompt index is available",
+        "follow-with-preserve is armed regardless of page_flip."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::scroll_down"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::follow_new_turn"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::is_follow_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::is_follow_preserve_scroll"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "clamped_scroll_down_at_bottom_engages_follow_on_first_event"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "landing_at_bottom_does_not_engage_follow"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "overscroll_never_engages_follow_when_config_disabled"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "follow_new_turn_scroll_policies"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback follow toggles and automatic selection",
+    "contract": "Toggle and follow helpers SHALL provide distinct entry points: toggle_follow flips follow and sends an entering transition to the bottom; enable_follow_mode follows and clears preserve; enable_follow enables follow without moving; enable_follow_with_preserve delays bottom pin for one frame. handle_follow_mode SHALL re-pin to bottom and select the last selectable item only when nothing is selected or follow_auto_select says the current selection is already the tail.",
+    "scenarios": [
+      [
+        "Enter follow",
+        "toggle_follow is called while manual",
+        "the viewport moves to bottom and follow becomes active."
+      ],
+      [
+        "Preserve enable",
+        "enable_follow_with_preserve follows after a prompt was positioned",
+        "the first follow frame retains the current position until overflow."
+      ],
+      [
+        "Auto-select guard",
+        "follow mode is active with a middle selection",
+        "new content moves the viewport but does not clobber a deliberate middle selection unless follow_auto_select and tail selection conditions hold."
+      ],
+      [
+        "No-op manual mode",
+        "handle_follow_mode runs with follow disabled",
+        "the viewport and selection are unchanged."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::toggle_follow"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::enable_follow_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::enable_follow"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::enable_follow_with_preserve"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::handle_follow_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "follow_reclamps_when_content_shrinks_below_viewport"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback follow preserve re-clamping after content shrink",
+    "contract": "follow_scroll_to_bottom SHALL handle both normal tail following and page-flip preserve pins. Preserve SHALL remain while new content fits below the pinned prompt, switch to normal bottom-follow once max_offset exceeds the pin, and consume/re-clamp a stale pin when content shrinks so scroll_offset is not stranded beyond total content. Normal follow SHALL always re-clamp to max_scroll_offset, including when content becomes shorter than the viewport.",
+    "scenarios": [
+      [
+        "Preserved prompt",
+        "new rows still fit below a page-flip prompt",
+        "the pinned scroll offset remains unchanged and preserve stays armed."
+      ],
+      [
+        "Overflow after pin",
+        "content grows beyond the preserved offset",
+        "preserve is consumed and scroll moves to the measured bottom."
+      ],
+      [
+        "Pinned target removed",
+        "a tall entry above the pinned prompt shrinks/demotes and scroll_offset exceeds total_height",
+        "the stale preserve flag is consumed and the viewport re-pins to max offset."
+      ],
+      [
+        "Plain shrink",
+        "normal follow content shrinks below viewport",
+        "scroll_offset clamps to zero rather than freezing beyond the end."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::follow_scroll_to_bottom"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "page_flip_pin_reclamps_after_shrink_past_end"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "bottom_gestures_clear_preserve_pin"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "follow_reclamps_when_content_shrinks_below_viewport"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback selected-entry visibility with sticky headers and margins",
+    "contract": "ensure_selected_visible SHALL keep a selected entry visible in the current visible range using exact layout measurements only when the entry is offscreen. It SHALL account for sticky header height, configured top/bottom margins except at scroll edges, large-entry top anchoring, entry-fit bottom alignment, sticky-header re-evaluation at target, minimum scroll fractions/lines, and follow exit when manual visibility scrolling occurs.",
+    "scenarios": [
+      [
+        "Fully visible selection",
+        "the selected entry fits inside content bounds including margins",
+        "no scroll occurs."
+      ],
+      [
+        "Clipped top",
+        "the selected entry starts above the effective content top",
+        "scroll moves it to the content top plus margin through sticky-aware fixed-point calculation."
+      ],
+      [
+        "Clipped bottom",
+        "the entry fits but its bottom is below the effective bottom",
+        "scroll moves just enough to show the bottom unless a sticky header would hide its top, then top-aligns."
+      ],
+      [
+        "Large entry",
+        "the entry exceeds available content height",
+        "the entry top is shown rather than attempting impossible full visibility."
+      ],
+      [
+        "Minimum movement",
+        "a fitting entry needs a small non-edge scroll",
+        "the configured minimum scroll distance is applied unless it would hit an edge."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::ensure_selected_visible"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::build_relative_prompt_descriptors"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::current_sticky_layout"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::find_scroll_for_entry_at_content_top"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback exact entry top and center positioning",
+    "contract": "scroll_to_entry_top SHALL always position a valid entry at the viewport content top below sticky headers; scroll_to_entry_center SHALL measure the target exactly, account for sticky header height, center its entry around the viewport, disable follow, and bump generation. Invalid dimensions, empty state, or out-of-range entries SHALL no-op.",
+    "scenarios": [
+      [
+        "Top navigation",
+        "a valid next-turn prompt is selected",
+        "the entry is placed at the sticky-adjusted content top and follow is disabled."
+      ],
+      [
+        "Center reveal",
+        "a valid entry is requested for centered viewing",
+        "the entry is measured exactly and the viewport centers it after sticky-header convergence."
+      ],
+      [
+        "Invalid target",
+        "the index is out of bounds or layout dimensions are unavailable",
+        "no scroll or generation change occurs."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::scroll_to_entry_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::entry_top_scroll_offset"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::scroll_to_entry_center"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "scroll_to_entry_top"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "scroll_to_entry_center"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback search reveal expands and unhides target entries",
+    "contract": "reveal_entry_line SHALL select a valid entry, build a cache before hidden-group checks on cache miss, unhide a truncated group, expand foldable entries to Expanded, optionally pin the forced expansion when respect_manual_folds is enabled, rekey verb-group expansion ownership, and rebuild layout exactly when display state/cache/heights require it. Out-of-range entries SHALL be a no-op.",
+    "scenarios": [
+      [
+        "Collapsed target",
+        "a search match is inside a collapsed fold",
+        "the entry expands, optionally becomes pinned, layout rebuilds once, and selection follows it."
+      ],
+      [
+        "Truncated target",
+        "a match is hidden by group truncation",
+        "the containing group is added to expanded_groups and the target becomes visible."
+      ],
+      [
+        "Adjacent verb fold",
+        "a dense truncated run abuts a separately claimed verb group",
+        "only the dense run is unhidden; the adjacent verb fold remains intact."
+      ],
+      [
+        "Cache miss",
+        "layout cache is absent before reveal",
+        "the cache is rebuilt before hidden detection so unhide is not skipped."
+      ],
+      [
+        "Invalid target",
+        "entry_idx is outside entries",
+        "selection, scroll, generation and layout remain unchanged."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::reveal_entry_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::rekey_verb_group_expansion"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_expands_collapsed_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_ungroups_truncated_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_ungroups_truncated_entry_across_adjacent_verb_fold"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_unhides_truncated_group_on_cache_miss"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_out_of_bounds_is_noop"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback reveal logical lines through wrapped and nonselectable rows",
+    "contract": "reveal_entry_line SHALL map the search index logical line through the rendered entry output, not treat each logical newline as one screen row. rendered_row_offset_within_entry SHALL use EntryRenderer::rendered_row_of_logical_line with current width/theme/appearance/cwd, skip nonselectable thinking headers and blank rows, include prior wrapped rows, clamp the nudge to the cached entry height, and clamp final scroll to max offset.",
+    "scenarios": [
+      [
+        "Wrapped preceding line",
+        "a later logical line follows a line that wraps over many rows",
+        "revealing the later line scrolls past all preceding wrapped rows."
+      ],
+      [
+        "Thinking header",
+        "a Thinking entry renders a nonselectable header/blank prefix",
+        "logical line zero maps after those rows, not to the header."
+      ],
+      [
+        "Past-end line",
+        "line_in_entry exceeds the entry height",
+        "the scroll nudge clamps to the last rendered row and repeated huge indices agree."
+      ],
+      [
+        "Visible target",
+        "the entry is already visible with clean cache heights",
+        "reveal changes selection/scroll as needed without rebuilding the whole layout."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "ScrollbackState::rendered_row_offset_within_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "EntryRenderer::rendered_row_of_logical_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_biases_scroll_toward_matched_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_scrolls_past_wrapped_rows_of_earlier_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_skips_thinking_header_rows_when_mapping_logical_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_skips_rebuild_for_already_visible_target"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Pager scrollback navigation regression evidence and verification boundary",
+    "contract": "The module SHALL preserve the 39 inline regression behaviors for turn/response anchors, streaming responses, page and half-page movement, overscroll follow, page-flip preserve, shrink re-clamping, fold/group reveal, wrapped-line mapping, sticky-header page deltas, and viewport-edge selection. These tests are static source evidence and do not prove live terminal event integration or runtime layout backends.",
+    "scenarios": [
+      [
+        "Streaming response",
+        "an empty streaming placeholder later receives content",
+        "response navigation sees the completed/trailing message without rebuilding turn boundaries."
+      ],
+      [
+        "Page selection",
+        "a page movement crosses mixed-height entries",
+        "selection follows the visual top/bottom edge and subsequent select_next continues from that new selection."
+      ],
+      [
+        "Reveal performance",
+        "a target is already visible or requires expansion/dirty-height recovery",
+        "layout rebuild count matches the cheap path or exactly one required rebuild."
+      ],
+      [
+        "Sticky header gate",
+        "sticky headers are enabled/disabled around a tall prompt",
+        "page delta subtracts only a header that the renderer actually paints."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "tests module"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "test_streaming_response_real_path"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "test_response_navigation_walks_anchor_offsets"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "page_up_selects_top_of_viewport"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "page_down_selects_bottom_of_viewport"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "page_up_then_select_next_does_not_teleport_to_old_selection"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_rebuilds_once_when_expanding_collapsed_entry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "reveal_rebuilds_when_heights_are_dirty"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "page_down_does_not_skip_lines_behind_sticky_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "page_delta_ignores_header_when_sticky_headers_disabled"
       ]
     ]
   }

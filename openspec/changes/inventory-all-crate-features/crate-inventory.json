@@ -3042,26 +3042,37 @@
       "Pager scrollback Esc cancel ignored PTY check",
       "Pager scrollback dense-gap and group-range source unit checks",
       "Pager scrollback entry fold mutation and viewport anchor restoration",
+      "Pager scrollback exact entry top and center positioning",
       "Pager scrollback folded ranges and viewport paint-window selection",
       "Pager scrollback folded-run labels and synthetic header selection",
+      "Pager scrollback follow mode, overscroll and turn-start policy",
+      "Pager scrollback follow preserve re-clamping after content shrink",
+      "Pager scrollback follow toggles and automatic selection",
       "Pager scrollback generic content and tool-file link ownership",
       "Pager scrollback identity, immutable events and reconnect frontier",
       "Pager scrollback inline media and Mermaid placement geometry",
       "Pager scrollback layout cache lifecycle and incremental geometry updates",
       "Pager scrollback lazy viewport measurement warmup and tall-history bounds",
+      "Pager scrollback manual scrolling and viewport-edge selection",
       "Pager scrollback multi-click action dispatch",
       "Pager scrollback mutation, materialization and cache invalidation",
+      "Pager scrollback navigation regression evidence and verification boundary",
       "Pager scrollback permission epochs and ordered insertion",
       "Pager scrollback raw and global fold controls",
       "Pager scrollback rendered group-header action semantics",
       "Pager scrollback resize anchoring and bounded navigation measurement",
       "Pager scrollback resolved text-selection geometry and cached boundaries",
+      "Pager scrollback response-anchor navigation",
+      "Pager scrollback reveal logical lines through wrapped and nonselectable rows",
       "Pager scrollback running, finish flash and pending-input lifecycle",
       "Pager scrollback screen-row hit testing sticky prompts and permission members",
       "Pager scrollback search playground",
+      "Pager scrollback search reveal expands and unhides target entries",
+      "Pager scrollback selected-entry visibility with sticky headers and margins",
       "Pager scrollback selection playground",
       "Pager scrollback source-aware Markdown hyperlink projection",
       "Pager scrollback timeline status and link presentation",
+      "Pager scrollback turn index and stable turn navigation",
       "Pager scrollback turn navigation and layout metadata types",
       "Pager scrollback turn, viewport and layout orchestration",
       "Pager scrollback view-range and selectable-entry navigation",
@@ -3776,6 +3787,10 @@
         "sha256": "c8819156e68090132161ec5c73c99dd3d6ff730f4d08ca21f5006af78ea08ef2"
       },
       {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/router.rs",
+        "sha256": "ce6c9d6d6486be4efbe51481855f9c239c298c861401a16bb7eadcfae02e210a"
+      },
+      {
         "path": "crates/codegen/pager/src/app/root/dispatch/tests/settings.rs",
         "sha256": "6fcf3e52ded184fe0875282f35d43b3e78dde0e0c5ad223b05a7ad2e0aa6ad8c"
       },
@@ -4186,6 +4201,10 @@
       {
         "path": "crates/codegen/pager/src/scrollback/state/mod.rs",
         "sha256": "a1379a9660cd4cd04bb1accfce6b58266bb7779b1b00b50b433fb17364ab629f"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/state/nav.rs",
+        "sha256": "e5a17635d129f8dcf936e51d0f192657314b664318e4e66b3ca2866e47ddaabd"
       },
       {
         "path": "crates/codegen/pager/src/scrollback/state/selection.rs",

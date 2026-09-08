@@ -13150,3 +13150,241 @@ Selection navigation SHALL not panic when the item slice is empty while layout m
 - **THEN** only the active bar changes, normalization follows mode, and closed bars reject paste.
 
 证据：`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `ListPaneState`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `handle_paste`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_next_prev_empty_items_no_panic`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_next_scrolls_in_small_viewport`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `select_next_with_prepare_layout_between_steps`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `scroll_lines_works_in_small_viewport`；`crates/codegen/pager/src/views/list_pane/state/mod.rs` — `paste_targets_only_active_list_input_and_preserves_comment_newlines`。
+### Requirement: Pager scrollback turn index and stable turn navigation
+ScrollbackState SHALL rebuild turns from UserPrompt boundaries, close completed turns at the next prompt, mark the final turn Running, and derive current_turn from the selected entry or the final turn. It SHALL expose turn lookup/iteration, jump to a turn index, and jump to a prompt EntryId without allowing shifted indices or non-prompt ids to select the wrong block. next_turn SHALL activate the next prompt or re-activate the last prompt; prev_turn SHALL first return from a response to its prompt, then move to the prior prompt or selectable pre-turn content.
+
+#### Scenario: Turn rebuild
+- **WHEN** entries contain multiple user prompts and a final open turn
+- **THEN** turn ranges cover each prompt-to-next-prompt span, prior turns are Completed, and the final turn is Running.
+
+#### Scenario: Stable jump
+- **WHEN** a captured prompt EntryId still exists after index shifts
+- **THEN** jump_to_entry resolves its current index and activates only that turn prompt; missing/non-prompt ids return false.
+
+#### Scenario: Forward boundary
+- **WHEN** next_turn is already on the final turn
+- **THEN** the final prompt is reactivated and scrolled rather than failing.
+
+#### Scenario: Backward boundary
+- **WHEN** prev_turn is inside a response or at the first prompt with pre-turn entries
+- **THEN** it first selects the current prompt, then selects the previous prompt or first selectable pre-turn entry.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::rebuild_turns`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::turn_containing`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::current_turn`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::turn_count`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::turn`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::turns`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::iter_entries`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::jump_to_turn`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::jump_to_entry`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::next_turn`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::prev_turn`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::activate_entry`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::activate_turn`。
+
+### Requirement: Pager scrollback response-anchor navigation
+prev_response and next_response SHALL navigate among the first nonempty AgentMessage of each trailing agent-message run in a turn, skipping structural/session blocks and skipping turns whose trailing work ends in a tool/thinking/subagent/background block. Navigation SHALL require a usable layout and viewport, confine candidates to the visible turn in SingleTurn mode, compare exact sticky-header-adjusted offsets strictly above/below the current scroll, select the anchor, disable follow, and bump generation.
+
+#### Scenario: Trailing response run
+- **WHEN** a turn ends with multiple AgentMessage blocks after notices
+- **THEN** the first message of that trailing run is the response anchor.
+
+#### Scenario: Tool-ended turn
+- **WHEN** the final turn entry is a tool call with no trailing response
+- **THEN** neither response direction finds an anchor.
+
+#### Scenario: Exact anchor boundary
+- **WHEN** the viewport is exactly at an anchor top
+- **THEN** K walks to the previous anchor and J walks to the next; the current anchor is not returned again.
+
+#### Scenario: No layout
+- **WHEN** viewport height/width or layout cache is unusable
+- **THEN** response navigation returns false without changing selection.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `response_anchor_in_range`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::prev_response`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::next_response`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::snap_to_response`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `test_response_anchor_trailing_run_skips_interleaved_messages`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `test_no_response_anchor_when_turn_ends_in_tool_call`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `test_response_navigation_walks_anchor_offsets`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `test_response_navigation_single_turn_mode`。
+
+### Requirement: Pager scrollback manual scrolling and viewport-edge selection
+ScrollbackState SHALL support saturating row scroll, half-page movement, top/bottom jumps, full-page movement that subtracts the currently rendered sticky header and keeps a two-row overlap, and viewport-edge selection that picks the first/last selectable visible entry while skipping hidden or nonselectable blocks. goto_top SHALL exit follow and select the first visible selectable; goto_bottom SHALL pin to max offset, enter follow, clear preserve pin, and select the last visible selectable.
+
+#### Scenario: Manual scroll
+- **WHEN** scroll_up or scroll_down is called with rows
+- **THEN** offsets saturate at zero/max and manual upward movement exits follow.
+
+#### Scenario: Page movement
+- **WHEN** page_up/page_down runs with sticky headers or disabled sticky headers
+- **THEN** the delta is content viewport minus header minus two overlap rows, or viewport minus two when no header is rendered, with a minimum of one.
+
+#### Scenario: Edge selection
+- **WHEN** a page lands on a viewport edge containing structural/hidden rows
+- **THEN** selection walks inward to the nearest selectable entry covering that visual edge.
+
+#### Scenario: Top/bottom gesture
+- **WHEN** goto_top or goto_bottom is invoked
+- **THEN** top selects the first visible item and unfollows; bottom selects the last item, clears preserve pin, and follows the tail.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::scroll_up`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::scroll_down`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::page_scroll_rows`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::current_header_screen_rows`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::page_up`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::page_down`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::select_viewport_edge`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::is_selectable_in_viewport`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::half_page_up`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::half_page_down`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::goto_top`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::goto_bottom`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_up_selects_top_of_viewport`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_down_selects_bottom_of_viewport`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_down_does_not_skip_lines_behind_sticky_header`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_delta_ignores_header_when_sticky_headers_disabled`。
+
+### Requirement: Pager scrollback follow mode, overscroll and turn-start policy
+Follow mode SHALL represent tail tracking with explicit follow_mode and optional follow_preserve_scroll. A positive scroll_down already clamped at bottom SHALL enter follow on the first fully clamped gesture only when follow_by_overscroll is enabled; a gesture that lands at bottom after moving rows SHALL remain manual until the next clamped gesture. follow_new_turn SHALL page-flip a prompt to the top and arm preserve, preserve existing position for non-page-flip prompts, and arm follow-with-preserve for synthetic/no-prompt turns.
+
+#### Scenario: Clamped overscroll
+- **WHEN** the viewport is already at max and a positive scroll-down moves zero rows
+- **THEN** follow engages immediately when configured; rows=0 and disabled config do not engage.
+
+#### Scenario: Landing at bottom
+- **WHEN** scroll-down moves real rows and lands at max
+- **THEN** follow remains off until a later zero-movement scroll gesture.
+
+#### Scenario: Page-flip prompt
+- **WHEN** a new turn has a prompt and page_flip is true
+- **THEN** the prompt is selected/top-pinned, follow is enabled, and preserve remains armed.
+
+#### Scenario: No page-flip prompt
+- **WHEN** a prompt exists but page_flip is false
+- **THEN** scroll/follow state is retained while the prompt is selected.
+
+#### Scenario: Synthetic turn
+- **WHEN** no prompt index is available
+- **THEN** follow-with-preserve is armed regardless of page_flip.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::scroll_down`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::follow_new_turn`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::is_follow_mode`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::is_follow_preserve_scroll`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `clamped_scroll_down_at_bottom_engages_follow_on_first_event`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `landing_at_bottom_does_not_engage_follow`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `overscroll_never_engages_follow_when_config_disabled`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `follow_new_turn_scroll_policies`。
+
+### Requirement: Pager scrollback follow toggles and automatic selection
+Toggle and follow helpers SHALL provide distinct entry points: toggle_follow flips follow and sends an entering transition to the bottom; enable_follow_mode follows and clears preserve; enable_follow enables follow without moving; enable_follow_with_preserve delays bottom pin for one frame. handle_follow_mode SHALL re-pin to bottom and select the last selectable item only when nothing is selected or follow_auto_select says the current selection is already the tail.
+
+#### Scenario: Enter follow
+- **WHEN** toggle_follow is called while manual
+- **THEN** the viewport moves to bottom and follow becomes active.
+
+#### Scenario: Preserve enable
+- **WHEN** enable_follow_with_preserve follows after a prompt was positioned
+- **THEN** the first follow frame retains the current position until overflow.
+
+#### Scenario: Auto-select guard
+- **WHEN** follow mode is active with a middle selection
+- **THEN** new content moves the viewport but does not clobber a deliberate middle selection unless follow_auto_select and tail selection conditions hold.
+
+#### Scenario: No-op manual mode
+- **WHEN** handle_follow_mode runs with follow disabled
+- **THEN** the viewport and selection are unchanged.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::toggle_follow`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::enable_follow_mode`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::enable_follow`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::enable_follow_with_preserve`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::handle_follow_mode`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `follow_reclamps_when_content_shrinks_below_viewport`。
+
+### Requirement: Pager scrollback follow preserve re-clamping after content shrink
+follow_scroll_to_bottom SHALL handle both normal tail following and page-flip preserve pins. Preserve SHALL remain while new content fits below the pinned prompt, switch to normal bottom-follow once max_offset exceeds the pin, and consume/re-clamp a stale pin when content shrinks so scroll_offset is not stranded beyond total content. Normal follow SHALL always re-clamp to max_scroll_offset, including when content becomes shorter than the viewport.
+
+#### Scenario: Preserved prompt
+- **WHEN** new rows still fit below a page-flip prompt
+- **THEN** the pinned scroll offset remains unchanged and preserve stays armed.
+
+#### Scenario: Overflow after pin
+- **WHEN** content grows beyond the preserved offset
+- **THEN** preserve is consumed and scroll moves to the measured bottom.
+
+#### Scenario: Pinned target removed
+- **WHEN** a tall entry above the pinned prompt shrinks/demotes and scroll_offset exceeds total_height
+- **THEN** the stale preserve flag is consumed and the viewport re-pins to max offset.
+
+#### Scenario: Plain shrink
+- **WHEN** normal follow content shrinks below viewport
+- **THEN** scroll_offset clamps to zero rather than freezing beyond the end.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::follow_scroll_to_bottom`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_flip_pin_reclamps_after_shrink_past_end`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `bottom_gestures_clear_preserve_pin`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `follow_reclamps_when_content_shrinks_below_viewport`。
+
+### Requirement: Pager scrollback selected-entry visibility with sticky headers and margins
+ensure_selected_visible SHALL keep a selected entry visible in the current visible range using exact layout measurements only when the entry is offscreen. It SHALL account for sticky header height, configured top/bottom margins except at scroll edges, large-entry top anchoring, entry-fit bottom alignment, sticky-header re-evaluation at target, minimum scroll fractions/lines, and follow exit when manual visibility scrolling occurs.
+
+#### Scenario: Fully visible selection
+- **WHEN** the selected entry fits inside content bounds including margins
+- **THEN** no scroll occurs.
+
+#### Scenario: Clipped top
+- **WHEN** the selected entry starts above the effective content top
+- **THEN** scroll moves it to the content top plus margin through sticky-aware fixed-point calculation.
+
+#### Scenario: Clipped bottom
+- **WHEN** the entry fits but its bottom is below the effective bottom
+- **THEN** scroll moves just enough to show the bottom unless a sticky header would hide its top, then top-aligns.
+
+#### Scenario: Large entry
+- **WHEN** the entry exceeds available content height
+- **THEN** the entry top is shown rather than attempting impossible full visibility.
+
+#### Scenario: Minimum movement
+- **WHEN** a fitting entry needs a small non-edge scroll
+- **THEN** the configured minimum scroll distance is applied unless it would hit an edge.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::ensure_selected_visible`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::build_relative_prompt_descriptors`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::current_sticky_layout`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::find_scroll_for_entry_at_content_top`。
+
+### Requirement: Pager scrollback exact entry top and center positioning
+scroll_to_entry_top SHALL always position a valid entry at the viewport content top below sticky headers; scroll_to_entry_center SHALL measure the target exactly, account for sticky header height, center its entry around the viewport, disable follow, and bump generation. Invalid dimensions, empty state, or out-of-range entries SHALL no-op.
+
+#### Scenario: Top navigation
+- **WHEN** a valid next-turn prompt is selected
+- **THEN** the entry is placed at the sticky-adjusted content top and follow is disabled.
+
+#### Scenario: Center reveal
+- **WHEN** a valid entry is requested for centered viewing
+- **THEN** the entry is measured exactly and the viewport centers it after sticky-header convergence.
+
+#### Scenario: Invalid target
+- **WHEN** the index is out of bounds or layout dimensions are unavailable
+- **THEN** no scroll or generation change occurs.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::scroll_to_entry_top`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::entry_top_scroll_offset`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::scroll_to_entry_center`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `scroll_to_entry_top`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `scroll_to_entry_center`。
+
+### Requirement: Pager scrollback search reveal expands and unhides target entries
+reveal_entry_line SHALL select a valid entry, build a cache before hidden-group checks on cache miss, unhide a truncated group, expand foldable entries to Expanded, optionally pin the forced expansion when respect_manual_folds is enabled, rekey verb-group expansion ownership, and rebuild layout exactly when display state/cache/heights require it. Out-of-range entries SHALL be a no-op.
+
+#### Scenario: Collapsed target
+- **WHEN** a search match is inside a collapsed fold
+- **THEN** the entry expands, optionally becomes pinned, layout rebuilds once, and selection follows it.
+
+#### Scenario: Truncated target
+- **WHEN** a match is hidden by group truncation
+- **THEN** the containing group is added to expanded_groups and the target becomes visible.
+
+#### Scenario: Adjacent verb fold
+- **WHEN** a dense truncated run abuts a separately claimed verb group
+- **THEN** only the dense run is unhidden; the adjacent verb fold remains intact.
+
+#### Scenario: Cache miss
+- **WHEN** layout cache is absent before reveal
+- **THEN** the cache is rebuilt before hidden detection so unhide is not skipped.
+
+#### Scenario: Invalid target
+- **WHEN** entry_idx is outside entries
+- **THEN** selection, scroll, generation and layout remain unchanged.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::reveal_entry_line`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::rekey_verb_group_expansion`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_expands_collapsed_entry`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_ungroups_truncated_entry`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_ungroups_truncated_entry_across_adjacent_verb_fold`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_unhides_truncated_group_on_cache_miss`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_out_of_bounds_is_noop`。
+
+### Requirement: Pager scrollback reveal logical lines through wrapped and nonselectable rows
+reveal_entry_line SHALL map the search index logical line through the rendered entry output, not treat each logical newline as one screen row. rendered_row_offset_within_entry SHALL use EntryRenderer::rendered_row_of_logical_line with current width/theme/appearance/cwd, skip nonselectable thinking headers and blank rows, include prior wrapped rows, clamp the nudge to the cached entry height, and clamp final scroll to max offset.
+
+#### Scenario: Wrapped preceding line
+- **WHEN** a later logical line follows a line that wraps over many rows
+- **THEN** revealing the later line scrolls past all preceding wrapped rows.
+
+#### Scenario: Thinking header
+- **WHEN** a Thinking entry renders a nonselectable header/blank prefix
+- **THEN** logical line zero maps after those rows, not to the header.
+
+#### Scenario: Past-end line
+- **WHEN** line_in_entry exceeds the entry height
+- **THEN** the scroll nudge clamps to the last rendered row and repeated huge indices agree.
+
+#### Scenario: Visible target
+- **WHEN** the entry is already visible with clean cache heights
+- **THEN** reveal changes selection/scroll as needed without rebuilding the whole layout.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `ScrollbackState::rendered_row_offset_within_entry`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `EntryRenderer::rendered_row_of_logical_line`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_biases_scroll_toward_matched_line`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_scrolls_past_wrapped_rows_of_earlier_line`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_skips_thinking_header_rows_when_mapping_logical_line`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_skips_rebuild_for_already_visible_target`。
+
+### Requirement: Pager scrollback navigation regression evidence and verification boundary
+The module SHALL preserve the 39 inline regression behaviors for turn/response anchors, streaming responses, page and half-page movement, overscroll follow, page-flip preserve, shrink re-clamping, fold/group reveal, wrapped-line mapping, sticky-header page deltas, and viewport-edge selection. These tests are static source evidence and do not prove live terminal event integration or runtime layout backends.
+
+#### Scenario: Streaming response
+- **WHEN** an empty streaming placeholder later receives content
+- **THEN** response navigation sees the completed/trailing message without rebuilding turn boundaries.
+
+#### Scenario: Page selection
+- **WHEN** a page movement crosses mixed-height entries
+- **THEN** selection follows the visual top/bottom edge and subsequent select_next continues from that new selection.
+
+#### Scenario: Reveal performance
+- **WHEN** a target is already visible or requires expansion/dirty-height recovery
+- **THEN** layout rebuild count matches the cheap path or exactly one required rebuild.
+
+#### Scenario: Sticky header gate
+- **WHEN** sticky headers are enabled/disabled around a tall prompt
+- **THEN** page delta subtracts only a header that the renderer actually paints.
+
+证据：`crates/codegen/pager/src/scrollback/state/nav.rs` — `tests module`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `test_streaming_response_real_path`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `test_response_navigation_walks_anchor_offsets`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_up_selects_top_of_viewport`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_down_selects_bottom_of_viewport`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_up_then_select_next_does_not_teleport_to_old_selection`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_rebuilds_once_when_expanding_collapsed_entry`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `reveal_rebuilds_when_heights_are_dirty`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_down_does_not_skip_lines_behind_sticky_header`；`crates/codegen/pager/src/scrollback/state/nav.rs` — `page_delta_ignores_header_when_sticky_headers_disabled`。

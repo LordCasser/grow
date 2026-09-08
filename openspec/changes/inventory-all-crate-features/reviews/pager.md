@@ -2286,3 +2286,7 @@ Luna/high复用代理完整读取`app/root/dispatch/dashboard.rs`共2484行、�
 Luna/high复用代理完整读取`views/dashboard/peek.rs`共2467行、28项内联测试；主代理复核SHA-256与12项功能需求来源，覆盖peek状态刷新、root/subagent投影、配置徽章、面板渲染、问题/权限选项、reply/paste、live tail、状态摘要和数字键路由。未运行Cargo或真实终端。
 
 Luna/high复用代理完整读取`views/list_pane/state/mod.rs`共2740行、115项内联测试；主代理复核SHA-256与13项功能需求来源，覆盖稳定ID选择、布局缓存与淘汰、滚动/跟随、过滤/搜索、键盘导航、能力开关、复制、视觉选择和输入粘贴。未运行Cargo或真实终端。
+
+Luna/high复用代理完整读取`app/root/dispatch/tests/router.rs`共2452行、91项内联测试及5个辅助函数；主代理复核SHA-256与15项功能需求来源，覆盖路由、控制token、会话/子代理、模型/Agent、权限、dashboard和任务结果分支。未运行Cargo或动态dispatch。
+
+Luna/high复用代理完整读取`scrollback/state/nav.rs`共2426行、39项内联测试；主代理复核SHA-256与11项功能需求来源，覆盖turn/response导航、分页滚动、follow/page-flip、sticky header、可见性、搜索reveal、折叠展开和wrapped-line映射。未运行Cargo或真实终端。

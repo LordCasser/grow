@@ -740,3 +740,11 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager list pane state集中选择、布局缓存和搜索导航
 
 `views/list_pane/state/mod.rs`同时维护稳定ID选择、布局缓存淘汰、滚动/跟随、过滤搜索、键盘导航、能力开关、复制、视觉选择和粘贴。13条静态契约已登记，后续按选择模型、布局缓存和输入导航拆分并补真实交互验证；本轮不改列表行为。
+
+## 待拆分：Pager router测试覆盖多域完成和控制token
+
+`app/root/dispatch/tests/router.rs`集中路由、控制token、会话/子代理、模型/Agent、权限、dashboard和任务结果分支。15条静态契约已登记，后续按协议路由、身份围栏和视图副作用拆分并补动态dispatch验证；本轮不改router。
+
+## 待拆分：Pager nav混合滚动、可见性和wrapped-line映射
+
+`scrollback/state/nav.rs`同时处理turn/response导航、分页滚动、follow/page-flip、sticky header、可见性、搜索reveal、折叠展开和wrapped-line映射。11条静态契约已登记，后续按导航状态、布局映射和滚动策略拆分并补真实终端验证；本轮不改导航行为。
