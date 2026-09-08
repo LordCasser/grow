@@ -27946,3 +27946,349 @@ When a shortcut string contains [x], render_menu SHALL restyle the last [x] occu
 - **THEN** the affordance keeps bg_highlight and bold while using text_primary only when hovered.
 
 证据：`crates/codegen/pager/src/views/welcome/menu.rs` — `render_menu`；`crates/codegen/pager/src/views/welcome/menu.rs` — `mouse_on_dismiss`；`crates/codegen/pager/src/views/welcome/menu.rs` — `dismiss_style`。
+
+
+### Requirement: Session picker fetch reset and request projection
+
+The implementation SHALL satisfy the following tested behavior: dispatch_fetch_session_list increments session_picker_detail_generation, marks the welcome picker loading, clears native entries, resets selected index/query/search_active/expanded state, clears content results/content loading/entries_query, and returns one Effect::FetchSessionList with query None, the current session_picker_list_seq, and no kind_filter. It does not modify session_picker_list_seq itself.
+
+#### Scenario: Fresh browse request
+- **WHEN** FetchSessionList dispatch reaches dispatch_fetch_session_list
+- **THEN** the picker is reset to its initial browse state, detail generation increases, loading is true, and one plain list effect is returned with the current sequence.
+
+#### Scenario: Stale-result isolation setup
+- **WHEN** a new plain list request starts while prior entries, query, expansion, or content results exist
+- **THEN** those stored picker fields are cleared before the new list response can be applied.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `dispatch_fetch_session_list`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `Effect::FetchSessionList`；`crates/codegen/pager/src/app/root/mod.rs` — `session_picker_detail_generation`；`crates/codegen/pager/src/app/root/mod.rs` — `session_picker_list_seq`；`crates/codegen/pager/src/app/root/mod.rs` — `session_picker_state`。
+
+
+### Requirement: Picker surface selection preservation across native results
+
+The implementation SHALL satisfy the following tested behavior: PickerSurface captures selection through capture_picker_selection using native entries, content results, picker state, effective_filter_query, grouped mode, content loading, and the current repository name. restore_selection reuses the effective query and restore_picker_selection with the same surface inputs, then clears state.expanded. native_loaded captures before mutation, clears loading and search content loading when query is Some, stores entries_query and entries, returns the empty browse notice only for a non-search empty result, and restores the anchor. native_failed captures before mutation, clears loading and search content loading when applicable, replaces entries with an empty vector, clears entries_query, restores the anchor, and returns the supplied error notice.
+
+#### Scenario: Native load
+- **WHEN** a session list result is applied to a picker surface
+- **THEN** the result and query state are stored, relevant loading flags clear, prior selection is restored against the new data, and only an empty browse result yields the supplied empty notice.
+
+#### Scenario: Native failure
+- **WHEN** a current session list request fails for a picker surface
+- **THEN** entries become an empty vector, the query marker is cleared, relevant loading flags clear, prior selection restoration runs, and the supplied error notice is returned.
+
+#### Scenario: Expansion reset
+- **WHEN** selection restoration completes after either native load or failure
+- **THEN** the picker expanded set is cleared after restore_picker_selection returns.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `PickerSurface`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `PickerSurface::capture_selection`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `PickerSurface::restore_selection`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `PickerSurface::native_loaded`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `PickerSurface::native_failed`；`crates/codegen/pager/src/views/session_picker.rs` — `capture_picker_selection`；`crates/codegen/pager/src/views/session_picker.rs` — `restore_picker_selection`；`crates/codegen/pager/src/views/session_picker.rs` — `effective_filter_query`；`crates/codegen/pager/src/views/session_picker.rs` — `PickerSelectionAnchor`。
+
+
+### Requirement: Current-sequence list response routing
+
+The implementation SHALL satisfy the following tested behavior: handle_session_list_loaded ignores a response whose seq differs from app.session_picker_list_seq and otherwise increments detail generation. It first applies a current active Agent modal SessionPicker surface using the agent session cwd and grouped=true; if no such modal consumed the sessions, it applies the welcome picker fields using app.cwd and app.session_picker_grouped. Both paths use repo_name_from_cwd for selection anchoring, return no effects, and can emit the empty browse notice through the surface helper. The function distinguishes browse by query.is_none() and clears the relaxed-notification latch only for a current-sequence Cwd browse response.
+
+#### Scenario: Stale loaded result
+- **WHEN** SessionListLoaded carries a sequence different from session_picker_list_seq
+- **THEN** the handler returns an empty effect vector without changing picker data or generation.
+
+#### Scenario: Modal result
+- **WHEN** a current-sequence result arrives while the active agent owns an ActiveModal::SessionPicker
+- **THEN** the modal surface receives the sessions/query and selection restoration using the agent repository context, and the welcome surface is not updated by the same result.
+
+#### Scenario: Welcome result
+- **WHEN** a current-sequence result arrives without a consuming session-picker modal
+- **THEN** the welcome picker surface receives the sessions/query using app.cwd and its grouped setting.
+
+#### Scenario: Browse latch reset
+- **WHEN** a current-sequence non-relaxed browse response has query None
+- **THEN** session_picker_relaxed_notified_for is cleared after result handling.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `handle_session_list_loaded`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `ActiveModal::SessionPicker`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `ListScope::is_relaxed`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `repo_name_from_cwd`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `get_active_agent_mut`；`crates/codegen/pager/src/app/root/mod.rs` — `session_picker_list_seq`；`crates/codegen/pager/src/app/root/mod.rs` — `session_picker_grouped`；`crates/codegen/pager/src/app/root/mod.rs` — `session_picker_relaxed_notified_for`。
+
+
+### Requirement: Relaxed-scope notification latch
+
+The implementation SHALL satisfy the following tested behavior: After a current-sequence loaded response has not produced a direct notice, a relaxed ListScope::Repo or ListScope::All response emits at most one toast per app.cwd when the active view is not Welcome and the latch does not already equal that cwd. Repo uses `No sessions in this directory. Showing other sessions from this repository.`; other relaxed scopes use `No sessions in this directory. Showing sessions from other directories.`. Welcome suppresses the toast and does not consume the latch, while the same cwd remains latched for subsequent non-Welcome relaxed results.
+
+#### Scenario: Repository relaxation
+- **WHEN** a relaxed Repo response has no direct empty-result notice, the active view is renderable, and the cwd is not latched
+- **THEN** the repository-specific toast is shown and the current cwd is stored in session_picker_relaxed_notified_for.
+
+#### Scenario: All-scope relaxation
+- **WHEN** a relaxed non-Repo response has no direct notice, the active view is renderable, and the cwd is not latched
+- **THEN** the cross-directory toast is shown and the current cwd is stored in the latch.
+
+#### Scenario: Welcome suppression
+- **WHEN** a relaxed response arrives while active_view is Welcome
+- **THEN** no relaxed toast is shown and the one-shot latch is not consumed.
+
+#### Scenario: Per-directory behavior
+- **WHEN** a relaxed response arrives for a cwd already stored in the latch
+- **THEN** no duplicate relaxed toast is emitted; a later Cwd browse clears the latch so a future relaxed response can notify again.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `handle_session_list_loaded`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `ListScope::Repo`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `ListScope::is_relaxed`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `ActiveView::Welcome`；`crates/codegen/pager/src/app/root/mod.rs` — `session_picker_relaxed_notified_for`；`crates/codegen/pager/src/app/root/mod.rs` — `AppView::show_toast`。
+
+
+### Requirement: Current-sequence list failure recovery
+
+The implementation SHALL satisfy the following tested behavior: handle_session_list_failed ignores a stale seq and otherwise increments detail generation, logs the error with tracing::warn, formats `Couldn't load sessions: {error}`, and routes failure through the active Agent SessionPicker surface when present or the welcome picker surface otherwise. The surface failure helper clears loading flags as applicable, empties entries, clears entries_query, restores selection, and returns the formatted notice; the handler shows that notice and returns no effects.
+
+#### Scenario: Stale failure
+- **WHEN** SessionListFailed carries a sequence different from session_picker_list_seq
+- **THEN** the failure returns an empty effect vector without logging or mutating picker state in this handler.
+
+#### Scenario: Modal failure
+- **WHEN** a current-sequence failure arrives while an active Agent owns a SessionPicker modal
+- **THEN** the modal surface is emptied and reset with the agent repository context, and the formatted error toast is shown.
+
+#### Scenario: Welcome failure
+- **WHEN** a current-sequence failure arrives without a consuming modal
+- **THEN** the welcome picker surface is emptied and reset with app.cwd context, and the formatted error toast is shown.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `handle_session_list_failed`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `PickerSurface::native_failed`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `ActiveModal::SessionPicker`；`crates/codegen/pager/src/app/root/dispatch/session/list.rs` — `tracing::warn`；`crates/codegen/pager/src/app/root/mod.rs` — `session_picker_list_seq`；`crates/codegen/pager/src/app/root/mod.rs` — `AppView::show_toast`。
+
+
+### Requirement: AgentView::ingest_workflow_update SHALL accept only WorkflowUpdated notifications, reject stale/duplicate non-cleared revisions, and preserve a cleared tombstone for legacy revision-zero updates.
+
+Non-WorkflowUpdated variants SHALL return false without mutation. For non-cleared updates, revision zero SHALL be rejected when a positive revision was previously seen, positive revisions SHALL be rejected when <= the stored revision, and revision zero SHALL be rejected when run_id is in cleared_workflow_runs. Accepted positive revisions SHALL update workflow_run_revisions. Cleared updates bypass the stale checks, record a positive revision when present, and add run_id to cleared_workflow_runs. The method returns true after applying an accepted update.
+
+#### Scenario: Wrong event
+- **WHEN** the notification is not WorkflowUpdated
+- **THEN** ingest returns false and does not alter workflow snapshots/blocks.
+
+#### Scenario: First legacy update
+- **WHEN** revision is zero and no prior revision/tombstone exists
+- **THEN** the update is accepted.
+
+#### Scenario: Legacy after positive
+- **WHEN** revision is zero after a positive revision was recorded
+- **THEN** the update is rejected as stale.
+
+#### Scenario: Duplicate positive
+- **WHEN** revision is positive and <= stored revision
+- **THEN** the update is rejected.
+
+#### Scenario: New positive
+- **WHEN** revision is greater than stored or no stored revision exists
+- **THEN** the update is accepted and revision high-water is stored.
+
+#### Scenario: Legacy after clear
+- **WHEN** revision is zero for a run in cleared_workflow_runs
+- **THEN** the update is rejected.
+
+#### Scenario: Clear notification
+- **WHEN** status is cleared
+- **THEN** the update bypasses non-cleared stale checks and records the clear tombstone.
+
+证据：`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `AgentView::ingest_workflow_update`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `GrowSessionUpdate::WorkflowUpdated`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `workflow_run_revisions`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `cleared_workflow_runs`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `revision`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `status`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `run_id`。
+
+
+### Requirement: build_workflow_run_snapshot SHALL map a workflow notification into the common WorkflowRunSnapshot while recomputing active agent count from agent state and recording receipt time.
+
+The snapshot SHALL preserve run_id, optional definition_id/scope/hash, name, objective, status, management_available, optional current_phase, agent budget/usage/remaining/incomplete, elapsed_ms, pause_message, and result_summary. Phases SHALL map to `(title,state)` pairs. Agents SHALL map to WorkflowAgentRowView with id/label/phase/model/state/tokens_used/duration_ms. active_agents SHALL be recomputed as the count of agents whose state equals exactly `running`, ignoring any separate wire active_agents field. received_at SHALL be Instant::now at snapshot construction.
+
+#### Scenario: Metadata projection
+- **WHEN** a WorkflowUpdated payload contains definition and status metadata
+- **THEN** the snapshot retains every provided metadata field.
+
+#### Scenario: Phase projection
+- **WHEN** phases contain title/state records
+- **THEN** the snapshot exposes ordered phase tuples.
+
+#### Scenario: Agent projection
+- **WHEN** agents contain labels, phases, models, states, tokens, durations
+- **THEN** each row is copied into WorkflowAgentRowView in order.
+
+#### Scenario: Active count
+- **WHEN** wire active_agents disagrees with agent roster
+- **THEN** snapshot active_agents equals the exact running-state count from agents.
+
+#### Scenario: Receipt time
+- **WHEN** a snapshot is built
+- **THEN** received_at is a fresh Instant timestamp.
+
+证据：`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `build_workflow_run_snapshot`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `WorkflowRunSnapshot`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `WorkflowAgentRowView`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `WorkflowPhaseInfo`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `agent_budget`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `agents_used`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `agents_remaining`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `agent_usage_incomplete`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `active_agents`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `received_at`。
+
+
+### Requirement: upsert_workflow_block SHALL map wire status to WorkflowBlockStatus, create or update one block per run_id, refresh phase/progress data, and finish/remove terminal mappings without duplicating entries.
+
+Status mapping SHALL be active→Running, complete→Done{elapsed}, failed/interrupted→Failed{elapsed}, cancelled→Cancelled{elapsed}, cleared→remove the run_id mapping and finish its existing running entry, and unknown values→Paused{elapsed}. Existing mappings SHALL be used only when their EntryId still resolves; stale mappings are removed and a new WorkflowBlock::started is pushed. New blocks SHALL be indexed by run_id and mark the last scrollback entry running before status reconciliation. Existing blocks SHALL update status, cloned phase title/state, current_phase, active_agents, elapsed, and invalidate cache. Running entries SHALL be set running; non-running entries SHALL be finished; terminal Done/Failed/Cancelled entries SHALL remove the workflow_blocks mapping, while Paused retains it.
+
+#### Scenario: Fresh active run
+- **WHEN** no valid mapping exists and status is active
+- **THEN** one started Workflow block is pushed, mapped by run_id, and marked running.
+
+#### Scenario: Progress update
+- **WHEN** a mapped block receives new phases/current phase/active count/elapsed
+- **THEN** the same block is mutated and its render cache invalidated.
+
+#### Scenario: Terminal completion
+- **WHEN** status is complete, failed, interrupted, or cancelled
+- **THEN** the status includes elapsed duration, the entry is finished, and run_id mapping is removed.
+
+#### Scenario: Unknown status
+- **WHEN** wire status is not recognized
+- **THEN** the block is Paused with elapsed duration and mapping remains available.
+
+#### Scenario: Cleared run
+- **WHEN** status is cleared
+- **THEN** existing mapping is removed and its running entry is finished without creating a replacement block.
+
+#### Scenario: Stale mapping
+- **WHEN** workflow_blocks points to a missing scrollback entry
+- **THEN** the stale map entry is removed and a new block is created.
+
+#### Scenario: Active roster
+- **WHEN** agent states are supplied
+- **THEN** active_agents passed to block is recomputed from exact `running` states.
+
+证据：`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `upsert_workflow_block`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `WorkflowBlockStatus::Running`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `WorkflowBlockStatus::Done`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `WorkflowBlockStatus::Failed`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `WorkflowBlockStatus::Cancelled`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `WorkflowBlockStatus::Paused`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `WorkflowBlock::started`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `RenderBlock::Workflow`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `workflow_blocks`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `scrollback.push_block`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `scrollback.set_last_running`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `scrollback.set_entry_running`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `scrollback.finish_running`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `entry.invalidate_cache`。
+
+
+### Requirement: AgentView::ingest_workflow_update SHALL apply each accepted workflow projection to session.workflow_runs and the matching scrollback block within one view-domain method so rendering does not observe a partial update.
+
+For accepted non-cleared updates, ingest SHALL build a snapshot using the exact availability of an available command named `workflow-run`, replace the existing session snapshot with matching run_id or append it, then upsert the corresponding transcript block. For cleared updates, it SHALL remove all session snapshots with that run_id, then clear/finish the block mapping. It SHALL recompute active agents from the roster and pass the same phase/current/objective/status/elapsed data to block ingestion. Foreground, wire active_agents, and current_agent_label are intentionally ignored by this method.
+
+#### Scenario: New snapshot
+- **WHEN** accepted non-cleared update has no matching session run
+- **THEN** one WorkflowRunSnapshot is appended and one transcript block is upserted.
+
+#### Scenario: Existing snapshot
+- **WHEN** accepted update matches run_id in workflow_runs
+- **THEN** the existing snapshot is replaced rather than duplicated.
+
+#### Scenario: Management command gate
+- **WHEN** available_commands contains name exactly workflow-run
+- **THEN** management_available is true in the snapshot.
+
+#### Scenario: Missing gate
+- **WHEN** command list lacks exact workflow-run
+- **THEN** management_available is false.
+
+#### Scenario: Cleared snapshot
+- **WHEN** status is cleared
+- **THEN** all session snapshots with run_id are removed before block cleanup.
+
+#### Scenario: Atomic view update
+- **WHEN** rendering observes after ingest returns true
+- **THEN** session projection and transcript block have both been processed by the same method.
+
+证据：`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `AgentView::ingest_workflow_update`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `session.workflow_runs`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `available_commands`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `management_available`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `workflow-run`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `build_workflow_run_snapshot`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `upsert_workflow_block`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `foreground`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `active_agents`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `current_agent_label`。
+
+
+### Requirement: Workflow ingestion SHALL treat Shell workflow notifications as authoritative projection data while keeping scrollback identity/cache and revision/tombstone bookkeeping local to AgentView/session state.
+
+The implementation SHALL satisfy the following tested behavior: The method does not execute workflow operations, fetch definitions, infer process liveness, validate status/phase vocabulary, or derive active agent count from the wire count; it maps strings and roster facts into the common snapshot and block. Local workflow_run_revisions and cleared_workflow_runs gate replay/stale notifications, workflow_blocks maps run_id to EntryId, and ScrollbackState owns running/cache transitions. This source has no inline tests; integration tests in other modules are outside this file and cannot be claimed as local proof.
+
+#### Scenario: Authoritative wire fields
+- **WHEN** a notification supplies arbitrary status/phase/state strings
+- **THEN** values are retained/mapped according to visible string matches without schema validation.
+
+#### Scenario: Local identity
+- **WHEN** a run is updated repeatedly
+- **THEN** run_id maps to a stable EntryId when the entry still exists.
+
+#### Scenario: Replay guard
+- **WHEN** old or cleared notifications arrive
+- **THEN** local revision/tombstone state rejects the applicable stale update.
+
+#### Scenario: No inline proof
+- **WHEN** the source is statically audited
+- **THEN** test_count is zero; ACP routing, server delivery, persistence/reload merge, and UI rendering remain unproven here.
+
+证据：`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `AgentView::ingest_workflow_update`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `upsert_workflow_block`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `build_workflow_run_snapshot`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `workflow_blocks`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `workflow_run_revisions`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `cleared_workflow_runs`；`crates/codegen/pager/src/app/agent_view/workflow_ingest.rs` — `RenderBlock::Workflow`。
+
+
+### Requirement: Jump picker key mapping and activation contract
+
+handle_jump_key SHALL consume key-release events without state changes; map j/Down to MoveDown, k/Up to MoveUp, Enter to the selected row's JumpInput::Select or Consumed when no row exists, Esc to Dismissed, and every other key to Consumed. jump_activate SHALL resolve only the current selected index and return its prompt_entry_id as a stable EntryId; an empty list or stale selected index SHALL return Consumed.
+
+#### Scenario: Navigation keys
+- **WHEN** a pressed key has j/Down, k/Up, Enter, Esc, or another key code
+- **THEN** the corresponding JumpInput variant is returned and Enter carries the selected prompt EntryId when available.
+
+#### Scenario: Key release
+- **WHEN** a key event has KeyEventKind::Release
+- **THEN** JumpInput::Consumed is returned regardless of its key code.
+
+#### Scenario: Empty activation
+- **WHEN** Enter is handled while entries are empty or selected is outside entries
+- **THEN** activation returns Consumed and cannot produce an invalid EntryId.
+
+#### Scenario: Stable activation identity
+- **WHEN** a selected TimelineEntry exists and its positional index could later shift
+- **THEN** activation returns prompt_entry_id rather than a positional turn index.
+
+证据：`crates/codegen/pager/src/views/jump.rs` — `JumpInput`；`crates/codegen/pager/src/views/jump.rs` — `handle_jump_key`；`crates/codegen/pager/src/views/jump.rs` — `jump_activate`；`crates/codegen/pager/src/views/jump.rs` — `JumpState`；`crates/codegen/pager/src/views/jump.rs` — `tests::keys_map_to_inputs`；`crates/codegen/pager/src/views/jump.rs` — `tests::activate_selects_turn_under_cursor`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::handle_jump_key`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `picker_select_uses_stable_id_across_removal`。
+
+
+### Requirement: Jump picker cursor and hit-test contract
+
+move_cursor SHALL leave an empty picker unchanged and clamp selected to the inclusive [0, entries.len-1] range for positive or negative deltas. set_jump_cursor SHALL leave an empty picker unchanged, clamp a hovered index to the last row, and return true only when selected changes. jump_row_at SHALL delegate row geometry to ListOverlay using the current length and selected cursor, while jump_overlay_height SHALL use the same list geometry and screen height.
+
+#### Scenario: Cursor movement
+- **WHEN** a nonempty picker receives a positive or negative delta
+- **THEN** selected moves by the delta and clamps at the first or last entry.
+
+#### Scenario: Empty cursor
+- **WHEN** a picker has no entries and move_cursor or set_jump_cursor is called
+- **THEN** selected is unchanged and set_jump_cursor returns false.
+
+#### Scenario: Mouse hover
+- **WHEN** a valid or out-of-range row index is supplied
+- **THEN** the index is clamped to the last entry and the function reports whether selection changed.
+
+#### Scenario: Row hit geometry
+- **WHEN** a screen coordinate is above the title, on a visible row, outside the area, or beyond the visible window
+- **THEN** jump_row_at returns the delegated visible entry index or None; overlay height follows ListOverlay's title/row/padding and screen-fraction caps.
+
+证据：`crates/codegen/pager/src/views/jump.rs` — `move_cursor`；`crates/codegen/pager/src/views/jump.rs` — `set_jump_cursor`；`crates/codegen/pager/src/views/jump.rs` — `jump_row_at`；`crates/codegen/pager/src/views/jump.rs` — `jump_overlay_height`；`crates/codegen/pager/src/views/jump.rs` — `tests::cursor_moves_and_clamps`；`crates/codegen/pager/src/views/jump.rs` — `tests::row_hit_test_maps_to_entry_index`；`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::row_at`；`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::height`；`crates/codegen/pager/src/views/overlay_list.rs` — `tests::row_at_respects_scroll_window`。
+
+
+### Requirement: Jump picker row rendering contract
+
+render_jump_overlay SHALL render through ListOverlay with the title Jump to which turn?, use the current theme, number the rows oldest-first from entry.turn_idx+1 with a gutter width equal to the decimal digit count of entries.len(), show (no preview) for empty previews, and truncate nonempty previews to the available content width after the ordinal gutter. Ordinals SHALL use gray over the shared row background; previews SHALL use text_primary over that background and become bold only for the cursor row. Shared ListOverlay focus, cursor background, unfocused dimming, title, accent bar, and visible-window geometry SHALL remain authoritative.
+
+#### Scenario: Normal preview
+- **WHEN** a timeline entry has a nonempty preview and the overlay is rendered
+- **THEN** the row contains a right-aligned one-based ordinal, a truncated preview within the row content width, and the cursor row uses bold preview text.
+
+#### Scenario: Missing preview
+- **WHEN** a timeline entry preview is empty
+- **THEN** the row displays the literal (no preview) placeholder.
+
+#### Scenario: Wide ordinal gutter
+- **WHEN** entries.len has more decimal digits or turn_idx is larger
+- **THEN** all ordinals use the shared widest decimal width and preserve row alignment.
+
+#### Scenario: Unfocused overlay
+- **WHEN** focused is false
+- **THEN** ListOverlay dims the rendered area after the row content is painted, while row content still uses its resolved row background.
+
+证据：`crates/codegen/pager/src/views/jump.rs` — `render_jump_overlay`；`crates/codegen/pager/src/views/jump.rs` — `JumpState::list`；`crates/codegen/pager/src/views/jump.rs` — `tests::row_hit_test_maps_to_entry_index`；`crates/codegen/pager/src/views/overlay_list.rs` — `ListOverlay::render`；`crates/codegen/pager/src/views/overlay_list.rs` — `RowCtx`；`crates/codegen/pager/src/app/agent_view/render.rs` — `render_jump_overlay`。
+
+
+### Requirement: Jump picker transcript preview and viewport ownership contract
+
+A JumpState SHALL retain oldest-first TimelineEntry rows, selected cursor, and a JumpRestore containing optional width-stable ScrollAnchor, prior selection, and follow_mode. AgentView keyboard/mouse/wheel movement SHALL use the pure cursor helpers and live-scroll the selected prompt to the transcript top; Enter SHALL dispatch stable prompt selection; Esc SHALL dismiss and restore the bookmark/selection/follow mode. Input-owning overlays SHALL prevent or dismiss a hidden jump picker before it can consume input, while a running turn's cancel chord SHALL dismiss the picker and continue to CancelTurn.
+
+#### Scenario: Open and preview
+- **WHEN** two or more timeline turns exist and /jump opens
+- **THEN** the active/top turn is selected, restore state is captured, and the selected prompt is previewed at the transcript top.
+
+#### Scenario: Cursor preview
+- **WHEN** the selected row moves by key, mouse, or wheel
+- **THEN** the cursor is clamped and the selected prompt is live-scrolled to the same top anchor used by Enter.
+
+#### Scenario: Dismiss restore
+- **WHEN** Esc or JumpDismiss occurs after preview movement
+- **THEN** jump_state is removed and the captured scroll bookmark, prior selected entry, and follow mode are restored.
+
+#### Scenario: Stale selection
+- **WHEN** the selected stable EntryId disappears before confirmation
+- **THEN** selection fails safely and the captured viewport is restored.
+
+#### Scenario: Overlay ownership
+- **WHEN** rewind, inline edit, /btw, pending input overlays, or session reload owns the prompt slot
+- **THEN** the picker is refused or dropped before hidden state can consume wheel/keys; Ctrl-C remains available to cancel a running turn.
+
+证据：`crates/codegen/pager/src/views/jump.rs` — `JumpRestore`；`crates/codegen/pager/src/views/jump.rs` — `JumpState`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::sync_jump_preview`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::dismiss_jump_picker`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::restore_jump_viewport`；`crates/codegen/pager/src/app/agent_view/jump.rs` — `AgentView::jump_slot_taken`；`crates/codegen/pager/src/app/agent_view/panes.rs` — `AgentPane::handle_scroll`；`crates/codegen/pager/src/app/root/dispatch/jump.rs` — `dispatch_jump_show_picker`；`crates/codegen/pager/src/app/root/dispatch/jump.rs` — `dispatch_jump_picker_select`；`crates/codegen/pager/src/app/root/dispatch/jump.rs` — `dispatch_jump_dismiss`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `dismiss_restores_viewport`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `picker_select_restores_viewport_on_out_of_range_turn`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `scroll_drops_hidden_jump_picker_behind_input_overlay`；`crates/codegen/pager/src/app/agent_view/input.rs` — `jump_picker_is_an_esc_consumer`。

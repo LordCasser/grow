@@ -1016,3 +1016,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Elapsed duration is cast from as_millis() to i64 without checked conversion, leaving extreme-duration behavior implicit.
 - Pager 审计债务：Header width budgeting uses byte lengths for the ASCII prefix and suffix and delegates path shortening separately, so display-cell width invariants are not expressed at this boundary.
 - Pager 审计债务：The production module has only two narrow header tests; core output modes, selection metadata, timing, style, and fold contracts can regress without local evidence.
+- Pager 审计债务：The modal and welcome paths are manually constructed twice at the call sites; the PickerSurface abstraction reduces field plumbing but still requires duplicated current-repository and grouped-mode setup.
+- Pager 审计债务：session_picker_list_seq is validated here but advanced elsewhere, leaving request invalidation ownership split across dispatch handlers and making the freshness contract non-local.
+- Pager 审计债务：The relaxed notification latch is a PathBuf equality cache coupled to app.cwd while selection anchoring uses the agent session cwd for modal surfaces, so notification and picker repository scopes can diverge during cwd transitions.
+- Pager 审计债务：Loaded and failed handlers always return empty effect vectors and mutate the view directly, so data reconciliation, notice production, and side effects are coupled in one dispatcher boundary.
+- Pager 审计债务：No inline tests exist in this module despite multiple race and surface-routing branches; the contract depends on external dispatch tests and integration paths.

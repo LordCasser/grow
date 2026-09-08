@@ -4059,7 +4059,21 @@
       "Welcome menu row width and alignment contract",
       "Welcome menu row geometry and visible-item contract",
       "Welcome menu selection and shortcut styling contract",
-      "Welcome menu dismiss affordance hover contract"
+      "Welcome menu dismiss affordance hover contract",
+      "Session picker fetch reset and request projection",
+      "Picker surface selection preservation across native results",
+      "Current-sequence list response routing",
+      "Relaxed-scope notification latch",
+      "Current-sequence list failure recovery",
+      "AgentView::ingest_workflow_update SHALL accept only WorkflowUpdated notifications, reject stale/duplicate non-cleared revisions, and preserve a cleared tombstone for legacy revision-zero updates.",
+      "build_workflow_run_snapshot SHALL map a workflow notification into the common WorkflowRunSnapshot while recomputing active agent count from agent state and recording receipt time.",
+      "upsert_workflow_block SHALL map wire status to WorkflowBlockStatus, create or update one block per run_id, refresh phase/progress data, and finish/remove terminal mappings without duplicating entries.",
+      "AgentView::ingest_workflow_update SHALL apply each accepted workflow projection to session.workflow_runs and the matching scrollback block within one view-domain method so rendering does not observe a partial update.",
+      "Workflow ingestion SHALL treat Shell workflow notifications as authoritative projection data while keeping scrollback identity/cache and revision/tombstone bookkeeping local to AgentView/session state.",
+      "Jump picker key mapping and activation contract",
+      "Jump picker cursor and hit-test contract",
+      "Jump picker row rendering contract",
+      "Jump picker transcript preview and viewport ownership contract"
     ],
     "reviewed_files": [
       {
@@ -6449,6 +6463,18 @@
       {
         "path": "crates/codegen/pager/src/views/welcome/menu.rs",
         "sha256": "ee401f13b5061b5e907c0ba5045eab76043c79fc1a614c744cf4b7627b808892"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/session/list.rs",
+        "sha256": "ea9bc9b174ac5fe5e57cb5e29f9ba38e2ecf356d4eab88bd5a7d77412a0587bf"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/agent_view/workflow_ingest.rs",
+        "sha256": "d0553b45025e27b6253d8c3de37d79cd7df8ff3f8c13a1be897a2daeb6dc0d10"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/jump.rs",
+        "sha256": "80785ced1e1473f1ce9742304dba3b71cae8f3fb765a154a97522f511c4f40fd"
       }
     ],
     "review": "reviews/pager.md"
