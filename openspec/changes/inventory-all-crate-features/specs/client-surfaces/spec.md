@@ -15011,3 +15011,298 @@ All viewer methods SHALL maintain the ownership split represented by the fields 
 - **THEN** test_count is zero and no runtime behavior is claimed.
 
 证据：`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::handle_key`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::process_pending_copy`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::handle_scroll`；`crates/codegen/pager/src/views/block_viewer.rs` — `BlockViewerPane::handle_paste`。
+### Requirement: ListPane SHALL borrow a model item slice, carry focus and overlay style configuration through builder methods, and render only into nonzero areas after splitting bottom input/status rows and scrollbar space from the requested viewport.
+ListPane::new SHALL start unfocused with default ListPaneStyle; focused and style SHALL return updated builder values. StatefulWidget::render SHALL no-op for zero dimensions, reserve state.bottom_bar_height rows at the bottom, scale total/offset consistently when content exceeds u16::MAX, split the remaining list area through maybe_split_for_scrollbar, store the resulting scrollbar hit area, and render list, indicators, toast, scrollbar, and bottom bar in that order.
+
+#### Scenario: Widget setup
+- **WHEN** a caller creates a pane and sets focus/style
+- **THEN** the widget borrows the exact items and carries the requested flags.
+
+#### Scenario: Zero area
+- **WHEN** width or height is zero
+- **THEN** render returns without indexing or painting.
+
+#### Scenario: Bottom bar
+- **WHEN** input or accepted matcher needs a bar
+- **THEN** the list area shrinks and the bar occupies the final rows.
+
+#### Scenario: Huge content
+- **WHEN** total height exceeds u16::MAX
+- **THEN** total and offset share a scale so scrollbar position stays proportional.
+
+#### Scenario: Scrollbar split
+- **WHEN** content overflows
+- **THEN** the state stores the scrollbar area used by later click/scroll handling.
+
+证据：`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::new`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::focused`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::style`；`crates/codegen/pager/src/views/list_pane/render.rs` — `impl StatefulWidget for ListPane`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::render`。
+
+### Requirement: ListPane SHALL render content-based items with optional full-width backgrounds, cursor/selection prefixes, NoWrap truncation, or wrapped continuation rows while keeping all writes inside the supplied area.
+render_item_framework SHALL paint item.background across the area, choose prefix_cursor/prefix_in_selection/prefix by cursor/selection state, subtract prefix display width, use SafeBuf for prefix/content writes, render one truncated row in NoWrap or word-wrap content in Wrap mode, and leave continuation prefix columns blank. render_items SHALL use a direct fast path for fully visible items and a scratch-buffer blit for clipped items while preserving parent backgrounds where scratch cells are Reset.
+
+#### Scenario: NoWrap item
+- **WHEN** content fits or is longer than the row
+- **THEN** prefix and content are painted within width and excess content is handled by the ellipsis post-pass.
+
+#### Scenario: Wrapped item
+- **WHEN** wrap mode has multiple desired rows
+- **THEN** word-wrapped lines fill allocated rows with content indented after the prefix.
+
+#### Scenario: Custom background
+- **WHEN** item.background returns a color
+- **THEN** the complete item area receives that background before content.
+
+#### Scenario: Partial visibility
+- **WHEN** first item is scrolled or bottom row is clipped
+- **THEN** content renders in scratch and only visible rows are copied without erasing parent background.
+
+#### Scenario: Narrow area
+- **WHEN** prefix consumes all available width
+- **THEN** the content write is skipped safely without out-of-bounds access.
+
+证据：`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::render_item_framework`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::render_items`；`crates/codegen/pager/src/views/list_pane/render.rs` — `SafeBuf`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListItem::background`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListItem::prefix_cursor`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListItem::prefix_in_selection`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListItem::prefix`。
+
+### Requirement: ListPane SHALL render only the state-visible item range, map visible indices to physical items after filtering, skip stale out-of-range mappings safely, overlay selection background and match inversion after content, and append truncation markers only for true text truncation.
+render_items SHALL iterate state.visible_range, translate through state.to_physical, debug-assert but release-skip invalid indices, honor first_item_skip_rows and per-item layout heights, and stop at viewport bottom. Selection overlay SHALL preserve content/foreground/modifiers, show only when focused or configured, and distinguish cursor versus visual-range colors. Match highlights SHALL use the active regex, search column offset, wrap mode, and state.show_highlights. Ellipsis SHALL trigger only when desired_height(area.width) exceeds allocated item height, never for viewport clipping.
+
+#### Scenario: Filtered range
+- **WHEN** state has a visible-to-physical map
+- **THEN** only matching items are painted in visible order.
+
+#### Scenario: Stale shrink
+- **WHEN** filter and item count changed between frames
+- **THEN** invalid physical indices are skipped instead of panicking.
+
+#### Scenario: Selection overlay
+- **WHEN** cursor or visual range is visible
+- **THEN** background is applied after item content while style/text remain intact.
+
+#### Scenario: Search overlay
+- **WHEN** matcher has matches
+- **THEN** only matched cells receive REVERSED inversion at the correct prefix/wrapped positions.
+
+#### Scenario: Truncation
+- **WHEN** NoWrap allocated height is smaller than desired text height
+- **THEN** ellipsis is appended after the last nonspace or replaces the final cell; viewport clipping alone adds none.
+
+证据：`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::render_items`；`crates/codegen/pager/src/views/list_pane/render.rs` — `render_truncation_ellipsis`；`crates/codegen/pager/src/views/list_pane/render.rs` — `paint_match_highlights`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPaneState::visible_range`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPaneState::first_item_skip_rows`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPaneState::to_physical`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPaneState::multi_range`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPaneState::show_selection_when_unfocused`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPaneState::matcher`。
+
+### Requirement: The renderer SHALL show Unicode truncation and scroll-position indicators without corrupting existing backgrounds or merging indicators into adjacent text.
+render_truncation_ellipsis SHALL scan the row’s rightmost nonspace cell, append or replace with `…`, inherit the donor foreground, and preserve target background. render_corner_indicators SHALL no-op for zero areas or disabled style, place ▲ when offset is nonzero, place ◆ in follow mode or ▼ when more content exists below, and insert `… ` padding when indicators overwrite content while retaining cell backgrounds.
+
+#### Scenario: Truncated text
+- **WHEN** row has text with trailing space
+- **THEN** ellipsis is appended using adjacent foreground.
+
+#### Scenario: Full row
+- **WHEN** text reaches the final cell
+- **THEN** the final character is replaced by ellipsis with its background preserved.
+
+#### Scenario: Scrolled/follow state
+- **WHEN** offset is above zero or follow is active
+- **THEN** top ▲ and bottom ◆ indicators appear.
+
+#### Scenario: More content
+- **WHEN** NAV is not at bottom and content exceeds viewport
+- **THEN** bottom ▼ appears.
+
+#### Scenario: Indicator collision
+- **WHEN** corner cells contain text
+- **THEN** ellipsis-space padding separates the indicator from content.
+
+证据：`crates/codegen/pager/src/views/list_pane/render.rs` — `render_truncation_ellipsis`；`crates/codegen/pager/src/views/list_pane/render.rs` — `render_corner_indicators`。
+
+### Requirement: ListPane SHALL render copy feedback, scrollbar styles, and active or accepted input bars in the reserved bottom area with mode-specific labels, cursor rendering, and matcher status alignment.
+render SHALL paint a bottom-right `Copied!` toast only while state.copy_toast_active and space permits, then draw styled scrollbar track/thumb from scaled metrics. render_bottom_bar SHALL fill the bar background, label Search/Filter/GotoLine/Comment inputs left-aligned and render the textarea in the remaining area, or right-align a dim `[filter: query]`/`[search: query]` status for an accepted matcher.
+
+#### Scenario: Copy toast
+- **WHEN** toast is active and content area is wider than eight columns
+- **THEN** Copied! is painted at the bottom right with toast foreground/bold modifier.
+
+#### Scenario: Active input
+- **WHEN** an input mode is open
+- **THEN** the correct prompt label and textarea occupy the reserved rows.
+
+#### Scenario: Accepted matcher
+- **WHEN** input is closed but a matcher remains
+- **THEN** a dim mode/query status is right-aligned.
+
+#### Scenario: Scrollbar style
+- **WHEN** content overflows or fits
+- **THEN** track/thumb are painted through render_scrollbar_styled using pane style colors and stored area geometry.
+
+#### Scenario: Comment input
+- **WHEN** bottom bar height allows multiple rows
+- **THEN** the textarea receives the full multiline bar area.
+
+证据：`crates/codegen/pager/src/views/list_pane/render.rs` — `render_bottom_bar`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::render`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPaneState::copy_toast_active`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPaneState::input_mode`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPaneState::matcher`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPaneState::render_input_textarea`；`crates/codegen/pager/src/views/list_pane/render.rs` — `render_scrollbar_styled`。
+
+### Requirement: ListPane rendering SHALL keep desired-height, layout, wrapping, and match-highlight coordinates consistent for long/styled lines, including the two-column scrollbar width reduction and corrective phase.
+The renderer SHALL pass the same area width to desired-height and word wrapping for content items; prepare_layout’s scrollbar-aware width must match the content area chosen by render. Match highlighting SHALL align plain search offsets with styled spans and wrapped rows. Long items SHALL clip by viewport without corrupting prefix/layout, and scaled scrollbar rendering SHALL use the same scaled total/offset inputs as layout state.
+
+#### Scenario: Long wrapped line
+- **WHEN** content exceeds multiple rows
+- **THEN** all desired wrapped rows render when viewport permits and layout height matches wrapping.
+
+#### Scenario: Styled search line
+- **WHEN** content spans have ANSI-derived styles but plain search text
+- **THEN** highlight cells spell the matched text at correct wrapped positions.
+
+#### Scenario: Scrollbar width
+- **WHEN** overflow reduces content width by two columns
+- **THEN** layout heights are computed at the narrower width so text is not truncated.
+
+#### Scenario: Heavy few items
+- **WHEN** item count does not prove scrollbar but total wrapped height overflows
+- **THEN** the corrective narrow-width phase still produces complete content.
+
+#### Scenario: Filter shrink
+- **WHEN** filtered items are removed after a prepared frame
+- **THEN** render remains bounded and paints the new filtered rows.
+
+证据：`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::render_items`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::render_item_framework`；`crates/codegen/pager/src/views/list_pane/render.rs` — `ListPane::render`；`crates/codegen/pager/src/views/list_pane/render.rs` — `long_line_desired_height_is_accurate`；`crates/codegen/pager/src/views/list_pane/render.rs` — `highlight_match_wrap_mode_real_tracing_line`；`crates/codegen/pager/src/views/list_pane/render.rs` — `scrollbar_width_fix_verified`；`crates/codegen/pager/src/views/list_pane/render.rs` — `scrollbar_fix_phase1_many_items`；`crates/codegen/pager/src/views/list_pane/render.rs` — `scrollbar_fix_phase2_few_heavy_items`。
+
+### Requirement: The list renderer SHALL preserve its inline regression matrix for basic/filtered/selected/empty rendering, scroll clipping, truncation ellipsis, selection-plus-highlight layering, wrapped styled search coordinates, long-line completeness, scrollbar width correction, and filter shrink safety. These tests are source evidence for Buffer-level behavior and do not prove a real terminal.
+The 27 inline tests SHALL exercise ListPane StatefulWidget rendering with fixture ListItems, including long tracing lines and styled spans. They establish the documented overlay order and width fixes at the ratatui Buffer boundary; they do not establish crossterm delivery, real terminal glyph width, or external scrollbar input.
+
+#### Scenario: Basic state
+- **WHEN** items are empty, selected, filtered, or scrolled
+- **THEN** Buffer rows reflect the visible selection/filter state without panic.
+
+#### Scenario: Overlay regressions
+- **WHEN** selection and search overlap or content truncates
+- **THEN** background, REVERSED highlight, and ellipsis behavior remain stable.
+
+#### Scenario: Wrap regressions
+- **WHEN** long or styled lines are rendered
+- **THEN** height/content and match coordinates remain complete across wrapped rows.
+
+#### Scenario: Scrollbar regressions
+- **WHEN** overflow occurs with many or few heavy items
+- **THEN** both width-reduction phases avoid truncation and shrink/filter remains safe.
+
+证据：`crates/codegen/pager/src/views/list_pane/render.rs` — `tests module (27 #[test] functions: renders_basic_items, renders_with_selection, renders_scrolled_view, renders_empty_list, renders_with_filter, truncation_ellipsis_appended_after_text, truncation_ellipsis_replaces_last_char_at_full_width, no_truncation_ellipsis_for_short_items, highlight_match_inverts_correct_cells, selection_bg_and_highlight_inversion_both_applied, highlight_match_wrap_mode_correct_positions, highlight_match_wrap_mode_real_tracing_line, highlight_match_wrap_mode_styled_spans, long_line_desired_height_is_accurate, long_line_renders_all_wrapped_rows, long_line_content_is_complete, escaped_newlines_not_split, tracing_entry_renders_complete_content, long_line_constrained_viewport_clips_correctly, multiple_long_items_layout_integrity, scrolled_long_item_shows_end_content, wrap_line_count_matches_desired_height, scrollbar_width_mismatch_bug_repro, scrollbar_width_fix_verified, scrollbar_fix_phase1_many_items, scrollbar_fix_phase2_few_heavy_items, render_does_not_panic_when_filter_active_and_items_shrink`。
+### Requirement: Background demotion preserves active turn guards
+DemoteToBackground SHALL emit no effect without an active execute guard, emit the current session/tool ids when a running execute exists, and ignore an idle session.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** DemoteToBackground SHALL emit no effect without an active execute guard, emit the current session/tool ids when a running execute exists, and ignore an idle session.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `Action::DemoteToBackground`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `Effect::DemoteToBackground`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `AgentState::Idle`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `demote_dispatch_keeps_turn_session_and_execute_guards`。
+
+### Requirement: Prompt response errors are correlated to the owning turn
+PromptResponse errors for a non-current prompt SHALL be discarded without changing the running turn or scrollback; an error for the current prompt SHALL end the turn and render failure.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** PromptResponse errors for a non-current prompt SHALL be discarded without changing the running turn or scrollback; an error for the current prompt SHALL end the turn and render failure.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `TaskResult::PromptResponse`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `current_prompt_id`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `TurnFailed`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `queued_prompt_rpc_error_does_not_kill_running_turn`。
+
+### Requirement: Plugin CTA completion settles successful install and reload
+Successful CTA install/reload with expects_mcp=false SHALL settle to Installed, dismiss the installed CTA, avoid MCP fetch, and refresh the catalog after install.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** Successful CTA install/reload with expects_mcp=false SHALL settle to Installed, dismiss the installed CTA, avoid MCP fetch, and refresh the catalog after install.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `CtaPhase`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `TaskResult::CtaPluginInstallDone`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `TaskResult::CtaPluginReloadDone`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `Effect::DismissCtaInstalled`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `Effect::FetchPluginCtaCatalog`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `Effect::FetchPluginCtaMcps`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cta_install_done_skills_only_settles_installed_without_fetch`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cta_reload_done_skills_only_settles_installed_without_fetch`。
+
+### Requirement: Cancel turn emits trigger-aware cancellation and preserves server queue
+CancelTurn SHALL no-op when idle, cancel a running turn and enter Cancelling, forward/consume a one-shot trigger hint, and leave shared queue/input untouched so the server agent drains queued prompts.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** CancelTurn SHALL no-op when idle, cancel a running turn and enter Cancelling, forward/consume a one-shot trigger hint, and leave shared queue/input untouched so the server agent drains queued prompts.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `dispatch`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `Action::CancelTurn`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `Effect::CancelTurn`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `CancelTrigger`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_trigger_hint`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `shared_queue`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `QueueRemove`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_without_subagents_cancels_immediately`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_forwards_trigger_hint_to_effect`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_without_trigger_hint_sends_none`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_leaves_shared_queue_for_agent_to_drain`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_when_idle_does_nothing`。
+
+### Requirement: Cancel turn subagent panel, choices, and retries
+When unfinished subagents exist, CancelTurn SHALL open a choice panel unless a stored preference applies; choices encode cancel_subagents, finished children still cancel, panel double-dispatch falls through, and Cancelling retries resend using the remembered preference.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** When unfinished subagents exist, CancelTurn SHALL open a choice panel unless a stored preference applies; choices encode cancel_subagents, finished children still cancel, panel double-dispatch falls through, and Cancelling retries resend using the remembered preference.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `CancelTurnChoice`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `CancelTurnViewState`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_view`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_subagents_preference`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `is_cancelling`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_with_running_subagents_shows_panel`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_choice_stop_running_sends_cancel_true`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_choice_continue_to_run_sends_cancel_false`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_choice_after_turn_finished_is_noop`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_choice_after_subagents_finished_still_cancels`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_double_dispatch_falls_through_when_panel_open`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_when_already_cancelling_resends_cancel`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_retry_honors_subagent_preference`。
+
+### Requirement: Goal interrupt panel and explicit pause/stop routing
+Goal-active cancellation SHALL always open the Goal panel while running, derive choice count from running subagents, map Pause/Stop choices to explicit pause_goal/cancel_subagents flags, route no-turn PauseGoal through `/goal pause`, and replay the last intent on retry.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** Goal-active cancellation SHALL always open the Goal panel while running, derive choice count from running subagents, map Pause/Stop choices to explicit pause_goal/cancel_subagents flags, route no-turn PauseGoal through `/goal pause`, and replay the last intent on retry.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `GoalDisplayState`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `goal_interrupt_view`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `GoalInterruptChoice`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `pause_goal`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `ExecuteSlashCommand`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `/goal pause`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `goal_active_cancel_opens_panel_ignoring_pref`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `goal_panel_choice_count_follows_subagents`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `goal_pause_choice_maps_to_cancel_with_pause`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `goal_stop_turn_only_maps_to_cancel_without_pause`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `goal_stop_turn_and_subagents_maps_to_cancel_subagents`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `goal_active_without_turn_pause_routes_command_plane`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `goal_retry_replays_last_interrupt_without_pause`。
+
+### Requirement: Cancel preference bypass and persistence
+AlwaysStop/AlwaysContinue SHALL bypass the subagent panel and send the configured cancel_subagents value; choosing either always option SHALL update the agent/UI preference and persist its setting enum.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** AlwaysStop/AlwaysContinue SHALL bypass the subagent panel and send the configured cancel_subagents value; choosing either always option SHALL update the agent/UI preference and persist its setting enum.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_subagents_preference`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_subagents_on_turn_cancel`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `Effect::PersistSetting`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `AlwaysStop`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `AlwaysContinue`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `always_stop_preference_skips_panel`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `always_continue_preference_skips_panel`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `always_stop_choice_sets_preference`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `always_continue_choice_sets_preference`。
+
+### Requirement: Prompt status watchdog queries stalled turns exactly once
+poll_stalled_prompt_submissions SHALL query exact prompt status after submitting/running watchdog thresholds when reducer activity is absent or stale, while recent activity, young turns, and in-flight queries suppress duplicate requests without fabricating a terminal.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** poll_stalled_prompt_submissions SHALL query exact prompt status after submitting/running watchdog thresholds when reducer activity is absent or stale, while recent activity, young turns, and in-flight queries suppress duplicate requests without fabricating a terminal.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `poll_stalled_prompt_submissions`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `PROMPT_STATUS_WATCHDOG_DELAY`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `PROMPT_STATUS_RUNNING_WATCHDOG_DELAY`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `QueryPromptStatus`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `prompt_status_query_matches`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `last_prompt_event_at`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `stalled_unacknowledged_submission_queries_exact_prompt_status`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `running_turn_stalled_without_activity_queries_prompt_status`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `running_turn_with_recent_activity_skips_query`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `running_turn_with_stale_activity_queries_prompt_status`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `running_turn_below_threshold_skips_query`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `running_turn_query_in_flight_skips_duplicate`。
+
+### Requirement: Prompt status responses rearm liveness and finalize terminal state
+PromptStatusResolved SHALL clear query markers, preserve the display start anchor, record observation time, rearm Running/nonterminal watchdog windows, finalize Terminal exactly once, leave queued idle observations non-claiming, and settle queued submitting prompts to Idle with in-flight state cleared.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** PromptStatusResolved SHALL clear query markers, preserve the display start anchor, record observation time, rearm Running/nonterminal watchdog windows, finalize Terminal exactly once, leave queued idle observations non-claiming, and settle queued submitting prompts to Idle with in-flight state cleared.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `PromptStatusResolved`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `PromptStatusWire`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `last_status_observed_at`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `next_prompt_watchdog_deadline`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `mark_turn_finished`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `TurnCompleted`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `running_status_response_rearms_from_observation_time`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `nonterminal_watchdog_answers_never_end_a_running_turn`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `running_watchdog_terminal_response_finalizes_via_first_wins_finalizer`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `queued_prompt_status_observes_without_claiming_or_rearming_a_turn`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `queued_prompt_status_resolves_submitting_state`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `terminal_prompt_status_uses_same_first_wins_finalizer`。
+
+### Requirement: Cancellation clears panel and rewinds only pristine prompt state
+Prompt completion SHALL clear cancel UI; cancellation SHALL restore a pristine stashed prompt and remove every combined segment bubble, but preserve a newer composer draft or post-activity state while using normal Cancelling.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** Prompt completion SHALL clear cancel UI; cancellation SHALL restore a pristine stashed prompt and remove every combined segment bubble, but preserve a newer composer draft or post-activity state while using normal Cancelling.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `PromptResponse`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_turn_view`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `in_flight_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `combined_scrollback_entries`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `TurnCancelled`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `prompt_response_clears_cancel_turn_panel`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_after_first_activity_does_not_restore`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_rewind_removes_all_combined_segment_blocks`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `cancel_with_newer_draft_skips_pristine_rewind_and_keeps_draft`。
+
+### Requirement: Session title and prompt history sanitize skill XML
+Session title and prompt history presentation SHALL convert command-name/message/args XML wrappers into clean slash commands and arguments while preserving plain prompts.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** Session title and prompt history presentation SHALL convert command-name/message/args XML wrappers into clean slash commands and arguments while preserving plain prompts.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `entry_title`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `generated_session_title`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `PromptHistoryLoaded`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `prompt_history`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `entry_title_strips_skill_xml_from_generated_title`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `entry_title_strips_skill_xml_from_first_prompt`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `prompt_history_loaded_sanitizes_skill_xml`。
+
+### Requirement: Background task kill results reconcile inactive agents
+BgTaskKilled/BgTaskKillFailed SHALL clear retry state for already-exited/missing/error outcomes, keep pending kill for Killed, and remove NotFound tasks while finishing associated running scrollback entries.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** BgTaskKilled/BgTaskKillFailed SHALL clear retry state for already-exited/missing/error outcomes, keep pending kill for Killed, and remove NotFound tasks while finishing associated running scrollback entries.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `BgTaskKilled`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `BgTaskKillFailed`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `KillOutcome`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `pending_kill`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `kill_requested_at`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `needs_animation`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `bg_task_killed_already_exited_clears_pending_kill_on_inactive_agent`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `bg_task_killed_not_found_removes_task_from_inactive_agent`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `bg_task_killed_not_found_finishes_scrollback_entry`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `bg_task_killed_missing_outcome_clears_pending_kill`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `bg_task_killed_keeps_pending_kill_on_killed_outcome`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `bg_task_kill_failed_clears_pending_kill_on_inactive_agent`。
+
+### Requirement: Dashboard subagent rows cap, roster filter, and sanitize labels
+Dashboard row builders SHALL show up to eight subagents, add a placeholder with the hidden remainder above the cap, suppress nested rows in the live roster builder while retaining them in full build_rows, and strip ANSI control characters from subagent labels.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** Dashboard row builders SHALL show up to eight subagents, add a placeholder with the hidden remainder above the cap, suppress nested rows in the live roster builder while retaining them in full build_rows, and strip ANSI control characters from subagent labels.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `build_rows`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `build_rows_with_roster`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `MAX_VISIBLE_SUBAGENTS`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `is_more_placeholder`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `more_count`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `subagent_type`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `build_rows_collapses_many_subagents`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `build_rows_seven_subagents_no_placeholder`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `build_rows_eight_subagents_no_placeholder`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `build_rows_sixteen_subagents_placeholder_counts_remainder`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `build_rows_with_roster_hides_subagent_rows`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `subagent_label_strips_control_characters`。
+
+### Requirement: Mouse capture sticky state survives subagent exit
+ToggleMouseCapture SHALL propagate the sticky disabled toast recursively to parent and active subagent views, and clearing active_subagent on return SHALL preserve the parent sticky notice.
+
+#### Scenario: Observed
+- **WHEN** the tested dispatch scenario is exercised
+- **THEN** ToggleMouseCapture SHALL propagate the sticky disabled toast recursively to parent and active subagent views, and clearing active_subagent on return SHALL preserve the parent sticky notice.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `ToggleMouseCapture`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `mouse_capture_is_enabled`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `MOUSE_OFF_STICKY`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `active_subagent`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `sticky_toast`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `subagent_views`；`crates/codegen/pager/src/app/root/dispatch/tests/turn.rs` — `mouse_reporting_toggle_sticky_survives_subagent_esc_to_parent`。

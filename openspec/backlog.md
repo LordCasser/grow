@@ -796,3 +796,15 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 ## 待拆分：Pager block viewer混合内容查看、布局和选择状态
 
 `views/block_viewer.rs`同时处理block查看器、滚动/布局、文本选择和输入状态投影。9条静态契约已登记，后续需按内容查看、布局和选择状态拆分并补真实终端验证；本轮不改viewer行为。
+
+## 待拆分：Pager list pane render混合窗口布局和选择视觉
+
+`views/list_pane/render.rs`同时处理列表行渲染、滚动窗口、选择/过滤、视觉状态和剪贴板提示。7条静态契约已登记，后续需按布局窗口、选择视觉和提示拆分并补真实终端验证；本轮不改render行为。
+
+## 待拆分：Pager turn dispatch测试混合终态、控制和压缩
+
+`app/root/dispatch/tests/turn.rs`集中turn完成/失败、prompt队列、压缩、行为/模型控制和终态通知。14条静态契约已登记，后续需按turn终态、控制确认和压缩协议拆分并补动态验证；本轮不改turn处理。
+
+## 待拆分：Pager prompt模块混合编辑、发送和队列状态
+
+`app/agent_view/prompt.rs`同时处理prompt编辑/发送、队列状态、快捷动作和输入投影。静态事实已登记，后续需按编辑模型、提交协议和队列状态拆分并补真实输入验证；本轮不改prompt行为。

@@ -2477,6 +2477,8 @@
       "AgentView pending action deduplication and completion reduction",
       "Allocator release hook installation and trace attribution",
       "Async view shared wake notification",
+      "Background demotion preserves active turn guards",
+      "Background task kill results reconcile inactive agents",
       "Background work watcher count projection",
       "Banner hit metadata and zero-area behavior",
       "BlockContent SHALL define the common scrollback rendering contract: content, accent/bullet styling, backgrounds, padding, fold/display modes, selection/grouping, media references, fullscreen preambles, and optional Mermaid/media affordances.",
@@ -2490,7 +2492,11 @@
       "CLI agent argument and inline definition normalization",
       "CLI completion script generation and zsh root rewrite",
       "Cached terminal OSC8 hyperlink route projection",
+      "Cancel preference bypass and persistence",
+      "Cancel turn emits trigger-aware cancellation and preserves server queue",
+      "Cancel turn subagent panel, choices, and retries",
       "Cancel-turn and Goal interrupt panels SHALL consume their own keyboard and mouse input. Cancel-turn supports navigation, numeric/Enter choice submission, Ctrl-C cancel, Tab to scrollback, and Esc ContinueToRun while refreshing rewind suppression. Goal interrupt supports navigation, numeric/Enter choice submission, Tab/focus controls and an Esc dismiss-only path that closes the panel without cancelling the turn or Goal.",
+      "Cancellation clears panel and rewinds only pristine prompt state",
       "Centered tip footer fitting and content partition",
       "Client model catalog refresh and selection state",
       "Client model image capability and context window projection",
@@ -2501,6 +2507,7 @@
       "Context and session info result projection boundaries",
       "Critical banner two-row rendering and reservation",
       "Dashboard peek field computation for top-level, subagent and roster rows",
+      "Dashboard subagent rows cap, roster filter, and sanitize labels",
       "Default actions adapt to screen and terminal",
       "Default and fork model setters use different catalogs",
       "Desktop notification protocol selection and raw stderr emission",
@@ -2523,6 +2530,7 @@
       "Follow up response acceptance and pending turn buffer",
       "Footer shortcut layout, styling, and hit metadata",
       "Git discovery labels path display and branch glyph policy",
+      "Goal interrupt panel and explicit pause/stop routing",
       "Grow home disk usage metadata walk and report serialization",
       "Headless CLI permission parse failure policy",
       "Headless CLI prompt and schema admission",
@@ -2540,10 +2548,15 @@
       "Input diagnostic ring retention and snapshot sanitization",
       "Leader bridge channel swap outbound stale drop and cancellation",
       "Leader mode SHALL resolve flags and policy in the order `--no-leader`, `--leader`, eligibility, local config, release remote setting, then default-off; a requested confinement profile SHALL veto an otherwise enabled leader without fabricating a policy-disable reason, and the result SHALL retain both typed reasons.",
+      "ListPane SHALL borrow a model item slice, carry focus and overlay style configuration through builder methods, and render only into nonzero areas after splitting bottom input/status rows and scrollbar space from the requested viewport.",
+      "ListPane SHALL render content-based items with optional full-width backgrounds, cursor/selection prefixes, NoWrap truncation, or wrapped continuation rows while keeping all writes inside the supplied area.",
+      "ListPane SHALL render copy feedback, scrollbar styles, and active or accepted input bars in the reserved bottom area with mode-specific labels, cursor rendering, and matcher status alignment.",
+      "ListPane SHALL render only the state-visible item range, map visible indices to physical items after filtering, skip stale out-of-range mappings safely, overlay selection background and match inversion after content, and append truncation markers only for true text truncation.",
       "ListPane input modes SHALL expose stable prompts and map Search/Filter to their corresponding match modes; goto-line parsing SHALL accept clamped single numbers and ranges, treat an incomplete N- as a single jump, reject invalid text, and enforce start <= end.",
       "ListPane input-bar state SHALL expose mode-dependent bottom-bar sizing, textarea text/cursor rendering, comment multiline capacity, hardware cursor coordinates, and expiring copy-toast state.",
       "ListPane keyboard handling SHALL consume j/k, arrows, Ctrl-j/k, Ctrl-d/u, PageUp/PageDown, g/G, Home/End, z, and enabled w according to pane state; viewport scrolling pins the selected item screen row and carries leftover movement past clamped viewport edges to the nearest selectable cursor.",
       "ListPane mouse handling SHALL prioritize scrollbar clicks/drags over content selection, map content rows to virtual item coordinates, route wheel events over the scrollbar to proportional movement, and release drag state on mouse-up.",
+      "ListPane rendering SHALL keep desired-height, layout, wrapping, and match-highlight coordinates consistent for long/styled lines, including the two-column scrollbar width reduction and corrective phase.",
       "ListPaneState SHALL clamp scrolling to content and viewport, support fixed-height NoWrap and variable-height Wrap layout, expose visible ranges/skip rows, keep empty or fitting lists at offset zero, center selected items with clamping, and preserve stable positions across append and prepare cycles.",
       "ListPaneState SHALL own scroll/selection/layout/matcher/input/clipboard state while borrowing items only during layout and actions; constructors SHALL apply the requested wrap/follow state subject to configuration, and public accessors SHALL expose stable-ID selection, visible-to-physical mapping, layout metrics, input state, and rendering flags.",
       "Local combined dequeue payload projection",
@@ -2580,6 +2593,7 @@
       "Modal sizing defaults, presets, compact mode, and bounds",
       "Modal window state initialization",
       "Models CLI listing and worker shutdown ownership",
+      "Mouse capture sticky state survives subagent exit",
       "Notification configuration defaults enum spellings and template projection",
       "Notification hook shell execution enrollment and timeout boundaries",
       "Notification service event gates emission accounting and idle output",
@@ -3342,6 +3356,7 @@
       "Plugin CLI installed and available inventory projection",
       "Plugin CTA banner width and hit regions",
       "Plugin CTA candidate and install completion gates",
+      "Plugin CTA completion settles successful install and reload",
       "Plugin CTA post install polling and catalog refresh",
       "Plugin tag and marketplace source mutation boundaries",
       "Process memory gauge platform projection and provider seams",
@@ -3350,6 +3365,9 @@
       "Promo CTA validation, safe URL target, and slot consistency",
       "Promo banner one-row rendering and affordance reservation",
       "Prompt completion writes and atomic element overlap refusal",
+      "Prompt response errors are correlated to the owning turn",
+      "Prompt status responses rearm liveness and finalize terminal state",
+      "Prompt status watchdog queries stalled turns exactly once",
       "Prompt suggestion completion fetch and response routing",
       "Prompt suggestion controller generation and prefix semantics",
       "Question freeform drafts SHALL be isolated per question tab and synchronized with the prompt widget only when entering/leaving InputMode. Leaving InputMode SHALL preserve nonblank text and selection, clear blank text, reset click timing, and re-entry SHALL retain folded paste chips when the stored slot still matches the live draft. A rewritten slot SHALL replace stale prompt content.",
@@ -3388,6 +3406,7 @@
       "Session announcement selection, expiry, visibility, and critical precedence",
       "Session announcement slash gate, hide keys, critical gate, and banner height",
       "Session startup materialization and local miss provenance",
+      "Session title and prompt history sanitize skill XML",
       "Session usage ledger display and cost absence",
       "Sessions CLI list search and deletion dispatch",
       "Setting persistence completion and unversioned rollback",
@@ -3448,9 +3467,11 @@
       "The app module SHALL preserve its inline regression matrix for terminal mode transforms, teardown ordering injection, cursor policy, bounded cancellation, control-safe title/hints, leader precedence and confinement messaging, hunk-tracker precedence, and the complete CLI/session option surface. These tests are source evidence for the stated boundaries and do not prove a live terminal, ACP connection, external editor, or process replacement.",
       "The block viewer source SHALL preserve its documented ListPane/viewer boundaries: it delegates navigation and filtering to ListPaneState, handles source-specific construction and patch/text selection locally, and exposes pending actions for callers rather than performing external clipboard/raw-mode/entry mutation itself.",
       "The interaction module SHALL preserve the focused regression behaviors pinned by its 30 inline tests: Plan action traversal and partial answers, cancel/Goal mouse-key semantics, permission chrome and scope behavior, fixed-choice no-freeform gating, and paste-chip round trips. These tests are source evidence for interaction state transitions and do not establish compiled, terminal, ACP transport, or downstream action execution behavior.",
+      "The list renderer SHALL preserve its inline regression matrix for basic/filtered/selected/empty rendering, scroll clipping, truncation ellipsis, selection-plus-highlight layering, wrapped styled search coordinates, long-line completeness, scrollbar width correction, and filter shrink safety. These tests are source evidence for Buffer-level behavior and do not prove a real terminal.",
       "The pager SHALL keep process-wide input ownership flags coherent: the `/gboom` game may push and pop an additional Kitty keyboard layer exactly once, mouse capture state SHALL be observable, minimal mode SHALL be tracked separately from styling toggles, and Esc cancellation plus opt-in mouse-reporting behavior SHALL be derived from explicit mode/config inputs.",
       "The pager run entry point SHALL load and validate effective configuration before redirecting native stderr, materialize session startup intent, resolve leader/permission/screen mode, initialize terminal state, connect with bounded cancellation, fall back from a failed leader to the embedded agent, run the root event loop, restore terminal ownership, and preserve update/relaunch/exit outcomes.",
       "The question modal SHALL expose Navigation, InputMode, and PlanAction focus modes. Navigation SHALL support bounded cursor movement, page/half jumps, option toggles/selections, option-key shortcuts, freeform activation, question tab cycling, clipboard copy of option text, fullscreen, cancellation/skip and pane transfer. InputMode SHALL route prompt editing and Enter/newline, save per-question freeform state on exit, and advance or submit. PlanAction SHALL select ChatAboutThis or SkipInterview explicitly with arrows/Enter and return to navigation on Esc.",
+      "The renderer SHALL show Unicode truncation and scroll-position indicators without corrupting existing backgrounds or merging indicators into adjacent text.",
       "The scrollback block module SHALL preserve its inline regression matrix for media placement, block factories and foldability, fullscreen viewer gating, bullet selection metadata, copy projection, and searchable text across all supported block variants. These tests are source evidence for block-state and projection behavior and do not prove terminal rendering or external clipboard integration.",
       "Theme and quality separation in Mermaid cache keys",
       "Theme commit and preview state separation",
@@ -3749,6 +3770,10 @@
         "sha256": "139b7b3f650edfbc17985707327ba75bb3e7e2a8ded4d0eede4c62007e914647"
       },
       {
+        "path": "crates/codegen/pager/src/app/agent_view/prompt.rs",
+        "sha256": "6f5178a6fdfa461a8cdc34a180b4e38378eeb46fead70f3003256ab446489b10"
+      },
+      {
         "path": "crates/codegen/pager/src/app/agent_view/queue.rs",
         "sha256": "3c3eb2687f75f6c8daa3cca8f9ce29a6a9973ca74080b0bc77a5785bf36575a2"
       },
@@ -3883,6 +3908,10 @@
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/tests/task_result.rs",
         "sha256": "a7f9d394a07ad605656c9b5dbd8e5979b87c9fc9782e0d0f40e008ecd654291f"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+        "sha256": "6d5d23c0fcbf57c69dd416edb6600f3bfa13d3d76261ad8e2f3b6dbe8f2a146d"
       },
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/tests/turn_pipeline.rs",
@@ -4759,6 +4788,10 @@
       {
         "path": "crates/codegen/pager/src/views/file_search/mod.rs",
         "sha256": "55b60c8f7c943e93cf2c87bd56a04d6e3337b65b39053fd3fa9aea83635f2307"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/list_pane/render.rs",
+        "sha256": "6beb36bf7e1494dc50dc7308dae93937ff9d19ba35bbff5244c06e590aa63262"
       },
       {
         "path": "crates/codegen/pager/src/views/list_pane/state/methods.rs",
