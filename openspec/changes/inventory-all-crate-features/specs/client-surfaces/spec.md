@@ -22441,3 +22441,349 @@ image_references SHALL expose the block-owned detected image slice in insertion 
 - **THEN** the first reference drives media_ref_path and eligible inline/open action routing.
 
 证据：`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `image_references`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `image_refs`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `media_ref_path`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `inline_media`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `inline_open_button`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `prefers_text_output`；`crates/codegen/pager/src/scrollback/blocks/tool/other.rs` — `CoordinationRow`。
+
+
+### Requirement: TableGeometry SHALL recognize only complete box-drawing top/divider/bottom border rows with consistent junction glyph families, tolerate leading spaces and blockquote bars, and calculate junction positions in Unicode display columns rather than bytes or scalar indices.
+
+The implementation SHALL satisfy the following tested behavior: grapheme_cols iterates extended graphemes, skips zero-width clusters, accumulates saturating UnicodeWidthStr columns, and records the first character. parse_border_row accepts optional prefix chars before the first corner, then requires the family-specific middle/corner glyphs and horizontal bars through a closing corner with at least two junctions; trailing text, wrong glyphs, unclosed rows, or inconsistent families return None. is_prefix_char permits only spaces and the quote bar.
+
+#### Scenario: Top/divider/bottom rows
+- **WHEN** a line uses matching box-drawing corners/junctions/horizontal bars
+- **THEN** parse_border_row returns the junction display columns and corresponding BorderKind.
+
+#### Scenario: Quote prefix
+- **WHEN** a table is rendered after a blockquote bar and spaces
+- **THEN** the prefix is ignored and grid junctions begin at the table corner column.
+
+#### Scenario: Wide glyphs
+- **WHEN** content before/within a grid contains CJK or emoji graphemes
+- **THEN** junction positions and cell clicks use display columns.
+
+#### Scenario: Malformed border
+- **WHEN** a row has wrong junctions, trailing content, missing close, or fewer than two junctions
+- **THEN** the line is rejected as a border.
+
+#### Scenario: Zero-width grapheme
+- **WHEN** a grapheme has zero display width
+- **THEN** it does not create a fake column or junction.
+
+证据：`crates/codegen/pager/src/scrollback/table_geometry.rs` — `CellRef`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `BorderKind`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `GridLine`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `BAR`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `is_prefix_char`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `grapheme_cols`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `parse_border_row`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `wide_glyphs_use_display_columns`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `blockquoted_table_with_quote_bar_prefix`。
+
+
+### Requirement: TableGeometry::detect SHALL require the anchor to lie inside a fully enclosed grid, derive one junction set from the anchor or a bounded upward border search, validate every intervening row outward to matching top and bottom borders, and group contiguous content lines into non-empty logical rows.
+
+The implementation SHALL satisfy the following tested behavior: detect reads the anchor line first; a border fixes junctions directly, while a content anchor searches upward at most MAX_JUNCTION_SEARCH=400 lines and stops on missing data or a non-prefix prose line. It walks up to a Top and down to a Bottom, rejecting a premature opposite border, Other row, inconsistent junctions, unclosed grid, or missing line. It records line_range as top..bottom+1 and pushes each contiguous Content run between borders into rows; no rows returns None.
+
+#### Scenario: Content anchor
+- **WHEN** at_line is a content line inside a closed table
+- **THEN** the nearest valid top/bottom borders are found and geometry is returned.
+
+#### Scenario: Border anchor
+- **WHEN** at_line is a matching border line
+- **THEN** the same grid is detected and line range includes both borders.
+
+#### Scenario: Outside grid
+- **WHEN** at_line is prose above or below the table
+- **THEN** detect returns None.
+
+#### Scenario: Wrapped row
+- **WHEN** one logical cell row spans several content lines
+- **THEN** the contiguous lines become one row range and cell text can join fragments later.
+
+#### Scenario: Inconsistent junctions
+- **WHEN** a divider or content row does not match the anchor junction set
+- **THEN** the entire detection fails closed.
+
+#### Scenario: Unclosed/malformed grid
+- **WHEN** a bottom border is missing or an Other line interrupts the walk
+- **THEN** detect returns None rather than guessing geometry.
+
+#### Scenario: Long prose search
+- **WHEN** no border appears within the bounded upward prefix search
+- **THEN** detect stops and returns None without scanning unbounded text.
+
+证据：`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::detect`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `MAX_JUNCTION_SEARCH`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `classify`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `is_content_row`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `detects_from_content_and_border_lines`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `no_grid_outside_table`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `inconsistent_junctions_bail`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `unclosed_grid_bails`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `wrapped_cell_fragments_join_with_space`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `plain_prose_and_rules_are_not_grids`。
+
+
+### Requirement: Detected table geometry SHALL expose half-open grid extent, column/row counts, content row lookup, per-column interior bands, and cell hit testing in display-column space; border rows and outside coordinates SHALL return no cell while junction clicks snap to an adjacent cell.
+
+The implementation SHALL satisfy the following tested behavior: line_range returns top border through one past bottom; n_cols is junction count minus one and n_rows is logical row count. row_of_line returns a row only for content lines; row_lines returns that row range. band returns the strictly interior display columns between flanking bars, including padding. cell_at returns None for non-content rows or columns outside the outer junctions; a junction uses the cell on its right except the closing border, which uses the final cell.
+
+#### Scenario: Grid extent
+- **WHEN** a table has top/bottom borders and logical rows
+- **THEN** line_range includes the full grid, and n_cols/n_rows match junctions and content runs.
+
+#### Scenario: Content lookup
+- **WHEN** a line is inside a logical row
+- **THEN** row_of_line returns the row index and row_lines returns its contiguous range.
+
+#### Scenario: Interior band
+- **WHEN** a column index is requested
+- **THEN** band spans display cells strictly between its two boundary bars.
+
+#### Scenario: Content hit
+- **WHEN** a display column lies within a cell
+- **THEN** cell_at returns the expected row/column CellRef.
+
+#### Scenario: Junction hit
+- **WHEN** a click lies exactly on an internal or closing bar
+- **THEN** internal bars snap right and the closing bar snaps left to the final cell.
+
+#### Scenario: Border/outside hit
+- **WHEN** a click lies on a border row or beyond grid columns
+- **THEN** cell_at returns None.
+
+证据：`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::line_range`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::n_cols`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::n_rows`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::row_of_line`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::row_lines`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::band`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::cell_at`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `cell_lookup_and_bands`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `CellRef`。
+
+
+### Requirement: TableGeometry::latched_cell_at SHALL preserve a held cell across border rows, divider rows, junctions, and one-column padding dead zones, move only when the pointer enters another cell interior, and clamp row/column movement beyond the grid to the nearest edge.
+
+The implementation SHALL satisfy the following tested behavior: latched_cell_at resolves the row from row_of_line when on content, clamps above/below the grid to first/last logical row, and otherwise preserves held.row. It resolves the column through interior_col_at; columns outside the outer junctions clamp to first/last, while bars and padding inside the grid preserve held.col. The returned CellRef therefore implements dead-zone hysteresis and symmetric release into neighboring content.
+
+#### Scenario: Content transition
+- **WHEN** the pointer enters another row or another column interior
+- **THEN** the latch moves to that row/column.
+
+#### Scenario: Divider/border dead zone
+- **WHEN** the pointer is on a divider or border row
+- **THEN** the held row is preserved rather than snapping to the next row.
+
+#### Scenario: Column padding dead zone
+- **WHEN** the pointer is on a junction or one-cell padding
+- **THEN** the held column remains unchanged.
+
+#### Scenario: Above/below edge
+- **WHEN** the pointer leaves the grid vertically
+- **THEN** the row clamps to first or last logical row.
+
+#### Scenario: Outside horizontal edge
+- **WHEN** the pointer leaves the grid horizontally
+- **THEN** the column clamps to first or last column.
+
+#### Scenario: Symmetric release
+- **WHEN** a held right cell moves back into left cell content
+- **THEN** the latch returns to the left cell only after entering its interior.
+
+证据：`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::latched_cell_at`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::interior_col_at`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `latched_cell_moves_only_via_content_or_past_the_edge`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `CellRef`。
+
+
+### Requirement: Cell copy SHALL slice each wrapped content line to the cell band in display columns, trim padding, skip empty fragments, and join nonblank fragments with spaces; grid copy SHALL serialize an order-independent rectangular cell range with tab-separated columns and newline-separated rows while flattening embedded tabs.
+
+The implementation SHALL satisfy the following tested behavior: cell_text obtains the selected column band, iterates the logical row line range, reads available source lines, calls slice_display_cols, trims fragments, skips empties and inserts a single space between retained fragments. grid_tsv normalizes endpoint order by row/col, calls cell_text for every rectangular cell, replaces tabs inside cell text with spaces, joins cells with tabs and rows with newlines.
+
+#### Scenario: Single cell
+- **WHEN** a cell contains one padded content fragment
+- **THEN** cell_text returns trimmed text without border/padding.
+
+#### Scenario: Wrapped fragments
+- **WHEN** a logical row spans multiple content lines
+- **THEN** nonblank fragments join with one space and blank companion cells are skipped.
+
+#### Scenario: Reverse endpoints
+- **WHEN** grid_tsv receives endpoints in reverse row/column order
+- **THEN** the output is normalized to top-left through bottom-right order.
+
+#### Scenario: Rectangular grid
+- **WHEN** a range spans multiple rows and columns
+- **THEN** each row is newline-separated and cells are tab-separated.
+
+#### Scenario: Embedded tab
+- **WHEN** cell source contains a tab character
+- **THEN** the tab is flattened to a space so TSV shape remains stable.
+
+#### Scenario: Missing source line
+- **WHEN** text_at returns None for part of a row
+- **THEN** the missing fragment is skipped without failing the entire copy.
+
+证据：`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::cell_text`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::grid_tsv`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `slice_display_cols`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `cell_text_and_tsv`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `wrapped_cell_fragments_join_with_space`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `CellRef`。
+
+
+### Requirement: The table geometry implementation SHALL preserve a linear-selection fallback whenever grid proof is incomplete, while accepting valid stray bar content and wide-glyph tables without misclassifying cell boundaries.
+
+The implementation SHALL satisfy the following tested behavior: Detection returns None for plain prose/rules, inconsistent junctions, unclosed grids, or anchors outside the table. A bar glyph inside a content cell is not a junction unless it occurs at the known junction column, so it remains part of cell_text. Unicode display-column arithmetic keeps wide names addressable, and the inline suite records exact expected ranges/cell values for these boundaries.
+
+#### Scenario: Plain prose
+- **WHEN** input contains prose or a horizontal rule without enclosing corners
+- **THEN** no TableGeometry is returned and caller can use linear selection.
+
+#### Scenario: Stray content bar
+- **WHEN** a content row contains an extra bar away from known junctions
+- **THEN** the grid remains valid and the extra bar is included in the cell text.
+
+#### Scenario: Broken divider
+- **WHEN** a divider junction is misaligned
+- **THEN** detection returns None rather than using a partial grid.
+
+#### Scenario: Wide cell text
+- **WHEN** a cell contains CJK display-wide characters
+- **THEN** cell lookup and text extraction use terminal display columns and return the expected cell.
+
+#### Scenario: Inline evidence
+- **WHEN** the 12 tests exercise valid, invalid, wrapped, quoted, wide and copy cases
+- **THEN** the expected geometry/copy behavior is pinned; this audit does not claim execution.
+
+证据：`crates/codegen/pager/src/scrollback/table_geometry.rs` — `TableGeometry::detect`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `stray_bar_in_cell_content_is_not_a_junction`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `wide_glyphs_use_display_columns`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `inconsistent_junctions_bail`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `unclosed_grid_bails`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `plain_prose_and_rules_are_not_grids`；`crates/codegen/pager/src/scrollback/table_geometry.rs` — `tests`。
+
+
+### Requirement: Group span kinds and binary containment lookup
+
+GroupSpan SHALL describe an entry-index range, fold kind, and expansion state; GroupKind SHALL distinguish VerbRun member counts from Truncation participant/hidden counts. span_containing SHALL binary-search sorted disjoint spans, treat ranges as half-open, and return only the span whose range contains the requested index.
+
+#### Scenario: Verb span
+- **WHEN** a verb run is represented
+- **THEN** the span carries its walked range, VerbRun member count, and expanded state.
+
+#### Scenario: Truncation span
+- **WHEN** a dense run exceeds its budget
+- **THEN** the span carries participant and hidden counts.
+
+#### Scenario: Containment
+- **WHEN** an index is before, inside, at the end of, or between sorted spans
+- **THEN** only an index inside a half-open range returns that span; gaps, ends, and empty input return None.
+
+证据：`crates/codegen/pager/src/scrollback/state/groups.rs` — `GroupSpan`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `GroupKind::VerbRun`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `GroupKind::Truncation`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `range`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `members`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `participants`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `hidden`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `expanded`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `span_containing`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `partition_point`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `Range::contains`。
+
+
+### Requirement: Group rebuild reset and setting-consistent projection
+
+apply SHALL clear every layout entry's group_header_count, group_collapse_header, and verb_group_header before each rebuild, read group_tool_verbs and show_thinking_blocks once, scan with those same settings, project the returned spans, and return the authoritative spans for storage in the layout cache.
+
+#### Scenario: Rebuild
+- **WHEN** a layout cache contains stale group flags
+- **THEN** all group flags are reset before scanning and projecting.
+
+#### Scenario: Settings snapshot
+- **WHEN** appearance settings are loaded for a rebuild
+- **THEN** both scan and projection use the same group-tool/show-thinking values.
+
+#### Scenario: Cache result
+- **WHEN** the scan completes
+- **THEN** the exact sorted spans are returned to the caller.
+
+证据：`crates/codegen/pager/src/scrollback/state/groups.rs` — `apply`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_header_count`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_collapse_header`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `verb_group_header`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `load_group_tool_verbs`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `load_show_thinking_blocks`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `scan`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `project_to_layout`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `LayoutCache::groups`。
+
+
+### Requirement: Fold scan precedence, claimed entries, and sorted disjoint spans
+
+scan SHALL run verb grouping before truncation, mark verb members/thought members as claimed, let claimed entries break truncation runs, append truncation spans over the remaining entries, and sort the combined spans by start index without overlap.
+
+#### Scenario: Precedence
+- **WHEN** entries contain a foldable verb run followed by a dense run
+- **THEN** the verb span is emitted first and the later truncation span starts after its claimed range.
+
+#### Scenario: Overlap prevention
+- **WHEN** multiple fold families are adjacent or separated
+- **THEN** returned spans are sorted by range.start and no pair overlaps.
+
+#### Scenario: No groups
+- **WHEN** inputs are empty or no fold family crosses its gate
+- **THEN** scan returns no spans while leaving projection inputs for the caller.
+
+证据：`crates/codegen/pager/src/scrollback/state/groups.rs` — `scan`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `scan_verb_runs`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `scan_truncations`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `claimed`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `spans.sort_unstable_by_key`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `GroupSpan::range`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_tool_verbs`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `show_thinking`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `max_visible`。
+
+
+### Requirement: Verb run discovery with transparent thoughts and expansion identity
+
+scan_verb_runs SHALL find maximal runs through scan_run_forward only when group_tool_verbs is enabled and the run folds. Member and ThoughtMember entries SHALL be claimed; Transparent entries remain unclaimed and inside the span; trailing transparent thoughts remain outside scan.end. The VerbRun member count SHALL count label-bearing members, and expansion SHALL be keyed by the first entry id.
+
+#### Scenario: Verb grouping enabled
+- **WHEN** group_tool_verbs is true and a run folds
+- **THEN** a VerbRun span covers the walked range, claims member arms, counts members, and records first-id expansion.
+
+#### Scenario: Verb grouping disabled
+- **WHEN** group_tool_verbs is false
+- **THEN** no verb spans or claims are produced, so members may flow into truncation.
+
+#### Scenario: Transparent thought
+- **WHEN** a collapsed/hidden or live thought appears inside a run
+- **THEN** the transparent row keeps its own row and is not counted/claimed as a member; trailing transparent rows stay outside the span.
+
+#### Scenario: Expanded verb
+- **WHEN** the first entry id is in expanded_groups
+- **THEN** the span is marked expanded while retaining the same range/member count.
+
+证据：`crates/codegen/pager/src/scrollback/state/groups.rs` — `scan_verb_runs`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `scan_run_forward`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `run_step`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `RunStep::Member`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `RunStep::ThoughtMember`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `RunStep::Transparent`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `RunStep::Break`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `scan.folds`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `scan.members`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `scan.end`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `expanded_groups`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_tool_verbs`。
+
+
+### Requirement: Budget truncation discovery with hidden-thinking transparency
+
+scan_truncations SHALL consider only collapsed groupable entries not hidden by the current thinking setting, skip hidden-thinking entries without breaking a run, stop at claimed/non-transparent breaks, and emit a span only when participants exceed max_visible + 1. The span range includes the dense walk, participants counts eligible entries, hidden equals participants - max_visible, and expansion is keyed by the first participant.
+
+#### Scenario: Budget gate
+- **WHEN** participants are at or below max_visible + 1
+- **THEN** no truncation span is emitted and existing layout remains untouched.
+
+#### Scenario: Over budget
+- **WHEN** a dense unclaimed run exceeds the threshold
+- **THEN** a Truncation span records its full walk, participants, hidden count, and first-id expansion.
+
+#### Scenario: Hidden thinking
+- **WHEN** hidden thinking is interspersed in a dense run
+- **THEN** the run remains contiguous, hidden thoughts neither count nor receive projection writes.
+
+#### Scenario: Break
+- **WHEN** a claimed entry or visible non-groupable/non-collapsed entry occurs
+- **THEN** the truncation run ends before the breaker.
+
+证据：`crates/codegen/pager/src/scrollback/state/groups.rs` — `scan_truncations`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `participates_in_truncation`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `is_groupable`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `display_mode`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `DisplayMode::Collapsed`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `is_hidden_thinking`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `max_visible`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_len`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_end`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `participants`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `hidden`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `claimed`。
+
+
+### Requirement: Verb run layout projection and gap ownership
+
+project_verb_run SHALL make the first member a synthetic verb header: collapsed height 1, expanded height 2 with group_collapse_header, and a saturated member count. Collapsed non-first claimed members SHALL have height 0 while their internal gaps are zeroed except the last claimed boundary; expanded members keep normal heights. Transparent entries keep rows and only donate their trailing gap while collapsed.
+
+#### Scenario: Collapsed verb run
+- **WHEN** a VerbRun is not expanded
+- **THEN** the first member is a one-row header, other claimed members hide, and only the run-internal gaps are zeroed.
+
+#### Scenario: Expanded verb run
+- **WHEN** the first id is expanded
+- **THEN** the header height is 2 and all member rows retain their normal heights.
+
+#### Scenario: Transparent member
+- **WHEN** a transparent thought/opened member is in the span
+- **THEN** its row remains, member count is unchanged, and its gap is adjusted only in collapsed mode.
+
+#### Scenario: Count saturation
+- **WHEN** members exceed u16 range
+- **THEN** group_header_count is capped at u16::MAX.
+
+证据：`crates/codegen/pager/src/scrollback/state/groups.rs` — `project_to_layout`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `project_verb_run`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `RunStep::Member`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `RunStep::ThoughtMember`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `RunStep::Transparent`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `verb_group_header`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_collapse_header`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_header_count`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `height`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `gap_after`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `u16::MAX`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `last_claimed`。
+
+
+### Requirement: Truncation layout projection and collapse header counts
+
+project_truncation SHALL render expanded groups as a standalone collapse header on the first entry with height 1, count participants - 1, and no trailing gap while preserving all following entry heights. In collapsed mode it SHALL skip hidden-thinking rows, make the first participating entry the `hidden - 1` header, hide the remaining hidden participants with zero counts/gaps, and leave the visible tail untouched.
+
+#### Scenario: Expanded truncation
+- **WHEN** the span is expanded
+- **THEN** entry 0 becomes a one-row collapse header counting all remaining participants and every later row keeps its normal height.
+
+#### Scenario: Collapsed truncation
+- **WHEN** the span is collapsed
+- **THEN** the first participating entry shows hidden - 1, subsequent hidden participants have height 0/count 0, and visible tail rows are unchanged.
+
+#### Scenario: Hidden thought in span
+- **WHEN** a hidden thought lies among participants
+- **THEN** the thought is skipped for both count and writes, preserving its seeded layout.
+
+证据：`crates/codegen/pager/src/scrollback/state/groups.rs` — `project_truncation`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_collapse_header`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_header_count`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `height`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `gap_after`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `participants`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `hidden`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `is_hidden_thinking`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `seen`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `span.range.start`。
+
+
+### Requirement: Single projection writer for fold flags and layout consequences
+
+project_to_layout SHALL dispatch each authoritative span by GroupKind and be the only path that writes group heights, gaps, header counts, collapse-header flags, and verb-header flags. Its projection SHALL preserve unrelated seeded layout data for entries outside the affected fold and for transparent/visible tail entries.
+
+#### Scenario: Span dispatch
+- **WHEN** spans contain VerbRun and Truncation variants
+- **THEN** the matching projection routine applies only that family's layout shape.
+
+#### Scenario: Untouched entries
+- **WHEN** an entry lies outside a span or is a transparent/visible tail row
+- **THEN** pre-existing height/gap and non-group metadata remain unchanged.
+
+#### Scenario: Combined transcript
+- **WHEN** verb and truncation spans coexist
+- **THEN** both shapes are projected without overlap and the fold headers expose their respective counts.
+
+证据：`crates/codegen/pager/src/scrollback/state/groups.rs` — `project_to_layout`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `project_verb_run`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `project_truncation`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `EntryLayoutInfo`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_header_count`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `group_collapse_header`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `verb_group_header`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `height`；`crates/codegen/pager/src/scrollback/state/groups.rs` — `gap_after`。

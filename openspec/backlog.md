@@ -939,3 +939,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：RuntimeEvidence::Unavailable and sentinel-like Available(None) are interpreted in several local branches, making evidence completeness policy implicit rather than represented by a dedicated report-state type.
 - Pager 审计债务：Stable DiagnosticId mapping and long remediation strings are hard-coded beside report assembly, which couples schema identity and copy text to the Rust control flow.
 - Pager 审计债务：The WezTerm newline suppression guard depends on wezterm_shape plus runtime evidence availability and duplicates terminal-specific policy with other startup/formatter layers; cross-layer changes can silently alter which fallback is shown.
+- Pager 审计债务：The block combines content lifecycle, elapsed-time policy, rendering, style policy, fold/display semantics, selection preamble, and appearance affordances, increasing coupling between data and presentation concerns.
+- Pager 审计债务：EXPAND_HINT duplicates the literal key chord used by an input interceptor instead of consulting the keybinding registry, so remapped controls can advertise the wrong shortcut.
+- Pager 审计债务：Replay timing is split between this block and ScrollbackState::finish_running_with_time, with implicit precedence between local Instant and server elapsed values.
+- Pager 审计债务：Body de-emphasis is implemented as a style patch after MarkdownContent output and uses global legacy-console detection, leaving palette blending, terminal SGR support, and block styling policy distributed across layers.
+- Pager 审计债务：The implementation returns finished_display_mode Some(Collapsed) while running and finished transitions are interpreted by outer entry/state code; this mode ownership is easy to desynchronize when new display modes are introduced.

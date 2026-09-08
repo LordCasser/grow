@@ -3825,7 +3825,22 @@
       "Other tool expanded output, error wrapping, and structured Q&A rendering",
       "AskUserQuestion output parser format recognition and annotation cleanup",
       "Other tool accent, bullet, folding, and neutral block protocol",
-      "Image reference exposure and text/media action routing"
+      "Image reference exposure and text/media action routing",
+      "Appearance thinking conversion and fixed flags",
+      "TableGeometry SHALL recognize only complete box-drawing top/divider/bottom border rows with consistent junction glyph families, tolerate leading spaces and blockquote bars, and calculate junction positions in Unicode display columns rather than bytes or scalar indices.",
+      "TableGeometry::detect SHALL require the anchor to lie inside a fully enclosed grid, derive one junction set from the anchor or a bounded upward border search, validate every intervening row outward to matching top and bottom borders, and group contiguous content lines into non-empty logical rows.",
+      "Detected table geometry SHALL expose half-open grid extent, column/row counts, content row lookup, per-column interior bands, and cell hit testing in display-column space; border rows and outside coordinates SHALL return no cell while junction clicks snap to an adjacent cell.",
+      "TableGeometry::latched_cell_at SHALL preserve a held cell across border rows, divider rows, junctions, and one-column padding dead zones, move only when the pointer enters another cell interior, and clamp row/column movement beyond the grid to the nearest edge.",
+      "Cell copy SHALL slice each wrapped content line to the cell band in display columns, trim padding, skip empty fragments, and join nonblank fragments with spaces; grid copy SHALL serialize an order-independent rectangular cell range with tab-separated columns and newline-separated rows while flattening embedded tabs.",
+      "The table geometry implementation SHALL preserve a linear-selection fallback whenever grid proof is incomplete, while accepting valid stray bar content and wide-glyph tables without misclassifying cell boundaries.",
+      "Group span kinds and binary containment lookup",
+      "Group rebuild reset and setting-consistent projection",
+      "Fold scan precedence, claimed entries, and sorted disjoint spans",
+      "Verb run discovery with transparent thoughts and expansion identity",
+      "Budget truncation discovery with hidden-thinking transparency",
+      "Verb run layout projection and gap ownership",
+      "Truncation layout projection and collapse header counts",
+      "Single projection writer for fold flags and layout consequences"
     ],
     "reviewed_files": [
       {
@@ -5999,6 +6014,18 @@
       {
         "path": "crates/codegen/pager/src/scrollback/blocks/tool/other.rs",
         "sha256": "e9aa676950093008e4b651c69849ae4380e1b08e80588b607e63e4d2eb6c2249"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "sha256": "80a67efe53ecf88e9f25b18a0de398ef8d747ef322c02a4f3b4930d224ee56b7"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "sha256": "0195556d281f5994b98efe2e7dda3243c069f4174ac39c28b8e285a55023e251"
+      },
+      {
+        "path": "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "sha256": "79e65b4d396dec752c8d7a59dd59dbe04d7479341ff47538a6b540be2b7098c6"
       }
     ],
     "review": "reviews/pager.md"

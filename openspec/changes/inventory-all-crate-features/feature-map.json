@@ -77447,6 +77447,26 @@
         "Thinking completion mode",
         "streaming thinking was untouched, manually expanded, toggled back, or governed by sticky expansion",
         "completion selects the corresponding collapsed or expanded resting mode."
+      ],
+      [
+        "Live stream timing",
+        "a block is created with streaming",
+        "elapsed_time_ms reports a nonnegative live duration before finish and finish freezes the local duration when no server value exists."
+      ],
+      [
+        "Replay timing",
+        "a block is created with streaming_replay and then finished",
+        "no local timer is used, so finish leaves elapsed_time_ms unset for the outer replay completion path to supply server duration."
+      ],
+      [
+        "Server duration precedence",
+        "set_elapsed_time_ms supplies Some milliseconds before finish",
+        "elapsed_time_ms returns the supplied server value and finish does not overwrite it with local elapsed time."
+      ],
+      [
+        "Incremental content",
+        "push_chunk or push_chunk_deferred receives markdown",
+        "the corresponding MarkdownContent streaming mutation is used; finish then invokes the full content finish path."
       ]
     ],
     "sources": [
@@ -77617,6 +77637,38 @@
       [
         "crates/codegen/pager/src/scrollback/state/mod.rs",
         "tests::sticky_expanded_mode_still_expands_untouched_thinking_on_finish"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::new"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::streaming"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::streaming_replay"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::push_chunk"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::push_chunk_deferred"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::finish"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::elapsed_time_ms"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::set_elapsed_time_ms"
       ]
     ]
   },
@@ -161572,6 +161624,31 @@
         "Fold toggle",
         "current mode is Collapsed, Truncated, or Expanded",
         "next_fold_mode returns Expanded for the first two and Collapsed for Expanded."
+      ],
+      [
+        "Accent disabled",
+        "thinking accent_enabled is false or the mode is Collapsed",
+        "accent returns None and no accent background is claimed."
+      ],
+      [
+        "Running accent",
+        "accent is enabled and the block is running",
+        "accent returns the configured color as animated when animate is true, otherwise as a static color, and bullet delegates to that accent."
+      ],
+      [
+        "Finished bullet",
+        "the block is not running",
+        "bullet returns None and the shared renderer can use its default bullet treatment."
+      ],
+      [
+        "Preamble",
+        "a compact preamble is requested",
+        "preamble builds the header using an Expanded, bright context even if the original context was muted/collapsed."
+      ],
+      [
+        "Bullet visibility",
+        "collapsed or header mode and a configured tool bullet are present",
+        "has_bullet reports true; absent bullet glyph or non-header expanded body reports false."
       ]
     ],
     "sources": [
@@ -161766,6 +161843,42 @@
       [
         "crates/codegen/pager/src/scrollback/blocks/user.rs",
         "tests::test_fold_toggle_truncated_to_expanded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::accent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::bullet"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::has_bullet"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::preamble"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::header_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::content"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::content_mut"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::text"
       ]
     ]
   },
@@ -183667,6 +183780,31 @@
         "Thinking visibility",
         "a thinking block is rendered with show_thinking false or true",
         "is_hidden_thinking is true only in the hidden case."
+      ],
+      [
+        "Running fold cycle",
+        "a running thinking block is folded from Collapsed, Truncated, or Expanded",
+        "next_fold_mode returns Expanded, Expanded, or Truncated respectively."
+      ],
+      [
+        "Finished fold cycle",
+        "a finished thinking block is folded from Collapsed, Truncated, or Expanded",
+        "next_fold_mode returns Expanded from Collapsed and Collapsed from the other two modes."
+      ],
+      [
+        "Completion collapse",
+        "the caller asks for collapse_mode or finished_display_mode after completion",
+        "the resting mode is Collapsed and the optional finished mode is Some(Collapsed)."
+      ],
+      [
+        "Raw projection",
+        "set_raw_mode is called",
+        "MarkdownContent receives the raw-mode setting and its cached source/render projection owns the resulting behavior."
+      ],
+      [
+        "Neutral block geometry",
+        "the common renderer queries background, accent_background, padding, or grouping",
+        "the block reports None/false/false/false/true for those respective block-level policies."
       ]
     ],
     "sources": [
@@ -183725,6 +183863,50 @@
       [
         "crates/codegen/pager/src/scrollback/entry.rs",
         "invalidate_cache"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::set_raw_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::background"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::accent_background"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::has_vpad_for"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::has_raw_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::is_foldable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::next_fold_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::collapse_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::default_display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::finished_display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::is_groupable"
       ]
     ]
   },
@@ -187249,6 +187431,31 @@
         "Styled table widths",
         "markdown tables contain emoji or wide glyphs",
         "rendered line content fills the requested display width without ghost cells."
+      ],
+      [
+        "Collapsed header",
+        "the block is rendered in Collapsed mode",
+        "one non-selectable header line is returned without a markdown body selection range."
+      ],
+      [
+        "Configured body header",
+        "the thinking header setting is enabled in Expanded mode",
+        "the header and blank separator are inserted as non-selectable rows before body lines, while body lines retain selection range zero."
+      ],
+      [
+        "Wrapped body",
+        "expanded content wraps at the supplied width",
+        "body output contains multiple lines whose selection metadata remains the shared MarkdownContent range."
+      ],
+      [
+        "Quote selection",
+        "the body begins with a markdown quote",
+        "the rendered bar prefix remains visible but derive_selection_text excludes it and returns the quote text."
+      ],
+      [
+        "Empty body",
+        "expanded or truncated rendering finds no wrapped content",
+        "render_empty_placeholder reuses the collapsed renderer and does not advertise an expand hint for the empty body."
       ]
     ],
     "sources": [
@@ -187303,6 +187510,50 @@
       [
         "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs",
         "empty_content_returns_placeholder"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::output"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::render_collapsed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::render_truncated"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::render_expanded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::render_empty_placeholder"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::maybe_prepend_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::styled_body"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "tests::collapsed_thinking_header_is_non_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "tests::prepended_thinking_header_is_non_selectable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "tests::thinking_body_lines_keep_markdown_range_ids"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "tests::thinking_quote_line_selection_excludes_bar_prefix"
       ]
     ]
   },
@@ -189904,6 +190155,1043 @@
       [
         "crates/codegen/pager/src/scrollback/blocks/tool/other.rs",
         "CoordinationRow"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Appearance thinking conversion and fixed flags",
+    "contract": "Thinking rendering SHALL honor the effective thinking appearance for header brightness/muting, body blend, body_dim_italic, truncated line count, and collapsed expand hint. The collapsed hint is appended only when collapsed_expand_hint is enabled, the mode is Collapsed, and the complete hint fits the content width; it is dim and never creates a second row. Body styling SHALL clear inherited line backgrounds, blend toward the theme defaults using bg_blend, and add DIM plus ITALIC except on legacy Windows consoles when body_dim_italic is enabled. Default appearance leaves reasoning spans unmodified by these emphasis attributes.",
+    "scenarios": [
+      [
+        "Default body style",
+        "default appearance renders expanded reasoning",
+        "reasoning spans do not gain DIM or ITALIC solely from ThinkingBlock."
+      ],
+      [
+        "Native palette emphasis",
+        "body_dim_italic is enabled while the terminal-native palette lock is active",
+        "every rendered reasoning span receives DIM and ITALIC, preserving the distinction when color blending is a no-op."
+      ],
+      [
+        "Fitting expand hint",
+        "collapsed_expand_hint is enabled in Collapsed mode and the hint fits",
+        "the header contains the dim `(ctrl+e to expand)` affordance on the same single row."
+      ],
+      [
+        "Narrow or inapplicable hint",
+        "the hint does not fit, the mode is Expanded/Truncated, or the body is empty",
+        "the header remains unchanged and no extra row or misleading hint is emitted."
+      ],
+      [
+        "Header selection/muting",
+        "a collapsed header is selected, muted, or configured bright",
+        "header_line chooses primary bold for selected/configured bright cases unless muted, otherwise muted bold, with elapsed detail styled muted."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "append_expand_hint"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "body_emphasis_patch"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::header_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::styled_body"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "ThinkingBlock::format_time"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "tests::thinking_body_is_not_dimmed_or_italic_by_default"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "tests::thinking_body_dim_italic_survives_the_terminal_native_palette"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/blocks/thinking.rs",
+        "tests::collapsed_header_advertises_the_expand_key_without_adding_a_row"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "TableGeometry SHALL recognize only complete box-drawing top/divider/bottom border rows with consistent junction glyph families, tolerate leading spaces and blockquote bars, and calculate junction positions in Unicode display columns rather than bytes or scalar indices.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: grapheme_cols iterates extended graphemes, skips zero-width clusters, accumulates saturating UnicodeWidthStr columns, and records the first character. parse_border_row accepts optional prefix chars before the first corner, then requires the family-specific middle/corner glyphs and horizontal bars through a closing corner with at least two junctions; trailing text, wrong glyphs, unclosed rows, or inconsistent families return None. is_prefix_char permits only spaces and the quote bar.",
+    "scenarios": [
+      [
+        "Top/divider/bottom rows",
+        "a line uses matching box-drawing corners/junctions/horizontal bars",
+        "parse_border_row returns the junction display columns and corresponding BorderKind."
+      ],
+      [
+        "Quote prefix",
+        "a table is rendered after a blockquote bar and spaces",
+        "the prefix is ignored and grid junctions begin at the table corner column."
+      ],
+      [
+        "Wide glyphs",
+        "content before/within a grid contains CJK or emoji graphemes",
+        "junction positions and cell clicks use display columns."
+      ],
+      [
+        "Malformed border",
+        "a row has wrong junctions, trailing content, missing close, or fewer than two junctions",
+        "the line is rejected as a border."
+      ],
+      [
+        "Zero-width grapheme",
+        "a grapheme has zero display width",
+        "it does not create a fake column or junction."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "CellRef"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "BorderKind"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "GridLine"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "BAR"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "is_prefix_char"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "grapheme_cols"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "parse_border_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "wide_glyphs_use_display_columns"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "blockquoted_table_with_quote_bar_prefix"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "TableGeometry::detect SHALL require the anchor to lie inside a fully enclosed grid, derive one junction set from the anchor or a bounded upward border search, validate every intervening row outward to matching top and bottom borders, and group contiguous content lines into non-empty logical rows.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: detect reads the anchor line first; a border fixes junctions directly, while a content anchor searches upward at most MAX_JUNCTION_SEARCH=400 lines and stops on missing data or a non-prefix prose line. It walks up to a Top and down to a Bottom, rejecting a premature opposite border, Other row, inconsistent junctions, unclosed grid, or missing line. It records line_range as top..bottom+1 and pushes each contiguous Content run between borders into rows; no rows returns None.",
+    "scenarios": [
+      [
+        "Content anchor",
+        "at_line is a content line inside a closed table",
+        "the nearest valid top/bottom borders are found and geometry is returned."
+      ],
+      [
+        "Border anchor",
+        "at_line is a matching border line",
+        "the same grid is detected and line range includes both borders."
+      ],
+      [
+        "Outside grid",
+        "at_line is prose above or below the table",
+        "detect returns None."
+      ],
+      [
+        "Wrapped row",
+        "one logical cell row spans several content lines",
+        "the contiguous lines become one row range and cell text can join fragments later."
+      ],
+      [
+        "Inconsistent junctions",
+        "a divider or content row does not match the anchor junction set",
+        "the entire detection fails closed."
+      ],
+      [
+        "Unclosed/malformed grid",
+        "a bottom border is missing or an Other line interrupts the walk",
+        "detect returns None rather than guessing geometry."
+      ],
+      [
+        "Long prose search",
+        "no border appears within the bounded upward prefix search",
+        "detect stops and returns None without scanning unbounded text."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::detect"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "MAX_JUNCTION_SEARCH"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "classify"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "is_content_row"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "detects_from_content_and_border_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "no_grid_outside_table"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "inconsistent_junctions_bail"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "unclosed_grid_bails"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "wrapped_cell_fragments_join_with_space"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "plain_prose_and_rules_are_not_grids"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Detected table geometry SHALL expose half-open grid extent, column/row counts, content row lookup, per-column interior bands, and cell hit testing in display-column space; border rows and outside coordinates SHALL return no cell while junction clicks snap to an adjacent cell.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: line_range returns top border through one past bottom; n_cols is junction count minus one and n_rows is logical row count. row_of_line returns a row only for content lines; row_lines returns that row range. band returns the strictly interior display columns between flanking bars, including padding. cell_at returns None for non-content rows or columns outside the outer junctions; a junction uses the cell on its right except the closing border, which uses the final cell.",
+    "scenarios": [
+      [
+        "Grid extent",
+        "a table has top/bottom borders and logical rows",
+        "line_range includes the full grid, and n_cols/n_rows match junctions and content runs."
+      ],
+      [
+        "Content lookup",
+        "a line is inside a logical row",
+        "row_of_line returns the row index and row_lines returns its contiguous range."
+      ],
+      [
+        "Interior band",
+        "a column index is requested",
+        "band spans display cells strictly between its two boundary bars."
+      ],
+      [
+        "Content hit",
+        "a display column lies within a cell",
+        "cell_at returns the expected row/column CellRef."
+      ],
+      [
+        "Junction hit",
+        "a click lies exactly on an internal or closing bar",
+        "internal bars snap right and the closing bar snaps left to the final cell."
+      ],
+      [
+        "Border/outside hit",
+        "a click lies on a border row or beyond grid columns",
+        "cell_at returns None."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::line_range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::n_cols"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::n_rows"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::row_of_line"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::row_lines"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::band"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::cell_at"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "cell_lookup_and_bands"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "CellRef"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "TableGeometry::latched_cell_at SHALL preserve a held cell across border rows, divider rows, junctions, and one-column padding dead zones, move only when the pointer enters another cell interior, and clamp row/column movement beyond the grid to the nearest edge.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: latched_cell_at resolves the row from row_of_line when on content, clamps above/below the grid to first/last logical row, and otherwise preserves held.row. It resolves the column through interior_col_at; columns outside the outer junctions clamp to first/last, while bars and padding inside the grid preserve held.col. The returned CellRef therefore implements dead-zone hysteresis and symmetric release into neighboring content.",
+    "scenarios": [
+      [
+        "Content transition",
+        "the pointer enters another row or another column interior",
+        "the latch moves to that row/column."
+      ],
+      [
+        "Divider/border dead zone",
+        "the pointer is on a divider or border row",
+        "the held row is preserved rather than snapping to the next row."
+      ],
+      [
+        "Column padding dead zone",
+        "the pointer is on a junction or one-cell padding",
+        "the held column remains unchanged."
+      ],
+      [
+        "Above/below edge",
+        "the pointer leaves the grid vertically",
+        "the row clamps to first or last logical row."
+      ],
+      [
+        "Outside horizontal edge",
+        "the pointer leaves the grid horizontally",
+        "the column clamps to first or last column."
+      ],
+      [
+        "Symmetric release",
+        "a held right cell moves back into left cell content",
+        "the latch returns to the left cell only after entering its interior."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::latched_cell_at"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::interior_col_at"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "latched_cell_moves_only_via_content_or_past_the_edge"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "CellRef"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Cell copy SHALL slice each wrapped content line to the cell band in display columns, trim padding, skip empty fragments, and join nonblank fragments with spaces; grid copy SHALL serialize an order-independent rectangular cell range with tab-separated columns and newline-separated rows while flattening embedded tabs.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: cell_text obtains the selected column band, iterates the logical row line range, reads available source lines, calls slice_display_cols, trims fragments, skips empties and inserts a single space between retained fragments. grid_tsv normalizes endpoint order by row/col, calls cell_text for every rectangular cell, replaces tabs inside cell text with spaces, joins cells with tabs and rows with newlines.",
+    "scenarios": [
+      [
+        "Single cell",
+        "a cell contains one padded content fragment",
+        "cell_text returns trimmed text without border/padding."
+      ],
+      [
+        "Wrapped fragments",
+        "a logical row spans multiple content lines",
+        "nonblank fragments join with one space and blank companion cells are skipped."
+      ],
+      [
+        "Reverse endpoints",
+        "grid_tsv receives endpoints in reverse row/column order",
+        "the output is normalized to top-left through bottom-right order."
+      ],
+      [
+        "Rectangular grid",
+        "a range spans multiple rows and columns",
+        "each row is newline-separated and cells are tab-separated."
+      ],
+      [
+        "Embedded tab",
+        "cell source contains a tab character",
+        "the tab is flattened to a space so TSV shape remains stable."
+      ],
+      [
+        "Missing source line",
+        "text_at returns None for part of a row",
+        "the missing fragment is skipped without failing the entire copy."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::cell_text"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::grid_tsv"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "slice_display_cols"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "cell_text_and_tsv"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "wrapped_cell_fragments_join_with_space"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "CellRef"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "The table geometry implementation SHALL preserve a linear-selection fallback whenever grid proof is incomplete, while accepting valid stray bar content and wide-glyph tables without misclassifying cell boundaries.",
+    "contract": "The implementation SHALL satisfy the following tested behavior: Detection returns None for plain prose/rules, inconsistent junctions, unclosed grids, or anchors outside the table. A bar glyph inside a content cell is not a junction unless it occurs at the known junction column, so it remains part of cell_text. Unicode display-column arithmetic keeps wide names addressable, and the inline suite records exact expected ranges/cell values for these boundaries.",
+    "scenarios": [
+      [
+        "Plain prose",
+        "input contains prose or a horizontal rule without enclosing corners",
+        "no TableGeometry is returned and caller can use linear selection."
+      ],
+      [
+        "Stray content bar",
+        "a content row contains an extra bar away from known junctions",
+        "the grid remains valid and the extra bar is included in the cell text."
+      ],
+      [
+        "Broken divider",
+        "a divider junction is misaligned",
+        "detection returns None rather than using a partial grid."
+      ],
+      [
+        "Wide cell text",
+        "a cell contains CJK display-wide characters",
+        "cell lookup and text extraction use terminal display columns and return the expected cell."
+      ],
+      [
+        "Inline evidence",
+        "the 12 tests exercise valid, invalid, wrapped, quoted, wide and copy cases",
+        "the expected geometry/copy behavior is pinned; this audit does not claim execution."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "TableGeometry::detect"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "stray_bar_in_cell_content_is_not_a_junction"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "wide_glyphs_use_display_columns"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "inconsistent_junctions_bail"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "unclosed_grid_bails"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "plain_prose_and_rules_are_not_grids"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/table_geometry.rs",
+        "tests"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Group span kinds and binary containment lookup",
+    "contract": "GroupSpan SHALL describe an entry-index range, fold kind, and expansion state; GroupKind SHALL distinguish VerbRun member counts from Truncation participant/hidden counts. span_containing SHALL binary-search sorted disjoint spans, treat ranges as half-open, and return only the span whose range contains the requested index.",
+    "scenarios": [
+      [
+        "Verb span",
+        "a verb run is represented",
+        "the span carries its walked range, VerbRun member count, and expanded state."
+      ],
+      [
+        "Truncation span",
+        "a dense run exceeds its budget",
+        "the span carries participant and hidden counts."
+      ],
+      [
+        "Containment",
+        "an index is before, inside, at the end of, or between sorted spans",
+        "only an index inside a half-open range returns that span; gaps, ends, and empty input return None."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "GroupSpan"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "GroupKind::VerbRun"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "GroupKind::Truncation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "members"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "participants"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "hidden"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "expanded"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "span_containing"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "partition_point"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "Range::contains"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Group rebuild reset and setting-consistent projection",
+    "contract": "apply SHALL clear every layout entry's group_header_count, group_collapse_header, and verb_group_header before each rebuild, read group_tool_verbs and show_thinking_blocks once, scan with those same settings, project the returned spans, and return the authoritative spans for storage in the layout cache.",
+    "scenarios": [
+      [
+        "Rebuild",
+        "a layout cache contains stale group flags",
+        "all group flags are reset before scanning and projecting."
+      ],
+      [
+        "Settings snapshot",
+        "appearance settings are loaded for a rebuild",
+        "both scan and projection use the same group-tool/show-thinking values."
+      ],
+      [
+        "Cache result",
+        "the scan completes",
+        "the exact sorted spans are returned to the caller."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "apply"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_header_count"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_collapse_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "verb_group_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "load_group_tool_verbs"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "load_show_thinking_blocks"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "scan"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "project_to_layout"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "LayoutCache::groups"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Fold scan precedence, claimed entries, and sorted disjoint spans",
+    "contract": "scan SHALL run verb grouping before truncation, mark verb members/thought members as claimed, let claimed entries break truncation runs, append truncation spans over the remaining entries, and sort the combined spans by start index without overlap.",
+    "scenarios": [
+      [
+        "Precedence",
+        "entries contain a foldable verb run followed by a dense run",
+        "the verb span is emitted first and the later truncation span starts after its claimed range."
+      ],
+      [
+        "Overlap prevention",
+        "multiple fold families are adjacent or separated",
+        "returned spans are sorted by range.start and no pair overlaps."
+      ],
+      [
+        "No groups",
+        "inputs are empty or no fold family crosses its gate",
+        "scan returns no spans while leaving projection inputs for the caller."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "scan"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "scan_verb_runs"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "scan_truncations"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "claimed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "spans.sort_unstable_by_key"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "GroupSpan::range"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_tool_verbs"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "show_thinking"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "max_visible"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Verb run discovery with transparent thoughts and expansion identity",
+    "contract": "scan_verb_runs SHALL find maximal runs through scan_run_forward only when group_tool_verbs is enabled and the run folds. Member and ThoughtMember entries SHALL be claimed; Transparent entries remain unclaimed and inside the span; trailing transparent thoughts remain outside scan.end. The VerbRun member count SHALL count label-bearing members, and expansion SHALL be keyed by the first entry id.",
+    "scenarios": [
+      [
+        "Verb grouping enabled",
+        "group_tool_verbs is true and a run folds",
+        "a VerbRun span covers the walked range, claims member arms, counts members, and records first-id expansion."
+      ],
+      [
+        "Verb grouping disabled",
+        "group_tool_verbs is false",
+        "no verb spans or claims are produced, so members may flow into truncation."
+      ],
+      [
+        "Transparent thought",
+        "a collapsed/hidden or live thought appears inside a run",
+        "the transparent row keeps its own row and is not counted/claimed as a member; trailing transparent rows stay outside the span."
+      ],
+      [
+        "Expanded verb",
+        "the first entry id is in expanded_groups",
+        "the span is marked expanded while retaining the same range/member count."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "scan_verb_runs"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "scan_run_forward"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "run_step"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "RunStep::Member"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "RunStep::ThoughtMember"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "RunStep::Transparent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "RunStep::Break"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "scan.folds"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "scan.members"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "scan.end"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "expanded_groups"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_tool_verbs"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Budget truncation discovery with hidden-thinking transparency",
+    "contract": "scan_truncations SHALL consider only collapsed groupable entries not hidden by the current thinking setting, skip hidden-thinking entries without breaking a run, stop at claimed/non-transparent breaks, and emit a span only when participants exceed max_visible + 1. The span range includes the dense walk, participants counts eligible entries, hidden equals participants - max_visible, and expansion is keyed by the first participant.",
+    "scenarios": [
+      [
+        "Budget gate",
+        "participants are at or below max_visible + 1",
+        "no truncation span is emitted and existing layout remains untouched."
+      ],
+      [
+        "Over budget",
+        "a dense unclaimed run exceeds the threshold",
+        "a Truncation span records its full walk, participants, hidden count, and first-id expansion."
+      ],
+      [
+        "Hidden thinking",
+        "hidden thinking is interspersed in a dense run",
+        "the run remains contiguous, hidden thoughts neither count nor receive projection writes."
+      ],
+      [
+        "Break",
+        "a claimed entry or visible non-groupable/non-collapsed entry occurs",
+        "the truncation run ends before the breaker."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "scan_truncations"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "participates_in_truncation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "is_groupable"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "display_mode"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "DisplayMode::Collapsed"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "is_hidden_thinking"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "max_visible"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_len"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_end"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "participants"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "hidden"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "claimed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Verb run layout projection and gap ownership",
+    "contract": "project_verb_run SHALL make the first member a synthetic verb header: collapsed height 1, expanded height 2 with group_collapse_header, and a saturated member count. Collapsed non-first claimed members SHALL have height 0 while their internal gaps are zeroed except the last claimed boundary; expanded members keep normal heights. Transparent entries keep rows and only donate their trailing gap while collapsed.",
+    "scenarios": [
+      [
+        "Collapsed verb run",
+        "a VerbRun is not expanded",
+        "the first member is a one-row header, other claimed members hide, and only the run-internal gaps are zeroed."
+      ],
+      [
+        "Expanded verb run",
+        "the first id is expanded",
+        "the header height is 2 and all member rows retain their normal heights."
+      ],
+      [
+        "Transparent member",
+        "a transparent thought/opened member is in the span",
+        "its row remains, member count is unchanged, and its gap is adjusted only in collapsed mode."
+      ],
+      [
+        "Count saturation",
+        "members exceed u16 range",
+        "group_header_count is capped at u16::MAX."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "project_to_layout"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "project_verb_run"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "RunStep::Member"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "RunStep::ThoughtMember"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "RunStep::Transparent"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "verb_group_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_collapse_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_header_count"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "gap_after"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "u16::MAX"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "last_claimed"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Truncation layout projection and collapse header counts",
+    "contract": "project_truncation SHALL render expanded groups as a standalone collapse header on the first entry with height 1, count participants - 1, and no trailing gap while preserving all following entry heights. In collapsed mode it SHALL skip hidden-thinking rows, make the first participating entry the `hidden - 1` header, hide the remaining hidden participants with zero counts/gaps, and leave the visible tail untouched.",
+    "scenarios": [
+      [
+        "Expanded truncation",
+        "the span is expanded",
+        "entry 0 becomes a one-row collapse header counting all remaining participants and every later row keeps its normal height."
+      ],
+      [
+        "Collapsed truncation",
+        "the span is collapsed",
+        "the first participating entry shows hidden - 1, subsequent hidden participants have height 0/count 0, and visible tail rows are unchanged."
+      ],
+      [
+        "Hidden thought in span",
+        "a hidden thought lies among participants",
+        "the thought is skipped for both count and writes, preserving its seeded layout."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "project_truncation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_collapse_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_header_count"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "gap_after"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "participants"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "hidden"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "is_hidden_thinking"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "seen"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "span.range.start"
+      ]
+    ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Single projection writer for fold flags and layout consequences",
+    "contract": "project_to_layout SHALL dispatch each authoritative span by GroupKind and be the only path that writes group heights, gaps, header counts, collapse-header flags, and verb-header flags. Its projection SHALL preserve unrelated seeded layout data for entries outside the affected fold and for transparent/visible tail entries.",
+    "scenarios": [
+      [
+        "Span dispatch",
+        "spans contain VerbRun and Truncation variants",
+        "the matching projection routine applies only that family's layout shape."
+      ],
+      [
+        "Untouched entries",
+        "an entry lies outside a span or is a transparent/visible tail row",
+        "pre-existing height/gap and non-group metadata remain unchanged."
+      ],
+      [
+        "Combined transcript",
+        "verb and truncation spans coexist",
+        "both shapes are projected without overlap and the fold headers expose their respective counts."
+      ]
+    ],
+    "sources": [
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "project_to_layout"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "project_verb_run"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "project_truncation"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "EntryLayoutInfo"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_header_count"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "group_collapse_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "verb_group_header"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "height"
+      ],
+      [
+        "crates/codegen/pager/src/scrollback/state/groups.rs",
+        "gap_after"
       ]
     ]
   }
