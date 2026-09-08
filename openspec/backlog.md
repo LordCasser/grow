@@ -981,3 +981,7 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：Path shortening recomputes a display string from config.grow_home on every result and uses textual prefix matching instead of a path-aware component comparison.
 - Pager 审计债务：Structured result parsing and UI presentation are coupled through MemoryResult fields while searchable_text and tool dispatch live elsewhere, spreading the memory-search contract across modules.
 - Pager 审计债务：Timing state is duplicated across each concrete tool block and relies on caller-set started_at; this file provides completion timing but cannot enforce start/finish lifecycle ordering.
+- Pager 审计债务：The fixture repeats manual transcript construction and fixed layout preparation across tests, so changes to turn/materialization setup can invalidate many cases at once.
+- Pager 审计债务：Jump picker lifecycle is coordinated by root dispatch, AgentView input, rewind, inline edit, reload, and ScrollbackState restore paths; this test file exposes the cross-module coupling but no single lifecycle owner.
+- Pager 审计债务：The tests use EntryId stability at the selection boundary while picker entries also retain turn previews and restore state, leaving two identity/position models that require careful synchronization.
+- Pager 审计债务：Overlay refusal and hidden-picker cleanup are tested through a narrow cancel-turn stand-in; adding a new input owner requires updating multiple precedence and teardown paths.

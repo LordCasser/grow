@@ -3931,7 +3931,20 @@
       "Session context extraction for memory rewrites",
       "Btw side-question dispatch, minimal correlation, and response focus",
       "Session recap availability, history detection, and manual/automatic dispatch",
-      "Recap task-result failure distinction and note feedback contract"
+      "Recap task-result failure distinction and note feedback contract",
+      "AgentView SHALL route input through subagent, confirmation, image/gboom/workflow/goal/btw/viewer/modal/permission/plan/rewind/edit/jump/question layers before pane handlers and global registry actions; consumed events return Changed/Action and unconsumed events bubble Unchanged.",
+      "HintItem SHALL preserve semantic keys, a short label, optional custom key display, optional cheatsheet description, and a pinned compact-visibility flag; constructors SHALL create single or paired key hints and pinned SHALL be chainable.",
+      "ShortcutsBar::new SHALL borrow the supplied hint slice and initialize ordinary rendering; compact SHALL configure a max-visible budget and optional trailing help hint, with_pending SHALL replace normal hints with a confirmation message, and with_right_text SHALL attach right-aligned auxiliary text.",
+      "ShortcutsBar SHALL clear and style its one-row area, render either the pending confirmation or effective hints with Unicode display widths and separators, stop before content exceeds the right edge, and optionally place right_text at the right without overwriting hint content.",
+      "compute_effective_hints SHALL return every hint in full mode; in compact mode it SHALL include all pinned hints, fill remaining max_visible slots with unpinned hints in original order, and append help_hint unconditionally when configured, even for an empty input or when pinned items exceed the budget.",
+      "The shortcuts bar SHALL only project already-built HintItems and PendingHint data; compact filtering, confirmation replacement, and right-text fitting SHALL not dispatch actions, mutate application state, or infer whether an advertised key is actually enabled.",
+      "Recap unavailable toast distinguishes empty history from generation failure",
+      "Manual recap dispatch gates empty history while preserving loading history",
+      "Recap transport failures clear progress and classify history-aware feedback",
+      "Minimal BTW responses are correlated per request and agent and stale results are ignored",
+      "Minimal BTW completion dismisses into exactly one transcript block",
+      "Fullscreen BTW late success preserves existing empty-question completion behavior",
+      "BTW missing-session feedback is mode-specific and effect-free"
     ],
     "reviewed_files": [
       {
@@ -6213,6 +6226,18 @@
       {
         "path": "crates/codegen/pager/src/app/root/dispatch/notes.rs",
         "sha256": "a7ed7d14ba7282658879e0beaab561888efd3f30cc93e66b89b09b7149bc1e00"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/jump.rs",
+        "sha256": "a113b19404fd0e91980c8350e52a9f4890c8b20d5c1b94388e3d2f36a27b9352"
+      },
+      {
+        "path": "crates/codegen/pager/src/views/shortcuts_bar.rs",
+        "sha256": "77527d33a7f2673b4cf9f478b658b697b0eeb48f5acb9eab158ff858be9ddf12"
+      },
+      {
+        "path": "crates/codegen/pager/src/app/root/dispatch/tests/notes.rs",
+        "sha256": "b036ba7407b38e011a1226c72a446b409e309aee9c0963183b9ccb79f68227fe"
       }
     ],
     "review": "reviews/pager.md"

@@ -24930,3 +24930,286 @@ When the recap request completes with a transport error, the task-result path SH
 - **THEN** live status clears and the generic Couldn't generate recap toast is shown.
 
 证据：`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `recap_unavailable_toast`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `recap_request_transport_failure_with_no_turns_uses_empty_toast`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `recap_request_transport_failure_with_turns_uses_generic_toast`。
+
+
+### Requirement: AgentView SHALL route input through subagent, confirmation, image/gboom/workflow/goal/btw/viewer/modal/permission/plan/rewind/edit/jump/question layers before pane handlers and global registry actions; consumed events return Changed/Action and unconsumed events bubble Unchanged.
+
+The input and takeover tests SHALL give an input-owning overlay precedence over an open jump picker. If an overlay appears after the picker opened, wheel and key handling SHALL drop the hidden jump state before it can move the invisible cursor. Ctrl-C SHALL still dismiss the picker and return CancelTurn for a running turn. Rewind and inline-edit entry SHALL also clear the jump picker rather than allowing it to reappear after the owning surface closes.
+
+#### Scenario: Hidden picker scroll
+- **WHEN** cancel-turn input ownership appears after JumpShowPicker and a wheel event arrives
+- **THEN** jump_state is cleared, the cancel-turn view remains present, and the hidden picker does not shift scrollback.
+
+#### Scenario: Hidden picker key
+- **WHEN** cancel-turn input ownership appears after JumpShowPicker and a Down key arrives
+- **THEN** the key path clears jump_state before picker navigation handles the key.
+
+#### Scenario: Running cancellation
+- **WHEN** a running turn has an open jump picker and Ctrl-C is pressed
+- **THEN** the picker closes and the returned InputOutcome is Action(CancelTurn).
+
+#### Scenario: Rewind takeover
+- **WHEN** rewind starts with a jump preview moved away from its captured viewport
+- **THEN** jump closes, rewind opens, and the pre-jump scroll offset is restored.
+
+#### Scenario: Inline edit takeover
+- **WHEN** inline edit starts with a jump picker open
+- **THEN** jump closes and inline_edit becomes active.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `tests::scroll_drops_hidden_jump_picker_behind_input_overlay`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `tests::key_drops_hidden_jump_picker_behind_input_overlay`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `tests::ctrl_c_stays_cancellable_with_jump_open`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `tests::rewind_dismisses_open_jump_picker`；`crates/codegen/pager/src/app/root/dispatch/tests/jump.rs` — `tests::inline_edit_dismisses_open_jump_picker`。
+
+
+### Requirement: HintItem SHALL preserve semantic keys, a short label, optional custom key display, optional cheatsheet description, and a pinned compact-visibility flag; constructors SHALL create single or paired key hints and pinned SHALL be chainable.
+
+The implementation SHALL satisfy the following tested behavior: HintItem::new creates one-key, unpinned data with no custom display/description. paired creates two keys displayed with "/" between their normal KeyShortcut displays. pinned sets pinned=true and returns the item. key_display prefers custom_display verbatim, otherwise joins every key.display() with "/"; labels/descriptions remain Cow values for static or owned text.
+
+#### Scenario: Single key
+- **WHEN** a view creates HintItem::new(key,label)
+- **THEN** one semantic key and label are stored, with default unpinned state.
+
+#### Scenario: Paired navigation
+- **WHEN** a view creates HintItem::paired(j,k,"nav")
+- **THEN** both keys are retained and rendered as j/k.
+
+#### Scenario: Custom display
+- **WHEN** custom_display is Some("Shift+Enter")
+- **THEN** key_display uses that string instead of recomputing keys.
+
+#### Scenario: Pinned hint
+- **WHEN** pinned() is chained on a hint
+- **THEN** compact filtering treats the hint as always visible.
+
+证据：`crates/codegen/pager/src/views/shortcuts_bar.rs` — `HintItem`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `HintItem::new`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `HintItem::paired`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `HintItem::pinned`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `HintItem::key_display`。
+
+
+### Requirement: ShortcutsBar::new SHALL borrow the supplied hint slice and initialize ordinary rendering; compact SHALL configure a max-visible budget and optional trailing help hint, with_pending SHALL replace normal hints with a confirmation message, and with_right_text SHALL attach right-aligned auxiliary text.
+
+The implementation SHALL satisfy the following tested behavior: new stores hints and clears pending_confirmation/right_text/compact. compact stores CompactConfig without copying the hints. with_pending stores or clears PendingHint; with_right_text stores the optional borrowed string. PendingHint carries a KeyShortcut and static label. The widget consumes this immutable builder state at render time; it does not mutate the source hint list.
+
+#### Scenario: Full mode
+- **WHEN** ShortcutsBar::new receives hints and no compact config
+- **THEN** all hints are eligible for rendering.
+
+#### Scenario: Compact mode
+- **WHEN** compact(max_visible, help_hint) is set
+- **THEN** effective hints are computed with the configured budget and optional help row.
+
+#### Scenario: Pending confirmation
+- **WHEN** with_pending(Some(PendingHint)) is set
+- **THEN** normal hints are replaced by press-again text.
+
+#### Scenario: Right text
+- **WHEN** with_right_text(Some(team)) is set
+- **THEN** auxiliary text is placed at the right when it fits without overlapping hints.
+
+证据：`crates/codegen/pager/src/views/shortcuts_bar.rs` — `ShortcutsBar`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `CompactConfig`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `PendingHint`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `ShortcutsBar::new`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `ShortcutsBar::compact`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `ShortcutsBar::with_pending`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `ShortcutsBar::with_right_text`。
+
+
+### Requirement: ShortcutsBar SHALL clear and style its one-row area, render either the pending confirmation or effective hints with Unicode display widths and separators, stop before content exceeds the right edge, and optionally place right_text at the right without overwriting hint content.
+
+The implementation SHALL satisfy the following tested behavior: A zero-height area returns without writes. Otherwise the bar fills each cell in the row with spaces and bg_base/gray style, removing stale text/modifiers. Normal keys use secondary bold on bg_base, labels and separators use gray without bold, and each hint is key:label separated by dim "  │  ". key/label/separator widths use UnicodeWidthStr and each segment is omitted/breaks when it would pass area.x+area.width. Pending mode renders only <shortcut.display()>:<"press again to label"> with key style and action style, without normal separators/right text. right_text appends a trailing space, computes display width, and is written only when it is narrower than area and starts after x+1.
+
+#### Scenario: Pending replacement
+- **WHEN** pending_confirmation is Some
+- **THEN** only the press-again message is rendered; normal hints are suppressed.
+
+#### Scenario: Normal hints
+- **WHEN** pending is None and effective hints are nonempty
+- **THEN** keys, colon, labels and separators are rendered in themed styles.
+
+#### Scenario: Long content
+- **WHEN** a hint or separator would exceed the row width
+- **THEN** rendering stops before writing past the supplied area.
+
+#### Scenario: Right auxiliary text
+- **WHEN** right_text fits and has room after the left hints
+- **THEN** text is right-aligned with a trailing space.
+
+#### Scenario: Zero height
+- **WHEN** area.height is zero
+- **THEN** widget returns without clearing or painting.
+
+#### Scenario: Unicode labels
+- **WHEN** key or label includes wide Unicode
+- **THEN** width budgeting uses display columns rather than byte count.
+
+证据：`crates/codegen/pager/src/views/shortcuts_bar.rs` — `Widget for ShortcutsBar`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `ShortcutsBar::render`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `PendingHint`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `HintItem::key_display`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `UnicodeWidthStr`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `Theme::current`。
+
+
+### Requirement: compute_effective_hints SHALL return every hint in full mode; in compact mode it SHALL include all pinned hints, fill remaining max_visible slots with unpinned hints in original order, and append help_hint unconditionally when configured, even for an empty input or when pinned items exceed the budget.
+
+The implementation SHALL satisfy the following tested behavior: With no CompactConfig, the result is a borrowed vector in input order. With compact config, pinned_count counts all pinned entries, unpinned_budget uses saturating_sub(max_visible,pinned_count), and a single pass keeps every pinned item while consuming that many unpinned slots in original order. Help is pushed after all selected source hints regardless of remaining budget. Therefore total output can exceed max_visible when pinned_count or help_hint requires it.
+
+#### Scenario: Full list
+- **WHEN** compact is None and three hints are supplied
+- **THEN** all three hints are returned.
+
+#### Scenario: Simple truncation
+- **WHEN** max_visible=2 and no pinned/help hints among three inputs
+- **THEN** first two unpinned hints are returned.
+
+#### Scenario: Help on empty
+- **WHEN** input list is empty but help_hint exists
+- **THEN** help hint is returned as the only item.
+
+#### Scenario: Large budget
+- **WHEN** max_visible exceeds input length and no help
+- **THEN** all input hints are returned safely.
+
+#### Scenario: Pinned reservation
+- **WHEN** three unpinned plus two pinned, max_visible=3
+- **THEN** one unpinned plus both pinned are returned.
+
+#### Scenario: Pinned order
+- **WHEN** a pinned hint is between unpinned source entries
+- **THEN** selected entries preserve original source order.
+
+#### Scenario: Pinned over budget
+- **WHEN** three pinned and one unpinned, max_visible=2
+- **THEN** all pinned hints are returned and no unpinned slot remains.
+
+#### Scenario: Help after pinned
+- **WHEN** pinned items already exceed budget and help exists
+- **THEN** all pinned entries remain and help is appended.
+
+证据：`crates/codegen/pager/src/views/shortcuts_bar.rs` — `compute_effective_hints`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `CompactConfig`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `compact_takes_first_n_then_appends_help`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `compact_help_hint_renders_even_with_empty_hint_list`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `compact_without_help_just_truncates`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `compact_max_visible_larger_than_input_is_safe`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `compact_pinned_hints_always_included`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `compact_pinned_preserves_original_order`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `compact_all_pinned_exceeding_max_visible`。
+
+
+### Requirement: The shortcuts bar SHALL only project already-built HintItems and PendingHint data; compact filtering, confirmation replacement, and right-text fitting SHALL not dispatch actions, mutate application state, or infer whether an advertised key is actually enabled.
+
+The implementation SHALL satisfy the following tested behavior: The module exposes pure compute_effective_hints and a Widget renderer. It does not resolve ActionRegistry entries, handle key events, open the shortcuts modal, or invoke pending actions. Rendering truncation is geometric: hints omitted after the first overflow are not transformed into an ellipsis or help row unless the caller configured help_hint. Pinned semantics are visibility policy only and do not affect input routing.
+
+#### Scenario: Registry supplied hints
+- **WHEN** caller passes context-filtered hints
+- **THEN** bar renders those items without rechecking action availability.
+
+#### Scenario: Pending action
+- **WHEN** caller passes PendingHint
+- **THEN** bar displays confirmation copy but does not consume or execute the second keypress.
+
+#### Scenario: Compact omission
+- **WHEN** hint list exceeds visible budget
+- **THEN** omitted hints are absent from this frame; no action state is changed.
+
+#### Scenario: No help configured
+- **WHEN** compact mode has help_hint=None
+- **THEN** bar only renders selected hints and provides no discoverability fallback.
+
+证据：`crates/codegen/pager/src/views/shortcuts_bar.rs` — `compute_effective_hints`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `ShortcutsBar::render`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `ShortcutsBar::with_pending`；`crates/codegen/pager/src/views/shortcuts_bar.rs` — `CompactConfig::help_hint`。
+
+
+### Requirement: Recap unavailable toast distinguishes empty history from generation failure
+
+recap_unavailable_toast SHALL return `No messages yet` when the session has no user messages, and SHALL return `Couldn't generate recap` when user messages exist.
+
+#### Scenario: Empty history
+- **WHEN** recap_unavailable_toast is called with false
+- **THEN** the exact text is `No messages yet`.
+
+#### Scenario: History present
+- **WHEN** recap_unavailable_toast is called with true
+- **THEN** the exact text is `Couldn't generate recap`.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `recap_unavailable_toast_empty_vs_with_messages`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `recap_unavailable_toast`。
+
+
+### Requirement: Manual recap dispatch gates empty history while preserving loading history
+
+A manual SendRecap request SHALL clear the slash-command prompt. With recap enabled and an idle session containing no user prompt, it SHALL emit no effect, leave no live loading status, and show `No messages yet`. When a user prompt exists, when scrollback is in a batch with a stale turn count, or when replay is still loading, it SHALL emit exactly a non-auto SendRecap effect and set replaceable `Generating session recap…` feedback without a toast.
+
+#### Scenario: Empty manual session
+- **WHEN** recap is enabled, a session exists, replay is idle, and scrollback has no user prompt
+- **THEN** SendRecap emits no effect, no loading feedback remains, the toast is `No messages yet`, and the prompt is cleared.
+
+#### Scenario: Message history
+- **WHEN** recap is enabled and scrollback contains a user prompt
+- **THEN** one SendRecap effect with auto=false is emitted, live status is `Generating session recap…`, and no toast is shown.
+
+#### Scenario: Batched history
+- **WHEN** a user prompt is already present during begin_batch while turn_count remains zero
+- **THEN** the entry scan recognizes history and still emits the non-auto recap request with progress feedback.
+
+#### Scenario: Replay in progress
+- **WHEN** replay is loading while scrollback has no prompt yet
+- **THEN** the dispatcher does not claim the session is empty; it emits the non-auto recap request with progress feedback.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `manual_recap_with_no_messages_toasts_empty_state_and_skips_request`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `manual_recap_with_messages_requests_and_shows_live_status`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `manual_recap_during_batch_load_with_prompts_still_requests`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `manual_recap_while_loading_replay_still_requests`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `dispatch_send_recap`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `scrollback_has_user_messages`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `Effect::SendRecap`。
+
+
+### Requirement: Recap transport failures clear progress and classify history-aware feedback
+
+For a non-auto RecapRequested task result carrying an error, the task-result handler SHALL clear the replaceable `recap` live feedback and call the history-aware toast contract: no user prompt yields `No messages yet`, while a session with a user prompt yields `Couldn't generate recap`.
+
+#### Scenario: Failure with no turns
+- **WHEN** a non-auto recap task fails while scrollback has no user prompt
+- **THEN** recap live feedback is cleared and the empty-state toast is `No messages yet`.
+
+#### Scenario: Failure with turns
+- **WHEN** a non-auto recap task fails after a user prompt is present
+- **THEN** recap live feedback is cleared and the generic failure toast is `Couldn't generate recap`.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `recap_request_transport_failure_with_no_turns_uses_empty_toast`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `recap_request_transport_failure_with_turns_uses_generic_toast`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `dispatch_task_result`；`crates/codegen/pager/src/app/root/dispatch/task_result.rs` — `TaskResult::RecapRequested`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `recap_unavailable_toast`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `scrollback_has_user_messages`。
+
+
+### Requirement: Minimal BTW responses are correlated per request and agent and stale results are ignored
+
+Minimal SendBtw requests SHALL carry a UUID correlation id. After Esc dismisses the active minimal overlay, a late response SHALL not recreate state. Across multiple requests and agents, an older request response SHALL not replace the newer request, each response SHALL update only its owning agent/request lifecycle, and a dismissed request SHALL leave no minimal lifecycle; reverse completion order SHALL remain isolated.
+
+#### Scenario: Dismissed minimal request
+- **WHEN** a minimal BTW request is dismissed with Esc before its response arrives
+- **THEN** the late correlated response leaves btw_state absent.
+
+#### Scenario: Stale same-agent response
+- **WHEN** an older request completes after a newer request is loading
+- **THEN** the older response is ignored and the newer request remains Loading with its question.
+
+#### Scenario: Current same-agent response
+- **WHEN** the current request completes
+- **THEN** only the matching request becomes Done with its own question.
+
+#### Scenario: Cross-agent response
+- **WHEN** background requests for two agents complete while the other agent is active
+- **THEN** each response resolves only the owning agent, and a dismissed second-agent response leaves its state and lifecycle absent.
+
+#### Scenario: Reverse completion
+- **WHEN** fresh requests for two agents complete in the opposite order
+- **THEN** both agents independently reach Done with their corresponding questions.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `send_minimal_btw`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `minimal_btw_response_after_esc_is_ignored`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `minimal_btw_requests_stay_independent_across_two_agents`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `handle_btw_response`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `minimal_api::start_minimal_btw`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `minimal_api::finish_minimal_btw`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `minimal_btw_lifecycle`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `BtwOverlayState::Loading`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `BtwOverlayState::Done`。
+
+
+### Requirement: Minimal BTW completion dismisses into exactly one transcript block
+
+A successful correlated minimal BTW response SHALL be dismissible into exactly one RenderBlock::Btw transcript entry retaining the original question and response text.
+
+#### Scenario: Successful minimal answer
+- **WHEN** a minimal request completes successfully and the Done overlay is dismissed with Esc
+- **THEN** scrollback contains exactly one BTW block whose question and content equal the request and answer.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `minimal_done_dismisses_to_exactly_one_btw_block`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `handle_btw_response`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `RenderBlock::Btw`；`crates/codegen/pager/src/app/root/mod.rs` — `handle_input`。
+
+
+### Requirement: Fullscreen BTW late success preserves existing empty-question completion behavior
+
+A fullscreen SendBtw request SHALL use no minimal correlation id. If the fullscreen BTW state is cleared before an otherwise successful response arrives, the response SHALL still produce a Done overlay using an empty question, preserving the existing fullscreen completion behavior.
+
+#### Scenario: Late fullscreen response
+- **WHEN** a fullscreen request has minimal_request_id=None and btw_state is dismissed before a successful response
+- **THEN** btw_state becomes Done and its question is empty.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `fullscreen_btw_response_after_dismiss_keeps_existing_behavior`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `dispatch_send_btw`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `handle_btw_response`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `BtwOverlayState::done`。
+
+
+### Requirement: BTW missing-session feedback is mode-specific and effect-free
+
+When SendBtw is dispatched without an active session, the dispatcher SHALL emit no effect. Minimal mode SHALL append a `No active session` system notice without a toast; fullscreen mode SHALL show a `No active session` toast and leave scrollback unchanged.
+
+#### Scenario: Minimal mode without session
+- **WHEN** screen mode is Minimal and session_id is None
+- **THEN** dispatch returns no effects, no toast is set, and the system transcript contains `No active session`.
+
+#### Scenario: Fullscreen mode without session
+- **WHEN** screen mode is fullscreen and session_id is None
+- **THEN** dispatch returns no effects, the toast is exactly `No active session`, and scrollback length remains zero.
+
+证据：`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `btw_no_session_feedback_is_mode_specific`；`crates/codegen/pager/src/app/root/dispatch/notes.rs` — `dispatch_send_btw`；`crates/codegen/pager/src/app/root/dispatch/tests/notes.rs` — `ScreenMode::Minimal`；`crates/codegen/pager/src/app/root/dispatch/tests/mod.rs` — `last_system_text`；`crates/codegen/pager/src/app/root/mod.rs` — `ScreenMode::Minimal`。
