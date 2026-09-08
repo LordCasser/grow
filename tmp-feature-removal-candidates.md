@@ -284,7 +284,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：仓库内调用均在 file_state 测试模块；实际 ConversationOnly 回退调用纯 merge_rewind_points_from，先持久化再 replace_rewind_points。
 - 删除理由：未参与当前生产路径的包装接口增加维护和测试表面。
 - 拟删除范围：仅两个方法及专属测试调用；确认后先将独有断言迁移到实际完整历史读取/纯合并路径。必须保留纯合并函数、truncate_from（取消仍使用）、完整读取与失败重试、replace_rewind_points 和实时捕获。
-- 状态：等待用户确认，尚未删除；公开方法的仓库外使用未知。证据见 audit-disconnected-rewind-entrypoints。
+- 状态：已获批并删除；回归结果见 clean-approved-candidates-r12-r32 的 R31 验证记录。
 
 ## R32 · 未接入生产消费者的 401 attribution 回调
 

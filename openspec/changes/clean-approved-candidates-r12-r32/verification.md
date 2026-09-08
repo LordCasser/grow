@@ -51,3 +51,6 @@ Removed only unused summary_lock_file/workflows_dir path helpers. Fresh JSONL st
 
 ## R30
 Removed uncalled standalone rewind_files and its three exclusive result/conflict types. Tracker, snapshots, Shell transactional rewind and compensation unchanged. Fresh workspace session::file_state regressions 31/31 passed; no remaining removed symbol references.
+
+## R31
+Removed only merge_and_remove_from/max_prompt_index wrappers. Migrated unique assertions to complete get_rewind_points history and pure merge; added preservation assertion that preview does not mutate tracker. Lazy failure/retry, truncate and replace paths retained. Fresh workspace file_state regressions 31/31 passed.

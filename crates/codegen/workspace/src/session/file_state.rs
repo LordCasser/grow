@@ -702,29 +702,6 @@ impl FileStateTracker {
         Ok(())
     }
 
-    /// Merge rewind points at indices >= `target_index` into the previous point
-    /// (`target_index - 1`), then remove the merged points.
-    ///
-    /// Used by ConversationOnly rewind: the conversation is rewound but files
-    /// are untouched, so the file effects of the discarded prompts must be
-    /// folded into the last surviving prompt's rewind point. This ensures:
-    /// - `/rewind 0` can still undo all file effects (merged into point N-1)
-    /// - A new prompt at `target_index` gets a fresh rewind point with correct
-    ///   before-snapshots (the current disk state)
-    ///
-    /// For `target_index == 0` there is no previous point to merge into, so all
-    /// points are simply cleared.
-    pub async fn merge_and_remove_from(&self, target_index: usize) -> io::Result<()> {
-        self.ensure_historical_loaded().await?;
-        let mut points = self.rewind_points.lock().await;
-        // Move the points out (no clone), merge, then rebuild the map.
-        let all: Vec<RewindPoint> = std::mem::take(&mut *points).into_values().collect();
-        for p in merge_rewind_points_from(all, target_index) {
-            points.insert(p.prompt_index, p);
-        }
-        Ok(())
-    }
-
     /// Install the already-persisted complete rewind projection.
     pub async fn replace_rewind_points(&self, replacement: Vec<RewindPoint>) {
         let mut source = self.lazy_source.lock().await;
@@ -738,12 +715,7 @@ impl FileStateTracker {
         *source = None;
     }
 
-    /// Get the maximum prompt index that has a rewind point
-    pub async fn max_prompt_index(&self) -> io::Result<Option<usize>> {
-        self.ensure_historical_loaded().await?;
-        let points = self.rewind_points.lock().await;
-        Ok(points.keys().max().copied())
-    }
+
 }
 
 /// Handle for sending file state capture requests.
@@ -812,7 +784,6 @@ mod tests {
             assert!(error.to_string().contains(":4:"), "{error}");
             assert!(tracker.get_rewind_point(0).await.is_none(), "valid prefix must not leak into live state");
             assert!(tracker.truncate_from(5).await.is_err());
-            assert!(tracker.merge_and_remove_from(5).await.is_err());
             assert!(tracker.get_rewind_point(5).await.is_some());
             assert_eq!(tracker.get_rewind_point_metas().await.iter().map(|p| p.prompt_index).collect::<Vec<_>>(), [5]);
             assert!(tracker.lazy_source.lock().await.is_some());
@@ -830,9 +801,7 @@ mod tests {
         let tracker = lazy_tracker(&file);
         tracker.begin_prompt(5).await;
         assert!(tracker.get_rewind_points().await.is_err());
-        assert!(tracker.max_prompt_index().await.is_err());
         assert!(tracker.truncate_from(5).await.is_err());
-        assert!(tracker.merge_and_remove_from(5).await.is_err());
         assert!(tracker.get_rewind_point(5).await.is_some(), "failed historical read must not truncate live points");
         let historical = point_with_files(0, &[("old.rs", "history")]);
         std::fs::write(file.path(), format!("{}\n", serde_json::to_string(&historical).unwrap())).unwrap();
@@ -1207,8 +1176,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lazy_merge_and_remove_loads_historical() {
-        // ConversationOnly rewind path: merge_and_remove_from must see history.
+    async fn pure_merge_uses_complete_history_without_mutating_tracker() {
+        // ConversationOnly previews must merge complete historical points.
         let file = write_rewind_file(&[
             point_with_files(0, &[("a.rs", "h0")]),
             point_with_files(1, &[("b.rs", "h1")]),
@@ -1216,9 +1185,9 @@ mod tests {
         ]);
         let tracker = lazy_tracker(&file);
 
-        // Merge points >= 1 into point 0's predecessor (index 0).
-        tracker.merge_and_remove_from(1).await.unwrap();
-        let points = tracker.get_rewind_points().await.unwrap();
+        let history = tracker.get_rewind_points().await.unwrap();
+        let points = merge_rewind_points_from(history, 1);
+        assert_eq!(tracker.get_rewind_points().await.unwrap().len(), 3, "preview must not mutate the tracker");
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].prompt_index, 0);
         // Point 0 should now also carry the merged files from points 1 and 2.
@@ -1244,12 +1213,13 @@ mod tests {
         assert_eq!(points[0].prompt_index, 0);
     }
 
-    /// `max_prompt_index` is a rewind op and must trigger the load.
+    /// Complete history exposes the highest historical prompt index.
     #[tokio::test]
-    async fn lazy_max_prompt_index_loads_historical() {
+    async fn complete_history_retains_highest_prompt_index() {
         let file = write_rewind_file(&[point_with_files(0, &[]), point_with_files(4, &[])]);
         let tracker = lazy_tracker(&file);
-        assert_eq!(tracker.max_prompt_index().await.unwrap(), Some(4));
+        let points = tracker.get_rewind_points().await.unwrap();
+        assert_eq!(points.iter().map(|point| point.prompt_index).max(), Some(4));
     }
 
     /// Concurrent live capture + rewind query: must not deadlock, and the full set
