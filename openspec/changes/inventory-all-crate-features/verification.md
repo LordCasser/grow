@@ -3856,3 +3856,5 @@ OpenSpec strict复核发现三项agent_view新增契约缺少RFC 2119关键词�
 - 本批静态审计覆盖 1 个 Pager Rust 文件，新增 3 条唯一契约并合并 0 条既有契约；逐文件 SHA、行数和内联测试符号均已核对，未运行 Cargo。
 
 - 本批静态审计覆盖 3 个 Pager Rust 文件，新增 12 条唯一契约并合并 0 条既有契约；逐文件 SHA、行数和内联测试符号均已核对，未运行 Cargo。
+
+- Markdown fuzz 补漏审计覆盖 1 个 Rust 文件，新增 4 条唯一契约并合并 0 条既有契约；SHA、行数、fuzz 入口和 UTF-8 边界已核对，未运行 Cargo/cargo-fuzz。

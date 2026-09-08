@@ -218330,5 +218330,201 @@
         "AgentId"
       ]
     ]
+  },
+  {
+    "crate": "markdown",
+    "capability": "fuzz-coverage",
+    "requirement": "render_all accepts only valid UTF-8 fuzz inputs",
+    "contract": "The fuzz callback SHALL use `std::str::from_utf8(data)` as the input gate and SHALL silently skip invalid byte sequences.",
+    "scenarios": [
+      {
+        "name": "Valid UTF-8 input",
+        "when": "the fuzzer supplies bytes accepted by std::str::from_utf8",
+        "then": "the callback continues into full and streaming render coverage."
+      },
+      {
+        "name": "Invalid UTF-8 input",
+        "when": "from_utf8 returns Err",
+        "then": "the callback returns from that iteration without panicking or calling the markdown renderers."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "fuzz_target!"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "std::str::from_utf8"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "data: &[u8]"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/Cargo.toml",
+        "[[bin]] name = \"render_all\""
+      ]
+    ]
+  },
+  {
+    "crate": "markdown",
+    "capability": "fuzz-coverage",
+    "requirement": "render_all fuzzes full markdown rendering in pretty and non-pretty modes",
+    "contract": "The full-render branch SHALL cover both pretty-mode settings for each accepted input and SHALL not require a particular rendered output value.",
+    "scenarios": [
+      {
+        "name": "Pretty full render",
+        "when": "a valid string reaches the full-render loop with pretty=true",
+        "then": "render_markdown_ratatui_full is called with STYLE, the input string and no syntect theme."
+      },
+      {
+        "name": "Source-faithful full render",
+        "when": "the loop reaches pretty=false",
+        "then": "render_markdown_ratatui_full is called again with the same input/style and pretty disabled."
+      },
+      {
+        "name": "Output-independent fuzzing",
+        "when": "either full render returns a MarkdownRenderOutput/Checkpoint pair",
+        "then": "the target discards the pair and proceeds without asserting output text, links, checkpoints or dimensions."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "render_markdown_ratatui_full"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "STYLE"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "for pretty in [true, false]"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "render_markdown_ratatui_full(s, STYLE, pretty, None)"
+      ],
+      [
+        "crates/codegen/markdown/src/lib.rs",
+        "render_markdown_ratatui_full"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/Cargo.toml",
+        "render_all"
+      ]
+    ]
+  },
+  {
+    "crate": "markdown",
+    "capability": "fuzz-coverage",
+    "requirement": "render_all fuzzes streaming markdown rendering across rotating UTF-8-safe chunk sizes",
+    "contract": "The streaming branch SHALL preserve valid `&str` chunk boundaries while exercising repeated incremental render calls in the cycle [1, 16, 32] for each pretty setting; empty input SHALL produce no push call but remain a valid iteration.",
+    "scenarios": [
+      {
+        "name": "One-byte chunking",
+        "when": "the rotating index selects chunk size 1",
+        "then": "the next chunk begins at pos and ends at the next valid character boundary, then is pushed and rendered."
+      },
+      {
+        "name": "Sixteen/32-byte chunking",
+        "when": "the rotating index selects 16 or 32",
+        "then": "the target requests that byte length, clamps at source length, extends through a split UTF-8 code point if needed, and renders the resulting valid substring."
+      },
+      {
+        "name": "Pretty streaming",
+        "when": "the outer loop uses pretty=true",
+        "then": "a fresh StreamingMarkdownRenderer receives every chunk with pretty formatting enabled."
+      },
+      {
+        "name": "Non-pretty streaming",
+        "when": "the outer loop uses pretty=false",
+        "then": "a separate fresh renderer receives the same chunk sequence with pretty formatting disabled."
+      },
+      {
+        "name": "Empty source",
+        "when": "the valid input string has length zero",
+        "then": "the streaming loop performs no push_and_render call and the iteration completes without special-case failure."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "CHUNK_SIZES"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "StreamingMarkdownRenderer::new"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "push_and_render"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "while pos < s.len()"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "s.is_char_boundary"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "ci = (ci + 1) % CHUNK_SIZES.len()"
+      ],
+      [
+        "crates/codegen/markdown/src/streaming.rs",
+        "StreamingMarkdownRenderer::new"
+      ],
+      [
+        "crates/codegen/markdown/src/streaming.rs",
+        "StreamingMarkdownRenderer::push_and_render"
+      ]
+    ]
+  },
+  {
+    "crate": "markdown",
+    "capability": "fuzz-coverage",
+    "requirement": "render_all is a cargo-fuzz libFuzzer binary entrypoint",
+    "contract": "The fuzz target SHALL be driven by libFuzzer-generated `&[u8]` inputs rather than a conventional `main` or Rust test function.",
+    "scenarios": [
+      {
+        "name": "Fuzz binary registration",
+        "when": "the markdown fuzz manifest is built",
+        "then": "render_all resolves to fuzz_targets/render_all.rs as a non-test, non-doc, non-bench binary."
+      },
+      {
+        "name": "Generated byte input",
+        "when": "libFuzzer invokes the callback",
+        "then": "the callback receives arbitrary bytes through `data: &[u8]` and applies the UTF-8 gate before rendering."
+      }
+    ],
+    "sources": [
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "#![no_main]"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "use libfuzzer_sys::fuzz_target"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "fuzz_target!"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/Cargo.toml",
+        "[package.metadata] cargo-fuzz = true"
+      ],
+      [
+        "crates/codegen/markdown/fuzz/Cargo.toml",
+        "[[bin]] name = \"render_all\""
+      ],
+      [
+        "crates/codegen/markdown/fuzz/README.md",
+        "cargo fuzz run render_all"
+      ]
+    ]
   }
 ]

@@ -1950,7 +1950,11 @@
       "diagram-rendering/Terminal Mermaid fallback output",
       "terminal-markdown/Markdown playground feature",
       "terminal-markdown/Markdown playground interaction",
-      "terminal-markdown/Markdown performance fixtures"
+      "terminal-markdown/Markdown performance fixtures",
+      "render_all accepts only valid UTF-8 fuzz inputs",
+      "render_all fuzzes full markdown rendering in pretty and non-pretty modes",
+      "render_all fuzzes streaming markdown rendering across rotating UTF-8-safe chunk sizes",
+      "render_all is a cargo-fuzz libFuzzer binary entrypoint"
     ],
     "reviewed_files": [
       {
@@ -2072,6 +2076,10 @@
       {
         "path": "crates/codegen/markdown/src/url_scan.rs",
         "sha256": "787ba036c9a29cd9b6783b582350708e5ff206a55cbe2d3f0015c2c477e61d0b"
+      },
+      {
+        "path": "crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs",
+        "sha256": "d3895ca539d133fb99b848f55ad6efacc31086caf0963f5b3654ca2ed369188c"
       }
     ]
   },

@@ -1093,3 +1093,4 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：The regression is #[ignore], so minimal idle Ctrl+C quit confirmation is outside default automated coverage.
 - Pager 审计债务：Literal text matching and acceptance of PendingStatus leave the command-state and clean-exit contracts indirect.
 - Pager 审计债务：25个模块名手工维护，缺少目录与声明同步校验；集成拓扑依赖注释和 shared helper 约定。
+- Markdown 审计债务：README 与 target 的 syntect 覆盖矩阵存在漂移；fuzz target 是 crash-oriented，缺少输出差分与结构化属性检查。

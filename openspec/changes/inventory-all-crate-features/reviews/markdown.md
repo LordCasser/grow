@@ -418,3 +418,5 @@ Cargo feature：`{"default": [], "playground": ["dep:crossterm", "dep:ratatui-te
 - 2026-09-07 在本独立工作树执行 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p markdown --all-features --target-dir /Users/lordcasser/workspace/projects/grow-openspec-sdd/target -- --test-threads=1：退出 0，502 单测通过、0 失败/忽略，两个 playground binary 各 0 测试，3 个 doctest 全部 ignored。日志 /tmp/grow-markdown-all-features-tests.log；早先 44/36 个定向测试为子集，不重复累加。
 - 测试后立即 cargo clean --profile dev --target-dir 本任务 target，退出 0，删除 1572 文件约 407.9 MiB，未清理 main 工作树。这个测试覆盖本包 Mermaid 模块，不引用另一 mermaid crate 的结果；不覆盖 libFuzzer campaign 或交互 UI。
 - 最终复核 src/lib.rs：ANSI render_markdown 也调用 normalize_latex_delimiters。与 ratatui 的差异是输出变换和 URL metadata 后扫描，不能误写成 ANSI 未做规范化。
+
+合并 Markdown `crates/codegen/markdown/fuzz/fuzz_targets/render_all.rs`：35 行、0 项内联测试、SHA-256 `d3895ca539d133fb99b848f55ad6efacc31086caf0963f5b3654ca2ed369188c`；从源码事实提取 4 条契约，已合并到 feature-map。未运行 Cargo/cargo-fuzz 或运行时测试。
