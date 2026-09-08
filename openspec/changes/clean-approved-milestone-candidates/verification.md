@@ -27,3 +27,6 @@ Removed only two uncalled private YAML repair helpers and RECOVERABLE_KEYS. Fres
 
 ## R10
 Removed unused skill model/effort fields from discovery, both SkillInfo representations and mirrored test fixtures; session sampling fields unchanged. Initial compilation exposed remaining test-only literals, which were removed before final validation. Fresh tools skill 200/200, agent prompt::skills 94/94 and workspace-types rpc::skills 7/7 passed; git diff --check passed.
+
+### R10 integration follow-up
+Shell test-target compilation found three remaining SkillInfo fixture literals. Removed only their obsolete model/effort fields. Rebuilt shell slash_commands regressions passed 98/98 before resuming R11; no production behavior changed.

@@ -1599,8 +1599,6 @@ fn make_test_skill(
         plugin_root: None,
         plugin_data: None,
         allowed_tools: None,
-        model: None,
-        effort: None,
         disable_model_invocation: false,
         has_user_specified_description: false,
         paths: None,
