@@ -203,7 +203,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：方法体始终None，全仓Rust检索未发现调用；键盘和鼠标接受均使用selected_text。
 - 删除理由：没有产品行为，却暴露一个看似可获取选择结果的误导接口。
 - 拟删除范围：仅此方法及专属注释；保留HistoryEntry、selected_text、导航、渲染及历史功能。
-- 状态：等待用户确认，尚未删除。仓库外公共API使用未知；证据见audit-prompt-history-and-draft-entrypoints。
+- 状态：用户已授权扩展为功能，正在实现；设计与验证见 openspec/changes/implement-history-conversation-search/。
 
 ## R22 · 独立的隐藏scroll-debug命令别名
 
@@ -252,7 +252,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：global缓存默认关闭；唯一非测试 set_enabled 位于 apply_remote_settings_side_effects，但全仓没有调用该函数。生产正规化目前经绕过分支直接计算，启用缓存的命中验证只见于测试。
 - 删除理由：当前未启用的缓存和开关增加维护表面；若决定保留，应另行明确配置权威并接通启用流程。
 - 拟删除范围：仅可选缓存/断开的hook与字段，实际实施前梳理类型和调用依赖；必须保留图片正规化、结果类型、错误处理和最近加入的后台计算并发限制，不能整文件直接删除。
-- 状态：等待确认，尚未删除或启用。公共hook的仓库外调用未知；证据见 audit-normalization-cache-activation。
+- 状态：用户已授权扩展为功能，正在实现；设计与验证见 openspec/changes/implement-session-image-fallback/。
 
 ## R28 · 无调用方的旧可选 JSON 读取器
 
@@ -276,7 +276,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：全仓 Rust 检索中 rewind_files 只有定义；三个类型只在该文件中服务这个入口。实际 shell handle_rewind 使用自己的预览、持久化意图、文件应用/补偿和 Timeline 提交链。
 - 删除理由：保留了第二套未启用的文件回退实现和响应模型；它缺少 shell 的事务协调，不能仅为复用而接入。
 - 拟删除范围：该函数及确认独占的三个类型、专属说明；保留 shell 回退、RewindResponse、RewindConflictInfo、merge_rewind_points_from、文件快照及事务恢复。
-- 状态：已获批并删除；回归结果见 clean-approved-candidates-r12-r32 的 R30 验证记录。
+- 状态：已获批并删除；回归结果见归档 2026-09-08-clean-approved-candidates-r12-r32 的 R30 验证记录。
 
 ## R31 · 仅被测试调用的回退 tracker 便利方法
 
@@ -284,7 +284,7 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 证据：仓库内调用均在 file_state 测试模块；实际 ConversationOnly 回退调用纯 merge_rewind_points_from，先持久化再 replace_rewind_points。
 - 删除理由：未参与当前生产路径的包装接口增加维护和测试表面。
 - 拟删除范围：仅两个方法及专属测试调用；确认后先将独有断言迁移到实际完整历史读取/纯合并路径。必须保留纯合并函数、truncate_from（取消仍使用）、完整读取与失败重试、replace_rewind_points 和实时捕获。
-- 状态：已获批并删除；回归结果见 clean-approved-candidates-r12-r32 的 R31 验证记录。
+- 状态：已获批并删除；回归结果见归档 2026-09-08-clean-approved-candidates-r12-r32 的 R31 验证记录。
 
 ## R32 · 未接入生产消费者的 401 attribution 回调
 
@@ -293,4 +293,4 @@ R1–R11 已收到逐项决定：R1 保留；R7 因无法排除外部初始化�
 - 删除理由：保留未启用的诊断扩展和跨层配置字段；注释仍引用已不存在的 shell token_suffix。短 token 会完整跨回调边界，不能把截断称为脱敏。
 - 拟删除范围：可选回调、专属枚举/别名/调用点及纯转发字段；确认后核对专属测试并保留有效认证断言。
 - 必须保留：请求构建时认证状态捕获、auth_rejected、SentCredential 和认证重试预算；bearer resolver 与认证方式诊断。sent_bearer/current_sent_bearer_prefix/截断助手还有这些消费者，不得随回调整体删除，是否改成仅保存 presence 需另行核对。
-- 状态：已获批并删除；回归结果见 clean-approved-candidates-r12-r32 的 R32 验证记录。
+- 状态：已获批并删除；回归结果见归档 2026-09-08-clean-approved-candidates-r12-r32 的 R32 验证记录。
