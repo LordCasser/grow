@@ -1,0 +1,3 @@
+- [x] Complete and archive approved cleanup with per-item test evidence.
+- [x] Update workspace/lockfile versions and release notes without dependency upgrades.
+- [x] Validate metadata, notes and OpenSpec; archive packaging preparation.
