@@ -217737,5 +217737,72 @@
         "PtyHarness::screen_contents"
       ]
     ]
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Minimal PTY cases are grouped under a dedicated module",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ",
+    "scenarios": [
+      {
+        "name": "Dedicated minimal subtree",
+        "when": "the pty_e2e_minimal integration crate is compiled",
+        "then": "the minimal cases are collected under the `minimal` module namespace."
+      },
+      {
+        "name": "Family-level organization",
+        "when": "a contributor selects or skips the minimal family",
+        "then": "the module boundary provides one coherent subtree rather than one interleaved parent-level list."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Minimal PTY integration registers the complete child test module inventory",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ",
+    "scenarios": [
+      {
+        "name": "Complete module declaration",
+        "when": "the minimal module is expanded by Rust",
+        "then": "all 25 declared child modules are registered for compilation and test discovery."
+      },
+      {
+        "name": "Ordered family inventory",
+        "when": "the source file is compared with the family list",
+        "then": "the modules appear in the documented order, covering screen mode, scrollback, turns, input, overlays, session, transcript and cleanup cases."
+      },
+      {
+        "name": "Filesystem resolution",
+        "when": "each declared module is resolved relative to the minimal directory",
+        "then": "the corresponding `.rs` child file exists in the checked-out tree."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "crate": "pager",
+    "capability": "client-surfaces",
+    "requirement": "Minimal PTY children share the family harness and exercise the built pager-minimal hook",
+    "contract": "The implementation SHALL satisfy the following tested behavior: ",
+    "scenarios": [
+      {
+        "name": "Shared helper resolution",
+        "when": "a child minimal test imports family helpers",
+        "then": "`crate::common` resolves to the shared pty_e2e support module at the integration-crate root."
+      },
+      {
+        "name": "Built binary integration",
+        "when": "a child invokes the shared minimal spawn fixture",
+        "then": "the harness resolves and launches the built pager binary with minimal arguments, allowing the binary to install the sibling pager-minimal hook."
+      },
+      {
+        "name": "PTY suite placement",
+        "when": "the minimal family is compiled",
+        "then": "it remains part of the pager PTY integration suite and is not declared as a separate Cargo test crate."
+      }
+    ],
+    "sources": []
   }
 ]

@@ -4254,7 +4254,10 @@
       "Minimal settings modal liveness, panic absence and cleanup",
       "Idle minimal prompt bootstrap",
       "First Ctrl-C arms idle quit confirmation",
-      "Second Ctrl-C exits minimal pager"
+      "Second Ctrl-C exits minimal pager",
+      "Minimal PTY cases are grouped under a dedicated module",
+      "Minimal PTY integration registers the complete child test module inventory",
+      "Minimal PTY children share the family harness and exercise the built pager-minimal hook"
     ],
     "reviewed_files": [
       {
@@ -6828,6 +6831,10 @@
       {
         "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_ctrl_c_arms_and_quits.rs",
         "sha256": "81245de217d4863ac03bf5ffd1d32c0459f497410ac840b04c91012a0757f450"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/mod.rs",
+        "sha256": "5f895789ae44c76d9b04e04f389b43d6a1732482570a740a9879ab52c08be808"
       }
     ],
     "review": "reviews/pager.md"

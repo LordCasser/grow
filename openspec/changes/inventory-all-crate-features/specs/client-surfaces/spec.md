@@ -32128,3 +32128,50 @@ The implementation SHALL satisfy the following tested behavior:
 #### Scenario: Failure diagnostic
 - **WHEN** wait_exit_code returns Running or another unsupported state
 - **THEN** the assertion fails and reports the state plus current screen contents.
+
+
+### Requirement: Minimal PTY cases are grouped under a dedicated module
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Dedicated minimal subtree
+- **WHEN** the pty_e2e_minimal integration crate is compiled
+- **THEN** the minimal cases are collected under the `minimal` module namespace.
+
+#### Scenario: Family-level organization
+- **WHEN** a contributor selects or skips the minimal family
+- **THEN** the module boundary provides one coherent subtree rather than one interleaved parent-level list.
+
+
+### Requirement: Minimal PTY integration registers the complete child test module inventory
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Complete module declaration
+- **WHEN** the minimal module is expanded by Rust
+- **THEN** all 25 declared child modules are registered for compilation and test discovery.
+
+#### Scenario: Ordered family inventory
+- **WHEN** the source file is compared with the family list
+- **THEN** the modules appear in the documented order, covering screen mode, scrollback, turns, input, overlays, session, transcript and cleanup cases.
+
+#### Scenario: Filesystem resolution
+- **WHEN** each declared module is resolved relative to the minimal directory
+- **THEN** the corresponding `.rs` child file exists in the checked-out tree.
+
+
+### Requirement: Minimal PTY children share the family harness and exercise the built pager-minimal hook
+
+The implementation SHALL satisfy the following tested behavior:
+
+#### Scenario: Shared helper resolution
+- **WHEN** a child minimal test imports family helpers
+- **THEN** `crate::common` resolves to the shared pty_e2e support module at the integration-crate root.
+
+#### Scenario: Built binary integration
+- **WHEN** a child invokes the shared minimal spawn fixture
+- **THEN** the harness resolves and launches the built pager binary with minimal arguments, allowing the binary to install the sibling pager-minimal hook.
+
+#### Scenario: PTY suite placement
+- **WHEN** the minimal family is compiled
+- **THEN** it remains part of the pager PTY integration suite and is not declared as a separate Cargo test crate.
