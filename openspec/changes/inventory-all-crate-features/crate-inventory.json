@@ -4204,7 +4204,19 @@
       "Tall minimal fixture commits a response head into native scrollback",
       "Minimal slash overlay opens while committed scrollback fills the viewport",
       "Closing the minimal overlay preserves committed native scrollback across viewport shrink",
-      "Overlay growth test liveness, panic absence and minimal cleanup"
+      "Overlay growth test liveness, panic absence and minimal cleanup",
+      "Tall minimal response reaches committed native scrollback",
+      "Two-dimensional resize preserves committed content and liveness",
+      "Prompt remains functional after resize",
+      "Minimal resize test cleanup",
+      "The ignored minimal PTY test SHALL start an isolated ContentController, configure a first-turn sentinel response, create a temporary project cwd containing .git, run the first pager there at the default minimal geometry, submit PROMPT, wait for the first turn in full_text, wait for the minimal idle sentinel, pump a final 300 ms flush window, and quit before relaunching.",
+      "Starting minimal again with --continue in the same stable git cwd SHALL replay the first turn's sentinel into the resumed session's combined history/screen text within RESUME_TIMEOUT.",
+      "After --continue has replayed the first transcript, the resumed minimal session SHALL accept a second prompt and render a distinct second-turn sentinel in full_text.",
+      "The resumed minimal process SHALL render no visible panic marker after replay and the follow-up turn, and the ignored test SHALL request clean shutdown.",
+      "Minimal Responses reasoning fixture enables persisted thinking blocks",
+      "Minimal reasoning and answer both commit to the full transcript",
+      "Enabled minimal reasoning body remains available in the committed transcript",
+      "Minimal reasoning PTY liveness, panic absence and cleanup"
     ],
     "reviewed_files": [
       {
@@ -6726,6 +6738,18 @@
       {
         "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs",
         "sha256": "305e67c264b792895df829e56d8e68839a334c07acc4212aaa0a3bbd41481c9b"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_resize_preserves_committed_scrollback.rs",
+        "sha256": "b88aa4baffde1bc12af5d07b3dcdc66c4e8e522bb95515565770d9ce614de6f8"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_continue_reprints_transcript.rs",
+        "sha256": "160564f09443874cc96e21bde07250387d887b849e6fe871759d5f3cc2dacdcf"
+      },
+      {
+        "path": "crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs",
+        "sha256": "8bba308c2b27394590e9e97d813120375aad634090e02d88d29591c4ab027a29"
       }
     ],
     "review": "reviews/pager.md"

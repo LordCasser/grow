@@ -31204,3 +31204,223 @@ The ignored PTY test SHALL fail with captured scrollback or screen diagnostics w
 - **THEN** the visible screen contains no `panicked` marker and quit_minimal is invoked.
 
 证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `deadline`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `dropdown_deadline`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_committed_content_survives_overlay_grow.rs` — `quit_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_exit_code`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`。
+
+
+### Requirement: Tall minimal response reaches committed native scrollback
+
+The implementation SHALL satisfy the following tested behavior: The test starts ContentController, configures tall_response(MOCK_RESPONSE_SENTINEL, 80), spawns minimal with spawn_minimal, waits for minimal readiness, submits PROMPT with carriage return, and pumps 100 ms updates for at most 40 seconds until scrollback_text contains the response sentinel. It asserts the sentinel is in native scrollback before resizing.
+
+#### Scenario: Tall committed block
+- **WHEN** the mock response is configured with 80 fenced-code payload rows and the initial prompt is submitted
+- **THEN** the response head eventually appears in native scrollback.
+
+#### Scenario: Scrollback precondition
+- **WHEN** scrollback_text contains MOCK_RESPONSE_SENTINEL before the deadline
+- **THEN** the test proceeds to resize.
+
+#### Scenario: Missing precondition
+- **WHEN** the sentinel is absent at the 40-second deadline
+- **THEN** the assertion fails with the captured scrollback text.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `tall_response`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::start`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::scrollback_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`。
+
+
+### Requirement: Two-dimensional resize preserves committed content and liveness
+
+The implementation SHALL satisfy the following tested behavior: After the native-scrollback precondition, the test resizes the harness from its default geometry to 30 rows by 80 columns, pumps output for 800 ms, requires the pager to remain running, rejects a visible `panicked` marker, and requires contains_full_text(MOCK_RESPONSE_SENTINEL). The test function is ignored, so these are explicit-selection assertions only.
+
+#### Scenario: Smaller terminal geometry
+- **WHEN** the first response sentinel is already in native scrollback
+- **THEN** PtyHarness::resize changes both rows and columns to 30x80 and the harness receives an 800 ms update window.
+
+#### Scenario: Resize liveness
+- **WHEN** the resize update completes
+- **THEN** the child remains running and the visible screen has no `panicked` marker.
+
+#### Scenario: Committed-history preservation
+- **WHEN** the resize has reflowed terminal history
+- **THEN** the first response sentinel remains reachable through combined scrollback plus screen text.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_resize_preserves_committed_scrollback.rs` — `minimal_resize_preserves_committed_scrollback`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::resize`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::update`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::is_running`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::contains_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::contains_full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: Prompt remains functional after resize
+
+The implementation SHALL satisfy the following tested behavior: After the resize assertions, the test changes the mock response to turn_sentinel(2) followed by ` after resize.`, injects `again` plus carriage return, and waits up to 30 seconds for turn_sentinel(2) in full_text. This is the test’s post-resize prompt/functionality check.
+
+#### Scenario: Post-resize submit
+- **WHEN** the first response remains in combined history after resizing
+- **THEN** the test submits `again` using the smaller terminal geometry.
+
+#### Scenario: Second turn streaming
+- **WHEN** the second-turn sentinel is not yet in full_text
+- **THEN** the harness waits for turn_sentinel(2) or fails after 30 seconds.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `turn_sentinel`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::full_text`。
+
+
+### Requirement: Minimal resize test cleanup
+
+The implementation SHALL satisfy the following tested behavior: After the second-turn wait, the test calls quit_minimal to perform the shared Ctrl+Q confirmation and bounded shutdown/kill fallback. The file does not add a separate exit-status assertion.
+
+#### Scenario: Cleanup after second turn
+- **WHEN** turn_sentinel(2) appears after the resize
+- **THEN** quit_minimal is invoked on the live harness.
+
+证据：`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`。
+
+
+### Requirement: The ignored minimal PTY test SHALL start an isolated ContentController, configure a first-turn sentinel response, create a temporary project cwd containing .git, run the first pager there at the default minimal geometry, submit PROMPT, wait for the first turn in full_text, wait for the minimal idle sentinel, pump a final 300 ms flush window, and quit before relaunching.
+
+The implementation SHALL satisfy the following tested behavior: minimal_continue_reprints_transcript starts ContentController and sets `MOCKRESPONSE_T1 first session payload.`. It creates tempfile project, creates project/.git so session selection has a stable git cwd, calls spawn_minimal_in_dir with DEFAULT_ROWS, DEFAULT_COLS, no extra args and that cwd, waits for wait_minimal_ready, submits PROMPT plus carriage return, waits up to 30 seconds for turn_sentinel(1) in full_text, then waits up to 15 seconds for MINIMAL_IDLE_SENTINEL, pumps 300 ms, and calls quit_minimal. The idle gate and settle are intended to ensure turn completion and updates.jsonl flush before --continue.
+
+#### Scenario: Stable session cwd
+- **WHEN** the test creates its project fixture
+- **THEN** a temporary directory with a .git child is used for both pager runs.
+
+#### Scenario: First minimal run
+- **WHEN** the first pager starts
+- **THEN** spawn_minimal_in_dir uses the shared default 50x120 minimal fixture and reaches minimal readiness.
+
+#### Scenario: First turn commit
+- **WHEN** PROMPT is submitted
+- **THEN** turn_sentinel(1) appears in full_text within 30 seconds.
+
+#### Scenario: Durable flush gate
+- **WHEN** turn 1 has rendered
+- **THEN** MINIMAL_IDLE_SENTINEL appears within 15 seconds, the harness pumps 300 ms, and the first pager quits before resume.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_continue_reprints_transcript.rs` — `minimal_continue_reprints_transcript`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_ROWS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `DEFAULT_COLS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `PROMPT`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_IDLE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal_in_dir`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::start`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::update`。
+
+
+### Requirement: Starting minimal again with --continue in the same stable git cwd SHALL replay the first turn's sentinel into the resumed session's combined history/screen text within RESUME_TIMEOUT.
+
+The implementation SHALL satisfy the following tested behavior: After the first harness quits, the test calls spawn_minimal_in_dir with the same ContentController, DEFAULT_ROWS, DEFAULT_COLS, project path, and extra arg `--continue`. It waits for turn_sentinel(1) through wait_for_full_text with RESUME_TIMEOUT (120 seconds), failing with the resumed full_text diagnostic if absent. The test's contract is full transcript reprint because minimal has no separate history pane and terminal native history owns the prior content; it checks presence only, not a count.
+
+#### Scenario: Resume same session
+- **WHEN** the first run has quit after idle and flush settle
+- **THEN** a second minimal pager starts in the same cwd with --continue.
+
+#### Scenario: Transcript reprint
+- **WHEN** the resumed process is loading the prior session
+- **THEN** turn_sentinel(1) appears in full_text within RESUME_TIMEOUT.
+
+#### Scenario: History surface
+- **WHEN** the sentinel is observed after continue
+- **THEN** the result is treated as transcript content reprinted into native scrollback rather than a separate minimal history pane.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_continue_reprints_transcript.rs` — `minimal_continue_reprints_transcript`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `RESUME_TIMEOUT`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `spawn_minimal_in_dir`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::full_text`。
+
+
+### Requirement: After --continue has replayed the first transcript, the resumed minimal session SHALL accept a second prompt and render a distinct second-turn sentinel in full_text.
+
+The implementation SHALL satisfy the following tested behavior: Once turn_sentinel(1) is observed, the test changes ContentController's response to `MOCKRESPONSE_T2 resumed payload.`, injects `again` plus carriage return, and waits up to 30 seconds for turn_sentinel(2) in resumed.full_text(). This checks that continue leaves the session interactive rather than only showing historical output.
+
+#### Scenario: Configure resumed response
+- **WHEN** the first sentinel has replayed
+- **THEN** the mock response changes to the second-turn sentinel and resumed payload.
+
+#### Scenario: Submit follow-up
+- **WHEN** the resumed prompt is ready
+- **THEN** the test injects `again` followed by carriage return.
+
+#### Scenario: Follow-up rendered
+- **WHEN** the second turn is accepted
+- **THEN** turn_sentinel(2) appears in full_text within 30 seconds.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_continue_reprints_transcript.rs` — `minimal_continue_reprints_transcript`；`crates/codegen/pager-pty-harness/src/content.rs` — `ContentController::set_response`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::full_text`。
+
+
+### Requirement: The resumed minimal process SHALL render no visible panic marker after replay and the follow-up turn, and the ignored test SHALL request clean shutdown.
+
+The implementation SHALL satisfy the following tested behavior: After the second-turn wait, the test asserts !resumed.contains_text("panicked") with resumed.screen_contents() in the failure diagnostic, then calls quit_minimal(&mut resumed). The helper owns Ctrl-Q confirmation and exit polling; this source does not assert an exit code, first-run liveness after quit, or persisted session contents beyond the observed replay.
+
+#### Scenario: No panic after continue
+- **WHEN** the follow-up sentinel has rendered
+- **THEN** the resumed screen contains no `panicked` substring.
+
+#### Scenario: Clean resumed shutdown
+- **WHEN** all replay and follow-up assertions pass
+- **THEN** quit_minimal is invoked for the resumed pager.
+
+#### Scenario: Ignored execution gate
+- **WHEN** the default minimal PTY target discovers this test
+- **THEN** the #[ignore] attribute excludes it unless explicitly selected.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_continue_reprints_transcript.rs` — `minimal_continue_reprints_transcript`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::contains_text`；`crates/codegen/pager-pty-harness/src/pty.rs` — `PtyHarness::screen_contents`。
+
+
+### Requirement: Minimal Responses reasoning fixture enables persisted thinking blocks
+
+The ignored Tokio PTY test SHALL start a Responses-backed `test-model`, register a foreground InferenceRequestMatcher with responses_api_reasoning_and_text_events that emits reasoning before answer text, set the fallback answer, and write `[ui] show_thinking_blocks = true` into the isolated `.grow/config.toml` before starting the minimal pager. It SHALL use the shared minimal/no-leader arguments, enable terminal query responses, and wait for minimal readiness.
+
+#### Scenario: Responses backend selection
+- **WHEN** the reasoning turn fixture is created
+- **THEN** the mock model advertises the Responses API backend and the registered expectation matches a foreground Responses request.
+
+#### Scenario: Reasoning-before-answer stream
+- **WHEN** the expected inference request is claimed
+- **THEN** the scripted SSE sequence emits reasoning summary deltas before the normal answer text for `test-model`.
+
+#### Scenario: Thinking gate
+- **WHEN** the isolated pager is about to start
+- **THEN** `.grow/config.toml` explicitly contains `show_thinking_blocks = true`, so thinking ingestion does not depend on an unset rollout default.
+
+#### Scenario: Minimal readiness
+- **WHEN** the pager is spawned with MINIMAL_ARGS
+- **THEN** query responses are enabled and wait_minimal_ready observes the minimal idle state before submitting PROMPT.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `minimal_commits_thinking_body_to_scrollback`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `ContentController::start_with_models`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `MockModel::with_api_backend`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `InferenceEndpoint::Responses`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `InferenceRequestMatcher::foreground`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `ContentController::expect_response`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `ScriptedResponse::sse`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `sse::responses_api_reasoning_and_text_events`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `ContentController::set_response`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `show_thinking_blocks`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `PtyHarness::spawn_with_content`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `PtyHarness::set_respond_to_queries`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `MINIMAL_ARGS`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `wait_minimal_ready`；`crates/codegen/pager/tests/pty_e2e_minimal.rs` — `pty_e2e_minimal`。
+
+
+### Requirement: Minimal reasoning and answer both commit to the full transcript
+
+After PROMPT is submitted, the minimal PTY SHALL expose the answer sentinel `MOCK_RESPONSE_SENTINEL` in full_text within 30 seconds, then expose the `Thought for` thinking header within ten seconds, establishing that the Responses reasoning stream and its answer have been projected into the minimal transcript.
+
+#### Scenario: Answer completion
+- **WHEN** PROMPT is submitted against the registered Responses expectation
+- **THEN** full_text contains MOCK_RESPONSE_SENTINEL within the 30-second bound and the test treats the turn as committed.
+
+#### Scenario: Thinking header
+- **WHEN** the answer sentinel has been observed
+- **THEN** full_text contains `Thought for` within ten seconds, proving the enabled thinking block has a committed presentation header.
+
+#### Scenario: Ordered projection
+- **WHEN** the scripted stream emits reasoning before answer text
+- **THEN** the test waits for the answer first and the thought header second, preserving the intended reasoning/answer observation order.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `PtyHarness::inject_keys`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `MOCK_RESPONSE_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `Thought for`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_for_full_text`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::full_text`；`crates/codegen/pager-minimal/src/overlay.rs` — `sync_viewport`。
+
+
+### Requirement: Enabled minimal reasoning body remains available in the committed transcript
+
+With show_thinking_blocks explicitly enabled and a Responses reasoning summary streamed before the answer, the minimal PTY SHALL expose REASONING_SENTINEL in full_text within ten seconds after the `Thought for` header, treating the reasoning body as transcript content rather than answer text that can be silently dropped.
+
+#### Scenario: Reasoning body commit
+- **WHEN** the answer and `Thought for` header have been observed
+- **THEN** full_text contains the distinct REASONING_SENTINEL body within ten seconds.
+
+#### Scenario: Reasoning/answer separation
+- **WHEN** the fixture constructs reasoning and answer from distinct sentinel strings
+- **THEN** the test can attribute the body assertion to the reasoning stream rather than the answer sentinel.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `REASONING_SENTINEL`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `reasoning`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `answer`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `reasoning body must be committed to scrollback`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `PtyHarness::full_text`；`crates/codegen/pager/src/scrollback/state/mod.rs` — `ScrollbackState::push_chunk_to_thinking`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::thinking`；`crates/codegen/pager/src/scrollback/block.rs` — `RenderBlock::thinking_streaming`。
+
+
+### Requirement: Minimal reasoning PTY liveness, panic absence and cleanup
+
+The ignored reasoning PTY test SHALL fail with full-text diagnostics if the reasoning body is not observed within its bounded wait, SHALL reject a visible `panicked` marker after the answer/header/body checks, and SHALL invoke quit_minimal for the shared two-step Ctrl-Q cleanup with its bounded exit fallback.
+
+#### Scenario: Reasoning timeout
+- **WHEN** REASONING_SENTINEL is absent after ten seconds
+- **THEN** the test panics with the error and complete full_text capture rather than claiming the body was committed.
+
+#### Scenario: No visible panic
+- **WHEN** the answer, header and reasoning body have been observed
+- **THEN** contains_text(`panicked`) is false on the current screen.
+
+#### Scenario: Minimal cleanup
+- **WHEN** all content assertions pass
+- **THEN** quit_minimal sends the confirmation chords and waits for exit or its harness kill fallback.
+
+证据：`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `unwrap_or_else`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `PtyHarness::contains_text`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `PtyHarness::screen_contents`；`crates/codegen/pager/tests/pty_e2e/minimal/minimal_commits_thinking_body_to_scrollback.rs` — `quit_minimal`；`crates/codegen/pager/tests/pty_e2e/common.rs` — `quit_minimal`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::wait_exit_code`；`crates/codegen/pager-pty-harness/src/lib.rs` — `PtyHarness::quit`。

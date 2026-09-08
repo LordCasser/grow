@@ -1071,3 +1071,8 @@ pager-pty-harness的79条契约已覆盖全部40个文件，但脚本、PTY、sc
 - Pager 审计债务：PAGER=cat avoids the interactive pager path that motivated the related restore tests, so the primary full-screen/alternate-screen lifecycle remains unexercised here.
 - Pager 审计债务：Fixed polling deadlines and 100 ms updates make the test timing-sensitive while providing no explicit frame-drain or child-exit synchronization.
 - Pager 审计债务：The test combines mock setup, session startup, prompt submission, slash input pacing, transcript export, restore, panic scanning, and shutdown in one scenario, broadening failure diagnosis.
+- Pager 审计债务：The resize regression is ignored, leaving minimal committed-history resize behavior outside routine automated coverage.
+- Pager 审计债务：History preservation is inferred from one sentinel substring without a structured block identity, line-count, or duplicate assertion, so wiping and reprinting can be hard to distinguish.
+- Pager 审计债务：The source comments specify forbidden production mechanisms, but the test has no instrumentation or static guard proving those paths are absent.
+- Pager 审计债务：Fixed 40-second/30-second waits and an 800 ms settle interval make the scenario timing-sensitive while providing no explicit frame or resize completion barrier.
+- Pager 审计债务：The test combines tall markdown rendering, native scrollback entry, a two-dimensional resize, screen health, post-resize streaming, and shutdown in one scenario, broadening failure diagnosis.
