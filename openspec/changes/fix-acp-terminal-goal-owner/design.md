@@ -1,0 +1,1 @@
+Follow LocalTerminalBackend: store the request revision in the existing TrackedTask, default to None for unowned tasks, and copy it into TaskSnapshot. No new identity type, no fallback revision, no weaker notification validation, no session migration. The shared snapshot path also covers listing and exit watchers.

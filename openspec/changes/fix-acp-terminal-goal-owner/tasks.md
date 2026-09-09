@@ -1,0 +1,4 @@
+- [x] Trace adjacent Goal owner propagation and record findings.
+- [x] Reproduce lost ACP terminal owner revision in adapter regression.
+- [x] Retain request revision through snapshots and completion.
+- [x] Run regression and validate/archive the change.

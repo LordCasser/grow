@@ -155,3 +155,5 @@ budgeting and normal compaction still apply independently. See the authoritative
 [Timeline contract](../../openspec/specs/session-timeline/spec.md).
 
 An Active Goal reload restores the v9 objective, definition revision, lifecycle status, budget, settled usage, and elapsed time from the same Timeline Control snapshot as Behavior, then re-arms idle continuation. Goal owns no persisted plan, board, planner phase, or stage lease. Older Goal architectures and invalid v9 snapshots are rejected without migration instead of reviving a second lifecycle model.
+
+后台终端任务在接纳时冻结 Goal ID 与 definition revision；本地和 ACP 客户端后端均将二者一起保留到任务快照及完成通知，通知桥不为缺失版本号填默认值。见 [behavior-goal](../../openspec/specs/behavior-goal/spec.md)。

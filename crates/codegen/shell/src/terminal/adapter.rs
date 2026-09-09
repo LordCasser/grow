@@ -41,6 +41,7 @@ pub(super) struct TrackedTask {
     kind: TaskKind,
     owner_session_id: Option<String>,
     goal_id: Option<String>,
+    goal_definition_revision: Option<u64>,
     description: Option<String>,
     output_byte_limit: usize,
 }
@@ -65,6 +66,7 @@ impl Default for TrackedTask {
             kind: TaskKind::Bash,
             owner_session_id: None,
             goal_id: None,
+            goal_definition_revision: None,
             description: None,
             output_byte_limit: crate::terminal::DEFAULT_OUTPUT_BYTE_LIMIT,
         }
@@ -103,7 +105,7 @@ impl TrackedTask {
             kind: self.kind,
             owner_session_id: self.owner_session_id.clone(),
             goal_id: self.goal_id.clone(),
-            goal_definition_revision: None,
+            goal_definition_revision: self.goal_definition_revision,
             description: self.description.clone(),
             // ACP tracked tasks are only registered via run_background.
             is_backgrounded: true,
@@ -279,6 +281,7 @@ impl TerminalBackend for AcpTerminalAdapter {
                     kind: request.kind,
                     owner_session_id: request.owner_session_id.clone(),
                     goal_id: request.goal_id.clone(),
+                    goal_definition_revision: request.goal_definition_revision,
                     description,
                     output_byte_limit: request.output_byte_limit,
                     ..Default::default()

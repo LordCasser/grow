@@ -126,7 +126,7 @@ fn scripted_gateway(outputs: Vec<(String, bool)>) -> GatewaySender {
 
 fn background_request(output_file: PathBuf) -> TerminalRunRequest {
     TerminalRunRequest {
-        goal_definition_revision: None,
+        goal_definition_revision: Some(7),
         command: "watch-something".into(),
         working_directory: PathBuf::from("/tmp"),
         env: HashMap::new(),
@@ -171,6 +171,7 @@ async fn run_background_records_snapshots_and_threads_task_kind() {
     assert_eq!(snapshot.kind, TaskKind::Monitor);
     assert_eq!(snapshot.owner_session_id.as_deref(), Some("owner-1"));
     assert_eq!(snapshot.goal_id.as_deref(), Some("goal-1"));
+    assert_eq!(snapshot.goal_definition_revision, Some(7));
 
     let completed = loop {
         match notifications.recv().await.expect("completion notification") {
@@ -181,6 +182,7 @@ async fn run_background_records_snapshots_and_threads_task_kind() {
     assert_eq!(completed.kind, TaskKind::Monitor);
     assert_eq!(completed.owner_session_id.as_deref(), Some("owner-1"));
     assert_eq!(completed.goal_id.as_deref(), Some("goal-1"));
+    assert_eq!(completed.goal_definition_revision, Some(7));
     assert_eq!(completed.exit_code, Some(0));
 
     assert_eq!(
