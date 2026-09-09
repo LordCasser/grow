@@ -1,0 +1,3 @@
+- [x] Reproduce resume crossing an unacknowledged terminal boundary.
+- [x] Reuse the terminal barrier for resume admission.
+- [x] Verify regression and workflow lifecycle tests; archive.

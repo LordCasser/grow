@@ -33,6 +33,8 @@ Run 的启动从实时 Workflow Behavior 复核到预检、validated hash 提交
 session runtime worker 上直接执行。阻塞任务异常、预检失败或 Definition hash 漂移均在
 validated hash 与 Run 生成之前 fail closed。
 
+Resume 必须等待上一执行轮次的终止 watcher 确认 manifest 与 Timeline Ended 已持久化，才能写入下一轮 Resumed；内存中已显示 paused/failed 不等于终止提交完成。终止确认失败或通道关闭时返回错误，不增加 execution epoch。见 [workflow-execution](../../openspec/specs/workflow-execution/spec.md)。
+
 每个 Run 在 admission 时冻结默认模型及完整 catalog sampler route。每个 catalog identity 的
 provider model、endpoint transport、backend、header/query 契约、输出与温度参数、context window、
 retry/stream/compaction/doom-loop policy 和 reasoning effort 属于同一快照；transport identity 与

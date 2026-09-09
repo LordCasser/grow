@@ -317,6 +317,21 @@ impl WorkflowManager {
         spec: LaunchSpec,
     ) -> Result<(String, oneshot::Receiver<WorkflowOutcome>), LaunchError> {
         let admission_generation = self.admission_snapshot()?;
+        if let Some(run_id) = spec.resume_run_id.as_deref()
+            && self.tracker.lock().get(run_id).is_some_and(|run| run.status.is_resumable())
+            && let Some(active) = self.active.get_mut(run_id)
+        {
+            // The watcher projects a stopped state before persisting Ended.
+            // Keep its receiver owned by the manager across cancellation, and
+            // do not let reaping discard a failed terminal acknowledgment.
+            let settled = (&mut active.done).await;
+            self.active.remove(run_id);
+            settled.map_err(|_| {
+                LaunchError::Timeline(format!(
+                    "workflow {run_id} terminal watcher stopped before acknowledgement"
+                ))
+            })?.map_err(LaunchError::Timeline)?;
+        }
         self.reap_terminal_runs();
         if self.active.len() >= WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION {
             return Err(LaunchError::TooManyActiveRuns);
@@ -1759,6 +1774,71 @@ mod tests {
                 assert_eq!(result, serde_json::json!("original"));
             }
             other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_waits_for_terminal_manifest_and_timeline_acknowledgment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+        let (persist_tx, mut persist_rx) = mpsc::unbounded_channel();
+        manager.store = WorkflowRunStore::new(manager.session_directory.clone(), persist_tx);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let mut barrier = Some((ready_tx, release_rx));
+            while let Some(message) = persist_rx.recv().await {
+                if let crate::session::persistence::PersistenceMsg::WorkflowRunStateAndAck {
+                    manifest, respond_to,
+                } = message {
+                    if manifest.state.status.is_resumable()
+                        && let Some((ready, release)) = barrier.take()
+                    {
+                        let _ = ready.send(());
+                        let _ = release.await;
+                    }
+                    let _ = respond_to.send(Ok(()));
+                }
+            }
+        });
+        let script = "let meta = #{ name: \"t\", description: \"d\" }; await_user(\"user\", \"pause\"); complete(\"done\");";
+        let (run_id, first_outcome) = manager.launch(resolve_inline(script.into()).unwrap(), spec()).await.unwrap();
+        ready_rx.await.unwrap();
+        assert!(manager.tracker.lock().get(&run_id).unwrap().status.is_resumable());
+        let resume = manager.launch(resolve_inline(script.into()).unwrap(), LaunchSpec {
+            resume_run_id: Some(run_id), ..spec()
+        });
+        tokio::pin!(resume);
+        tokio::select! {
+            result = &mut resume => panic!("resume crossed pending terminal: {:?}", result.err()),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+        }
+        release_tx.send(()).unwrap();
+        let (_, second_outcome) = resume.await.unwrap();
+        assert!(matches!(first_outcome.await.unwrap(), WorkflowOutcome::AwaitingUser { .. }));
+        assert!(matches!(second_outcome.await.unwrap(), WorkflowOutcome::Completed { .. }));
+    }
+
+    #[tokio::test]
+    async fn resume_propagates_terminal_ack_failure_without_advancing_epoch() {
+        for dropped in [false, true] {
+            let (mut manager, _rx) = test_manager(None);
+            let script = "let meta = #{ name: \"t\", description: \"d\" }; await_user(\"user\", \"pause\");";
+            let (run_id, outcome) = manager.launch(resolve_inline(script.into()).unwrap(), spec()).await.unwrap();
+            outcome.await.unwrap();
+            let epoch = manager.tracker.lock().execution_epoch(&run_id);
+            let (done_tx, done_rx) = oneshot::channel();
+            manager.test_insert_active_run(run_id.clone(), done_rx);
+            if dropped {
+                drop(done_tx);
+            } else {
+                done_tx.send(Err("terminal disk failure".into())).unwrap();
+            }
+            let result = manager.launch(resolve_inline(script.into()).unwrap(), LaunchSpec {
+                resume_run_id: Some(run_id.clone()), ..spec()
+            }).await;
+            assert!(matches!(result, Err(LaunchError::Timeline(_))));
+            assert_eq!(manager.tracker.lock().execution_epoch(&run_id), epoch);
         }
     }
 
