@@ -1,0 +1,10 @@
+- [x] Trace Goal creation, explicit-budget semantics, editing, restart and restore.
+- [x] Audit Goal usage admission, settlement, descendants and sidebands.
+- [x] Audit Goal automatic continuation, blocking, cancellation and control races.
+- [x] Audit Workflow definitions, validation, publishing and immutable run source.
+- [x] Audit Workflow execution, journal replay, wait/resume and side-effect ownership.
+- [x] Audit Workflow host services, child calls, budgets, cancellation and terminal transitions.
+- [x] Audit Goal/Workflow mutual exclusion, startup recovery and foreground arbitration.
+- [x] Audit tool/slash entry points and TUI state/error projection.
+- [x] Independently fix confirmed bugs with regression evidence.
+- [x] Run relevant integrated regressions, summarize residual limitations and archive.
