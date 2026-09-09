@@ -1,0 +1,4 @@
+- [x] Trace durable session evidence and shared-window startup ownership.
+- [x] Add regression demonstrating descendant startup synchronization closes root admission.
+- [x] Restrict lifecycle synchronization to the root and document the boundary.
+- [x] Run Goal, subagent and startup regressions and OpenSpec validation.

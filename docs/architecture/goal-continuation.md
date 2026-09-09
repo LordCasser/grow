@@ -35,6 +35,8 @@ Goal architecture v9 deliberately rejects older snapshots. `goal_id` is the stab
 
 ## Lifecycle ownership
 
+The root session alone synchronizes the shared provider admission window from its durable Goal tracker. Descendants inherit that window for admission and usage settlement; their local startup or control refresh cannot close an active root Goal or reopen a stopped/budget-limited one. The behavior contract is in [behavior-goal](../../openspec/specs/behavior-goal/spec.md).
+
 - The user creates, edits, pauses, restarts, budgets, and clears a Goal through `/goal`.
 - Creating a different Goal requires explicitly clearing the existing Goal,
   including a completed one; completed state is never silently overwritten.

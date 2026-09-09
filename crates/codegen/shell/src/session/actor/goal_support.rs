@@ -475,6 +475,11 @@ impl SessionActor {
     /// Publish the lifecycle boundary only after its durable Control commit.
     /// Descendant model responses read this shared value at settlement time.
     pub(super) fn sync_goal_usage_window(&self) {
+        // Descendants inherit the root window, not its local Goal tracker.
+        // Their startup/control refreshes cannot publish root lifecycle state.
+        if self.startup_hints.is_subagent {
+            return;
+        }
         let (active_goal_id, exhausted, usage_incomplete) = {
             let tracker = self.goal_tracker.lock();
             let goal = tracker.snapshot();
@@ -2536,6 +2541,49 @@ mod tests {
             window.submit(10).await,
             Err("root Goal accounting actor is unavailable".into())
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn descendant_sync_preserves_root_goal_admission() {
+        tokio::task::LocalSet::new().run_until(async {
+            let (mut actor, _gateway_rx) = build_actor().await;
+            let child = std::sync::Arc::get_mut(&mut actor).unwrap();
+            child.startup_hints.is_subagent = true;
+            let (root_tx, _root_rx) = tokio::sync::mpsc::unbounded_channel();
+            let window = GoalUsageWindow::new(root_tx, Some("root-goal".into()));
+            child.goal_usage_window = window.clone();
+
+            // This is the synchronization performed at the end of child startup.
+            actor.sync_goal_usage_window();
+            assert_eq!(window.active_goal_id().as_deref(), Some("root-goal"));
+            for owner in ["root", "child"] {
+                let attempt = window.begin_model_attempt(owner, 0, Some("root-goal"))
+                    .await.unwrap().unwrap();
+                assert_eq!(window.attempt_goal_id(&attempt).as_deref(), Some("root-goal"));
+                assert!(window.finish_attempt(&attempt));
+            }
+
+            // Even a local active tracker must not reopen a closed root window.
+            actor.goal_tracker.lock().create_goal(
+                "child-local".into(), "local state".into(), None, "now".into(),
+            ).unwrap();
+            for (exhausted, incomplete, message) in [
+                (true, false, "exhausted its token budget"),
+                (false, true, "incomplete token usage"),
+            ] {
+                window.sync_with_goal_state(Some("root-goal".into()), exhausted, incomplete);
+                actor.sync_goal_usage_window();
+                assert!(window.provider_admission_closed());
+                let error = window.begin_model_attempt("root", 0, Some("root-goal"))
+                    .await.unwrap_err();
+                assert!(error.contains(message), "{error}");
+            }
+            window.sync(None);
+            actor.sync_goal_usage_window();
+            assert_eq!(window.active_goal_id(), None);
+            assert!(window.begin_model_attempt("root", 0, Some("root-goal")).await.is_err());
+            assert_eq!(window.begin_model_attempt("root", 0, None).await.unwrap(), None);
+        }).await;
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -1759,7 +1759,9 @@ pub(crate) async fn spawn_session_actor(
             "Recovered a non-terminal public Workflow alongside this Goal. Stop or finish the Workflow, then restart the Goal."
                 .to_string(),
         );
-        goal_usage_window.sync(None);
+        if !startup_hints.is_subagent {
+            goal_usage_window.sync(None);
+        }
     }
     if reset_behavior {
         behavior
