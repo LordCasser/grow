@@ -676,16 +676,18 @@ fn goal_runtime_requires_the_local_task_planner() {
 #[tokio::test(flavor = "current_thread")]
 async fn delegated_goal_turn_uses_inherited_owner_revision() {
     tokio::task::LocalSet::new().run_until(async {
-        for matching in [true, false] {
+        for (delegated, matching) in [(true, true), (true, false), (false, true)] {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor.startup_hints.is_subagent = true;
+            actor.startup_hints.delegated_goal = delegated;
             let actor = std::sync::Arc::new(actor);
             actor.goal_usage_window.sync(Some("root-goal".into()));
             assert!(actor.goal_tracker.lock().snapshot().is_none());
             let bridge = actor.agent.borrow().tool_bridge().clone();
             use tools::implementations::grow_build::update_goal::{GoalContextSnapshotResource, GoalContextSnapshot, GoalView};
+            if delegated {
             bridge.update_resource(GoalContextSnapshotResource(Some(GoalContextSnapshot {
                 view: GoalView {
                     goal_id: if matching { "root-goal" } else { "other-goal" }.into(),
@@ -695,6 +697,7 @@ async fn delegated_goal_turn_uses_inherited_owner_revision() {
                     created_at: "now".into(), updated_at: "now".into(), status_message: None,
                 },
             }))).await;
+            }
             install_test_foreground(&actor, "delegated-turn").await;
             let result = actor.handle_prompt(
                 "delegated-turn", admit_test_human_input(&actor, "delegated-turn").await,
@@ -707,7 +710,12 @@ async fn delegated_goal_turn_uses_inherited_owner_revision() {
                 chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { identity, .. }) => Some(identity),
                 _ => None,
             });
-            if matching {
+            if !delegated {
+                assert!(result.is_ok(), "ordinary Task must not acquire a partial Goal owner: {result:?}");
+                let identity = identity.expect("durable ordinary child turn");
+                assert_eq!(identity.goal_id, None);
+                assert_eq!(identity.goal_definition_revision, None);
+            } else if matching {
                 assert!(result.is_ok(), "child must pass durable turn admission: {result:?}");
                 let identity = identity.expect("durable child turn");
                 assert_eq!(identity.goal_id.as_deref(), Some("root-goal"));

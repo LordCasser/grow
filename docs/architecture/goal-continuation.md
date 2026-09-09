@@ -79,7 +79,7 @@ The full continuation directive is a durable Timeline message. Provider and comp
 
 A child spawned during Goal work receives an immutable `GoalView` and `SubagentOwner::Goal { goal_id }`. Descendants inherit that ownership. Goal-owned children may read `get_goal`, but lifecycle mutation tools are removed from their effective tool configuration. The primary session is the only Goal lifecycle writer.
 
-A delegated turn records the complete Goal owner pair. When the shared admission window supplies the Goal id but the child has no matching local tracker, turn admission takes the definition revision from its matching immutable `GoalContextSnapshotResource`. It never invents a revision or creates a child Goal runtime; mismatched context remains a durable-admission error. See [behavior-goal](../../openspec/specs/behavior-goal/spec.md).
+Sharing the root usage window does not make an ordinary Task child Goal-owned. Child turn inference respects the `delegated_goal` provenance stamped from its typed SubagentOwner; unowned children retain an unowned turn identity. A delegated turn records the complete Goal owner pair. When the shared admission window supplies the Goal id but the child has no matching local tracker, turn admission takes the definition revision from its matching immutable `GoalContextSnapshotResource`. It never invents a revision or creates a child Goal runtime; mismatched context remains a durable-admission error. See [behavior-goal](../../openspec/specs/behavior-goal/spec.md).
 
 The effective child tool surface remains the intersection of registered tools, Agent definition, Behavior policy, delegated capability, and user permission. Goal ownership adds an object-level restriction; it never expands capability.
 

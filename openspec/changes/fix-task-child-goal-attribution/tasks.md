@@ -1,0 +1,3 @@
+- [x] Reproduce an ordinary Task child failing under an active shared Goal window.
+- [x] Gate child Goal identity inference on actual delegated ownership.
+- [x] Verify ordinary and delegated child admission and run Shell regressions.

@@ -272,7 +272,11 @@ impl SessionActor {
             turn_identity.goal_id = Some(goal.goal_id.clone());
             turn_identity.goal_definition_revision = Some(goal.definition_revision);
         }
-        if turn_identity.goal_id.is_none() {
+        // Every child shares the budget window, including ordinary Tasks.
+        // Only actual Goal delegation confers Goal turn ownership on a child.
+        if turn_identity.goal_id.is_none()
+            && (!self.startup_hints.is_subagent || self.startup_hints.delegated_goal)
+        {
             turn_identity.goal_id = self.goal_usage_window.active_goal_id();
             if let Some(goal_id) = turn_identity.goal_id.as_deref()
                 && let Some(goal) = self
