@@ -284,6 +284,21 @@ impl SessionActor {
                 turn_identity.goal_definition_revision = Some(goal.definition_revision);
             }
         }
+        if turn_identity.goal_id.is_some() && turn_identity.goal_definition_revision.is_none() {
+            // A Goal-owned child has no local Goal tracker. Its immutable
+            // inherited view, not a guessed revision, completes the owner pair.
+            let bridge = self.agent.borrow().tool_bridge().clone();
+            if let Some(context) = bridge
+                .read_resource::<tools::implementations::grow_build::update_goal::GoalContextSnapshotResource>()
+                .await
+                .and_then(|resource| resource.0)
+                .filter(|context| {
+                    Some(context.view.goal_id.as_str()) == turn_identity.goal_id.as_deref()
+                })
+            {
+                turn_identity.goal_definition_revision = Some(context.view.definition_revision);
+            }
+        }
         if let Err(error) = self
             .events
             .start_turn(crate::session::events::Event::TurnStarted {

@@ -1,0 +1,3 @@
+- [x] Reproduce child turn admission with an empty local tracker and inherited Goal context.
+- [x] Resolve the matching immutable owner revision and retain mismatch rejection.
+- [x] Run regression and integrated Shell tests, validate and archive.
