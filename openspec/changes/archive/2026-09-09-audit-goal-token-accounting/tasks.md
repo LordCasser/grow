@@ -1,0 +1,3 @@
+- [x] Identify Goal charge basis and display ambiguity.
+- [x] Reconcile a fixed session prefix, including sidebands and failed attempts.
+- [x] Record limitations and validate the documentation change.

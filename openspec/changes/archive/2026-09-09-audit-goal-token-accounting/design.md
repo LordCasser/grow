@@ -1,0 +1,1 @@
+Inspect current Goal charge functions and reconcile fixed Timeline control deltas against completed requests, sideband results and failed-request usage. Compare screenshot arithmetic separately because provider account/model filters and capture time are not established by request-level evidence. Do not estimate missing usage or rewrite a live session.
