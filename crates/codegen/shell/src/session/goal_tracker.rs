@@ -520,7 +520,7 @@ impl GoalTracker {
         };
         if goal.goal_id != goal_id
             || !goal.usage_blocks_budget()
-            || goal.status == GoalStatus::Paused
+            || goal.status != GoalStatus::Active
         {
             return false;
         }

@@ -1,0 +1,3 @@
+Keep the same goal_id ledger, transaction and persistence pipeline. Restrict tracker pause eligibility to Active. In the actor separate whether current Active budgeted lifecycle needs enforcement from recording evidence on an already-stopped Goal; only active budget enforcement or a retry belonging to the same retiring Goal turn requests preemption. Retain active step-boundary retry enforcement and unbudgeted lower-bound semantics. No migration or automatic restart.
+
+Creation already preserves Option::None across tool, slash and implicit Goal admission. Keep that implementation; document the opt-in budget contract and verify existing unbudgeted lower-bound/admission regressions.

@@ -1,0 +1,3 @@
+- [x] Reproduce late unknown usage altering stopped lifecycle.
+- [x] Preserve stopped lifecycle while persisting late usage.
+- [x] Verify active-budget and unbudgeted regressions alongside stopped-state cases.

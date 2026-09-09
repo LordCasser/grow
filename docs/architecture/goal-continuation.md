@@ -48,6 +48,10 @@ The root session alone synchronizes the shared provider admission window from it
 
 An Active Goal cannot coexist with another special Behavior. A stopped Goal is durable thread state orthogonal to Behavior, and can be edited, restarted, re-budgeted, or cleared while Normal, Clarify, Plan, or Workflow is selected. Goal does not own the foreground between turns, so user input, cancellation, and ordinary task execution still use the single session foreground/FIFO protocol.
 
+A Goal created without an explicit token budget has no token spending limit. Creation, restore and continuation preserve `None`; unknown usage remains a lower bound and does not close unbudgeted admission. Editing an objective preserves an existing explicit budget until the user removes it.
+
+Late usage still updates the admitting Goal after it stops, but incomplete usage cannot turn Complete, Blocked or BudgetLimited into Paused or preempt unrelated foreground work. A retry belonging to the same retiring Goal turn still observes its stop boundary. See [behavior-goal](../../openspec/specs/behavior-goal/spec.md).
+
 ## Idle continuation
 
 The idle arbiter admits work in this order:
