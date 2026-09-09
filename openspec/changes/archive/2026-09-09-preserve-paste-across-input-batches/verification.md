@@ -22,7 +22,7 @@ Environment: `CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_D
 - Targeted event-loop regression: 83 passed, 0 failed before the final detection-boundary case.
 - Final `cargo test --locked --offline -p pager --lib -- --test-threads=2`: 7,156 passed, 0 failed, 10 existing ignored tests. Includes all four new cases.
 - `git diff --check`: passed.
-- Strict OpenSpec validation and archive results are recorded after completion.
+- Strict OpenSpec validation: 18 passed before archive; 17 current specs/changes and 297 archived changes passed after archive, 0 failed.
 
 ## Scope
 
