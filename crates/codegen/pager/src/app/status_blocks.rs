@@ -200,13 +200,17 @@ pub(crate) fn session_usage_block_text(
         group_thousands(t.cached_read_tokens),
     ));
     rows.push(format!(
+        "  Cache hit rate: {}",
+        cache_hit_rate(t.input_tokens, t.cached_read_tokens)
+    ));
+    rows.push(format!(
         "  Output tokens:  {} ({} reasoning)",
         group_thousands(t.output_tokens),
         group_thousands(t.reasoning_tokens),
     ));
     rows.push(format!(
         "  Total tokens:   {}",
-        group_thousands(t.total_tokens)
+        group_thousands(t.input_tokens.saturating_add(t.output_tokens))
     ));
     rows.push(format!(
         "  Model calls:    {} · API time: {}",
@@ -215,26 +219,40 @@ pub(crate) fn session_usage_block_text(
     ));
     rows.push(format!("  Cost:           {}", format_cost(t)));
 
-    if usage.model_usage.len() > 1 {
-        rows.push("  By model:".to_string());
+    if !usage.model_usage.is_empty() {
+        rows.push("  By provider/model:".to_string());
         for (model, m) in &usage.model_usage {
             rows.push(format!(
-                "    {model} — {} in / {} out · {}",
+                "    {model}
+      {} total · {} in / {} out
+      {} cached · {} cache hit · {}",
+                group_thousands(m.input_tokens.saturating_add(m.output_tokens)),
                 group_thousands(m.input_tokens),
                 group_thousands(m.output_tokens),
+                group_thousands(m.cached_read_tokens),
+                cache_hit_rate(m.input_tokens, m.cached_read_tokens),
                 format_cost(m),
             ));
         }
     }
 
     if usage.usage_is_incomplete {
-        rows.push("  Note: usage is incomplete and may under-count.".to_string());
+        rows.push("  Note: usage is incomplete and may under-count; cache-hit rates cover recorded usage only.".to_string());
     }
 
     join_header_rows(
         "Session usage (since start or last resume):".to_string(),
         rows,
     )
+}
+
+/// Cache reads are part of full input; output never belongs in this ratio.
+fn cache_hit_rate(input: u64, cached: u64) -> String {
+    if input == 0 || cached > input {
+        "N/A".into()
+    } else {
+        format!("{:.2}%", cached as f64 / input as f64 * 100.0)
+    }
 }
 
 /// Cost cell. Ticks are 1e10 per USD; partial sums are scrubbed to absent.
@@ -328,8 +346,7 @@ mod tests {
             ..Default::default()
         };
         let text = session_usage_block_text(&usage);
-        // Snapshot pins content and column alignment together; single-model
-        // sessions must skip the redundant by-model breakdown.
+        // Snapshot pins overall content and column alignment.
         insta::assert_snapshot!("session_usage_block_full", text);
     }
 
@@ -341,14 +358,66 @@ mod tests {
         };
         usage
             .model_usage
-            .insert("grow-build".into(), model_row(100, 10, None));
+            .insert("provider-a/shared-model".into(), model_row(100, 10, None));
         usage
             .model_usage
-            .insert("grow-4".into(), model_row(50, 5, None));
+            .insert("provider-b/shared-model".into(), model_row(50, 5, None));
         let text = session_usage_block_text(&usage);
-        assert!(text.contains("By model:"), "{text}");
-        assert!(text.contains("grow-build — 100 in / 10 out"), "{text}");
-        assert!(text.contains("grow-4 — 50 in / 5 out"), "{text}");
+        assert!(text.contains("By provider/model:"), "{text}");
+        assert!(
+            text.contains("provider-a/shared-model\n      110 total · 100 in / 10 out"),
+            "{text}"
+        );
+        assert!(
+            text.contains("provider-b/shared-model\n      55 total · 50 in / 5 out"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn cache_rates_use_input_weighting_and_keep_model_identity() {
+        let mut a = model_row(100, 900, None);
+        a.cached_read_tokens = 100;
+        let b = model_row(900, 100, None);
+        let mut totals = model_row(1_000, 1_000, None);
+        totals.cached_read_tokens = 100;
+        // Ignore a conflicting derived wire total; spending uses input+output.
+        totals.total_tokens = 99_999;
+        let mut usage = PromptUsage {
+            totals,
+            ..Default::default()
+        };
+        usage.model_usage.insert("provider-a/shared".into(), a);
+        let single = session_usage_block_text(&usage);
+        assert!(single.contains("provider-a/shared"));
+        assert!(single.contains("100 cached · 100.00% cache hit"));
+        usage.model_usage.insert("provider-b/shared".into(), b);
+        let text = session_usage_block_text(&usage);
+        assert!(text.contains("Cache hit rate: 10.00%"), "{text}");
+        assert!(text.contains("Total tokens:   2,000"), "{text}");
+        assert!(text.contains("0 cached · 0.00% cache hit"), "{text}");
+        usage.usage_is_incomplete = true;
+        assert!(session_usage_block_text(&usage).contains("recorded usage only"));
+    }
+
+    #[test]
+    fn cache_rates_handle_zero_invalid_and_large_counts() {
+        assert_eq!(cache_hit_rate(0, 0), "N/A");
+        assert_eq!(cache_hit_rate(0, 10), "N/A");
+        assert_eq!(cache_hit_rate(10, 11), "N/A");
+        assert_eq!(cache_hit_rate(10, 0), "0.00%");
+        assert_eq!(cache_hit_rate(u64::MAX, u64::MAX), "100.00%");
+        assert_eq!(cache_hit_rate(3, 1), "33.33%");
+        let mut usage = PromptUsage {
+            totals: model_row(0, 5, None),
+            ..Default::default()
+        };
+        usage
+            .model_usage
+            .insert("provider/output-only".into(), usage.totals.clone());
+        let text = session_usage_block_text(&usage);
+        assert!(text.contains("Cache hit rate: N/A"));
+        assert!(text.contains("0 cached · N/A cache hit"));
     }
 
     #[test]

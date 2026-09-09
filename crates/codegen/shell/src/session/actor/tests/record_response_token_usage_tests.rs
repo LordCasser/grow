@@ -43,6 +43,44 @@ fn response_without_usage() -> ConversationResponse {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn usage_keeps_selected_provider_models_separate_from_wire_aliases() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let mut response = response_with_usage(150);
+            if let ConversationItem::Assistant(item) = &mut response.items[0] {
+                item.model_id = Some("same-wire-model".into());
+            }
+            response.usage.as_mut().unwrap().cached_prompt_tokens = 80;
+            for catalog in [
+                "provider-a/shared",
+                "provider-b/shared",
+                "provider-a/shared",
+            ] {
+                actor
+                    .record_response_token_usage(&response, None, Some(catalog.into()), None, true)
+                    .await
+                    .unwrap();
+            }
+            let usage = actor
+                .chat_state_handle
+                .try_get_session_usage()
+                .await
+                .unwrap();
+            assert_eq!(usage.by_model.len(), 2);
+            assert!(!usage.by_model.contains_key("same-wire-model"));
+            assert_eq!(usage.by_model["provider-a/shared"].total_tokens(), 300);
+            assert_eq!(usage.by_model["provider-b/shared"].total_tokens(), 150);
+            assert_eq!(usage.totals.total_tokens(), 450);
+            assert_eq!(usage.totals.cached_read_tokens, 240);
+            assert_eq!(usage.totals.input_tokens, 300);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn quarantined_response_is_billed_without_restoring_its_context_anchor() {
     tokio::task::LocalSet::new()
         .run_until(async {

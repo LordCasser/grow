@@ -1,0 +1,4 @@
+- [x] Capture canonical provider/model for usage attribution.
+- [x] Display total and per-provider/model tokens and cache-hit rates.
+- [x] Verify weighted rates, zero input, incomplete usage, single/multiple models and provider identity separation.
+- [x] Update documentation, validate and archive.

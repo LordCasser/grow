@@ -1289,6 +1289,9 @@ impl SessionActor {
                 })),
             );
             let model_timer = std::time::Instant::now();
+            // Bill the selected provider/model, not a provider-returned alias.
+            // Capture before awaiting sampling so later control changes cannot reattribute it.
+            let usage_model_id = self.current_catalog_model_id();
             let (mut response, latency) = match self.run_turn_via_sampler(request.clone()).await {
                 Ok(SamplerTurnOutcome::Response(r, latency)) => (r, latency),
                 Err(error) => {
@@ -1512,7 +1515,6 @@ impl SessionActor {
             let turn_refused = stop_reason == Some(sampling_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
-            let response_model_id = response.assistant().and_then(|item| item.model_id.clone());
             let persisted_items = response.items.len();
             let response_items = std::mem::take(&mut response.items);
             let native_continuation = response.native_continuation.take();
@@ -1536,7 +1538,7 @@ impl SessionActor {
             self.record_response_token_usage(
                 &response,
                 Some(model_duration_ms),
-                response_model_id,
+                Some(usage_model_id),
                 None,
                 quarantined == 0,
             )

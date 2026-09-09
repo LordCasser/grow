@@ -161,3 +161,7 @@ budgeting and normal compaction still apply independently. See the authoritative
 An Active Goal reload restores the v9 objective, definition revision, lifecycle status, budget, settled usage, and elapsed time from the same Timeline Control snapshot as Behavior, then re-arms idle continuation. Goal owns no persisted plan, board, planner phase, or stage lease. Older Goal architectures and invalid v9 snapshots are rejected without migration instead of reviving a second lifecycle model.
 
 后台终端任务在接纳时冻结 Goal ID 与 definition revision；本地和 ACP 客户端后端均将二者一起保留到任务快照及完成通知，通知桥不为缺失版本号填默认值。见 [behavior-goal](../../openspec/specs/behavior-goal/spec.md)。
+
+### `/usage` 统计展示
+
+`/usage` 统一展示当前统计窗口的总消耗及各 `provider/model` 分项，包括输入、输出、总 token、缓存命中输入和命中率。总量包含缓存输入，命中率为缓存命中输入除以全部输入；总体命中率按累计输入加权，不平均模型百分比。无输入时显示 N/A；不完整用量下的比例仅代表已记录部分。统计窗口沿用启动或最近 resume 之后，命令标题明确标注；`/session-info` 不承载这些统计。见 [client-surfaces 规范](../../openspec/specs/client-surfaces/spec.md)。
