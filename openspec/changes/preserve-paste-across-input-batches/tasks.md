@@ -1,0 +1,4 @@
+- [x] Reproduce long unbracketed paste splitting at the input budget.
+- [x] Preserve pending paste across bounded passes and flush on idle.
+- [x] Verify full payload, single insertion, exact cap, ordinary input and event storms.
+- [x] Run Pager regressions and strict OpenSpec validation.

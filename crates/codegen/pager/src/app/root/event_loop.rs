@@ -1470,6 +1470,7 @@ pub(crate) async fn run(
     // caught; a focus report is only swallowed when its `\e` and `[I`/`[O`
     // land in the same batch.
     let mut csi_filter = crate::app::csi_filter::CsiFragmentFilter::new();
+    let mut pending_paste = Vec::new();
 
     // Swallows the fire-and-forget XTVERSION reply whenever it arrives;
     // armed only when the startup query is still unanswered.
@@ -1673,7 +1674,8 @@ pub(crate) async fn run(
             // Gating, not reordering: moving input above ACP would flip the
             // starvation direction (streaming redraws starving behind held
             // keys), and cancel/quit must stay above the firehose regardless.
-            msg = acp_rx.recv(), if input_rx.is_empty() => {
+            msg = acp_rx.recv(), if input_rx.is_empty()
+                && !pending_paste_deadline(&pending_paste).is_some_and(|at| at <= Instant::now()) => {
                 let Some(msg) = msg else { break };
                 // A continuously-ready ACP stream must not outrank an expired
                 // animation deadline. Check once before every bounded batch.
@@ -1783,13 +1785,12 @@ pub(crate) async fn run(
                 }
             }
 
-            maybe_ev = input_rx.recv() => {
-                // Terminal events arrive via the dedicated reader thread set up
-                // near the top of this function. `None` means that thread ended.
-                let Some(ev) = maybe_ev else { break };
+            ev = next_input_or_paste_idle(&mut input_rx, &pending_paste) => {
+                // None flushes an idle pending paste, or ends a closed reader.
+                if ev.is_none() && pending_paste.is_empty() { break; }
                 let result = drain_and_process(
                     ev, &mut input_rx, &mut app, &mut tasks,
-                    &mut csi_filter, &mut xt_filter,
+                    &mut csi_filter, &mut xt_filter, &mut pending_paste,
                 ).await;
                 if result.should_quit {
                     break;
@@ -2651,42 +2652,20 @@ fn normalize_input_event(timed: TimedInputEvent) -> RoutedInputEvent {
 /// processing to fix paste on terminals without bracketed paste (e.g.
 /// Windows PowerShell) and filter leaked CSI fragments (SGR mouse and focus reports).
 async fn drain_and_process(
-    first: TimedInputEvent,
+    first: Option<TimedInputEvent>,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
     app: &mut AppView,
     tasks: &mut JoinSet<TaskResult>,
     csi_filter: &mut crate::app::csi_filter::CsiFragmentFilter,
     xt_filter: &mut crate::app::xt_filter::XtversionFilter,
+    pending_paste: &mut Vec<TimedInputEvent>,
 ) -> DrainResult {
     let mut needs_draw = false;
     let mut had_resize = false;
     let mut had_non_resize_change = false;
     let mut force_repaint = false;
 
-    // Collect all immediately-available events for paste coalescing.
-    let mut raw_events = vec![first];
-    drain_immediate(&mut raw_events, input_rx, INPUT_DRAIN_BATCH_MAX);
-
-    // XTVERSION reply removal must precede paste coalescing so reply chars
-    // are never folded into a synthetic Paste.
-    if xt_filter.armed() {
-        raw_events =
-            crate::app::xt_filter::filter_with_fragment_wait(xt_filter, raw_events, input_rx).await;
-    }
-
-    // On terminals without bracketed paste, try to capture more events
-    // that may still be in transit from the input reader thread.
-    if should_extend_for_paste(&raw_events) && detect_paste(&mut raw_events, input_rx).await {
-        collect_remaining_paste(&mut raw_events, input_rx).await;
-        // The paste extension pulled more events off the channel without
-        // running them through the still-armed filter — a late or split
-        // XTVERSION reply could otherwise be folded into the paste.
-        if xt_filter.armed() {
-            raw_events =
-                crate::app::xt_filter::filter_with_fragment_wait(xt_filter, raw_events, input_rx)
-                    .await;
-        }
-    }
+    let raw_events = collect_input_batch(first, input_rx, pending_paste, xt_filter).await;
 
     let coalesced = csi_filter.filter(coalesce_rapid_keys(raw_events));
     let coalesced = coalesced
@@ -2893,6 +2872,69 @@ async fn drain_and_process(
     }
 }
 
+/// A pending paste must finish even when the user sends no next key. The
+/// absolute deadline also survives other select arms winning in the meantime.
+fn pending_paste_deadline(pending: &[TimedInputEvent]) -> Option<Instant> {
+    pending
+        .iter()
+        .rev()
+        .find(|event| is_pasteable_key_event(&event.event))
+        .map(|event| Instant::from_std(event.arrived_at) + PASTE_CONTINUE_TIMEOUT)
+}
+
+async fn next_input_or_paste_idle(
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
+    pending: &[TimedInputEvent],
+) -> Option<TimedInputEvent> {
+    match pending_paste_deadline(pending) {
+        Some(deadline) => tokio::time::timeout_at(deadline, input_rx.recv())
+            .await
+            .unwrap_or(None),
+        None => input_rx.recv().await,
+    }
+}
+
+async fn collect_input_batch(
+    first: Option<TimedInputEvent>,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
+    pending_paste: &mut Vec<TimedInputEvent>,
+    xt_filter: &mut crate::app::xt_filter::XtversionFilter,
+) -> Vec<TimedInputEvent> {
+    let continuing = !pending_paste.is_empty();
+    let received_event = first.is_some();
+    let mut raw_events = std::mem::take(pending_paste);
+    let new_start = raw_events.len();
+    raw_events.extend(first);
+    let drained = drain_immediate(&mut raw_events, input_rx, INPUT_DRAIN_BATCH_MAX);
+
+    // The idle arm flushes the saved prefix without opening another wait.
+    if continuing && !received_event && drained == 0 {
+        return raw_events;
+    }
+    let has_control = raw_events[new_start..].iter().any(ends_paste_collection);
+    if xt_filter.armed() {
+        raw_events =
+            crate::app::xt_filter::filter_with_fragment_wait(xt_filter, raw_events, input_rx).await;
+    }
+    if !has_control
+        && (continuing
+            || (should_extend_for_paste(&raw_events)
+                && detect_paste(&mut raw_events, input_rx).await))
+    {
+        let budget_exhausted = collect_remaining_paste(&mut raw_events, input_rx).await;
+        if xt_filter.armed() {
+            raw_events =
+                crate::app::xt_filter::filter_with_fragment_wait(xt_filter, raw_events, input_rx)
+                    .await;
+        }
+        if budget_exhausted {
+            *pending_paste = raw_events;
+            return Vec::new();
+        }
+    }
+    raw_events
+}
+
 // ── Paste coalescing for terminals without bracketed paste ───────────
 
 /// Timeout for the first extension round (detection).  If no event
@@ -2924,12 +2966,18 @@ async fn detect_paste(
             let prev_len = batch.len();
             batch.push(ev);
             drain_immediate(batch, input_rx, INPUT_DRAIN_BATCH_MAX);
-            batch[prev_len..]
-                .iter()
-                .any(|e| is_pasteable_key_event(&e.event))
+            !batch[prev_len..].iter().any(ends_paste_collection)
+                && batch[prev_len..]
+                    .iter()
+                    .any(|e| is_pasteable_key_event(&e.event))
         }
         _ => false,
     }
+}
+
+fn ends_paste_collection(event: &TimedInputEvent) -> bool {
+    matches!(&event.event, Event::Key(key)
+        if key.kind != KeyEventKind::Release && !is_pasteable_key_event(&event.event))
 }
 
 /// Collect remaining paste events using [`PASTE_CONTINUE_TIMEOUT`].
@@ -2938,12 +2986,18 @@ async fn detect_paste(
 async fn collect_remaining_paste(
     batch: &mut Vec<TimedInputEvent>,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
-) {
+) -> bool {
     let mut extended = 0usize;
+    let mut latest_had_text = true;
     let mut idle_deadline = Instant::now() + PASTE_CONTINUE_TIMEOUT;
     loop {
-        if extended >= PASTE_EXTEND_MAX_EVENTS || Instant::now() >= idle_deadline {
-            break;
+        if extended >= PASTE_EXTEND_MAX_EVENTS {
+            // Budget exhaustion is not a paste terminator. Non-text event
+            // storms still terminate instead of retaining input indefinitely.
+            return latest_had_text;
+        }
+        if Instant::now() >= idle_deadline {
+            return false;
         }
         match tokio::time::timeout_at(idle_deadline, input_rx.recv()).await {
             Ok(Some(ev)) => {
@@ -2952,14 +3006,19 @@ async fn collect_remaining_paste(
                 extended += 1;
                 let remaining = PASTE_EXTEND_MAX_EVENTS - extended;
                 extended += drain_immediate(batch, input_rx, remaining.min(INPUT_DRAIN_BATCH_MAX));
-                if batch[prev_len..]
+                // Control keys terminate collection so cancellation/navigation
+                // cannot be trapped behind a continuing paste stream.
+                if batch[prev_len..].iter().any(ends_paste_collection) {
+                    return false;
+                }
+                latest_had_text = batch[prev_len..]
                     .iter()
-                    .any(|e| is_pasteable_key_event(&e.event))
-                {
+                    .any(|e| is_pasteable_key_event(&e.event));
+                if latest_had_text {
                     idle_deadline = Instant::now() + PASTE_CONTINUE_TIMEOUT;
                 }
             }
-            _ => break,
+            _ => return false,
         }
     }
 }
@@ -4348,6 +4407,128 @@ mod tests {
         let result = coalesce_rapid_keys(events);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].event, Event::Paste("a\nb\nc\nd\n".to_string()));
+    }
+
+    #[tokio::test]
+    async fn large_unbracketed_paste_is_one_insertion_across_collection_budget() {
+        let payload = "fn example() {\n    // 中文注释\n\n    let value = \"text\";\n}\n".repeat(1000)
+            + "unterminated tail";
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for ch in payload.chars() {
+            tx.send(press(if ch == '\n' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(ch)
+            }))
+            .unwrap();
+        }
+        drop(tx);
+        let mut pending = Vec::new();
+        let mut filter = crate::app::xt_filter::XtversionFilter::new();
+        let mut collected = Vec::new();
+        let mut passes = 0;
+        while !rx.is_empty() || !pending.is_empty() {
+            let before = rx.len();
+            let first = next_input_or_paste_idle(&mut rx, &pending).await;
+            let batch = collect_input_batch(first, &mut rx, &mut pending, &mut filter).await;
+            assert!(before - rx.len() <= PASTE_EXTEND_MAX_EVENTS + 2 * INPUT_DRAIN_BATCH_MAX + 2);
+            collected.extend(coalesce_rapid_keys(batch));
+            passes += 1;
+        }
+        assert!(passes > 2, "exercise several bounded passes");
+        assert_eq!(collected.len(), 1);
+        let Event::Paste(text) = &collected[0].event else {
+            panic!("paste tail escaped as keys")
+        };
+        assert_eq!(text, &payload);
+        let mut prompt = crate::views::prompt_widget::PromptWidget::new();
+        prompt.handle_paste(text);
+        assert_eq!(prompt.textarea.elements().len(), 1);
+        assert_eq!(prompt.try_send(), Some(payload));
+    }
+
+    #[tokio::test]
+    async fn paste_collection_exact_budget_flushes_without_another_key() {
+        let total = PASTE_EXTEND_MAX_EVENTS + 2 * INPUT_DRAIN_BATCH_MAX + 2;
+        let payload = "x\n".repeat(total / 2);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for ch in payload.chars() {
+            tx.send(press(if ch == '\n' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(ch)
+            }))
+            .unwrap();
+        }
+        let mut pending = Vec::new();
+        let mut filter = crate::app::xt_filter::XtversionFilter::new();
+        let first = rx.recv().await;
+        assert!(
+            collect_input_batch(first, &mut rx, &mut pending, &mut filter)
+                .await
+                .is_empty()
+        );
+        assert_eq!(pending.len(), total);
+        assert!(rx.is_empty());
+        let first = tokio::time::timeout(
+            Duration::from_secs(1),
+            next_input_or_paste_idle(&mut rx, &pending),
+        )
+        .await
+        .unwrap();
+        assert!(first.is_none());
+        let batch = collect_input_batch(first, &mut rx, &mut pending, &mut filter).await;
+        assert!(pending.is_empty());
+        assert_eq!(coalesce_rapid_keys(batch)[0].event, Event::Paste(payload));
+        tx.send(press(KeyCode::Char('z'))).unwrap();
+        let first = next_input_or_paste_idle(&mut rx, &pending).await;
+        let ordinary = collect_input_batch(first, &mut rx, &mut pending, &mut filter).await;
+        assert_eq!(ordinary.len(), 1);
+        assert!(matches!(ordinary[0].event, Event::Key(_)));
+    }
+
+    #[tokio::test]
+    async fn pending_paste_preserves_control_key_at_next_batch_boundary() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..PASTE_EXTEND_MAX_EVENTS * 2 {
+            tx.send(press(KeyCode::Char('x'))).unwrap();
+        }
+        let mut pending = vec![
+            press(KeyCode::Char('a')),
+            press(KeyCode::Enter),
+            press(KeyCode::Char('b')),
+        ];
+        let control = TimedInputEvent::now(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+        let mut filter = crate::app::xt_filter::XtversionFilter::new();
+        let batch =
+            collect_input_batch(Some(control.clone()), &mut rx, &mut pending, &mut filter).await;
+        assert!(pending.is_empty());
+        assert!(
+            !rx.is_empty(),
+            "control handling must not wait for the paste tail"
+        );
+        assert!(
+            coalesce_rapid_keys(batch)
+                .iter()
+                .any(|event| event == &control)
+        );
+    }
+
+    #[tokio::test]
+    async fn paste_detection_does_not_extend_past_a_control_key() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(press(KeyCode::Char('b'))).unwrap();
+        let control = TimedInputEvent::now(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+        tx.send(control.clone()).unwrap();
+        let mut batch = vec![press(KeyCode::Char('a'))];
+        assert!(!detect_paste(&mut batch, &mut rx).await);
+        assert_eq!(batch.last(), Some(&control));
     }
 
     // ── should_extend_for_paste tests ───────────────────────────────

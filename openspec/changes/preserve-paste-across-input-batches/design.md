@@ -1,0 +1,5 @@
+Keep a pending raw-event buffer in the existing event loop. A paste extension reports whether it reached its event budget; reaching that budget yields to the main loop without committing the prefix. Subsequent passes append to that buffer. An absolute idle deadline based on the last contributing event lets the existing input select arm flush the buffer when no new event arrives. Coalescing and widget insertion happen only after collection completes. No larger event cap and no unbounded drain loop.
+
+This fixes the demonstrated batch-cap split; key streams without bracketed-paste markers still rely on an idle heuristic and cannot prove clipboard transaction identity across arbitrary delivery gaps. Existing mixed bracketed/key merging has separate ownership ambiguities and is outside this change.
+
+Control keys end the collection wait and retain their normal event order. Non-text storms do not perpetuate a pending paste. The ACP select guard yields to an expired pending-paste deadline so a continuously ready model stream cannot prevent the idle flush.

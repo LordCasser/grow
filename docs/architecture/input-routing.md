@@ -23,6 +23,10 @@ discoverability surface, not a second Behavior capability model. Tool/command
 inspection is permitted only during the bootstrap window before the first
 structured projection arrives.
 
+## Terminal paste collection
+
+Unbracketed paste arrives as key events. Pager retains a detected paste across bounded collection passes; an exhausted per-pass event budget yields to the event loop without inserting a partial chip. The existing idle deadline flushes the complete insertion even when no next event arrives. Real bracketed paste and clipboard reads retain their existing paths. This timing heuristic cannot identify a clipboard transaction across arbitrary transport gaps. See [client-surfaces](../../openspec/specs/client-surfaces/spec.md).
+
 ## Input classes
 
 所有真实 `HumanIntent` 共用一个 durable admission 入口；Pager 的 UI 动作只决定 intent，不直接决定执行：

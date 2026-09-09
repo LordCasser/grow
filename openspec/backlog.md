@@ -654,3 +654,4 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 - Pager 审计债务：Literal text matching and acceptance of PendingStatus leave the command-state and clean-exit contracts indirect.
 - Pager 审计债务：25个模块名手工维护，缺少目录与声明同步校验；集成拓扑依赖注释和 shared helper 约定。
 - Markdown 审计债务：README 与 target 的 syntect 覆盖矩阵存在漂移；fuzz target 是 crash-oriented，缺少输出差分与结构化属性检查。
+- **Bracketed paste 与后续按键归属**：preserve-paste-across-input-batches 核对发现 `coalesce_rapid_keys` 在同一 drain 同时出现 Event::Paste 和普通按键时调用 `merge_paste_fragments`，后者会合并 Enter/字符并丢弃非文本按键。现有测试把它视为 Windows 终端碎片恢复，但完整 bracketed paste 后的真实输入缺少可靠边界证据。需独立复核 Crossterm 的平台事件保证，覆盖粘贴后立即 Enter、方向键、Ctrl+C 和连续两次独立粘贴；不在本次未括号粘贴的 5,000 事件截断修复中混入平台协议重写。
