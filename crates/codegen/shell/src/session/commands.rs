@@ -370,7 +370,7 @@ pub enum SessionCommand {
     /// single accounting ingress.
     RecordGoalUsage {
         goal_id: String,
-        tokens: i64,
+        tokens: crate::session::goal_tracker::GoalTokenUsage,
         respond_to: oneshot::Sender<Result<bool, String>>,
     },
     /// Fail closed when a provider attempt admitted inside a Goal window did

@@ -1,0 +1,5 @@
+- [x] Carry categorized usage through admitted main, descendant and sideband settlements.
+- [x] Persist counters atomically with budget usage and preserve restore semantics.
+- [x] Project total, components, budget basis and incomplete historical data in Goal detail.
+- [x] Verify accumulation, cache-only calls, repeat settlement, restore and display; run relevant regressions.
+- [x] Validate and archive OpenSpec.

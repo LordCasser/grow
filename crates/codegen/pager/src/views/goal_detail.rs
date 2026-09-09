@@ -9,7 +9,37 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 
 use crate::app::session::{GoalDisplayState, GoalDisplayStatus};
 use crate::theme::Theme;
-use crate::views::agent_status::format_tokens_compact;
+
+fn usage_lines(goal: &GoalDisplayState) -> Vec<String> {
+    let historical = goal
+        .tokens_used
+        .saturating_sub(goal.usage_breakdown.total());
+    let partial = goal.usage_incomplete || historical > 0;
+    let marker = if partial { "≥" } else { "" };
+    let mut lines = vec![format!("Total tokens  {marker}{}", goal.tokens_used)];
+    let usage = goal.usage_breakdown;
+    lines.extend([
+        format!("Input (cache hit)   {marker}{}", usage.cached_input_tokens),
+        format!(
+            "Input (cache miss)  {marker}{}",
+            usage.uncached_input_tokens
+        ),
+        format!("Output              {marker}{}", usage.output_tokens),
+    ]);
+    if historical > 0 {
+        lines.push(format!(
+            "Unclassified history  ≥{historical} (categories unavailable)"
+        ));
+    }
+    if let Some(budget) = goal.token_budget {
+        lines.push(format!(
+            "Budget  {marker}{}/{} tokens",
+            goal.tokens_used, budget
+        ));
+    }
+    lines.push("Budget basis: all input + output, including cache hits".into());
+    lines
+}
 
 #[derive(Default)]
 pub(crate) struct GoalDetailRenderer {
@@ -170,22 +200,12 @@ pub(crate) fn render_goal_detail(
         Style::default().fg(theme.text_primary),
     ));
     lines.push(Line::default());
-    let lower_bound = if goal.usage_incomplete { "≥" } else { "" };
-    let usage = match goal.token_budget {
-        Some(budget) => format!(
-            "Usage  {lower_bound}{}/{} tokens",
-            format_tokens_compact(goal.tokens_used),
-            format_tokens_compact(budget)
-        ),
-        None => format!(
-            "Usage  {lower_bound}{} tokens",
-            format_tokens_compact(goal.tokens_used)
-        ),
-    };
-    lines.push(Line::from(Span::styled(
-        usage,
-        Style::default().fg(theme.gray),
-    )));
+    for usage in usage_lines(goal) {
+        lines.push(Line::from(Span::styled(
+            usage,
+            Style::default().fg(theme.gray),
+        )));
+    }
     lines.push(Line::from(Span::styled(
         format!(
             "Elapsed  {}",
@@ -284,6 +304,38 @@ pub(crate) fn truncate_to_width(input: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detail_shows_cache_inclusive_total_components_and_budget() {
+        let mut goal = GoalDisplayState::test_stub();
+        goal.tokens_used = 580;
+        goal.token_budget = Some(1_000);
+        goal.usage_breakdown = shell::session::goal_tracker::GoalTokenUsage::new(500, 200, 80);
+        let lines = usage_lines(&goal);
+        assert!(lines.contains(&"Total tokens  580".into()));
+        assert!(lines.contains(&"Input (cache hit)   200".into()));
+        assert!(lines.contains(&"Input (cache miss)  300".into()));
+        assert!(lines.contains(&"Output              80".into()));
+        assert!(lines.contains(&"Budget  580/1000 tokens".into()));
+        assert!(!lines.iter().any(|line| line.contains('≥')));
+    }
+
+    #[test]
+    fn aggregate_history_and_unknown_calls_are_not_presented_as_exact() {
+        let mut goal = GoalDisplayState::test_stub();
+        goal.tokens_used = 380;
+        let lines = usage_lines(&goal);
+        assert!(lines.contains(&"Total tokens  ≥380".into()));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("categories unavailable"))
+        );
+        assert!(lines.contains(&"Input (cache hit)   ≥0".into()));
+        goal.tokens_used = 0;
+        goal.usage_incomplete = true;
+        assert!(usage_lines(&goal).contains(&"Total tokens  ≥0".into()));
+    }
 
     #[test]
     fn goal_action_hint_only_offers_valid_lifecycle_controls() {

@@ -59,6 +59,55 @@ impl GoalPauseReason {
     }
 }
 
+/// Provider-style spending; full input (including cache hits) plus output.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoalTokenUsage {
+    pub cached_input_tokens: u64,
+    pub uncached_input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl GoalTokenUsage {
+    pub fn new(input: u64, cached: u64, output: u64) -> Self {
+        let cached = cached.min(input);
+        Self {
+            cached_input_tokens: cached,
+            uncached_input_tokens: input - cached,
+            output_tokens: output,
+        }
+    }
+
+    pub fn total(self) -> i64 {
+        i64::try_from(
+            self.cached_input_tokens
+                .saturating_add(self.uncached_input_tokens)
+                .saturating_add(self.output_tokens),
+        )
+        .unwrap_or(i64::MAX)
+    }
+
+    fn accumulate(&mut self, usage: Self) {
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(usage.cached_input_tokens);
+        self.uncached_input_tokens = self
+            .uncached_input_tokens
+            .saturating_add(usage.uncached_input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+    }
+}
+
+impl From<&chat_state::SidebandUsage> for GoalTokenUsage {
+    fn from(usage: &chat_state::SidebandUsage) -> Self {
+        Self::new(
+            usage.input_tokens,
+            usage.cache_read_tokens,
+            usage.output_tokens,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalState {
@@ -77,10 +126,14 @@ pub struct GoalState {
     pub status: GoalStatus,
     pub token_budget: Option<i64>,
     /// Durable cumulative Goal charge. This is model consumption, not the
-    /// current provider context length: uncached input plus output for every
+    /// current provider context length: full input (including cache hits) plus output for every
     /// main-loop or sideband model call in the session task tree while the
     /// Goal usage window is Active.
     pub tokens_used: i64,
+    /// None identifies aggregate-only history whose cached input and categories
+    /// were never recorded. New Goals always initialize complete counters.
+    #[serde(default)]
+    pub usage_breakdown: Option<GoalTokenUsage>,
     /// At least one provider attempt admitted while this Goal was active did
     /// not return usage. `tokens_used` is then only a durable lower bound. The
     /// gap pauses automatic continuation only when an exact token budget is
@@ -131,8 +184,16 @@ impl GoalTracker {
     /// The current Goal architecture intentionally has no compatibility projection. Old
     /// planner/blackboard snapshots are rejected instead of reviving two
     /// lifecycle models in one session.
-    pub fn from_snapshot(snapshot: GoalState) -> Option<Self> {
+    pub fn from_snapshot(mut snapshot: GoalState) -> Option<Self> {
         Self::validate_snapshot(&snapshot).ok()?;
+        if snapshot.usage_breakdown.is_none()
+            || snapshot.tokens_used > snapshot.usage_breakdown.unwrap_or_default().total()
+        {
+            // Historical scalar accounting excluded cache reads. Preserve its
+            // lower bound without inventing categories or an exact budget.
+            snapshot.usage_incomplete = true;
+            snapshot.usage_incomplete_acknowledged = false;
+        }
         let active_since = snapshot.status.continues_automatically().then(Instant::now);
         Some(Self {
             goal: Some(snapshot),
@@ -151,6 +212,7 @@ impl GoalTracker {
             || snapshot.objective.trim().is_empty()
             || snapshot.token_budget.is_some_and(|budget| budget <= 0)
             || snapshot.tokens_used < 0
+            || snapshot.usage_breakdown.unwrap_or_default().total() > snapshot.tokens_used
             || (snapshot.usage_incomplete_acknowledged
                 && (!snapshot.usage_incomplete || snapshot.token_budget.is_some()))
             || snapshot.blocked_audit.as_ref().is_some_and(|audit| {
@@ -215,6 +277,7 @@ impl GoalTracker {
             status: GoalStatus::Active,
             token_budget,
             tokens_used: 0,
+            usage_breakdown: Some(GoalTokenUsage::default()),
             usage_incomplete: false,
             usage_incomplete_acknowledged: false,
             elapsed_ms: 0,
@@ -478,8 +541,8 @@ impl GoalTracker {
     /// stable Goal id lets an already-captured charge land after the lifecycle
     /// transition that closed that window, without charging calls settled
     /// during the stopped interval.
-    pub fn account_tokens(&mut self, goal_id: &str, tokens: i64) -> bool {
-        if tokens <= 0 {
+    pub fn account_tokens(&mut self, goal_id: &str, tokens: GoalTokenUsage) -> bool {
+        if tokens.total() == 0 {
             return false;
         }
         let Some(goal) = self.goal.as_mut() else {
@@ -488,7 +551,10 @@ impl GoalTracker {
         if goal.goal_id != goal_id {
             return false;
         }
-        goal.tokens_used = goal.tokens_used.saturating_add(tokens);
+        goal.tokens_used = goal.tokens_used.saturating_add(tokens.total());
+        goal.usage_breakdown
+            .get_or_insert_default()
+            .accumulate(tokens);
         true
     }
 
@@ -528,7 +594,7 @@ impl GoalTracker {
         let goal = self.goal.as_mut().expect("Goal existed above");
         goal.status = GoalStatus::Paused;
         goal.status_message = Some(
-            "Goal paused because its token budget cannot be enforced exactly: a provider attempt did not report token usage. Usage is a lower bound. Remove the budget and restart, or clear and recreate the Goal for exact accounting."
+            "Goal paused because its token budget cannot be enforced exactly: token usage is incomplete. Usage is a lower bound. Remove the budget and restart, or clear and recreate the Goal for exact accounting."
                 .into(),
         );
         goal.blocked_audit = None;
@@ -542,14 +608,13 @@ impl GoalTracker {
     }
 }
 
-/// Codex Goal budget unit: uncached input plus output from one model call.
-/// Reasoning is already included in provider output and must not be added a
-/// second time.
-pub fn model_usage_goal_tokens(usage: &sampling_types::TokenUsage) -> i64 {
-    let uncached_input = usage
-        .prompt_tokens
-        .saturating_sub(usage.cached_prompt_tokens);
-    i64::from(uncached_input).saturating_add(i64::from(usage.completion_tokens))
+/// Full input plus output; reasoning is already included in output.
+pub fn model_usage_goal_tokens(usage: &sampling_types::TokenUsage) -> GoalTokenUsage {
+    GoalTokenUsage::new(
+        u64::from(usage.prompt_tokens),
+        u64::from(usage.cached_prompt_tokens),
+        u64::from(usage.completion_tokens),
+    )
 }
 
 fn now() -> String {
@@ -566,6 +631,79 @@ mod tests {
             .create_goal("g1".into(), "ship it".into(), Some(100), "now".into())
             .unwrap();
         tracker
+    }
+
+    #[test]
+    fn classified_usage_survives_restore_and_cache_only_calls_spend_budget() {
+        let mut tracker = tracker();
+        assert!(tracker.account_tokens("g1", GoalTokenUsage::new(500, 200, 80)));
+        let encoded = serde_json::to_value(tracker.snapshot().unwrap()).unwrap();
+        let mut restored =
+            GoalTracker::from_snapshot(serde_json::from_value(encoded).unwrap()).unwrap();
+        assert!(!restored.snapshot().unwrap().usage_incomplete);
+        assert!(restored.account_tokens("g1", GoalTokenUsage::new(420, 420, 0)));
+        assert_eq!(restored.tokens_used(), 1_000);
+        assert_eq!(
+            restored.snapshot().unwrap().usage_breakdown.unwrap(),
+            GoalTokenUsage::new(920, 620, 80)
+        );
+        assert!(!restored.account_tokens("different", GoalTokenUsage::new(100, 0, 0)));
+        assert_eq!(restored.tokens_used(), 1_000);
+    }
+
+    #[test]
+    fn historical_aggregate_remains_unclassified_and_cannot_enforce_exact_budget() {
+        for budget in [None, Some(10_000)] {
+            let mut goal = tracker().snapshot().unwrap().clone();
+            goal.token_budget = budget;
+            goal.tokens_used = 380;
+            let mut encoded = serde_json::to_value(goal).unwrap();
+            encoded.as_object_mut().unwrap().remove("usage_breakdown");
+            let mut restored =
+                GoalTracker::from_snapshot(serde_json::from_value(encoded).unwrap()).unwrap();
+            assert!(restored.snapshot().unwrap().usage_incomplete);
+            assert_eq!(
+                restored.snapshot().unwrap().usage_blocks_budget(),
+                budget.is_some()
+            );
+            assert!(restored.account_tokens("g1", GoalTokenUsage::new(500, 200, 80)));
+            let goal = restored.snapshot().unwrap();
+            assert_eq!(goal.tokens_used, 960);
+            assert_eq!(goal.usage_breakdown.unwrap_or_default().total(), 580);
+            assert_eq!(
+                goal.tokens_used - goal.usage_breakdown.unwrap_or_default().total(),
+                380
+            );
+        }
+    }
+
+    #[test]
+    fn historical_zero_is_not_proof_of_zero_cached_usage() {
+        let mut goal = tracker().snapshot().unwrap().clone();
+        goal.usage_breakdown = None;
+        let restored = GoalTracker::from_snapshot(goal).unwrap();
+        assert_eq!(restored.tokens_used(), 0);
+        assert!(restored.snapshot().unwrap().usage_incomplete);
+    }
+
+    #[test]
+    fn malformed_cache_count_and_large_usage_preserve_saturating_total() {
+        assert_eq!(
+            GoalTokenUsage::new(10, 99, 2),
+            GoalTokenUsage {
+                cached_input_tokens: 10,
+                uncached_input_tokens: 0,
+                output_tokens: 2
+            }
+        );
+        let mut tracker = tracker();
+        for _ in 0..2 {
+            assert!(
+                tracker.account_tokens("g1", GoalTokenUsage::new(u64::MAX, u64::MAX, u64::MAX))
+            );
+        }
+        assert_eq!(tracker.tokens_used(), i64::MAX);
+        assert!(GoalTracker::validate_snapshot(tracker.snapshot().unwrap()).is_ok());
     }
 
     #[test]
@@ -679,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn model_usage_is_monotonic_and_excludes_cache_reads() {
+    fn model_usage_counts_cache_reads_without_double_counting_reasoning() {
         let mut tracker = tracker();
         let usage = sampling_types::TokenUsage {
             prompt_tokens: 1_000,
@@ -690,17 +828,27 @@ mod tests {
             cache_creation_prompt_tokens: 0,
         };
         let charge = model_usage_goal_tokens(&usage);
-        assert_eq!(charge, 380);
+        assert_eq!(charge, GoalTokenUsage::new(1_000, 700, 80));
         assert!(tracker.account_tokens("g1", charge));
-        assert!(tracker.account_tokens("g1", 20));
-        assert_eq!(tracker.tokens_used(), 400);
+        assert!(tracker.account_tokens(
+            "g1",
+            crate::session::goal_tracker::GoalTokenUsage::new(20, 0, 0)
+        ));
+        assert_eq!(tracker.tokens_used(), 1_100);
+        assert_eq!(
+            tracker.snapshot().unwrap().usage_breakdown.unwrap(),
+            GoalTokenUsage::new(1_020, 700, 80)
+        );
     }
 
     #[test]
     fn admitted_owner_is_charged_even_if_goal_stops_before_settlement() {
         let mut tracker = tracker();
         assert!(tracker.pause(GoalPauseReason::User));
-        assert!(tracker.account_tokens("g1", 50));
+        assert!(tracker.account_tokens(
+            "g1",
+            crate::session::goal_tracker::GoalTokenUsage::new(50, 0, 0)
+        ));
         assert_eq!(tracker.tokens_used(), 50);
     }
 
@@ -709,7 +857,10 @@ mod tests {
         let mut tracker = tracker();
         assert!(tracker.pause(GoalPauseReason::User));
         assert!(tracker.restart());
-        assert!(tracker.account_tokens("g1", 50));
+        assert!(tracker.account_tokens(
+            "g1",
+            crate::session::goal_tracker::GoalTokenUsage::new(50, 0, 0)
+        ));
         assert_eq!(tracker.tokens_used(), 50);
     }
 
@@ -756,7 +907,10 @@ mod tests {
         assert!(tracker.revise_goal("finish safely".into(), None));
         assert_eq!(tracker.status(), Some(GoalStatus::Active));
         assert!(tracker.snapshot().unwrap().usage_incomplete);
-        assert!(tracker.account_tokens("g1", 42));
+        assert!(tracker.account_tokens(
+            "g1",
+            crate::session::goal_tracker::GoalTokenUsage::new(42, 0, 0)
+        ));
         assert_eq!(tracker.tokens_used(), 42);
         assert!(!tracker.set_token_budget(Some(100)));
         assert!(!tracker.revise_goal("install a budget".into(), Some(100)));
@@ -786,7 +940,10 @@ mod tests {
         assert!(tracker.revise_goal("ship safely".into(), Some(200)));
         assert_eq!(tracker.snapshot().unwrap().goal_id, "g1");
         assert_eq!(tracker.snapshot().unwrap().definition_revision, 2);
-        assert!(tracker.account_tokens("g1", 50));
+        assert!(tracker.account_tokens(
+            "g1",
+            crate::session::goal_tracker::GoalTokenUsage::new(50, 0, 0)
+        ));
         assert_eq!(tracker.tokens_used(), 50);
     }
 

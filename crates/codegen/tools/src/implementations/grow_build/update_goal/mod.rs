@@ -21,7 +21,9 @@ pub struct GetGoalInput {}
 pub struct CreateGoalInput {
     #[schemars(description = "The concrete long-term objective to pursue.")]
     pub objective: String,
-    #[schemars(description = "Optional positive token budget for this Goal.")]
+    #[schemars(
+        description = "Optional positive budget of full input plus output tokens, including cache-hit input. Omit unless the user explicitly requests a budget; omission means unlimited."
+    )]
     pub token_budget: Option<i64>,
 }
 
@@ -53,6 +55,7 @@ pub struct GoalView {
     pub objective: String,
     pub status: String,
     pub token_budget: Option<i64>,
+    /// Total input plus output, including cache-hit input.
     pub tokens_used: i64,
     pub usage_incomplete: bool,
     pub elapsed_ms: u64,

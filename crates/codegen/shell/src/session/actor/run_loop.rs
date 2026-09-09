@@ -1567,7 +1567,7 @@ pub(super) async fn run_session(
                         } else if matches!(result, Ok(false)) {
                             tracing::debug!(
                                 %goal_id,
-                                tokens,
+                                ?tokens,
                                 "discarded Goal usage for a retired Goal identity"
                             );
                         }

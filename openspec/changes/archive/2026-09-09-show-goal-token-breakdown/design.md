@@ -1,0 +1,10 @@
+Introduce one GoalTokenUsage value containing three counters and normalized conversions from provider and sideband usage. Carry it through existing attempt ownership, root mailbox, acknowledgment and persistence, replacing scalar charges. Fold its full input plus output total and category counters atomically; cache-only calls count toward budgets. Preserve existing ownership, duplicate settlement, evidence and rollback boundaries.
+
+The detail overlay shows total and three components, and states that budgets include cached input. Missing usage retains the existing lower-bound safety gate. Aggregate-only historical charges cannot recover cache input or categories: retain their scalar as unclassified historical usage and mark the total incomplete on runtime restore. Do not rewrite live sessions or heuristically reconstruct history. Existing incomplete-usage admission rules stop exact budget enforcement, while unbudgeted work continues. Fresh Goals have complete zero counters. Output includes reasoning; cache reads are clamped to full input so malformed provider cache counts cannot inflate totals.
+
+
+Implementation boundaries:
+- `GoalTokenUsage` normalizes full prompt input, clamps cache hits to input, and counts output once. Its total replaces the old cache-excluded scalar at every settlement entry.
+- `GoalState.usage_breakdown` is optional only to distinguish historical missing counters from an actual zero report. Fresh state initializes counters. Runtime restore marks missing categories (including historical zero scalars) or an unclassified historical gap incomplete. Existing rollback restores the exact prior snapshot.
+- `tokens_used` remains the cumulative budget counter and retains any unclassified historical lower bound; it advances atomically with the three known counters. Notifications project the counters to Goal detail. This does not modify model context, rewind history or provider transcripts.
+- No live provider request is necessary to validate arithmetic or settlement. Regression fixtures cover the actual main-loop, descendant mailbox and sideband paths.

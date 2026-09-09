@@ -1,6 +1,7 @@
 //! Small shared primitives for the Goal runtime.
 
 use super::*;
+use crate::session::goal_tracker::GoalTokenUsage;
 
 /// Process-local view of the Goal usage window shared by the root session and
 /// every descendant session it creates. Each provider call captures the active
@@ -73,7 +74,7 @@ struct GoalUsageAttemptOwner {
     /// `Some(None)` is unknown usage (an exact budget must fail closed);
     /// `Some(Some(tokens))` is the exact normalized Goal charge. The first
     /// report wins permanently.
-    settlement: Option<Option<i64>>,
+    settlement: Option<Option<GoalTokenUsage>>,
 }
 
 impl GoalUsageWindow {
@@ -292,7 +293,11 @@ impl GoalUsageWindow {
         removed
     }
 
-    pub(super) fn claim_attempt_settlement(&self, attempt_id: &str, tokens: Option<i64>) -> bool {
+    pub(super) fn claim_attempt_settlement(
+        &self,
+        attempt_id: &str,
+        tokens: Option<GoalTokenUsage>,
+    ) -> bool {
         let mut state = self.state.lock();
         let Some(attempt) = state.pending_attempts.get_mut(attempt_id) else {
             return false;
@@ -302,12 +307,15 @@ impl GoalUsageWindow {
             // (for example a strict request-capability rejection). Preserve
             // it distinctly from `None`, which means usage is unknown and
             // must close the Goal window.
-            attempt.settlement = Some(tokens.map(|tokens| tokens.max(0)));
+            attempt.settlement = Some(tokens);
         }
         true
     }
 
-    pub(super) fn attempt_settlement(&self, attempt_id: &str) -> Option<(String, Option<i64>)> {
+    pub(super) fn attempt_settlement(
+        &self,
+        attempt_id: &str,
+    ) -> Option<(String, Option<GoalTokenUsage>)> {
         let state = self.state.lock();
         let attempt = state.pending_attempts.get(attempt_id)?;
         Some((attempt.goal_id.clone(), attempt.settlement?))
@@ -354,7 +362,7 @@ impl GoalUsageWindow {
     pub(crate) async fn settle_attempt_via_root(
         &self,
         attempt_id: String,
-        tokens: Option<i64>,
+        tokens: Option<GoalTokenUsage>,
     ) -> Result<bool, String> {
         if !self.claim_attempt_settlement(&attempt_id, tokens) {
             return Ok(false);
@@ -375,7 +383,11 @@ impl GoalUsageWindow {
             .map_err(|_| "root Goal accounting acknowledgement was lost".to_owned())?
     }
 
-    pub(crate) fn settle_attempt_detached(&self, attempt_id: String, tokens: Option<i64>) {
+    pub(crate) fn settle_attempt_detached(
+        &self,
+        attempt_id: String,
+        tokens: Option<GoalTokenUsage>,
+    ) {
         // Claim synchronously before yielding to the detached acknowledgement
         // task. A subsequent admission in the same owner epoch can now see the
         // fence immediately and cannot overtake this settlement.
@@ -394,8 +406,8 @@ impl GoalUsageWindow {
     /// sideband calls). The captured Goal id is the time-window authority; the
     /// root may process the mailbox item after a pause without losing usage
     /// that was settled while the Goal was still active.
-    pub(crate) async fn submit(&self, tokens: i64) -> Result<bool, String> {
-        if tokens <= 0 {
+    pub(crate) async fn submit(&self, tokens: GoalTokenUsage) -> Result<bool, String> {
+        if tokens.total() == 0 {
             return Ok(false);
         }
         let Some(goal_id) = self.active_goal_id() else {
@@ -407,9 +419,9 @@ impl GoalUsageWindow {
     pub(crate) async fn submit_captured(
         &self,
         goal_id: String,
-        tokens: i64,
+        tokens: GoalTokenUsage,
     ) -> Result<bool, String> {
-        if tokens <= 0 {
+        if tokens.total() == 0 {
             return Ok(false);
         }
         let (respond_to, response) = tokio::sync::oneshot::channel();
@@ -502,7 +514,7 @@ impl SessionActor {
     pub(super) async fn apply_captured_goal_usage(
         &self,
         goal_id: &str,
-        tokens: i64,
+        tokens: GoalTokenUsage,
     ) -> Result<bool, String> {
         let outcome = self
             .account_captured_goal_usage(goal_id, tokens)
@@ -522,7 +534,7 @@ impl SessionActor {
     async fn account_captured_goal_usage(
         &self,
         goal_id: &str,
-        tokens: i64,
+        tokens: GoalTokenUsage,
     ) -> Result<bool, String> {
         let _transaction = self.goal_transaction_gate.lock().await;
         let Some(previous) = self.goal_tracker.lock().snapshot().cloned() else {
@@ -751,9 +763,9 @@ impl SessionActor {
     pub(super) async fn record_goal_model_usage(
         &self,
         admitted_goal_id: Option<&str>,
-        tokens: i64,
+        tokens: GoalTokenUsage,
     ) -> Result<bool, String> {
-        if tokens <= 0 {
+        if tokens.total() == 0 {
             return Ok(false);
         }
         let Some(goal_id) = admitted_goal_id else {
@@ -1706,7 +1718,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn known_usage_waits_for_the_step_budget_fence() {
+    async fn cache_only_usage_exhausts_budget_at_the_step_fence() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, _gateway_rx) = build_actor().await;
@@ -1732,11 +1744,10 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                assert!(
-                    actor
-                        .goal_usage_window
-                        .claim_attempt_settlement(&attempt_id, Some(12))
-                );
+                assert!(actor.goal_usage_window.claim_attempt_settlement(
+                    &attempt_id,
+                    Some(crate::session::goal_tracker::GoalTokenUsage::new(12, 12, 0))
+                ));
 
                 assert!(
                     actor
@@ -1813,7 +1824,7 @@ mod tests {
     async fn failed_goal_settlement_retains_attempt_and_retries_exactly_once() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                for charge in [Some(41), None] {
+                for charge in [Some(GoalTokenUsage::new(35, 20, 6)), None] {
                     let (mut actor, _gateway_rx) = build_actor().await;
                     actor
                         .goal_tracker
@@ -1849,6 +1860,15 @@ mod tests {
                             .is_err()
                     );
                     assert_eq!(actor.goal_tracker.lock().tokens_used(), 0);
+                    assert_eq!(
+                        actor
+                            .goal_tracker
+                            .lock()
+                            .snapshot()
+                            .unwrap()
+                            .usage_breakdown.unwrap_or_default(),
+                        GoalTokenUsage::default()
+                    );
                     assert!(
                         !actor
                             .goal_tracker
@@ -1900,8 +1920,9 @@ mod tests {
                         .unwrap();
                     let goal: crate::session::goal_tracker::GoalState =
                         serde_json::from_value(durable).unwrap();
-                    assert_eq!(goal.tokens_used, charge.unwrap_or(0));
+                    assert_eq!(goal.tokens_used, charge.unwrap_or_default().total());
                     assert_eq!(goal.usage_incomplete, charge.is_none());
+                    assert_eq!(goal.usage_breakdown.unwrap_or_default(), charge.unwrap_or_default());
                     assert!(
                         actor
                             .goal_usage_window
@@ -2049,7 +2070,11 @@ mod tests {
                     // Unknown usage can recur before or between provider
                     // attempts. Every lease must settle, without closing an
                     // unbudgeted Goal's retry/continuation admission.
-                    for charge in [None, None, Some(42)] {
+                    for charge in [
+                        None,
+                        None,
+                        Some(crate::session::goal_tracker::GoalTokenUsage::new(42, 0, 0)),
+                    ] {
                         let attempt = actor
                             .goal_usage_window
                             .begin_model_attempt(&owner, 0, Some("goal-1"))
@@ -2305,34 +2330,55 @@ mod tests {
 
         let submitted = tokio::spawn({
             let window = window.clone();
-            async move { window.submit(30).await }
+            async move {
+                window
+                    .submit(crate::session::goal_tracker::GoalTokenUsage::new(30, 0, 0))
+                    .await
+            }
         });
         let respond_to = match rx.recv().await.expect("usage command") {
             crate::session::commands::SessionCommand::RecordGoalUsage {
                 goal_id,
-                tokens: 30,
+                tokens,
                 respond_to,
-            } if goal_id == "goal-1" => respond_to,
+            } if goal_id == "goal-1"
+                && tokens == crate::session::goal_tracker::GoalTokenUsage::new(30, 0, 0) =>
+            {
+                respond_to
+            }
             _ => panic!("unexpected Goal usage command"),
         };
         let _ = respond_to.send(Ok(true));
         assert!(submitted.await.unwrap().unwrap());
 
         window.sync(None);
-        assert!(!window.submit(40).await.unwrap());
+        assert!(
+            !window
+                .submit(crate::session::goal_tracker::GoalTokenUsage::new(40, 0, 0))
+                .await
+                .unwrap()
+        );
         assert!(rx.try_recv().is_err(), "paused usage must not be emitted");
 
         window.sync(Some("goal-1".into()));
         let submitted = tokio::spawn({
             let window = window.clone();
-            async move { window.submit(50).await }
+            async move {
+                window
+                    .submit(crate::session::goal_tracker::GoalTokenUsage::new(50, 0, 0))
+                    .await
+            }
         });
         let respond_to = match rx.recv().await.expect("usage command") {
             crate::session::commands::SessionCommand::RecordGoalUsage {
                 goal_id,
-                tokens: 50,
+                tokens,
                 respond_to,
-            } if goal_id == "goal-1" => respond_to,
+            } if goal_id == "goal-1"
+                && tokens == crate::session::goal_tracker::GoalTokenUsage::new(50, 0, 0) =>
+            {
+                respond_to
+            }
             _ => panic!("unexpected Goal usage command"),
         };
         let _ = respond_to.send(Ok(true));
@@ -2370,7 +2416,10 @@ mod tests {
             let window = window.clone();
             async move {
                 window
-                    .settle_attempt_via_root(settlement_attempt_id, Some(17))
+                    .settle_attempt_via_root(
+                        settlement_attempt_id,
+                        Some(crate::session::goal_tracker::GoalTokenUsage::new(17, 0, 0)),
+                    )
                     .await
             }
         });
@@ -2383,7 +2432,10 @@ mod tests {
         };
         assert_eq!(
             window.attempt_settlement(&attempt_id),
-            Some(("goal-1".into(), Some(17)))
+            Some((
+                "goal-1".into(),
+                Some(crate::session::goal_tracker::GoalTokenUsage::new(17, 0, 0))
+            ))
         );
         window.finish_attempt(&attempt_id);
         respond_to.send(Ok(true)).unwrap();
@@ -2497,7 +2549,10 @@ mod tests {
                     0
                 }
                 "settlement" => {
-                    assert!(window.claim_attempt_settlement(&attempt, Some(42)));
+                    assert!(window.claim_attempt_settlement(
+                        &attempt,
+                        Some(crate::session::goal_tracker::GoalTokenUsage::new(42, 0, 0))
+                    ));
                     0
                 }
                 _ => unreachable!(),
@@ -2574,7 +2629,9 @@ mod tests {
 
         assert!(rx.recv().await.is_none());
         assert_eq!(
-            window.submit(10).await,
+            window
+                .submit(crate::session::goal_tracker::GoalTokenUsage::new(10, 0, 0))
+                .await,
             Err("root Goal accounting actor is unavailable".into())
         );
     }
@@ -2697,14 +2754,20 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(window.claim_attempt_settlement(&known, Some(73)));
+        assert!(window.claim_attempt_settlement(
+            &known,
+            Some(crate::session::goal_tracker::GoalTokenUsage::new(73, 0, 0))
+        ));
 
         let claimed = window.close_and_claim_pending_for_shutdown();
         assert!(claimed.contains(&known));
         assert!(claimed.contains(&unknown));
         assert_eq!(
             window.attempt_settlement(&known),
-            Some(("goal-1".into(), Some(73)))
+            Some((
+                "goal-1".into(),
+                Some(crate::session::goal_tracker::GoalTokenUsage::new(73, 0, 0))
+            ))
         );
         assert_eq!(
             window.attempt_settlement(&unknown),

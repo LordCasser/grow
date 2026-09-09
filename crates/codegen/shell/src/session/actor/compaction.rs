@@ -2926,7 +2926,7 @@ mod context_recall_tests {
                     .lock()
                     .select_behavior(tool_types::BehaviorId::Goal);
                 actor.sync_goal_usage_window();
-                actor.apply_captured_goal_usage("goal-1", 90).await.unwrap();
+                actor.apply_captured_goal_usage("goal-1", crate::session::goal_tracker::GoalTokenUsage::new(90, 0, 0)).await.unwrap();
                 actor
                     .chat_state_handle
                     .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
@@ -2974,9 +2974,10 @@ mod context_recall_tests {
                     .await
                     .unwrap()
                     .unwrap();
-                actor
-                    .goal_usage_window
-                    .claim_attempt_settlement(&attempt, Some(10));
+                actor.goal_usage_window.claim_attempt_settlement(
+                    &attempt,
+                    Some(crate::session::goal_tracker::GoalTokenUsage::new(10, 0, 0)),
+                );
                 let error = actor
                     .settle_claimed_goal_usage_attempt(&attempt)
                     .await

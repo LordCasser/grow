@@ -381,8 +381,9 @@ pub struct GoalDisplayState {
     pub status: GoalDisplayStatus,
     pub token_budget: Option<i64>,
     pub tokens_used: i64,
-    /// `tokens_used` is a lower bound because at least one admitted provider
-    /// attempt returned no usage. Shell pauses the Goal while this is true.
+    pub usage_breakdown: shell::session::goal_tracker::GoalTokenUsage,
+    /// Missing provider usage or aggregate-only history makes usage a lower
+    /// bound. Only an explicit budget prevents automatic continuation.
     pub usage_incomplete: bool,
     pub elapsed_ms: u64,
     pub created_at: String,
@@ -422,6 +423,7 @@ impl GoalDisplayState {
             status: GoalDisplayStatus::Active,
             token_budget: None,
             tokens_used: 0,
+            usage_breakdown: Default::default(),
             usage_incomplete: false,
             elapsed_ms: 0,
             created_at: "now".into(),

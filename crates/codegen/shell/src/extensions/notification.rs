@@ -1021,6 +1021,8 @@ pub enum SessionUpdate {
         #[serde(default)]
         tokens_used: i64,
         #[serde(default)]
+        usage_breakdown: crate::session::goal_tracker::GoalTokenUsage,
+        #[serde(default)]
         usage_incomplete: bool,
         elapsed_ms: u64,
         created_at: String,
@@ -1578,6 +1580,7 @@ mod tests {
             status: "active".into(),
             token_budget: Some(100_000),
             tokens_used: 25_000,
+            usage_breakdown: Default::default(),
             usage_incomplete: false,
             elapsed_ms: 5_000,
             created_at: "2026-01-01T00:00:00Z".into(),

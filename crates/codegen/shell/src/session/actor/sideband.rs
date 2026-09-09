@@ -1,5 +1,6 @@
 //! Durable sideband lifecycle shared by every auxiliary model call.
 
+use crate::session::goal_tracker::GoalTokenUsage;
 use sampling_types::{ConversationRequest, ConversationResponse};
 
 use crate::session::SessionActor;
@@ -242,12 +243,12 @@ impl SidebandRun {
         Ok(())
     }
 
-    fn usage_after_evidence_gate(&self, tokens: Option<i64>) -> Option<i64> {
+    fn usage_after_evidence_gate(&self, tokens: Option<GoalTokenUsage>) -> Option<GoalTokenUsage> {
         tokens.or_else(|| {
             self.evidence
                 .as_ref()
                 .filter(|evidence| !evidence.was_dispatched())
-                .map(|_| 0)
+                .map(|_| GoalTokenUsage::default())
         })
     }
 
@@ -268,7 +269,7 @@ impl SidebandRun {
     /// settlement; a successful acknowledgement disarms that fallback.
     pub(crate) async fn settle_goal_attempt(
         &mut self,
-        tokens: Option<i64>,
+        tokens: Option<GoalTokenUsage>,
     ) -> Result<(), SidebandRunError> {
         let Some(attempt_id) = self.admitted_attempt_id.clone() else {
             return Ok(());
@@ -283,7 +284,7 @@ impl SidebandRun {
         Ok(())
     }
 
-    fn claim_goal_attempt(&mut self, tokens: Option<i64>) -> Option<String> {
+    fn claim_goal_attempt(&mut self, tokens: Option<GoalTokenUsage>) -> Option<String> {
         let attempt_id = self.admitted_attempt_id.clone()?;
         if !self
             .goal_usage_window
@@ -654,7 +655,7 @@ impl SessionActor {
     async fn settle_sideband_attempt(
         &self,
         run: &mut SidebandRun,
-        tokens: Option<i64>,
+        tokens: Option<GoalTokenUsage>,
     ) -> Result<(), SidebandRunError> {
         if self.startup_hints.is_subagent {
             return run.settle_goal_attempt(tokens).await;
@@ -750,9 +751,8 @@ impl Drop for SidebandRun {
     }
 }
 
-fn sideband_goal_tokens(usage: &chat_state::SidebandUsage) -> i64 {
-    let uncached_input = usage.input_tokens.saturating_sub(usage.cache_read_tokens);
-    i64::try_from(uncached_input.saturating_add(usage.output_tokens)).unwrap_or(i64::MAX)
+fn sideband_goal_tokens(usage: &chat_state::SidebandUsage) -> GoalTokenUsage {
+    GoalTokenUsage::from(usage)
 }
 
 fn output_constraint_matches(
@@ -1380,10 +1380,12 @@ mod tests {
                 run.goal_usage_window = window.clone();
                 run.admitted_attempt_id = Some(attempt_id.clone());
 
-                let settlement =
-                    tokio::task::spawn_local(
-                        async move { run.settle_goal_attempt(Some(80)).await },
-                    );
+                let settlement = tokio::task::spawn_local(async move {
+                    run.settle_goal_attempt(Some(
+                        crate::session::goal_tracker::GoalTokenUsage::new(80, 0, 0),
+                    ))
+                    .await
+                });
                 let first = goal_rx.recv().await.expect("known-usage settlement");
                 let crate::session::commands::SessionCommand::SettleGoalUsageAttempt {
                     attempt_id: first_attempt_id,
@@ -1395,7 +1397,7 @@ mod tests {
                 assert_eq!(first_attempt_id, attempt_id);
                 assert_eq!(
                     window.attempt_settlement(&attempt_id),
-                    Some(("goal-1".into(), Some(80)))
+                    Some(("goal-1".into(), Some(GoalTokenUsage::new(80, 0, 0))))
                 );
                 settlement.abort();
                 assert!(settlement.await.unwrap_err().is_cancelled());
@@ -1416,7 +1418,7 @@ mod tests {
                 assert_eq!(second_attempt_id, attempt_id);
                 assert_eq!(
                     window.attempt_settlement(&attempt_id),
-                    Some(("goal-1".into(), Some(80)))
+                    Some(("goal-1".into(), Some(GoalTokenUsage::new(80, 0, 0))))
                 );
                 window.finish_attempt(&attempt_id);
                 respond_to.send(Ok(true)).unwrap();
@@ -1473,7 +1475,8 @@ mod tests {
                 .expect("root Sideband settlement must reach the lifecycle authority")
                 .unwrap();
 
-                assert_eq!(actor.goal_tokens_used(), 80);
+                assert_eq!(actor.goal_tokens_used(), 120);
+                assert_eq!(actor.goal_tracker.lock().snapshot().unwrap().usage_breakdown.unwrap_or_default(), GoalTokenUsage::new(100, 40, 20));
             })
             .await;
     }

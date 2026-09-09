@@ -178,7 +178,7 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 .record_response_token_usage(&first, None, None, Some("goal-1"), true)
                 .await
                 .unwrap();
-            assert_eq!(actor.goal_tokens_used(), 380);
+            assert_eq!(actor.goal_tokens_used(), 1_080);
 
             let mut after_compaction = response_with_usage(400);
             after_compaction.usage = Some(TokenUsage {
@@ -195,7 +195,8 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 .unwrap();
 
             assert_eq!(actor.chat_state_handle.get_projected_tokens().await, 400);
-            assert_eq!(actor.goal_tokens_used(), 480);
+            assert_eq!(actor.goal_tokens_used(), 1_480);
+            assert_eq!(actor.goal_tracker.lock().snapshot().unwrap().usage_breakdown.unwrap_or_default(), crate::session::goal_tracker::GoalTokenUsage::new(1_350, 1_000, 130));
         })
         .await;
 }
@@ -236,9 +237,9 @@ async fn descendant_model_usage_is_submitted_to_the_root_goal_window() {
             let respond_to = match command {
                 crate::session::commands::SessionCommand::RecordGoalUsage {
                     goal_id,
-                    tokens: 380,
+                    tokens,
                     respond_to,
-                } if goal_id == "goal-1" => respond_to,
+                } if goal_id == "goal-1" && tokens == crate::session::goal_tracker::GoalTokenUsage::new(1_000, 700, 80) => respond_to,
                 _ => panic!("unexpected Goal usage command"),
             };
             let _ = respond_to.send(Ok(true));

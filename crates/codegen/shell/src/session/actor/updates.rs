@@ -1520,7 +1520,10 @@ mod grow_event_id_stamping_tests {
                     .select_behavior(tool_types::BehaviorId::Goal);
                 actor.sync_goal_usage_window();
                 actor
-                    .record_goal_model_usage(Some("goal-1"), 380)
+                    .record_goal_model_usage(
+                        Some("goal-1"),
+                        crate::session::goal_tracker::GoalTokenUsage::new(380, 0, 0),
+                    )
                     .await
                     .unwrap();
                 assert_eq!(actor.goal_tokens_used(), 380);
@@ -1532,13 +1535,22 @@ mod grow_event_id_stamping_tests {
                         .pause(crate::session::goal_tracker::GoalPauseReason::User)
                 );
                 actor.sync_goal_usage_window();
-                actor.record_goal_model_usage(None, 120).await.unwrap();
+                actor
+                    .record_goal_model_usage(
+                        None,
+                        crate::session::goal_tracker::GoalTokenUsage::new(120, 0, 0),
+                    )
+                    .await
+                    .unwrap();
                 assert_eq!(actor.goal_tokens_used(), 380);
 
                 assert!(actor.goal_tracker.lock().restart());
                 actor.sync_goal_usage_window();
                 actor
-                    .record_goal_model_usage(Some("goal-1"), 25)
+                    .record_goal_model_usage(
+                        Some("goal-1"),
+                        crate::session::goal_tracker::GoalTokenUsage::new(25, 0, 0),
+                    )
                     .await
                     .unwrap();
                 assert_eq!(actor.goal_tokens_used(), 405);
