@@ -28,5 +28,5 @@ The local mock HTTP/SSE regression reproduced a completed malformed function cal
 
 Final `cargo test --locked --offline -p sampler --tests -- --test-threads=2` with the same environment: 220 unit tests and 33 integration tests passed, 0 failed. This includes the added unknown-usage scenario (Incomplete settlement, then successful resampling), plus existing fatal generic serialization and transport-after-output fences.
 
-Unique affected coverage: 4,282 passed, 0 failed, 3 ignored. No live provider run was needed: the mock uses the incident's malformed-argument shape deterministically. Post-archive validation is recorded after archiving.
+Unique affected coverage: 4,282 passed, 0 failed, 3 ignored. No live provider run was needed: the mock uses the incident's malformed-argument shape deterministically. Post-archive validation passed: 17 current specs/changes and 296 archived changes, 0 failed.
 
