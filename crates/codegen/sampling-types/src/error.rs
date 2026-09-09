@@ -158,6 +158,9 @@ pub enum SamplingError {
     Http(reqwest::Error),
     #[error("{prefix}{0}", prefix = SERIALIZATION_DISPLAY_PREFIX)]
     Serialization(serde_json::Error),
+    /// Completed model output with invalid tool JSON; discard the whole sample.
+    #[error("model returned invalid tool arguments: {0}")]
+    InvalidToolArguments(String),
     #[error("API error (status {status}): {message}")]
     Api {
         status: StatusCode,
@@ -337,6 +340,7 @@ impl SamplingError {
             SamplingError::InvalidConfiguration(_) | SamplingError::Persistence(_) => false,
             SamplingError::Http(err) => is_retryable_reqwest(err),
             SamplingError::Serialization(_) => false,
+            SamplingError::InvalidToolArguments(_) => true,
             SamplingError::Api { status, .. } => {
                 matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520 | 529)
             }

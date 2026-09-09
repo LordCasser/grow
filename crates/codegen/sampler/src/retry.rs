@@ -47,6 +47,9 @@ pub const RATE_LIMIT_RETRY_THRESHOLD: u32 = 2;
 /// 5-15 are flat at ~30s each (≈ 5.5 min).
 pub const DEFAULT_MAX_RETRIES: u32 = 15;
 
+/// Total attempts allowed when a completed model sample has invalid tool JSON.
+pub(crate) const INVALID_TOOL_ARGUMENTS_MAX_ATTEMPTS: u32 = 3;
+
 /// Resolve max API retries from an optional env override, model config,
 /// or default ([`DEFAULT_MAX_RETRIES`]).
 pub(crate) fn resolve_max_retries_with_env(
@@ -178,6 +181,19 @@ pub fn classify_error(
         };
     }
 
+    // A completed malformed sample is stochastic. Resample without rebuilding
+    // a healthy transport, with a small cap shared with ordinary retries.
+    if matches!(err, SamplingError::InvalidToolArguments(_)) {
+        let next_attempt = retry_count.saturating_add(1);
+        return if next_attempt >= max_retries.min(INVALID_TOOL_ARGUMENTS_MAX_ATTEMPTS) {
+            RetryDecision::Fatal(clone_error(err))
+        } else {
+            RetryDecision::Retry {
+                backoff: retry_backoff_with_jitter(next_attempt),
+            }
+        };
+    }
+
     // Rate-limited (429): cap retries at the rate-limit threshold to
     // avoid burning long waits.
     if err.is_rate_limited() {
@@ -272,6 +288,9 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 retry_prefix, detail_str
             )
         }
+        SamplingError::InvalidToolArguments(_) => format!(
+            "{retry_prefix}Model returned invalid tool arguments; the response was discarded."
+        ),
         SamplingError::Serialization(e) => {
             format!(
                 "{}Failed to parse API response at line {} column {}: {}. This indicates an unexpected response format from the server.",
@@ -363,6 +382,9 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
             // as an EventStreamError (the closest retryable transport
             // variant) so callers see an equivalent description.
             SamplingError::EventStreamError(e.to_string())
+        }
+        SamplingError::InvalidToolArguments(message) => {
+            SamplingError::InvalidToolArguments(message.clone())
         }
         SamplingError::Serialization(e) => {
             // serde_json::Error is not Clone; its Display already carries the

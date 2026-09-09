@@ -173,6 +173,7 @@ pub enum SamplingErrorKind {
     Http,
     Api,
     Serialization,
+    InvalidToolArguments,
     IdleTimeout,
     RateLimited,
     EmptyResponse,
@@ -192,6 +193,7 @@ impl SamplingErrorKind {
             SamplingErrorKind::Http => "http",
             SamplingErrorKind::Api => "api",
             SamplingErrorKind::Serialization => "serialization",
+            SamplingErrorKind::InvalidToolArguments => "invalid_tool_arguments",
             SamplingErrorKind::IdleTimeout => "idle_timeout",
             SamplingErrorKind::RateLimited => "rate_limited",
             SamplingErrorKind::EmptyResponse => "empty_response",
@@ -211,6 +213,9 @@ impl From<&SamplingError> for SamplingErrorInfo {
             SamplingError::Persistence(_) => (SamplingErrorKind::Persistence, None, None, None),
             SamplingError::Http(_) => (SamplingErrorKind::Http, None, None, None),
             SamplingError::Serialization(_) => (SamplingErrorKind::Serialization, None, None, None),
+            SamplingError::InvalidToolArguments(_) => {
+                (SamplingErrorKind::InvalidToolArguments, None, None, None)
+            }
             SamplingError::Api {
                 status,
                 model_metadata,
@@ -295,6 +300,12 @@ pub(crate) fn sampling_error_from_info(info: &SamplingErrorInfo) -> SamplingErro
         SamplingErrorKind::Serialization => {
             SamplingError::serialization_from_rendered(&info.message)
         }
+        SamplingErrorKind::InvalidToolArguments => SamplingError::InvalidToolArguments(
+            info.message
+                .strip_prefix("model returned invalid tool arguments: ")
+                .unwrap_or(&info.message)
+                .to_owned(),
+        ),
         SamplingErrorKind::Http => SamplingError::EventStreamError(info.message.clone()),
         SamplingErrorKind::Api | SamplingErrorKind::RateLimited => SamplingError::Api {
             status: info
@@ -321,6 +332,20 @@ pub(crate) fn sampling_error_from_info(info: &SamplingErrorInfo) -> SamplingErro
 mod tests {
     use super::*;
     use reqwest::StatusCode;
+
+    #[test]
+    fn invalid_tool_arguments_survive_serialized_error_boundary() {
+        let original = SamplingError::InvalidToolArguments(
+            "Responses output index 2 contains invalid JSON".into(),
+        );
+        let info: SamplingErrorInfo =
+            serde_json::from_value(serde_json::to_value(SamplingErrorInfo::from(&original)).unwrap())
+                .unwrap();
+        let restored = sampling_error_from_info(&info);
+        assert!(matches!(restored, SamplingError::InvalidToolArguments(_)));
+        assert!(restored.is_retryable());
+        assert_eq!(restored.to_string(), original.to_string());
+    }
 
     #[test]
     fn auth_variant_classified_as_auth() {

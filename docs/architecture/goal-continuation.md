@@ -95,6 +95,8 @@ The Goal detail overlay is a read-only projection of that same state. It contain
 
 ## Recovery invariants
 
+Completed Responses output with invalid tool JSON is discarded and resampled before the turn can fail. This uses the sampler's existing retry, evidence and usage settlement path, with at most three attempts (or a lower configured cap). Preview output does not authorize tool execution; only validated completion admits calls and native continuation. Recovery emits Retrying diagnostics while the TUI keeps its normal running activity and Goal remains active. Cancellation, admission closure and persistence failures stop recovery, and exhaustion follows the normal Goal pause path. Generic serialization and inconsistent identities remain terminal. See [model-sampling](../../openspec/specs/model-sampling/spec.md).
+
 - Active reloads re-arm idle continuation; stopped statuses remain stopped and restore with Normal unless another orthogonal Behavior is already selected.
 - The Goal runtime requires `create_goal`, `get_goal`, `update_goal`, and
   `todo_write`. A missing required tool pauses an Active Goal with an actionable

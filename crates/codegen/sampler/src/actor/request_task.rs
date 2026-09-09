@@ -440,6 +440,14 @@ pub(crate) async fn run_request_task(
                     handle_cancellation(&event_tx, &request_id, &mut completion_tx);
                     return request_id;
                 }
+                // Preview deltas never admit tools. A completed malformed sample
+                // can be discarded even when preview output was observed.
+                let effective_max_retries =
+                    if matches!(error, SamplingError::InvalidToolArguments(_)) {
+                        max_retries.min(retry_mod::INVALID_TOOL_ARGUMENTS_MAX_ATTEMPTS)
+                    } else {
+                        effective_max_retries
+                    };
                 if !apply_retry_decision(
                     &error,
                     &mut retry_count,
@@ -1194,6 +1202,195 @@ fn send_completion(
 mod tests {
     use super::*;
     use futures_util::stream;
+
+    #[tokio::test]
+    async fn malformed_completed_tool_arguments_recover_with_bounded_accounted_attempts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for mode in [
+            "recover",
+            "unknown_usage",
+            "exhaust",
+            "lower_cap",
+            "disabled",
+            "persistence",
+            "usage_failure",
+            "cancel",
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = requests.clone();
+            let server = tokio::spawn(async move {
+                let mut first_input = None;
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    let mut request = Vec::new();
+                    let mut buf = [0; 4096];
+                    loop {
+                        let n = socket.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buf[..n]);
+                        if let Some(end) = request.windows(4).position(|b| b == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                            let len: usize = headers
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .unwrap()
+                                .trim()
+                                .parse()
+                                .unwrap();
+                            if request.len() >= end + 4 + len {
+                                let body: serde_json::Value =
+                                    serde_json::from_slice(&request[end + 4..end + 4 + len]).unwrap();
+                                let input = body["input"].clone();
+                                if let Some(first) = &first_input {
+                                    assert_eq!(first, &input, "retry must preserve last valid input");
+                                } else {
+                                    first_input = Some(input);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    let arguments = if matches!(mode, "recover" | "unknown_usage") && attempt > 0 {
+                        "{}"
+                    } else {
+                        "{\"description\":: "
+                    };
+                    let item = serde_json::json!({"type":"function_call", "id":"fc_1", "call_id":"call_1", "name":"test_tool", "arguments":arguments, "status":"completed"});
+                    let added = serde_json::json!({"type":"response.output_item.added", "sequence_number":0, "output_index":0,
+                        "item":{"type":"function_call", "id":"fc_1", "call_id":"call_1", "name":"test_tool", "arguments":"", "status":"in_progress"}});
+                    let mut completed = serde_json::json!({"type":"response.completed", "sequence_number":1,
+                        "response":{"id":"resp_1", "object":"response", "created_at":0, "model":"test-model", "status":"completed", "output":[item],
+                        "usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":0},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":14}}});
+                    if mode == "unknown_usage" && attempt == 0 {
+                        completed["response"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("usage");
+                    }
+                    let body = format!("data: {added}\n\ndata: {completed}\n\n");
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                }
+            });
+            let charges = Arc::new(Mutex::new(Vec::new()));
+            let charges_sink = charges.clone();
+            let usage_sink: AttemptUsageSink = Arc::new(move |usage| {
+                charges_sink.lock().unwrap().push(usage);
+                Box::pin(async move {
+                    if mode == "usage_failure" {
+                        Err("usage settlement failed".into())
+                    } else {
+                        Ok(())
+                    }
+                })
+            });
+            let cancel = CancellationToken::new();
+            let cancel_sink = cancel.clone();
+            let settled = charges.clone();
+            let evidence: crate::audit::EvidenceSink = Arc::new(move |record| {
+                let cancel = cancel_sink.clone();
+                let settled = settled.clone();
+                Box::pin(async move {
+                    if record.kind == "retry" {
+                        assert!(
+                            !settled.lock().unwrap().is_empty(),
+                            "usage must settle before retry"
+                        );
+                        if mode == "persistence" {
+                            return Err("retry evidence failed".into());
+                        }
+                        if mode == "cancel" {
+                            cancel.cancel();
+                        }
+                    }
+                    Ok(())
+                })
+            });
+            let (event_tx, mut events) = mpsc::unbounded_channel();
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                run_request_task(
+                    RequestId::from("malformed-tool"),
+                    ConversationRequest::default(),
+                    SamplerConfig {
+                        api_backend: ApiBackend::Responses,
+                        base_url: format!("http://{address}"),
+                        model: "test-model".into(),
+                        max_retries: Some(match mode {
+                            "disabled" => 0,
+                            "lower_cap" => 2,
+                            _ => 8,
+                        }),
+                        ..Default::default()
+                    },
+                    RetryPolicy {
+                        retry_only_before_output: true,
+                        ..Default::default()
+                    },
+                    event_tx,
+                    cancel,
+                    None,
+                    None,
+                    Some(usage_sink),
+                    Some(evidence),
+                ),
+            )
+            .await
+            .expect("bounded malformed-output recovery");
+            server.abort();
+            let mut collected = Vec::new();
+            while let Some(event) = events.recv().await {
+                collected.push(event);
+            }
+            let expected = match mode {
+                "recover" | "unknown_usage" | "lower_cap" => 2,
+                "exhaust" => 3,
+                _ => 1,
+            };
+            assert_eq!(
+                requests.load(Ordering::SeqCst),
+                expected,
+                "{mode}: {collected:?}"
+            );
+            assert_eq!(charges.lock().unwrap().len(), expected);
+            for (index, charge) in charges.lock().unwrap().iter().enumerate() {
+                if mode == "unknown_usage" && index == 0 {
+                    assert!(matches!(charge, AttemptUsage::Incomplete { .. }));
+                } else {
+                    assert!(
+                        matches!(charge, AttemptUsage::Known { usage, .. } if usage.total_tokens == 14)
+                    );
+                }
+            }
+            let completions: Vec<_> = collected
+                .iter()
+                .filter_map(|event| match event {
+                    SamplingEvent::Completed { response, .. } => Some(response),
+                    _ => None,
+                })
+                .collect();
+            if matches!(mode, "recover" | "unknown_usage") {
+                assert!(
+                    collected
+                        .iter()
+                        .any(|event| matches!(event, SamplingEvent::Retrying { .. }))
+                );
+                assert_eq!(completions.len(), 1);
+                assert_eq!(completions[0].tool_calls()[0].arguments.as_ref(), "{}");
+                assert!(
+                    !collected
+                        .iter()
+                        .any(|e| matches!(e, SamplingEvent::Failed { .. }))
+                );
+            } else {
+                assert!(completions.is_empty(), "bad calls must never be admitted");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn attempt_scope_capture_is_evaluated_once_per_attempt() {

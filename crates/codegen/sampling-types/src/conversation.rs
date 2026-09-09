@@ -2788,6 +2788,7 @@ pub fn response_to_conversation_items(
     // Preserve completion evidence until this boundary. Once converted to a
     // ToolCall the status is gone and downstream may schedule it. Reject the
     // entire response rather than selectively executing ambiguous siblings.
+    let mut invalid_arguments = None;
     for (index, item) in response.output.iter().enumerate() {
         let rs::OutputItem::FunctionCall(call) = item else {
             continue;
@@ -2800,13 +2801,21 @@ pub fn response_to_conversation_items(
             None => response.status == rs::Status::Completed,
             _ => false,
         };
-        if !complete || serde_json::from_str::<serde::de::IgnoredAny>(&call.arguments).is_err() {
+        if !complete {
             return Err(crate::SamplingError::Serialization(
                 serde::de::Error::custom(format!(
-                    "Responses protocol: incomplete function call or invalid JSON arguments at output index {index}"
+                    "Responses protocol: incomplete function call at output index {index}"
                 )),
             ));
         }
+        if serde_json::from_str::<serde::de::IgnoredAny>(&call.arguments).is_err() {
+            invalid_arguments.get_or_insert(index);
+        }
+    }
+    if let Some(index) = invalid_arguments {
+        return Err(crate::SamplingError::InvalidToolArguments(format!(
+            "Responses output index {index} contains invalid JSON"
+        )));
     }
     let model_id = response.model.clone();
     let model_fingerprint = response
@@ -2962,6 +2971,37 @@ pub fn responses_native_fragment(response: &rs::Response) -> NativeContinuationF
         input.push(item);
     }
     NativeContinuationFragment::Responses(input)
+}
+
+#[cfg(test)]
+#[test]
+fn responses_invalid_arguments_reject_siblings_and_preserve_status_failures() {
+    for sibling_status in ["completed", "in_progress"] {
+        for bad_first in [true, false] {
+            let invalid = serde_json::json!({"type":"function_call", "id":"bad", "call_id":"bad_call",
+                "name":"lookup", "arguments":"{\"description\":: ", "status":"completed"});
+            let sibling = serde_json::json!({"type":"function_call", "id":"sibling", "call_id":"sibling_call",
+                "name":"lookup", "arguments":"{}", "status":sibling_status});
+            let output = if bad_first {
+                vec![invalid, sibling]
+            } else {
+                vec![sibling, invalid]
+            };
+            let response: rs::Response = serde_json::from_value(serde_json::json!({
+                "id":"resp_test", "created_at":0, "object":"response", "model":"test", "status":"completed", "output":output
+            })).unwrap();
+            let error = response_to_conversation_items(response).unwrap_err();
+            if sibling_status == "completed" {
+                assert!(matches!(
+                    error,
+                    crate::SamplingError::InvalidToolArguments(_)
+                ));
+            } else {
+                assert!(matches!(error, crate::SamplingError::Serialization(_)));
+                assert!(!error.is_retryable());
+            }
+        }
+    }
 }
 
 #[cfg(test)]

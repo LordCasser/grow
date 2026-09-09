@@ -108,7 +108,8 @@ fn classify_sampling_error(err: SamplingError, image_count: usize) -> CompactFai
         SamplingError::Http(_)
         | SamplingError::EventStreamError(_)
         | SamplingError::EmptyResponse { .. }
-        | SamplingError::DoomLoopDetected { .. } => false,
+        | SamplingError::DoomLoopDetected { .. }
+        | SamplingError::InvalidToolArguments(_) => false,
     };
     if deterministic {
         CompactFailure::Deterministic(acp_err)

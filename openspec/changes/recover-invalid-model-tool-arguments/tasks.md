@@ -1,0 +1,4 @@
+- [x] Reproduce completed malformed arguments terminating instead of resampling.
+- [x] Add typed recovery and bounded retry classification.
+- [x] Verify success, exhaustion, disabled retries, cancellation, persistence and usage boundaries.
+- [x] Run affected module regressions and strict OpenSpec validation.
