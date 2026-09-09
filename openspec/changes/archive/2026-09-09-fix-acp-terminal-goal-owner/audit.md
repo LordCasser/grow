@@ -18,3 +18,5 @@ Scope: root / descendant startup, delegated turns, nested Task, runtime Agent re
 | Unowned recovery projection | shell/src/agent/mvp_agent/mod.rs orphan task projection | Explicit None/None pair is a display-only orphan close, not the partial-owner ACP defect. |
 
 The two newly investigated failures are separate from the earlier shared-window and delegated-revision fixes. This audit checks connected ownership boundaries and associated regressions; it does not prove every process/crash interleaving. No provider requests, user-session rewriting or unrelated ownership framework refactor is required.
+
+Final outcome: ACP omission fixed in b915aff0; ordinary Task misattribution reproduced through handle_prompt and fixed in e31dfb09. Full Shell: 3,762 passed, zero failed, 3 ignored. Final OpenSpec strict validation: 17 passed; archive validation: 295 passed. No additional confirmed omission in the inspected boundaries remains open from this pass.
