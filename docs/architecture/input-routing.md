@@ -47,6 +47,8 @@ payload 必须先以 content-addressed immutable JSON 发布，Timeline 再提�
 4. leading slash / bash 仍先以普通 Prompt intent 完成 Hook admission 并进入 FIFO。`TurnStarted` 取得预留后，若命令在 host plane 内闭合而没有生成模型消息，则以 `InputHandled` 终止；命令产生的内部 prompt 不再冒充第二个 HumanIntent。
 5. 仅内部 synthetic/test interjection 可以没有 input identity；生产用户 steer 一律携带可回退 payload。turn 的最后安全点未消费的 residual steer 在目标 turn 结束后 durable `Steer → Fifo`，再以原始 input identity 回到队首，绝不能泄漏进 successor 的 interjection buffer。
 
+Steering 的模型消息与展示消息使用不同文本：Timeline 保留给 LLM 的 interjection 包装及 skill expansion，`updates.jsonl` 只保存清理图片路径后的用户原文和独立图片块。实时与 resume 展示不得改用模型包装；用户自己输入的标签仍是原文，不通过标签解析反推展示内容。契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md)。
+
 A successful Goal control that invalidates the running context (set/edit/enter/pause/clear) ends that exact foreground turn through normal cancellation. Read-only or non-invalidating controls (status/restart/budget), and rejected mutations, leave it running.
 
 Steering 的客户端 `expected_turn_id` 先定位 foreground，Shell 再把当前 Timeline `TurnId` 写入 durable route。消费时必须同时复核该 `TurnId` 仍是 foreground；prompt id、队列位置或文本相等都不能代替这一身份。它只向同一 turn 的 safe-point buffer 追加输入，不创建 replacement turn 或另一个 terminal。Compaction 和 idle state 不可 steer。

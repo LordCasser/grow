@@ -1,0 +1,3 @@
+- [x] Reproduce wrapped text in persisted interjection display.
+- [x] Fix both interjection publication paths without changing model context.
+- [x] Run regressions and strict OpenSpec validation; record evidence.

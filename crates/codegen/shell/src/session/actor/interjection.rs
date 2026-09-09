@@ -477,7 +477,7 @@ impl SessionActor {
             let sanitized =
                 crate::session::placeholder_images::strip_paths_from_image_placeholders(text);
             let skill_information = self.interjection_skill_information(&sanitized).await;
-            let permission_text = sanitized.clone();
+            let display_text = sanitized.clone();
             let mut wrapped = format_interjection(sanitized);
             let images = self
                 .prepare_interjection_images(&mut wrapped, attachments)
@@ -496,7 +496,7 @@ impl SessionActor {
                 }
                 None => wrapped.clone(),
             };
-            let mut item = ConversationItem::interjection(model_text, permission_text);
+            let mut item = ConversationItem::interjection(model_text, display_text.clone());
             for img in &images {
                 item.add_image(pick_user_image_url(img));
             }
@@ -505,7 +505,7 @@ impl SessionActor {
                 .map(|requeue| requeue.input_ids.as_slice())
                 .unwrap_or_default();
             if input_ids.is_empty() {
-                self.inject_synthetic_user_message(&wrapped, item, false, &images)
+                self.inject_synthetic_user_message(&display_text, item, false, &images)
                     .await;
             } else {
                 let Some(turn) = self.events.current_turn() else {
@@ -519,7 +519,7 @@ impl SessionActor {
                     tracing::error!(%error, ?input_ids, "steer consumption was not durable");
                     continue;
                 }
-                self.publish_synthetic_user_message(&wrapped, item, false, &images, false)
+                self.publish_synthetic_user_message(&display_text, item, false, &images, false)
                     .await;
             }
             tracing::info!("Injected mid-turn interjection as standalone synthetic user message");
@@ -570,6 +570,51 @@ mod tests {
     use crate::session::actor::tests::support::{
         begin_test_causal_turn, build_actor, install_test_foreground,
     };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn interjection_replay_preserves_user_text_and_model_envelope() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for accepted in [false, true] {
+                    let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (actor, _events) = super::super::tests::support::create_test_actor_ex(
+                        0, 100_000, 80, gateway_tx, persistence_tx,
+                    ).await;
+                    begin_test_causal_turn(&actor).await;
+                    install_test_foreground(&actor, "turn-1").await;
+                    let text = "用户原文\n<user_query>literal user markup</user_query>";
+                    if accepted {
+                        actor.admit_human_steer(
+                            "turn-1", text.into(), Vec::new(), Some("steer-display".into()),
+                        ).await.unwrap();
+                        assert!(actor.close_steering_and_drain("turn-1").await);
+                    } else {
+                        actor.inject_pending_interjections(vec![PendingInterjection {
+                            text: text.into(), attachments: Vec::new(), requeue: None,
+                        }]).await;
+                    }
+                    let notification = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        loop {
+                            if let Some(PersistenceMsg::Update(SessionUpdate::Acp(notification))) = persistence_rx.recv().await
+                                && matches!(notification.update, acp::SessionUpdate::UserMessageChunk(_))
+                            {
+                                break notification;
+                            }
+                        }
+                    }).await.expect("persisted user display update");
+                    let encoded = serde_json::to_string(&notification).unwrap();
+                    let replayed: acp::SessionNotification = serde_json::from_str(&encoded).unwrap();
+                    let acp::SessionUpdate::UserMessageChunk(chunk) = replayed.update else { panic!("user chunk") };
+                    let acp::ContentBlock::Text(display) = chunk.content else { panic!("text block") };
+                    assert_eq!(display.text, text, "resume must preserve user-authored text");
+                    let conversation = actor.chat_state_handle.get_conversation().await;
+                    assert!(conversation.iter().any(|item| item.text_content() == format_interjection(text.into())),
+                        "model context must retain its runtime envelope");
+                }
+            })
+            .await;
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn final_steering_fence_injects_accepted_input_and_rejects_late_input() {
