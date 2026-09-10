@@ -221,19 +221,43 @@ fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_RENAME_INFO,
+        FILE_RENAME_INFO_0, FileRenameInfoEx, SetFileInformationByHandle,
     };
-    use windows::core::PCWSTR;
 
-    let source = crate::local_ipc::security::wide_path(source)?;
-    let target = crate::local_ipc::security::wide_path(target)?;
+    let source = std::fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ.0 | DELETE.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(source)?;
+    crate::local_ipc::security::verify_private_file(&source)?;
+    let mut target = crate::local_ipc::security::wide_path(target)?;
+    target.pop(); // FILE_RENAME_INFO counts filename bytes without the terminator.
+    let name_bytes = u32::try_from(target.len().saturating_mul(2))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "manifest path is too long"))?;
+    let bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName) + name_bytes as usize;
+    let buffer_len = u32::try_from(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "rename buffer is too large"))?;
+    let mut buffer = vec![0usize; bytes.div_ceil(std::mem::size_of::<usize>())];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    unsafe {
+        // REPLACE_IF_EXISTS | POSIX_SEMANTICS keeps readers of the old inode
+        // alive while new opens resolve to the complete replacement manifest.
+        (*info).Anonymous = FILE_RENAME_INFO_0 { Flags: 0x1 | 0x2 };
+        (*info).RootDirectory = HANDLE::default();
+        (*info).FileNameLength = name_bytes;
+        std::ptr::copy_nonoverlapping(target.as_ptr(), (*info).FileName.as_mut_ptr(), target.len());
+    }
     for attempt in 0..=5 {
         let result = unsafe {
-            MoveFileExW(
-                PCWSTR(source.as_ptr()),
-                PCWSTR(target.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            SetFileInformationByHandle(
+                HANDLE(source.as_raw_handle()),
+                FileRenameInfoEx,
+                info.cast(),
+                buffer_len,
             )
         };
         match result {
@@ -484,7 +508,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         ensure_private_runtime_dirs(&home).unwrap();
         let path = peers_dir(&home).join("peer.json");
-        let manifest = PeerManifest {
+        let mut manifest = PeerManifest {
             schema_version: SCHEMA_VERSION,
             peer_id: "peer".into(),
             pid: 1,
@@ -500,8 +524,13 @@ mod tests {
         };
         write_manifest(&path, &manifest).unwrap();
         let reader = crate::local_ipc::security::open_private_file(&path).unwrap();
+        manifest.heartbeat_at = 2;
         write_manifest(&path, &manifest).unwrap();
-        assert_eq!(read_manifest(&path).unwrap().token, "test-token");
+        let current = read_manifest(&path).unwrap();
+        assert_eq!(current.token, "test-token");
+        assert_eq!(current.heartbeat_at, 2);
+        let previous: PeerManifest = serde_json::from_reader(&reader).unwrap();
+        assert_eq!(previous.heartbeat_at, 1);
         drop(reader);
     }
 

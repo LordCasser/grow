@@ -275,7 +275,11 @@ impl JsonlStorageAdapter {
         recover_sidebands: bool,
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
-        let opened = self.open_session(info)?;
+        let opened = if recover_sidebands {
+            self.open_session(info)?
+        } else {
+            self.open_session_for_observation(info)?
+        };
         let summary = opened.summary().clone();
         let validated = opened.validated_timeline(&info.id.to_string())?;
         let timeline_events = validated.events;
@@ -302,7 +306,7 @@ impl JsonlStorageAdapter {
             crate::session::announcement_state::AnnouncementState::latest_from_timeline(
                 timeline.events(),
             )?;
-        let workflow_runs = self.load_workflow_runs_sync(info, &timeline)?;
+        let workflow_runs = self.load_workflow_runs_sync(info, &timeline, opened.directory())?;
         let result = super::PersistedDataLight {
             summary,
             timeline_events,
@@ -770,27 +774,29 @@ impl JsonlStorageAdapter {
         &self,
         info: &Info,
     ) -> io::Result<super::ContainedDirectory> {
-        self.session_parent(info, true)
+        self.session_parent(info, true, false)
     }
 
     fn open_session_parent(&self, info: &Info) -> io::Result<super::ContainedDirectory> {
-        self.session_parent(info, false)
+        self.session_parent(info, false, false)
     }
 
     fn session_parent(
         &self,
         info: &Info,
         create_missing: bool,
+        shared_read: bool,
     ) -> io::Result<super::ContainedDirectory> {
         let authority = self.authority(create_missing)?;
         match &self.dir_mode {
             SessionDirMode::FromRoot(_) => {
                 let encoded = crate::util::grow_home::encode_cwd_dirname(&info.cwd);
-                let directory = authority.open_relative(
-                    &Path::new("sessions").join(&encoded),
-                    "session storage directory",
-                    create_missing,
-                )?;
+                let relative = Path::new("sessions").join(&encoded);
+                let directory = if shared_read {
+                    authority.open_relative_shared_read(&relative, "session storage directory")?
+                } else {
+                    authority.open_relative(&relative, "session storage directory", create_missing)?
+                };
                 if encoded != urlencoding::encode(&info.cwd).as_ref() {
                     if create_missing {
                         Self::ensure_cwd_marker(&directory, &info.cwd)?;
@@ -2128,6 +2134,31 @@ impl JsonlStorageAdapter {
         Ok(OpenedSession { directory, summary })
     }
 
+    fn open_session_for_observation(&self, info: &Info) -> io::Result<OpenedSession> {
+        let key = format!("{}\0{}", info.id, info.cwd);
+        let has_pinned_entity = self
+            .opened_sessions
+            .lock()
+            .map_err(|_| io::Error::other("session capability cache poisoned"))?
+            .contains_key(&key);
+        if has_pinned_entity {
+            return self.open_session(info);
+        }
+        let parent = self.session_parent(info, false, true)?;
+        let path = self.session_dir(info);
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "session path has no file name")
+        })?;
+        let directory = parent.open_relative_shared_read(Path::new(name), "session storage directory")?;
+        let summary = Self::read_summary_from_directory(&directory)?;
+        Self::validate_session_identity(info, &summary)?;
+        // Observation sharing must not become a capability for later writes.
+        Ok(OpenedSession {
+            directory: std::sync::Arc::new(directory),
+            summary,
+        })
+    }
+
     /// Return the already identity-checked entity capability used by this
     /// adapter's live writer. Canonical Timeline commits must not be blocked by
     /// a later-corrupted Summary projection; an unbound adapter still performs
@@ -2528,6 +2559,7 @@ impl JsonlStorageAdapter {
         &self,
         info: &Info,
         timeline: &Timeline,
+        session: &super::ContainedDirectory,
     ) -> io::Result<Vec<crate::session::workflow::store::RestoredWorkflowRun>> {
         use crate::session::workflow::store::{
             MAX_RESTORED_WORKFLOW_RUNS, MAX_WORKFLOW_ARGS_BYTES, MAX_WORKFLOW_MANIFEST_BYTES,
@@ -2555,7 +2587,6 @@ impl JsonlStorageAdapter {
         if run_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let session = self.open_session(info)?.directory;
         let mut restored = Vec::new();
         for run_id in run_ids {
             let lifecycle = timeline.workflow_lifecycle(&run_id).ok_or_else(|| {
@@ -2566,7 +2597,7 @@ impl JsonlStorageAdapter {
             })?;
             let run_relative = Path::new("workflows").join(&run_id);
             let run_dir =
-                match session.open_relative(&run_relative, "Workflow run directory", false) {
+                match session.open_relative_shared_read(&run_relative, "Workflow run directory") {
                     Ok(run_dir) => run_dir,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error),
@@ -3306,7 +3337,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         .map_err(io::Error::other)?
     }
     async fn load_session(&self, info: &Info) -> io::Result<PersistedData> {
-        let opened = self.open_session(info)?;
+        let opened = self.open_session_for_observation(info)?;
         let summary = opened.summary().clone();
         let validated = opened.validated_timeline(&info.id.to_string())?;
         let timeline_events = validated.events;
@@ -3328,7 +3359,7 @@ impl StorageAdapter for JsonlStorageAdapter {
             crate::session::announcement_state::AnnouncementState::latest_from_timeline(
                 timeline.events(),
             )?;
-        let workflow_runs = self.load_workflow_runs_sync(info, &timeline)?;
+        let workflow_runs = self.load_workflow_runs_sync(info, &timeline, opened.directory())?;
         let rewind_points = Self::read_jsonl_from_directory::<RewindPoint>(
             opened.directory(),
             std::ffi::OsStr::new("rewind_points.jsonl"),

@@ -4555,6 +4555,7 @@ async fn coordination_observer_preserves_live_sideband_and_new_writer_recovers_o
     let observer = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
     observer.load_session_without_updates(&info).await.unwrap();
     observer.load_session(&info).await.unwrap();
+    assert!(observer.opened_sessions.lock().unwrap().is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), before, "observing a live session must not close its sideband");
     assert!(observer.load_session_for_write_without_updates(&info).await.is_err());
     assert_eq!(std::fs::read(&path).unwrap(), before, "rejected writer must not mutate the sideband");

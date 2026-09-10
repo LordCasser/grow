@@ -1,0 +1,4 @@
+- [x] Identify Windows CI failures and inspect manifest, directory capability, load and fixture paths.
+- [x] Implement bounded Windows publication/observation corrections and portable fixture cwd.
+- [ ] Pass existing Windows coordination and storage regressions, including held-reader replacement and live observer recovery.
+- [ ] Pass relevant local/remote regressions, update developer guidance, validate and archive.

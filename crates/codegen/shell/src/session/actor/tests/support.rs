@@ -290,7 +290,7 @@ async fn test_agent_from_config(
     let ctx = SessionContext {
         backend,
         fs,
-        cwd: std::path::PathBuf::from("/tmp"),
+        cwd: std::env::temp_dir(),
         session_folder: std::env::temp_dir().join("grow-test"),
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
@@ -390,7 +390,7 @@ pub(crate) async fn create_test_actor_ex(
         }
     });
     let persistence_tx = actor_persistence_tx;
-    let cwd = paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+    let cwd = paths::AbsPathBuf::new(std::env::temp_dir()).unwrap();
     let fs = Arc::new(workspace::file_system::MockFs::new(cwd.to_path_buf()));
     let terminal = Arc::new(DummyTerminal {});
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
