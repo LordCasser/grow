@@ -1,0 +1,4 @@
+- [x] Identify the failed test-thread stack and compare the three workflow environments.
+- [x] Align platform regression RUST_MIN_STACK with core regression.
+- [x] Parse workflow YAML, check exact environment parity and validate OpenSpec.
+- [x] Archive the CI configuration change; keep actual platform executions gated by release verification.

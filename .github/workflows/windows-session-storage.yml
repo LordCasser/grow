@@ -24,6 +24,7 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
+      RUST_MIN_STACK: "16777216"
     steps:
       - uses: actions/checkout@v6
 
