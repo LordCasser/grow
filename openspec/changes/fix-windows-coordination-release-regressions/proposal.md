@@ -14,4 +14,6 @@ Extend local-coordination and session-timeline with the verified Windows reader/
 
 # Impact
 
+Preserve bounded stderr and exit diagnostics on failed process regressions. An explicit workflow-dispatch option reruns only CLI/process validation after unchanged library tests have passed; the default and pull-request matrix retain every existing library test step.
+
 Coordination manifest publication, JSONL session observation, the portable actor test fixture and existing regression cases. Windows execution is required before archiving. Linux/macOS regression and release builds remain gates in the parent release record.

@@ -15,3 +15,5 @@ Microsoft documents the rename flag union for [FILE_RENAME_INFO](https://learn.m
 The PTY test harness import now mirrors its existing Unix-only export and call site. Coordination CI retains dependency caches on failure using the same rust-cache setting as core/storage validation; this does not change test selection.
 
 The disk-usage symlink fixture calls its existing Windows directory/file helpers, with Unix aliases to the existing generic helper. This restores cross-platform compilation without removing or weakening any metadata-only, no-follow or independent-billing assertion.
+
+Failure diagnostics are emitted after fixture clients close, before their temporary directory is removed: each process exit code and the last 16 KiB of each fixture stderr. The explicit `process_only` dispatch option skips already-passed, unchanged library suites while rebuilding the CLI and executing every real-process scenario. Normal dispatch and pull-request behavior remain complete. Validation records must identify these targeted reruns and retain the full library-run provenance.

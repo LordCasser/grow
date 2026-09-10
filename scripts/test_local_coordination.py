@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -472,12 +473,19 @@ context_window = 200000
                       "text": "Continue ordinary work after inquiry recovery."}]})["stopReason"] == "end_turn"
         print("PASS running and queued crash receipts get one durable interrupted terminal across reloads", flush=True)
     finally:
+        failed = sys.exc_info()[0] is not None
         model.release.set()
         model.foreground_release.set()
         for client in reversed(clients):
             client.close()
         pool.shutdown(wait=True, cancel_futures=True)
         model.close()
+        if failed:
+            for client in clients:
+                print(f"Grow fixture pid={client.proc.pid} exit={client.proc.returncode}", file=sys.stderr)
+            for log in sorted(root.glob("*.stderr.log")):
+                print(f"--- {log.name} (last 16 KiB) ---", file=sys.stderr)
+                print(log.read_text(encoding="utf-8", errors="replace")[-16384:], file=sys.stderr)
 
 
 if __name__ == "__main__":
