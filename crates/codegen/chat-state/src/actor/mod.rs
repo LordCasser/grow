@@ -451,6 +451,10 @@ impl ChatStateActor {
             ChatStateCommand::PushToolResult { item } => {
                 self.push_message(item).await;
             }
+            ChatStateCommand::PushToolResultDurably { item, reply } => {
+                let result = self.push_tool_result_durably(item).await;
+                let _ = reply.send(result);
+            }
             ChatStateCommand::PushToolResultConditionally {
                 item,
                 rejection_item,

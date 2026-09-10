@@ -232,6 +232,24 @@ impl ChatStateActor {
         }
     }
 
+    pub(super) async fn push_tool_result_durably(
+        &mut self,
+        item: ConversationItem,
+    ) -> Result<(), crate::commands::TimelineWriteError> {
+        let tokens = super::state::estimate_item_tokens(&item);
+        let event = self
+            .state
+            .timeline
+            .prepare(crate::TimelineEventKind::Messages(crate::MessageEvent {
+                cause: MessageCause::ToolResult,
+                items: vec![item],
+                surface: crate::SurfaceOp::Append,
+            }))?;
+        self.commit_timeline_event(event).await?;
+        self.apply_projected_token_delta(0, tokens);
+        Ok(())
+    }
+
     pub(super) async fn push_tool_result_conditionally(
         &mut self,
         item: ConversationItem,

@@ -685,6 +685,34 @@ async fn push_assistant_response_appends_and_persists() {
 }
 
 #[tokio::test]
+async fn host_completion_result_waits_for_durable_ack_and_reports_failure() {
+    for fail in [false, true] {
+        let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let handle = ChatStateActor::spawn(Vec::new(), test_config(), Box::new(mock), event_tx,
+            tokio_util::sync::CancellationToken::new());
+        let write = {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                handle.push_tool_result_durably(ConversationItem::tool_result("finish", "accepted")).await
+            })
+        };
+        let ack = persistence_rx.next_timeline_ack().await.unwrap();
+        assert!(!write.is_finished(), "completion cannot be exposed before commit acknowledgement");
+        ack.send(if fail {
+            Err(std::io::Error::new(std::io::ErrorKind::StorageFull, "disk full"))
+        } else { Ok(()) }).unwrap();
+        assert_eq!(write.await.unwrap().is_err(), fail);
+        if !fail {
+            let history = handle.get_conversation().await;
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].text_content(), "accepted");
+            assert!(handle.get_projected_tokens().await > 0);
+        }
+    }
+}
+
+#[tokio::test]
 async fn push_tool_result_appends_and_persists() {
     let mut h = TestHarness::new();
     h.handle

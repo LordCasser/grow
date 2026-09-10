@@ -199,6 +199,17 @@ impl ChatStateHandle {
         let _ = self.cmd_tx.send(ChatStateCommand::PushToolResult { item });
     }
 
+    pub async fn push_tool_result_durably(
+        &self,
+        item: ConversationItem,
+    ) -> Result<(), TimelineWriteError> {
+        self.query("PushToolResultDurably", |reply| {
+            ChatStateCommand::PushToolResultDurably { item, reply }
+        })
+        .await
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
+    }
+
     pub async fn push_tool_result_conditionally(
         &self,
         item: ConversationItem,

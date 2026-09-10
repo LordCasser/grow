@@ -7,6 +7,16 @@ Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，�
 
 远程配置管理、deployment-config 服务、签名策略同步及其专用 CLI 不在规划范围内。
 
+## 行动预告后任务提前结束（宿主完成协议已修复）
+
+用户确认中文冒号处停顿跨端点存在。`audit-provider-stop-provenance` 复核发现：Grow 确实会自行把 Turn 终态标为 end_turn，不能拿这个标签反推端点响应；但原 session 的三份 HTTP 原始 body 也明确包含 end_turn/message_stop。补充 DeepSeek Responses 会话的两处已定位中文冒号片段实际带 commentary 和工具调用，随后继续，仍需用户指出其观察的具体停顿。证据见 [来源审计](changes/archive/2026-09-10-audit-provider-stop-provenance/investigation.md)。
+
+`require-explicit-turn-completion` 将普通 Turn 的完成权威移到显式 FinishTurn 声明：只有预告和合法 provider 终止时继续同一 Turn，连续三次无声明/无业务调用则明确报错；完成、等待用户和等待后台结果分别保留终态种类。声明与业务工具同批时不能收尾，新的用户输入不能沿用旧声明，取消、预算、拒绝及结构化输出保留原终止权威。见 [完成协议验证](changes/archive/2026-09-10-require-explicit-turn-completion/verification.md)。
+
+这是对宿主“无工具响应即完成”的修复；显式声明仍可能被模型错误使用，不能把协议回归当作业务结果正确性的证明。下列历史投影修复与本次完成协议分别处理事实丢失和终止判定。
+
+- **Responses phase 的 portable 保留**：原生片段保留 phase，中性 Assistant 投影仍丢失其阶段和消息边界。当前完成协议不依赖该字段，跨模型完整阶段保留需要单独定义中性消息契约及恢复/压缩验证，不混入本次 Turn 终止修复。
+
 ## 压缩后的 portable 工具历史（已完成）
 
 2026-09-10 核对 session `01a08910-219a-78f1-a45c-98b448764a05`：局部压缩保留了 tail identity，但 `finish_surface_replacement` 重置整个 native epoch 后，`project_portable_history` 把最新的成对工具调用/结果也转换成 Historical tool exchange 文本。已观察到压缩后模型只给出行动预告便合法 stop，因果强度仍受单样本限制。本次修复历史摘要范围与下一 Step 续接；结构化 portable tail 单独立项。

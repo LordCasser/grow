@@ -300,7 +300,7 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
             );
             server.enqueue_response(
                 "/v1/messages",
-                messages_text_turn("Recovered from the image context.", "test-model"),
+                with_finish_turn(messages_text_turn("Recovered from the image context.", "test-model")),
             );
             let (actor, mut gateway_rx) = actor_with_sampler(&server, Some("vision")).await;
             install_test_foreground(&actor, "image-400-aux-recovery").await;
@@ -454,7 +454,7 @@ fn auxiliary_image_400_fails_without_installing_a_lossy_shadow() {
             }
             server.enqueue_response(
                 "/v1/messages",
-                messages_text_turn("Continued without visual context.", "test-model"),
+                with_finish_turn(messages_text_turn("Continued without visual context.", "test-model")),
             );
             let (actor, mut gateway_rx) = actor_with_sampler(&server, Some("vision")).await;
             install_test_foreground(&actor, "image-400-aux-400").await;

@@ -325,7 +325,16 @@ async fn actor_with_sampler_delivery(
         },
         sampler_event_tx,
     );
+    let (goal_usage_tx, mut goal_usage_rx) = mpsc::unbounded_channel();
+    actor.goal_usage_window = goal_support::GoalUsageWindow::new(goal_usage_tx.clone(), None);
     let actor = std::sync::Arc::new(actor);
+    let usage_actor = actor.clone();
+    tokio::task::spawn_local(async move {
+        let _mailbox_owner = goal_usage_tx;
+        while let Some(SessionCommand::SettleGoalUsageAttempt { attempt_id, respond_to }) = goal_usage_rx.recv().await {
+            let _ = respond_to.send(usage_actor.settle_claimed_goal_usage_attempt(&attempt_id).await);
+        }
+    });
     let drainer = actor.clone();
     tokio::task::spawn_local(async move {
         let mut sampler_event_rx = sampler_event_rx;
@@ -341,6 +350,14 @@ async fn actor_with_sampler_delivery(
 async fn run_user_turn(
     actor: &std::sync::Arc<SessionActor>,
     prompt_id: &str,
+) -> Result<PromptTurnOk, acp::Error> {
+    run_user_turn_with_schema(actor, prompt_id, None).await
+}
+
+async fn run_user_turn_with_schema(
+    actor: &std::sync::Arc<SessionActor>,
+    prompt_id: &str,
+    schema: Option<serde_json::Value>,
 ) -> Result<PromptTurnOk, acp::Error> {
     install_test_foreground(actor, prompt_id).await;
     tokio::time::timeout(
@@ -358,7 +375,7 @@ async fn run_user_turn(
             None,
             None,
             false,
-            None,
+            schema,
             None,
         ),
     )
@@ -449,6 +466,278 @@ fn chat_completions_request_count(server: &MockInferenceServer) -> usize {
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 #[test]
+fn explicit_completion_resumes_action_preambles_on_all_backends() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            for backend in [sampling_types::ApiBackend::Messages, sampling_types::ApiBackend::ChatCompletions,
+                sampling_types::ApiBackend::Responses] {
+                for preamble in ["继续。先看 run-startup.py 的 revision 语义与调用方，同时检查 closure corpus 是否也有硬编码：", "Next I will inspect the caller."] {
+                    let server = MockInferenceServer::start().await.unwrap();
+                    let args = r#"{"todos":[{"id":"completion-work","content":"record checked result","status":"completed"}]}"#;
+                    let (path, bare, action, final_response) = match backend {
+                        sampling_types::ApiBackend::Messages => ("/v1/messages",
+                            messages_turn(&[text_block(preamble)], END_TURN),
+                            messages_turn(&[tool_use_block("work", "todo_write", args)], "tool_use"),
+                            messages_turn(&[text_block("已完成检查。")], END_TURN)),
+                        sampling_types::ApiBackend::ChatCompletions => ("/v1/chat/completions",
+                            chat_completions_turn(preamble, Some("stop")),
+                            ScriptedResponse::sse(test_support::sse::chat_completions_reasoning_then_tool_call_events(
+                                "", "work", "todo_write", args, "test-model")),
+                            chat_completions_turn("已完成检查。", Some("stop"))),
+                        sampling_types::ApiBackend::Responses => ("/v1/responses",
+                            ScriptedResponse::sse(test_support::sse::responses_api_script_exact(preamble, "test-model")),
+                            ScriptedResponse::sse(test_support::sse::responses_api_reasoning_then_tool_call_events(
+                                "", "work", "todo_write", args, "test-model")),
+                            ScriptedResponse::sse(test_support::sse::responses_api_script_exact("已完成检查。", "test-model"))),
+                    };
+                    server.enqueue_response(path, bare);
+                    server.enqueue_response(path, action);
+                    server.enqueue_response(path, with_finish_turn(final_response));
+                    let (actor, _) = actor_with_sampler(&server, backend.clone()).await;
+                    *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+                    run_user_turn(&actor, "completion-preamble").await.unwrap();
+                    assert_eq!(server.requests().len(), 3, "{backend:?}: preamble must not end the turn");
+                    let history = actor.chat_state_handle.get_conversation().await;
+                    assert!(assistant_texts(&history).iter().any(|text| text == preamble));
+                    assert!(history.iter().any(|item| item.text_content().contains("last response ended without a valid FinishTurn")));
+                    let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                    assert_eq!(events.iter().filter(|event| matches!(&event.kind,
+                        chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed {call_id, ..})
+                            if call_id == "work")).count(), 1, "action must execute exactly once");
+                    let ended = events.iter().filter(|event| matches!(&event.kind,
+                        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended {..}))).collect::<Vec<_>>();
+                    assert_eq!(ended.len(), 1, "all steps belong to one turn");
+                    assert!(serde_json::to_string(&ended[0]).unwrap().contains("explicit_completion"));
+                }
+            }
+        }));
+    });
+}
+
+#[test]
+fn explicit_completion_violations_fail_without_claiming_success() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            for _ in 0..3 {
+                server.enqueue_response("/v1/messages", messages_turn(&[text_block("先检查：")], END_TURN));
+            }
+            let (actor, _) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            let error = run_user_turn(&actor, "completion-exhausted").await.unwrap_err();
+            assert!(format!("{error:?}").contains("turn_completion_protocol_failed"));
+            assert_eq!(server.requests().len(), 3);
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let ended = events.iter().filter(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended {..}))).collect::<Vec<_>>();
+            assert_eq!(ended.len(), 1);
+            assert!(!serde_json::to_string(&ended[0]).unwrap().contains("\"outcome\":\"completed\""));
+        }));
+    });
+}
+
+#[test]
+fn explicit_completion_requirement_cannot_reopen_refusal_or_protocol_failure() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            for refusal in [false, true] {
+                let server = MockInferenceServer::start().await.unwrap();
+                let requests = if refusal { 1 } else { 3 };
+                for _ in 0..requests {
+                    server.enqueue_response("/v1/messages", messages_turn(&[text_block("未执行。")],
+                        if refusal { "refusal" } else { END_TURN }));
+                }
+                let (actor, _) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+                let base = test_grow_build_agent_with_todo().await;
+                let mut definition = base.definition().clone();
+                definition.completion_requirement = Some(agent::config::CompletionRequirement {
+                    tool: "todo_write".into(), reminder: "Complete the required tool action.".into(),
+                    recovery: Some(agent::config::RecoveryPolicy { max_retries: 2, base_delay_ms: 0, max_delay_ms: 0 }),
+                });
+                *actor.agent.borrow_mut() = agent::Agent::new(definition, agent::PromptContext::default(),
+                    base.system_prompt().into(), base.role_prompt().map(str::to_owned), base.tool_bridge().clone());
+                let result = run_user_turn(&actor, "completion-required-tool").await;
+                if refusal {
+                    assert_eq!(result.unwrap().stop_reason, acp::StopReason::Refusal);
+                } else {
+                    assert!(format!("{:?}", result.unwrap_err()).contains("turn_completion_protocol_failed"));
+                }
+                assert_eq!(server.requests().len(), requests, "legacy recovery must not reopen host terminals");
+            }
+        }));
+    });
+}
+
+#[test]
+fn explicit_completion_cannot_finish_new_interjections() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let mut first = server.expect_response_blocked("first final",
+                test_support::InferenceRequestMatcher::foreground(test_support::InferenceEndpoint::Messages),
+                with_finish_turn(messages_turn(&[text_block("原请求已完成。")], END_TURN)));
+            server.enqueue_response("/v1/messages",
+                with_finish_turn(messages_turn(&[text_block("新增请求也已处理。")], END_TURN)));
+            let (actor, _) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+            let (result, ()) = tokio::join!(run_user_turn(&actor, "completion-steering"), async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked()).await.unwrap();
+                actor.pending_interjections.push(PendingInterjection {
+                    text: "还需要解释验证结果。".into(), attachments: vec![], requeue: None,
+                });
+                first.release();
+            });
+            result.unwrap();
+            assert_eq!(server.requests().len(), 2, "new input requires a fresh declaration");
+            assert!(server.request_bodies()[1].to_string().contains("还需要解释验证结果"));
+        }));
+    });
+}
+
+#[test]
+fn explicit_completion_invalid_declarations_recover_in_the_same_turn() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            for blocks in [
+                vec![text_block("完成"), tool_use_block("bad", "FinishTurn", r#"{"status":"completed"}"#)],
+                vec![tool_use_block("empty", "FinishTurn", r#"{"status":"completed","reason":"done"}"#)],
+                vec![text_block("完成"),
+                    tool_use_block("one", "FinishTurn", r#"{"status":"completed","reason":"done"}"#),
+                    tool_use_block("two", "FinishTurn", r#"{"status":"completed","reason":"done"}"#)],
+            ] {
+                let server = MockInferenceServer::start().await.unwrap();
+                server.enqueue_response("/v1/messages", messages_turn(&blocks, "tool_use"));
+                server.enqueue_response("/v1/messages", with_finish_turn(messages_turn(&[text_block("已交付结果。")], END_TURN)));
+                let (actor, _) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+                run_user_turn(&actor, "completion-invalid").await.unwrap();
+                assert_eq!(server.requests().len(), 2);
+                let history = actor.chat_state_handle.get_conversation().await;
+                for block in blocks.iter().filter(|block| block["type"] == "tool_use") {
+                    assert!(history.iter().any(|item| matches!(item, ConversationItem::ToolResult(result)
+                        if result.tool_call_id == block["id"].as_str().unwrap())));
+                }
+            }
+        }));
+    });
+}
+
+#[test]
+fn explicit_completion_respects_schema_refusal_and_goal_budget_terminals() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let schema = json!({"type":"object","properties":{"answer":{"type":"string"}},
+                "required":["answer"],"additionalProperties":false});
+            for backend in [sampling_types::ApiBackend::Messages, sampling_types::ApiBackend::ChatCompletions,
+                sampling_types::ApiBackend::Responses] {
+                let server = MockInferenceServer::start().await.unwrap();
+                let answer = r#"{"answer":"已完成"}"#;
+                let (path, response) = match backend {
+                    sampling_types::ApiBackend::Messages => ("/v1/messages", messages_turn(
+                        &[tool_use_block("schema_result", "StructuredOutput", answer)], "tool_use")),
+                    sampling_types::ApiBackend::ChatCompletions => ("/v1/chat/completions", chat_completions_turn(answer, Some("stop"))),
+                    sampling_types::ApiBackend::Responses => ("/v1/responses", ScriptedResponse::sse(
+                        test_support::sse::responses_api_script_exact(answer, "test-model"))),
+                };
+                server.enqueue_response(path, response);
+                let (actor, _) = actor_with_sampler(&server, backend).await;
+                let result = run_user_turn_with_schema(&actor, "completion-schema", Some(schema.clone())).await.unwrap();
+                assert!(result.structured_output.as_ref().unwrap().is_ok());
+                assert_eq!(server.requests().len(), 1);
+                assert!(!server.request_bodies()[0]["tools"].to_string().contains("FinishTurn"));
+            }
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response("/v1/messages", messages_turn(&[], "refusal"));
+            let (actor, _) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            assert_eq!(run_user_turn(&actor, "completion-refusal").await.unwrap().stop_reason, acp::StopReason::Refusal);
+            assert_eq!(server.requests().len(), 1);
+
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response("/v1/messages", messages_turn(&[text_block("先检查：")], END_TURN));
+            let (actor, _) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            actor.goal_tracker.lock().create_goal("completion-budget".into(), "test bounded continuation".into(),
+                Some(1), "2026-09-10T00:00:00Z".into()).unwrap();
+            actor.behavior.lock().select_behavior(tool_types::BehaviorId::Goal);
+            actor.sync_goal_usage_window();
+            run_user_turn(&actor, "completion-budget").await.unwrap();
+            assert_eq!(server.requests().len(), 1, "budget exhaustion forbids completion recovery sampling");
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(events.iter().any(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { terminal, .. })
+                    if terminal.completion_kind == "goal_spending_stopped")));
+        }));
+    });
+}
+
+#[test]
+fn explicit_completion_does_not_resume_after_user_cancel() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let mut first = server.expect_response_blocked("cancelled preamble",
+                test_support::InferenceRequestMatcher::auxiliary(test_support::InferenceEndpoint::Messages),
+                messages_turn(&[text_block("先检查：")], END_TURN));
+            let (actor, _) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            let (result, ()) = tokio::join!(run_user_turn(&actor, "completion-cancel"), async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked()).await.unwrap();
+                *actor.current_prompt_id.lock().unwrap() = Some("completion-cancel".into());
+                actor.cancel_running_task(false, false, false, Some("esc".into())).await.unwrap();
+                first.release();
+            });
+            // This direct fixture installs a foreground stub, not the task
+            // itself. Production cancellation revokes that stub's ownership;
+            // the still-polled test future must fail its terminal admission.
+            let error = result.expect_err("cancelled direct fixture has lost foreground ownership");
+            assert!(crate::session::commands::is_fatal_turn_boundary_error(&error));
+            assert_eq!(server.requests().len(), 1);
+        }));
+    });
+}
+
+#[test]
+fn explicit_completion_rejects_mixed_calls_and_accepts_waiting() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            for (status, text) in [("waiting_for_user", "需要你提供输入文件路径。"),
+                ("waiting_for_background", "正在等待外部构建结果。"), ("completed", "已完成记录。")]
+            {
+                let server = MockInferenceServer::start().await.unwrap();
+                server.enqueue_response("/v1/messages", messages_turn(&[
+                    text_block("已完成"),
+                    tool_use_block("mixed_finish", "FinishTurn", r#"{"status":"completed","reason":"done"}"#),
+                    tool_use_block("real_work", "todo_write", r#"{"todos":[{"id":"work","content":"record result","status":"completed"}]}"#),
+                ], "tool_use"));
+                server.enqueue_response("/v1/messages", messages_turn(&[
+                    text_block(text), tool_use_block("accepted_finish", "FinishTurn",
+                        &json!({"status":status,"reason":text}).to_string()),
+                ], "tool_use"));
+                let (actor, _) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+                *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+                run_user_turn(&actor, "completion-mixed").await.unwrap();
+                assert_eq!(server.requests().len(), 2);
+                let history = actor.chat_state_handle.get_conversation().await;
+                assert!(history.iter().any(|item| matches!(item, ConversationItem::ToolResult(result)
+                    if result.tool_call_id == "mixed_finish" && result.content.contains("Call FinishTurn alone"))));
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert!(!events.iter().any(|event| matches!(&event.kind,
+                    chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Started {call_id, ..})
+                        if call_id == "mixed_finish" || call_id == "accepted_finish")), "host declaration is not a business tool");
+                let expected_kind = if status == "completed" { "explicit_completion" } else { status };
+                assert!(events.iter().any(|event| matches!(&event.kind,
+                    chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { terminal, .. })
+                        if terminal.completion_kind == expected_kind)));
+            }
+        }));
+    });
+}
+
+#[test]
 fn retractable_stream_retry_accepts_only_the_second_candidate_and_bills_both() {
     run_with_session_stack(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -472,9 +761,9 @@ fn retractable_stream_retry_accepts_only_the_second_candidate_and_bills_both() {
             server.enqueue_response("/v1/chat/completions", ScriptedResponse::sse(vec![
                 SseEvent::data(prefix.to_string()), SseEvent::data(usage.to_string()),
             ]));
-            server.enqueue_response("/v1/chat/completions", ScriptedResponse::sse(
+            server.enqueue_response("/v1/chat/completions", with_finish_turn(ScriptedResponse::sse(
                 test_support::sse::chat_completion_script_exact("accepted answer", "test-model")
-            ));
+            )));
             let (actor, _, mut events) = actor_with_sampler_delivery(
                 &server, sampling_types::ApiBackend::ChatCompletions, sampler::OutputDelivery::Retractable,
             ).await;
@@ -529,8 +818,8 @@ fn unsigned_thinking_tool_exchange_survives_the_next_request() {
                 tool_use_block("unsigned_call", "todo_write",
                     r#"{"todos":[{"id":"unsigned-todo","content":"verify portable history","status":"completed"}]}"#),
             ], "tool_use"));
-            // A legal text-only end_turn stays terminal even when it ends in a colon.
-            server.enqueue_response("/v1/messages", messages_turn(&[text_block("记录结果：")], END_TURN));
+            // An explicit final declaration is terminal regardless of answer punctuation.
+            server.enqueue_response("/v1/messages", with_finish_turn(messages_turn(&[text_block("记录结果：")], END_TURN)));
             let (actor, _gateway) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
             run_user_turn(&actor, "unsigned-tools").await.unwrap();
@@ -559,7 +848,7 @@ fn unsigned_thinking_tool_exchange_survives_the_next_request() {
                     if call_id == "unsigned_call")).count(), 1, "the historical call must not execute twice");
             let history = actor.chat_state_handle.get_conversation().await;
             assert!(history.iter().any(|item| item.text_content() == "unsigned private thought"));
-            assert_eq!(history.last().unwrap().text_content(), "记录结果：");
+            assert_eq!(assistant_texts(&history).last().unwrap(), "记录结果：");
         }));
     });
 }
@@ -575,13 +864,13 @@ fn native_rejection_fallback(missing_signature: bool) {
             let server = MockInferenceServer::start().await.unwrap();
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(
+                with_finish_turn(messages_turn(
                     &[
                         thinking_block("visible first thought", "native_signature_secret"),
                         text_block("first answer"),
                     ],
                     END_TURN,
-                ),
+                )),
             );
             server.enqueue_response(
                 "/v1/messages",
@@ -608,7 +897,7 @@ fn native_rejection_fallback(missing_signature: bool) {
             );
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(&[text_block("portable retry answer")], END_TURN),
+                with_finish_turn(messages_turn(&[text_block("portable retry answer")], END_TURN)),
             );
 
             let (actor, mut gateway_rx) =
@@ -684,13 +973,13 @@ fn failed_portable_retry(missing_signature: bool) {
             let server = MockInferenceServer::start().await.unwrap();
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(
+                with_finish_turn(messages_turn(
                     &[
                         thinking_block("visible thought", "native_signature_secret"),
                         text_block("first answer"),
                     ],
                     END_TURN,
-                ),
+                )),
             );
             for message in ["native rejected", "portable request rejected"] {
                 server.enqueue_response(
@@ -716,7 +1005,7 @@ fn failed_portable_retry(missing_signature: bool) {
             }
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(&[text_block("later turn succeeds")], END_TURN),
+                with_finish_turn(messages_turn(&[text_block("later turn succeeds")], END_TURN)),
             );
 
             let (actor, mut gateway_rx) =
@@ -800,9 +1089,9 @@ fn malformed_tool_response_does_not_poison_the_next_turn() {
                     }).to_string()),
                     SseEvent::data("[DONE]"),
                 ]));
-                server.enqueue_response("/v1/chat/completions", ScriptedResponse::sse(
+                server.enqueue_response("/v1/chat/completions", with_finish_turn(ScriptedResponse::sse(
                     test_support::sse::chat_completion_script_exact("continued safely", "test-model"),
-                ));
+                )));
                 let (actor, _gateway_rx) = actor_with_sampler(&server, sampling_types::ApiBackend::ChatCompletions).await;
                 let result = run_user_turn(&actor, "polluted").await;
                 assert!(result.is_err(), "malformed response must stop before dispatch");
@@ -878,7 +1167,7 @@ fn protocol_invalid_tools_do_not_execute_and_the_next_turn_recovers() {
                     }), test_support::sse::responses_api_script_exact("continued safely", "test-model"))
                 };
                 server.enqueue_response(path, ScriptedResponse::sse(vec![SseEvent::data(bad.to_string())]));
-                server.enqueue_response(path, ScriptedResponse::sse(good));
+                server.enqueue_response(path, with_finish_turn(ScriptedResponse::sse(good)));
                 let has_terminal_usage = backend == ApiBackend::Responses || unfinished_json;
                 let (actor, _gateway_rx) = actor_with_sampler(&server, backend.clone()).await;
                 let error = run_user_turn(&actor, "bad-tool").await.expect_err("partial tool must fail");
@@ -922,7 +1211,7 @@ fn truncation_auto_continue_e2e() {
             );
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(&[text_block("part two")], END_TURN),
+                with_finish_turn(messages_turn(&[text_block("part two")], END_TURN)),
             );
             let (actor, _gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
@@ -975,7 +1264,7 @@ fn truncation_multiple_continues() {
             }
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(&[text_block("four")], END_TURN),
+                with_finish_turn(messages_turn(&[text_block("four")], END_TURN)),
             );
             let (actor, _gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
@@ -1028,7 +1317,7 @@ fn truncation_thinking_block() {
             );
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(&[text_block("part two")], END_TURN),
+                with_finish_turn(messages_turn(&[text_block("part two")], END_TURN)),
             );
             let (actor, _gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
@@ -1164,7 +1453,7 @@ fn truncation_tool_use_complete_wins_over_length() {
             );
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(&[text_block("done")], END_TURN),
+                with_finish_turn(messages_turn(&[text_block("done")], END_TURN)),
             );
             let (actor, _gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
@@ -1227,7 +1516,7 @@ fn context_window_exceeded_triggers_compaction() {
             // The rebuilt main turn completes.
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(&[text_block("after compact")], END_TURN),
+                with_finish_turn(messages_turn(&[text_block("after compact")], END_TURN)),
             );
             let (actor, _gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
@@ -1302,7 +1591,7 @@ fn api_context_window_error_triggers_session_compaction() {
             );
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(&[text_block("after API-error compact")], END_TURN),
+                with_finish_turn(messages_turn(&[text_block("after API-error compact")], END_TURN)),
             );
             let (actor, _gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
@@ -1462,7 +1751,7 @@ fn pause_turn_resend() {
             );
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(&[text_block("second segment")], END_TURN),
+                with_finish_turn(messages_turn(&[text_block("second segment")], END_TURN)),
             );
             let (actor, _gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
@@ -1506,7 +1795,7 @@ fn stop_failure_not_emitted_on_success() {
             );
             server.enqueue_response(
                 "/v1/messages",
-                messages_turn(&[text_block("part two")], END_TURN),
+                with_finish_turn(messages_turn(&[text_block("part two")], END_TURN)),
             );
             let (actor, mut gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
@@ -1604,7 +1893,7 @@ fn cross_backend_consistency() {
             );
             server.enqueue_response(
                 "/v1/chat/completions",
-                chat_completions_turn("part two", Some("stop")),
+                with_finish_turn(chat_completions_turn("part two", Some("stop"))),
             );
             let (actor, _gateway_rx) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::ChatCompletions).await;

@@ -1012,7 +1012,11 @@ impl SessionActor {
                         None,
                     ),
                 },
-                Ok(AdmittedTurnSuccess::Model(TurnOutcome::Completed { refusal, .. })) => (
+                Ok(AdmittedTurnSuccess::Model(TurnOutcome::Completed {
+                    refusal,
+                    completion_intent,
+                    ..
+                })) => (
                     crate::session::events::TurnOutcomeLabel::Completed,
                     chat_state::TurnTerminal {
                         stop_reason: if refusal.is_some() {
@@ -1021,7 +1025,9 @@ impl SessionActor {
                             "end_turn"
                         }
                         .into(),
-                        completion_kind: "completed".into(),
+                        completion_kind: completion_intent
+                            .map_or("completed", CompletionIntent::terminal_kind)
+                            .into(),
                     },
                     None,
                     None,

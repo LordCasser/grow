@@ -181,6 +181,12 @@ pub enum ChatStateCommand {
     /// Record a tool result.
     PushToolResult { item: ConversationItem },
 
+    /// Commit a host control result before permitting its terminal decision.
+    PushToolResultDurably {
+        item: ConversationItem,
+        reply: oneshot::Sender<Result<(), TimelineWriteError>>,
+    },
+
     /// Atomically validate frozen context coordinates and append either the
     /// proposed tool result or a bounded rejection result that still closes
     /// the provider tool call.

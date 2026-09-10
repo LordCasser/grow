@@ -1,6 +1,58 @@
 #![allow(dead_code)]
 use super::*;
 
+/// Opt-in final-response fixture. Raw provider terminators remain available
+/// unchanged for tests of missing declarations, truncation and Sidebands.
+pub(crate) fn with_finish_turn(mut response: test_support::ScriptedResponse) -> test_support::ScriptedResponse {
+    use test_support::scripted::ScriptedBody;
+    use test_support::SseEvent;
+    static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = format!("finish_{}", NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let args = json!({"status": "completed", "reason": "Requested answer delivered."});
+    let ScriptedBody::Sse(events) = &mut response.body else { panic!("expected SSE fixture") };
+    let mut rewritten = Vec::new();
+    let mut next_block = 0;
+    let mut inserted = false;
+    for mut event in events.drain(..) {
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&event.data) {
+            if value["type"] == "content_block_start" {
+                next_block = value["index"].as_u64().unwrap() + 1;
+            }
+            if value["type"] == "message_delta" {
+                for value in [
+                    json!({"type":"content_block_start","index":next_block,
+                        "content_block":{"type":"tool_use","id":id,"name":"FinishTurn","input":{}}}),
+                    json!({"type":"content_block_delta","index":next_block,
+                        "delta":{"type":"input_json_delta","partial_json":args.to_string()}}),
+                    json!({"type":"content_block_stop","index":next_block}),
+                ] { rewritten.push(SseEvent::data(value.to_string())); }
+                value["delta"]["stop_reason"] = json!("tool_use");
+                inserted = true;
+            } else if value["type"] == "response.completed" {
+                value["response"]["output"].as_array_mut().unwrap().push(json!({
+                    "type":"function_call","id":format!("item_{id}"),"call_id":id,
+                    "name":"FinishTurn","arguments":args.to_string(),"status":"completed"
+                }));
+                inserted = true;
+            } else if let Some(choices) = value["choices"].as_array_mut() {
+                for choice in choices {
+                    if choice["finish_reason"] == "stop" {
+                        choice["delta"]["tool_calls"] = json!([{"index":0,"id":id,"type":"function",
+                            "function":{"name":"FinishTurn","arguments":args.to_string()}}]);
+                        choice["finish_reason"] = json!("tool_calls");
+                        inserted = true;
+                    }
+                }
+            }
+            event.data = value.to_string();
+        }
+        rewritten.push(event);
+    }
+    assert!(inserted, "fixture has no final response");
+    *events = rewritten;
+    response
+}
+
 #[cfg(test)]
 pub(crate) async fn admit_test_human_input(actor: &SessionActor, label: &str) -> Vec<String> {
     let input_id = format!("test-input-{label}");

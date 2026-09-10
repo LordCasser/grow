@@ -11,6 +11,20 @@ finish/terminal 的流使用 `IncompleteStream`，身份或状态冲突仍然停
 session 的认证、native continuation 等修复与 sampler 共用一个 `RecoveryBudget`。
 行为契约见 [model-sampling](../../openspec/specs/model-sampling/spec.md)。
 
+普通 Turn 的完成协议由 `shell/src/session/actor/turn/completion.rs` 负责。
+`end_turn`、`stop` 和 `response.completed` 只证明 provider 的一次响应结束。
+模型须在最终答案或明确等待说明的同一响应中，单独调用宿主 `FinishTurn`，声明
+completed、waiting_for_user 或 waiting_for_background。该调用及结果先进入 Timeline，
+然后才进入 Stop gate；Turn terminal 的 completion_kind 分别为 explicit_completion、
+waiting_for_user、waiting_for_background。这些是模型声明和宿主判定，不是原始响应字段，
+也不是对业务结果正确性的证明。
+
+无声明的文本响应保留为已接纳事实，协议纠正通过既有 Step 边界继续当前 Turn。
+连续三次无有效声明且无业务调用会明确报错；业务调用后重新计数。此过程不按标点判定、
+不启动分类 Sideband、不重放历史工具，也不绕过控制切换、取消和 Goal 预算。
+结构化输出、拒绝和宿主控制终止继续使用各自的终止契约。等待声明仅结束本 Turn，
+不替代 Goal 生命周期工具。详见 [显式完成契约](../../openspec/specs/model-sampling/spec.md#requirement-ordinary-turns-require-explicit-completion-intent)。
+
 通知中的 `samplingRequestId` / `samplingAttempt` 标识临时候选，
 `SamplingAttempt` 按 Started → Discarded / Accepted 经过相同 FIFO 和合并缓冲。
 Pager Fullscreen/Inline 明确声明撤回能力；Minimal、headless 和未知发起方使用

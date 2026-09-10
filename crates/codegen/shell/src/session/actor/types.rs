@@ -61,12 +61,13 @@ pub(crate) enum SamplerTurnOutcome {
 
 /// Outcome of `process_conversation_turn`, distinguishing normal completion from cancellation.
 pub(crate) enum TurnOutcome {
-    /// The model finished responding (no more tool calls).
+    /// The model supplied a terminal contract (or a provider refusal).
     /// Carries the turn-end signals snapshot for trace metadata enrichment,
     /// the set of tool names invoked during this turn (for completion
     /// requirement tracking), and the schema-validated `--json-schema` output
     /// (`None` without a schema; `Some(Err)` on parse/validation failure).
     Completed {
+        completion_intent: Option<super::turn::CompletionIntent>,
         snapshot: Box<Option<TurnDeltaSnapshot>>,
         tools_called: Vec<String>,
         structured_output: Option<Result<serde_json::Value, String>>,
