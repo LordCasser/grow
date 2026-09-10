@@ -23,3 +23,13 @@ The user explicitly requested inclusion of the other agent's concurrent portable
 The combined candidate's complete Shell regression passed: 3,789 passed, 0 failed, 3 ignored, in 90.33 s. Command: `RUST_MIN_STACK=16777216 cargo test --locked --lib -p shell -j 2 -- --test-threads=4`; log: `/tmp/grow-v2.1.6-merged-shell-final.log`. Together with the three-library run above this is 4,777 passed / 0 failed / 4 existing ignored tests after the concurrent correction was included. The three-library run reused the other agent's existing incremental profile; Shell required a rebuild of affected crates. After all local executions ended, package-scoped Cargo cleanup removed 8.9 GiB and restored approximately 15 GiB free space. No installed Grow executable or live user session was modified.
 
 Archiving this preparation record does not claim publication. GitHub core regression, platform checks, annotated-tag preflight and the all-platform release workflow will be verified from their actual run results before publication is reported to the user.
+
+## Final candidate
+
+Commit `667e1b33` contains the provider-termination provenance repair, the portable tool-history and Windows storage fixes, and the final ordinary-response coordination fixture. The final remote gates all passed:
+
+- Core library regression and CLI build: [34496475770](https://github.com/LordCasser/grow/actions/runs/34496475770).
+- Windows session storage boundary suite (all eight exact tests): [34496475428](https://github.com/LordCasser/grow/actions/runs/34496475428).
+- Linux, macOS and Windows coordination libraries, CLI builds and independent-process scenarios: [34496475683](https://github.com/LordCasser/grow/actions/runs/34496475683).
+
+The local affected-crate run on the same source passed 476 ChatState, 240 sampler, 274 sampling-types and 3,794 Shell tests, with four existing ignored tests. The additional Messages terminal-evidence correction was verified by 28 focused sampler tests before this commit. These checks do not invoke a real paid provider and do not claim that a natural provider stop proves the user's task is complete. The FinishTurn protocol is explicitly excluded from this release.

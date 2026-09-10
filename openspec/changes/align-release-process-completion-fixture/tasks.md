@@ -1,2 +1,0 @@
-- [ ] Align ordinary fixture finals with the archived contract.
-- [ ] Pass syntax checks and all native process groups on the combined candidate; validate and archive.
