@@ -29,3 +29,7 @@ Windows contained storage SHALL publish immutable artifacts and session entities
 #### Scenario: Coordination reads a live source's durable inquiry history
 - **WHEN** coordination resolves its source Timeline by session id while that session's publication handle remains live
 - **THEN** the read uses the existing independent observation capability, validates the same identity and Timeline, and does not acquire or cache writer authority.
+
+#### Scenario: List sessions while a publication handle is alive
+- **WHEN** an independent adapter enumerates summaries while a session writer retains its publication handle
+- **THEN** the live session remains visible through observation handles, which do not enter the writer cache; later mutations still acquire their normal writer capability and lease.

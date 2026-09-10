@@ -884,7 +884,7 @@ impl JsonlStorageAdapter {
         }
         let authority = self.authority(false)?;
         let sessions =
-            match authority.open_relative(Path::new("sessions"), "sessions directory", false) {
+            match authority.open_relative_shared_read(Path::new("sessions"), "sessions directory") {
                 Ok(sessions) => sessions,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(error) => return Err(error),
@@ -895,10 +895,9 @@ impl JsonlStorageAdapter {
             if cwd_name.to_string_lossy().starts_with('.') {
                 continue;
             }
-            let cwd_directory = match sessions.open_relative(
+            let cwd_directory = match sessions.open_relative_shared_read(
                 Path::new(&cwd_name),
                 "session cwd directory",
-                false,
             ) {
                 Ok(directory) => directory,
                 Err(error) if Self::is_skippable_scan_error(&error) => continue,
@@ -908,10 +907,9 @@ impl JsonlStorageAdapter {
                 if session_name.to_string_lossy().starts_with('.') {
                     continue;
                 }
-                let directory = match cwd_directory.open_relative(
+                let directory = match cwd_directory.open_relative_shared_read(
                     Path::new(&session_name),
                     "session directory",
-                    false,
                 ) {
                     Ok(directory) => directory,
                     Err(error) if Self::is_skippable_scan_error(&error) => continue,

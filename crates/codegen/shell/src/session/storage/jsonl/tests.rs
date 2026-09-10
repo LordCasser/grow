@@ -152,6 +152,13 @@ async fn session_creation_round_trip_commits_and_reopens_the_timeline() {
         .expect("coordination must read a live source's committed history")
         .expect("the live source must remain discoverable by id");
     assert_eq!(observed.events().len(), timeline.events().len() + 1);
+    let observer = JsonlStorageAdapter::with_root(root.clone());
+    let summaries = observer.list_sessions_sync(None)
+        .expect("summary enumeration must coexist with a live publication handle");
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].info.id, info.id);
+    assert!(observer.opened_sessions.lock().unwrap().is_empty(), "observation must not admit a writer capability");
+    drop(observer);
     drop(writer);
 
     let resumed = JsonlStorageAdapter::with_root(root);
