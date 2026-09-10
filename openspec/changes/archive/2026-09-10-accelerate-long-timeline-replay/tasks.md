@@ -1,0 +1,4 @@
+- [x] Measure and fix cumulative lifecycle cloning in bulk replay.
+- [x] Verify equivalent Surface, sequence, ownership and delayed Control behavior; reject malformed history.
+- [x] Run frozen-session performance comparison and relevant regressions.
+- [x] Document evidence, validate and archive.

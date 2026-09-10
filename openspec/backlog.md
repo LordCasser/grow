@@ -64,6 +64,8 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 
 ## 持续审计待拆分事项
 
+- **长会话在线追加的生命周期复制开销**：本次仅移除私有批量恢复中的累计 `LifecycleFold` 克隆；在线 `Timeline::prepare/accept` 仍通过克隆保障失败原子性。后续若优化在线追加，应先测量长历史写入延迟，再设计不削弱拒绝原子性的最小变更；不能直接复用遇错会丢弃整个 fold 的恢复路径。恢复中的 JSON 解析、重复重建和 artifact 校验也需分别测量，不能以跳过校验换取速度。见 [accelerate-long-timeline-replay](changes/archive/2026-09-10-accelerate-long-timeline-replay/verification.md) 的验证记录。
+
 - **更新目录的多平台保留语义（已完成）**：已修正为保留当前版本和最高其他版本的全部已识别平台产物，包含回退与多平台真实目录回归。见 [fix-update-version-group-retention](changes/archive/2026-09-07-fix-update-version-group-retention/verification.md)。
 
 - **LSP inspect 同名来源展示（已完成）**：允许来源与被禁用的同名项目定义现分别展示，并共享报告的信任结果。见 [fix-inspect-lsp-fallback-display](changes/archive/2026-09-07-fix-inspect-lsp-fallback-display/verification.md)。

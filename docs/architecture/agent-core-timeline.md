@@ -52,6 +52,8 @@ Timeline -------------> Timeline persistence
 - 恢复边界只传递 Timeline events；不得同时携带一个预折叠 Surface。稳定 system head 只允许在 Timeline seed 中出现一次；client attach、模型切换、Agent/Behavior 切换、memory 与压缩均无权替换它。
 - UI 更新与本地诊断是 Timeline 的消费者，不是恢复会话的第二事实源。
 
+恢复时，`Timeline::from_events` 在未发布的独立 fold 中逐条校验事件，并原地推进生命周期，避免每条事件复制累计的请求、工具和输入索引。任一校验失败都会丢弃整个恢复结果；在线 `prepare/accept` 仍保留拒绝事件不改变现有状态的事务语义。两条路径共用内容校验和投影应用，并使用事件之前的 turn/step 状态决定 Control 激活边界。契约见 [Session Timeline](../../openspec/specs/session-timeline/spec.md)。
+
 ## 核心类型
 
 每条事件具有单调连续的 `seq`。`seq` 在接受时由 Timeline 分配，调用方不能指定或复用。

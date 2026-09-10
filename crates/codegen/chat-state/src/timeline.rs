@@ -1732,7 +1732,7 @@ impl Timeline {
     pub fn from_events(events: Vec<TimelineEvent>) -> Result<Self, TimelineError> {
         let mut timeline = Self::default();
         for event in events {
-            timeline.accept(event)?;
+            timeline.accept_replayed(event)?;
         }
         Ok(timeline)
     }
@@ -2928,6 +2928,26 @@ impl Timeline {
 
     pub fn accept(&mut self, event: TimelineEvent) -> Result<(), TimelineError> {
         let lifecycle = self.validate(&event)?;
+        let active_turn = self.lifecycle.active_turn.is_some();
+        let active_step = self.lifecycle.active_step.is_some();
+        self.apply_validated_event(event, active_turn, active_step);
+        self.lifecycle = lifecycle;
+        Ok(())
+    }
+
+    /// Only for a private, fresh restoration fold. An error discards the
+    /// entire fold; unlike live accept, no prior state needs to be preserved.
+    fn accept_replayed(&mut self, event: TimelineEvent) -> Result<(), TimelineError> {
+        self.validate_header(&event)?;
+        self.validate_content(&event)?;
+        let active_turn = self.lifecycle.active_turn.is_some();
+        let active_step = self.lifecycle.active_step.is_some();
+        self.lifecycle.accept(&event.kind)?;
+        self.apply_validated_event(event, active_turn, active_step);
+        Ok(())
+    }
+
+    fn apply_validated_event(&mut self, event: TimelineEvent, active_turn: bool, active_step: bool) {
         match &event.kind {
             TimelineEventKind::Messages(messages) => self.apply_messages(event.seq, messages),
             TimelineEventKind::ImageProjection(projection) => {
@@ -3067,11 +3087,7 @@ impl Timeline {
                         event: event.seq,
                         item: item as u32,
                     };
-                    if control_transition_waits_for_boundary(
-                        self.lifecycle.active_turn.is_some(),
-                        self.lifecycle.active_step.is_some(),
-                        context,
-                    ) {
+                    if control_transition_waits_for_boundary(active_turn, active_step, context) {
                         self.pending_control_contexts
                             .insert(context.layer, (source, context.item.clone()));
                     } else {
@@ -3102,9 +3118,7 @@ impl Timeline {
             self.subagent_result_recorded = true;
         }
         self.apply_prompt_coordinate(&event.kind);
-        self.lifecycle = lifecycle;
         self.events.push(event);
-        Ok(())
     }
 
     fn apply_notification(&mut self, seq: EventSeq, event: &NotificationEvent) {
@@ -3215,6 +3229,14 @@ impl Timeline {
     }
 
     fn validate(&self, event: &TimelineEvent) -> Result<LifecycleFold, TimelineError> {
+        self.validate_header(event)?;
+        let mut lifecycle = self.lifecycle.clone();
+        lifecycle.accept(&event.kind)?;
+        self.validate_content(event)?;
+        Ok(lifecycle)
+    }
+
+    fn validate_header(&self, event: &TimelineEvent) -> Result<(), TimelineError> {
         if self.subagent_result_recorded {
             return Err(TimelineError::SubagentTimelineEnded);
         }
@@ -3250,8 +3272,10 @@ impl Timeline {
             }
         }
 
-        let mut lifecycle = self.lifecycle.clone();
-        lifecycle.accept(&event.kind)?;
+        Ok(())
+    }
+
+    fn validate_content(&self, event: &TimelineEvent) -> Result<(), TimelineError> {
         if let TimelineEventKind::Compaction(CompactionEvent::Summary {
             id,
             input_ref,
@@ -3714,7 +3738,7 @@ impl Timeline {
                 return Err(TimelineError::InvalidSubagent);
             }
         }
-        Ok(lifecycle)
+        Ok(())
     }
 
     fn validate_notification(&self, notification: &NotificationEvent) -> Result<(), TimelineError> {
@@ -6503,6 +6527,168 @@ fn validate_tool_result_prune(
 mod tests {
     use super::*;
 
+    fn assert_bulk_matches(transactional: &Timeline) {
+        let replay = Timeline::from_events(transactional.events.clone()).unwrap();
+        assert_same_fold(&replay, transactional);
+    }
+
+    fn assert_same_fold(replay: &Timeline, transactional: &Timeline) {
+        assert_eq!(replay.surface_ids, transactional.surface_ids);
+        assert_eq!(replay.surface_revision, transactional.surface_revision);
+        assert_eq!(replay.next_prompt_index, transactional.next_prompt_index);
+        assert_eq!(
+            serde_json::to_value(&replay.surface).unwrap(),
+            serde_json::to_value(&transactional.surface).unwrap()
+        );
+        assert_eq!(
+            format!("{:?}", replay.lifecycle),
+            format!("{:?}", transactional.lifecycle)
+        );
+        assert_eq!(
+            format!("{:?}", replay.pending_control_contexts),
+            format!("{:?}", transactional.pending_control_contexts)
+        );
+        assert_eq!(replay.next_seq(), transactional.next_seq());
+        assert_eq!(replay.prompt_indices, transactional.prompt_indices);
+        assert_eq!(
+            replay.received_notification_ids,
+            transactional.received_notification_ids
+        );
+        assert_eq!(
+            replay.received_notifications,
+            transactional.received_notifications
+        );
+        assert_eq!(
+            replay.pending_monitor_notifications,
+            transactional.pending_monitor_notifications
+        );
+        assert_eq!(replay.terminal_monitors, transactional.terminal_monitors);
+        assert_eq!(replay.terminal_tasks, transactional.terminal_tasks);
+        assert_eq!(
+            replay.subagent_result_recorded,
+            transactional.subagent_result_recorded
+        );
+        assert_eq!(
+            format!("{:?}", replay.pending_notifications),
+            format!("{:?}", transactional.pending_notifications)
+        );
+    }
+
+    #[test]
+    fn bulk_replay_preserves_large_request_history_and_rejects_invalid_suffix() {
+        let mut timeline = Timeline::default();
+        let turn = TurnId(7);
+        let step = StepId { turn, index: 0 };
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn,
+                input_ids: vec![],
+                identity: user_identity(),
+                model_id: "provider/model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "task".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+        for i in 0..300 {
+            let id = format!("request-{i}");
+            timeline
+                .record(TimelineEventKind::Request(RequestEvent::Started {
+                    id: id.clone(),
+                    turn,
+                    step,
+                    model_id: "provider/model".into(),
+                    input_message_count: 0,
+                    tool_count: 0,
+                }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Request(RequestEvent::Completed {
+                    id,
+                    duration_ms: 1,
+                    time_to_first_token_ms: None,
+                    usage: RequestUsage::default(),
+                    response_message_count: 0,
+                }))
+                .unwrap();
+        }
+        assert_bulk_matches(&timeline);
+        for kind in [
+            TimelineEventKind::Request(RequestEvent::Started {
+                id: "request-0".into(),
+                turn,
+                step,
+                model_id: "provider/model".into(),
+                input_message_count: 0,
+                tool_count: 0,
+            }),
+            TimelineEventKind::Control(ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({}),
+                retired_context_layers: vec![],
+                model_contexts: vec![ControlContext {
+                    layer: ControlContextLayer::Behavior,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::assistant("invalid"),
+                }],
+            }),
+        ] {
+            let event = TimelineEvent {
+                version: TIMELINE_SCHEMA_VERSION,
+                seq: timeline.next_seq(),
+                at_ms: 1,
+                kind,
+            };
+            let before = format!("{timeline:?}");
+            assert!(timeline.accept(event.clone()).is_err());
+            assert_eq!(
+                format!("{timeline:?}"),
+                before,
+                "live rejection must be atomic"
+            );
+            let mut events = timeline.events.clone();
+            events.push(event);
+            assert!(Timeline::from_events(events).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "read-only performance comparison; set GROW_REPLAY_BENCH_PATH to a frozen timeline prefix"]
+    fn benchmark_frozen_timeline_replay() {
+        use std::io::BufRead;
+        let path = std::env::var_os("GROW_REPLAY_BENCH_PATH").expect("fixture path");
+        let start = std::time::Instant::now();
+        let events: Vec<TimelineEvent> =
+            std::io::BufReader::new(std::fs::File::open(path).unwrap())
+                .lines()
+                .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+                .collect();
+        eprintln!("decoded {} events in {:?}", events.len(), start.elapsed());
+        let reference_events = events.clone();
+        let start = std::time::Instant::now();
+        let mut reference = Timeline::default();
+        for (i, event) in reference_events.into_iter().enumerate() {
+            reference.accept(event).unwrap();
+            if (i + 1) % 10_000 == 0 {
+                eprintln!("transactional {} events: {:?}", i + 1, start.elapsed());
+            }
+        }
+        let baseline = start.elapsed();
+        let start = std::time::Instant::now();
+        let replay = Timeline::from_events(events).unwrap();
+        let optimized = start.elapsed();
+        eprintln!(
+            "transactional={baseline:?}, bulk={optimized:?}, speedup={:.2}x",
+            baseline.as_secs_f64() / optimized.as_secs_f64()
+        );
+        assert_same_fold(&replay, &reference);
+    }
+
     fn record_compaction_summary_for(
         timeline: &mut Timeline,
         id: &str,
@@ -8568,6 +8754,7 @@ mod tests {
             serde_json::to_value(timeline.branch_transcript()).unwrap(),
             serde_json::to_value(timeline.surface()).unwrap()
         );
+        assert_bulk_matches(&timeline);
     }
 
     #[test]
@@ -8698,6 +8885,7 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(timeline.surface().len(), 2);
+        assert_bulk_matches(&timeline);
 
         timeline
             .append(
@@ -8742,6 +8930,7 @@ mod tests {
             .unwrap(),
             serde_json::to_value(timeline.surface()).unwrap()
         );
+        assert_bulk_matches(&timeline);
     }
 
     #[test]
