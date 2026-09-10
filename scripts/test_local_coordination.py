@@ -280,7 +280,11 @@ context_window = 200000
 
         foreground = pool.submit(b.call, "session/prompt", {"sessionId": sb,
                                  "prompt": [{"type": "text", "text": "FOREGROUND_BLOCK"}]})
-        assert model.foreground.wait(20), "foreground did not reach local model"
+        deadline = time.monotonic() + 20
+        while not model.foreground.wait(0.05):
+            if foreground.done():
+                raise AssertionError(f"foreground completed before reaching local model: {foreground.result()}")
+            assert time.monotonic() < deadline, "foreground did not reach local model"
         model.block = True
         qid = inquiry_id()
         ask = dict(inquiryId=qid, sourceSessionId=sa, targetSessionId=sb, question="What are you doing?")
@@ -483,6 +487,8 @@ context_window = 200000
         if failed:
             for client in clients:
                 print(f"Grow fixture pid={client.proc.pid} exit={client.proc.returncode}", file=sys.stderr)
+                print(json.dumps({"notices": client.notices[-20:], "permissions": client.permissions},
+                                 ensure_ascii=False)[-16384:], file=sys.stderr)
             for log in sorted(root.glob("*.stderr.log")):
                 print(f"--- {log.name} (last 16 KiB) ---", file=sys.stderr)
                 print(log.read_bytes()[-16384:].decode("utf-8", errors="replace"), file=sys.stderr)
