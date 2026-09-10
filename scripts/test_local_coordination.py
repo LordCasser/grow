@@ -104,6 +104,13 @@ class ModelHandler(http.server.BaseHTTPRequestHandler):
             elif "call_coord_ask_ui" not in serialized:
                 tool_call = ("call_coord_ask_ui", "ask_session", {
                     "target_session_id": self.server.tool_target, "question": "UI tool flow status?"})
+        completion_call = not sideband and tool_call is None
+        if completion_call:
+            names = [tool.get("name") or tool.get("function", {}).get("name")
+                     for tool in body.get("tools", [])]
+            assert "FinishTurn" in names, "ordinary turn must advertise explicit completion"
+            tool_call = ("finish_" + uuid.uuid4().hex, "FinishTurn", {
+                "status": "completed", "reason": "Requested fixture answer delivered."})
         answer = "COORDINATION_SIDE_ANSWER" if sideband else "TOOL_FLOW_DONE" if tool_flow else "FOREGROUND_ANSWER"
         model = body.get("model", "test-model")
         if self.path.endswith("/responses"):
@@ -121,15 +128,21 @@ class ModelHandler(http.server.BaseHTTPRequestHandler):
                 call_id, name, arguments = tool_call
                 item = {"type": "function_call", "id": "fc_" + call_id, "call_id": call_id,
                         "name": name, "arguments": json.dumps(arguments), "status": "completed"}
-                response["output"] = [item]
+                response["output"] = response["output"] + [item] if completion_call else [item]
+                text_event = events[1]
+                tool_index = 1 if completion_call else 0
                 events = [events[0],
                           {"type": "response.output_item.added", "sequence_number": 1,
-                           "output_index": 0, "item": dict(item, arguments="", status="in_progress")},
+                           "output_index": tool_index, "item": dict(item, arguments="", status="in_progress")},
                           {"type": "response.function_call_arguments.delta", "sequence_number": 2,
-                           "item_id": item["id"], "output_index": 0, "delta": item["arguments"]},
+                           "item_id": item["id"], "output_index": tool_index, "delta": item["arguments"]},
                           {"type": "response.output_item.done", "sequence_number": 3,
-                           "output_index": 0, "item": item},
+                           "output_index": tool_index, "item": item},
                           {"type": "response.completed", "sequence_number": 4, "response": response}]
+                if completion_call:
+                    events.insert(1, text_event)
+                for sequence, event in enumerate(events):
+                    event["sequence_number"] = sequence
         else:
             events = [{"id": "chatcmpl-test", "object": "chat.completion.chunk",
                        "created": 1234567890, "model": model, "choices": [{"index": 0,
@@ -143,6 +156,8 @@ class ModelHandler(http.server.BaseHTTPRequestHandler):
                     "index": 0, "id": call_id, "type": "function",
                     "function": {"name": name, "arguments": json.dumps(arguments)}}]},
                     "finish_reason": "tool_calls"}]
+                if completion_call:
+                    events[0]["choices"][0]["delta"]["content"] = answer
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")

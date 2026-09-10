@@ -4139,13 +4139,18 @@ mod tests {
             b"published"
         );
         let reopened = parent
-            .open_relative(
-                Path::new("session"),
-                "independently reopened session",
-                false,
-            )
+            .open_relative_shared_read(Path::new("session"), "independently observed session")
             .unwrap();
         assert!(published.is_same_entity(&reopened).unwrap());
+        drop(reopened);
+        drop(published);
+        let next_writer = parent
+            .open_relative(Path::new("session"), "next writer capability", false)
+            .unwrap();
+        assert_eq!(
+            next_writer.read_bounded(std::ffi::OsStr::new("marker"), "reopened marker", 32).unwrap(),
+            b"published"
+        );
     }
 
     #[cfg(unix)]
