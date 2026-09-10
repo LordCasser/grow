@@ -544,6 +544,17 @@ pub fn stream_messages<'a>(
                     if delta.stop_sequence.is_some() {
                         final_stop_sequence = delta.stop_sequence.clone();
                     }
+                    // The terminal delta is provider evidence even if a later
+                    // block or argument validation rejects this candidate
+                    // before the expected MessageStop frame arrives.
+                    if let Some(stop_reason) = final_raw_stop_reason.as_ref() {
+                        crate::audit::AttemptEvidence::observe_terminal(
+                            sampling_types::ProviderTerminal::Messages {
+                                stop_reason: stop_reason.clone(),
+                                stop_sequence: final_stop_sequence.clone(),
+                            },
+                        );
+                    }
                     final_stop_reason = delta.stop_reason.map(|sr| match sr {
                         messages::StopReason::EndTurn => StopReason::Stop,
                         messages::StopReason::MaxTokens => StopReason::Length,
