@@ -12,6 +12,11 @@ fn symlink(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).expect("symlink");
 }
 
+#[cfg(unix)]
+use self::symlink as symlink_dir;
+#[cfg(unix)]
+use self::symlink as symlink_file;
+
 #[cfg(windows)]
 fn symlink_dir(target: &Path, link: &Path) {
     std::os::windows::fs::symlink_dir(target, link).expect("symlink dir");
@@ -69,11 +74,11 @@ fn symlinks_are_billed_as_entries_and_never_followed() {
     let plain = root.join("plain.bin");
     fs::write(&plain, vec![9u8; 50_000]).unwrap();
     let link_to_dir = root.join("link-to-dir");
-    symlink(&dir, &link_to_dir);
+    symlink_dir(&dir, &link_to_dir);
     let link_to_file = root.join("link-to-file");
-    symlink(&plain, &link_to_file);
+    symlink_file(&plain, &link_to_file);
     let dangling = root.join("dangling");
-    symlink(&root.join("missing-target"), &dangling);
+    symlink_file(&root.join("missing-target"), &dangling);
 
     let report = scan(&root).unwrap();
     let entry = |name: &str| {

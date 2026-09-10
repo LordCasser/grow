@@ -13,3 +13,5 @@ Windows job 102846210811 in run 34469589238 reports Error 5 on replacement, Erro
 Microsoft documents the rename flag union for [FILE_RENAME_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info) and old-handle/new-name semantics for [FileRenameInformationEx](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/4217551b-d2c0-42cb-9dc1-69a716cf6d0c). No backward-compatibility fallback is added for filesystems that reject the required atomic replacement semantics; failures preserve the old manifest.
 
 The PTY test harness import now mirrors its existing Unix-only export and call site. Coordination CI retains dependency caches on failure using the same rust-cache setting as core/storage validation; this does not change test selection.
+
+The disk-usage symlink fixture calls its existing Windows directory/file helpers, with Unix aliases to the existing generic helper. This restores cross-platform compilation without removing or weakening any metadata-only, no-follow or independent-billing assertion.

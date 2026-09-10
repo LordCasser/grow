@@ -8,6 +8,8 @@ Use platform-native temporary paths in the existing actor fixture and apply the 
 
 # Capabilities
 
+The disk-usage test fixture also selects the existing platform-correct symlink helpers; all regression assertions remain intact.
+
 Extend local-coordination and session-timeline with the verified Windows reader/writer coexistence boundaries. No new subsystem, storage format or cross-platform architecture rewrite.
 
 # Impact
