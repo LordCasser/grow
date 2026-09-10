@@ -2,6 +2,11 @@ name: Windows session storage
 
 on:
   workflow_dispatch:
+    inputs:
+      api_probe_only:
+        description: Run the isolated Win32 rename diagnostic without compiling Grow
+        type: boolean
+        default: false
   pull_request:
     paths:
       - ".github/workflows/windows-session-storage.yml"
@@ -19,7 +24,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rename-api-probe:
+    if: ${{ inputs.api_probe_only }}
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v6
+      - run: python openspec/changes/fix-windows-coordination-release-regressions/rename-api-probe.py
   session-creation:
+    if: ${{ !inputs.api_probe_only }}
     name: Create and reopen a session
     runs-on: windows-2025
     timeout-minutes: 90

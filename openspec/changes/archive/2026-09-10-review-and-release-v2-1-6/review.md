@@ -10,7 +10,7 @@ The independent-process regression found a native unoptimized debug crash on an 
 
 The native process regression also exposed a stale fixture expectation: resident reload projects the latest approved inquiry state, whereas the fixture required the initial receipt. `align-coordination-reload-regression` now asserts the exact approved nonterminal state; all ten process scenario groups passed. The debug-only stack correction also passed the complete shell regression.
 
-Subsequent Windows platform validation found a nonportable actor fixture and runtime manifest-replacement/observer-sharing failures. They are addressed in the active `fix-windows-coordination-release-regressions` change; final Windows validation is required before release. No additional blocker was identified in the other reviewed paths. This is not proof of every provider or every possible interleaving.
+Subsequent Windows platform validation found nonportable actor/PTY/symlink fixtures and runtime manifest-replacement/observer-sharing failures. Failure diagnostics also exposed immutable artifact publication beyond MAX_PATH and ordinary files misclassified as operational directory-scan errors. They are addressed in the active `fix-windows-coordination-release-regressions` change; final Windows validation is required before release. No additional blocker was identified in the other reviewed paths. This is not proof of every provider or every possible interleaving.
 
 | Area | Evidence checked |
 | --- | --- |
