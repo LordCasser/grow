@@ -142,7 +142,7 @@ impl ChatStateActor {
                     "after_bytes": eviction.as_ref().map_or(body_bytes, |value| value.body_bytes_after),
                 },
                 "continuation_epoch": epoch_nonce,
-                "portable_prefix_len": native_continuation.as_ref().map(|value| value.portable_prefix_len),
+                "portable_prefix_len": native_continuation.as_ref().and_then(|value| value.portable_prefix_end(&items)),
                 "native_spans": native_continuation.as_ref().map(|value| value.spans.iter()
                     .map(|span| [span.start, span.end]).collect::<Vec<_>>()),
             })),

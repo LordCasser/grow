@@ -81,17 +81,12 @@ fn estimate_effective_conversation_tokens(request: &ConversationRequest) -> u64 
     let Some(native) = &request.native_continuation else {
         return estimate_wire_items(&request.items);
     };
-    if native.portable_prefix_len > request.items.len() {
+    let Some(portable_end) = native.portable_prefix_end(&request.items) else {
         return estimate_wire_items(&project_portable_history(&request.items));
-    }
-    let mut total = estimate_wire_items(&project_portable_history(
-        &request.items[..native.portable_prefix_len],
-    ));
-    let mut cursor = native.portable_prefix_len;
+    };
+    let mut total = estimate_wire_items(&project_portable_history(&request.items[..portable_end]));
+    let mut cursor = portable_end;
     for span in &native.spans {
-        if span.start < cursor || span.end <= span.start || span.end > request.items.len() {
-            return estimate_wire_items(&project_portable_history(&request.items));
-        }
         total = total
             .saturating_add(estimate_wire_items(&request.items[cursor..span.start]))
             .saturating_add(span.fragment.estimated_tokens());

@@ -7,21 +7,23 @@ Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，�
 
 远程配置管理、deployment-config 服务、签名策略同步及其专用 CLI 不在规划范围内。
 
-## 压缩后的 portable 工具历史
+## 压缩后的 portable 工具历史（已完成）
 
 2026-09-10 核对 session `01a08910-219a-78f1-a45c-98b448764a05`：局部压缩保留了 tail identity，但 `finish_surface_replacement` 重置整个 native epoch 后，`project_portable_history` 把最新的成对工具调用/结果也转换成 Historical tool exchange 文本。已观察到压缩后模型只给出行动预告便合法 stop，因果强度仍受单样本限制。本次修复历史摘要范围与下一 Step 续接；结构化 portable tail 单独立项。
 
-- ceiling：继续清除旧 native 签名/加密 reasoning，不按相同 model/backend 猜测它们仍合法，也不通过回复长度/冒号强制重采样。
-- trigger：在继续评估此类语义停顿、跨模型迁移或 portable 请求协议时，由用户明确启动。
-- upgrade：分别证明三个后端对不含旧 reasoning carrier 的完整工具往返的接受边界，设计同 route 与跨 route 的投影策略；覆盖 partial compaction、完整/悬空/孤立工具项、模型切换和 replay。验证实际 wire 与后续工具执行，避免重发已执行副作用或从历史恢复 native state。
+2026-09-10 由 `preserve-portable-tool-exchanges` 完成：portable 投影保留配对的中性工具协议，继续清除旧 native reasoning/签名。三 backend、六方向模型切换、恢复、局部压缩及真实 between-step 工具执行回归通过；工具附件中的图片淘汰文本也完整编码。没有新增按冒号/短句重采样或历史工具重放。验证见 [记录](changes/archive/2026-09-10-preserve-portable-tool-exchanges/verification.md)，不据此声称所有线上模型都不会提前结束。
 
-## 无签名 Messages 回退切断工具往返
+## 无签名 Messages 回退切断工具往返（已完成）
 
 2026-09-10 审计 session `01a08906-7afd-70e2-af4e-5ff9ea4db84c`：原始请求 seq 49616、49659 只有最新 tool_result，没有对应 tool_use；Timeline 中调用及执行结果完整。当前 2.1.6 的 `push_response_durably` 在 unsigned thinking 导致 native 缺失时，把 portable prefix 固定在 assistant 之后、尚未追加的结果之前。`request_segments` 分别投影两侧，prefix 内的调用因无结果被删除，后缀结果却继续以原生协议发送。审计与本地复现见 `changes/archive/2026-09-10-audit-session-colon-stop/`。
 
 - 范围：这是跨层请求配对缺口，区别于上述完整工具历史被文本化的问题；不能因服务端接受了请求就认定配对有效。
 - 限制：三次行动预告后均收到合法 end_turn，其中首个请求没有孤立结果，不能把所有提前结束归因于本缺口。
-- 后续验收：从 unsigned thinking + tool_use 经真实 ChatState 接纳、工具结果追加到下一 wire，保证工具往返完整表达或整体安全降级；覆盖多个工具、文本/推理混排、控制边界、模型切换和恢复。继续清除无效签名，不重放已执行工具，不通过冒号或短句猜测完成状态。修复需单独 change，不在本审计实施。
+- 2026-09-10 由 `preserve-portable-tool-exchanges` 完成：共享 prefix 闭合逻辑吸收后追加的工具结果，wire、token 估算及来源证据使用同一范围，不越过新消息或 native span。真实 unsigned thinking → 工具执行 → 下一请求回归在旧实现失败、修复后通过，调用/结果各一次；多结果跨切点也保持配对。验证见 [记录](changes/archive/2026-09-10-preserve-portable-tool-exchanges/verification.md)。
+
+## 工具关联 ID 的目标编码
+
+2026-09-10 发布审查核对 `sampling-types/src/conversation.rs::build_messages_request`：既有 ID 清洗器把非字母数字/下划线/连字符替换成 `_`，因此中性历史中不同的 `a.b` 与 `a/b` 会得到相同目标 ID。此次真实会话的 ID 没有触发该情况，当前配对修复不扩展到 ID 编码重构。后续单独定义无碰撞的目标映射，并同时验证 live、portable 与完整 native span 的调用/结果身份，避免单改结果 ID 破坏原生 continuation。
 
 ## 长期：MCP Elicitation 与交互式 MCP
 

@@ -361,6 +361,11 @@ jobs:
           test -x "$bin"
           test -s "$bin"
 
+      - uses: actions/setup-python@v6
+        if: ${{ inputs.smoke }}
+        with:
+          python-version: "3.13"
+
       - name: Smoke-test native binary
         if: ${{ inputs.smoke && inputs.builder != 'windows' }}
         shell: bash
@@ -370,6 +375,7 @@ jobs:
           test -x "$bin"
           test -s "$bin"
           "$bin" --version | tee /dev/stderr | grep -F "${GROW_VERSION}"
+          python scripts/test_local_coordination.py --binary "$bin"
 
       - name: Smoke-test native binary
         if: ${{ inputs.smoke && inputs.builder == 'windows' }}
@@ -379,6 +385,8 @@ jobs:
           if (-not (Test-Path $bin)) { throw "missing $bin" }
           $version = & $bin --version
           if ($version -notlike "*$env:GROW_VERSION*") { throw "unexpected version: $version" }
+          python scripts/test_local_coordination.py --binary $bin
+          if ($LASTEXITCODE -ne 0) { throw "native process regression failed: $LASTEXITCODE" }
 
       - name: Package Unix release asset
         if: ${{ inputs.builder != 'windows' }}

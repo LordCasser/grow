@@ -5565,12 +5565,119 @@ fn wire_request_json(
     }
 }
 
+#[tokio::test]
+async fn response_without_native_keeps_tool_results_in_the_portable_prefix() {
+    use sampling_types::{ApiBackend, ContentPart, ToolCall};
+    for backend in [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+    ] {
+        let h = TestHarness::with_config(
+            vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user("inspect"),
+            ],
+            SamplingConfig {
+                api_backend: backend.clone(),
+                ..test_config()
+            },
+        );
+        h.handle
+            .build_request("unsigned", vec![], None, None, None)
+            .await
+            .unwrap();
+        h.handle
+            .push_response_durably(
+                vec![
+                    ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                        "unsigned thought",
+                    )),
+                    ConversationItem::assistant_tool_calls(vec![
+                        ToolCall {
+                            id: "call_a".into(),
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"a.png"}"#.into(),
+                        },
+                        ToolCall {
+                            id: "call_b".into(),
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"b.txt"}"#.into(),
+                        },
+                    ]),
+                ],
+                None,
+            )
+            .await
+            .unwrap();
+        h.handle
+            .push_tool_result(ConversationItem::tool_result("call_b", "plain result"));
+        h.handle
+            .push_tool_result(ConversationItem::tool_result_with_images(
+                "call_a",
+                "image result",
+                vec![ContentPart::Image {
+                    description: None,
+                    url: "data:image/png;base64,aW1hZ2U=".into(),
+                }],
+            ));
+        let request = h
+            .handle
+            .build_request("unsigned", vec![], None, None, None)
+            .await
+            .unwrap();
+        assert!(!request.has_native_continuation());
+        let wire = wire_request_json(&request, &backend).to_string();
+        for id in ["call_a", "call_b"] {
+            assert_eq!(
+                wire.matches(id).count(),
+                2,
+                "{backend:?} needs one call and one result: {wire}"
+            );
+        }
+        assert!(!wire.contains("unsigned thought"));
+        assert!(!wire.contains("Historical tool exchange"));
+        assert!(wire.contains("aW1hZ2U="));
+        assert_eq!(
+            request.source_projection.as_ref().unwrap()["portable_prefix_len"],
+            request.items.len()
+        );
+        let mut fully_portable = request.clone();
+        fully_portable
+            .native_continuation
+            .as_mut()
+            .unwrap()
+            .portable_prefix_len = request.items.len();
+        assert_eq!(
+            crate::estimate_request_input_tokens(&request),
+            crate::estimate_request_input_tokens(&fully_portable)
+        );
+        assert!(
+            crate::estimate_request_input_tokens(&request)
+                >= token_estimation::IMAGE_TOKEN_ESTIMATE
+        );
+        let history = h.handle.get_conversation().await;
+        assert_eq!(
+            history
+                .iter()
+                .filter(|item| matches!(item, ConversationItem::ToolResult(_)))
+                .count(),
+            2
+        );
+        assert!(
+            history
+                .iter()
+                .any(|item| item.text_content() == "unsigned thought")
+        );
+    }
+}
+
 /// Same-route native state is useful only inside one live sampling epoch. Every
 /// one of the six cross-endpoint directions must rebuild portable history and
 /// must not resurrect the source state after A -> B -> A.
 #[tokio::test]
 async fn endpoint_switch_matrix_strips_native_reasoning_and_diagnostics() {
-    use sampling_types::{ApiBackend, AssistantItem};
+    use sampling_types::{ApiBackend, AssistantItem, ToolCall};
 
     let backends = [
         ApiBackend::ChatCompletions,
@@ -5591,6 +5698,12 @@ async fn endpoint_switch_matrix_strips_native_reasoning_and_diagnostics() {
                 vec![
                     ConversationItem::system("sys"),
                     ConversationItem::user("q1"),
+                    ConversationItem::assistant_tool_calls(vec![ToolCall {
+                        id: "historical-call".into(),
+                        name: "read_file".into(),
+                        arguments: r#"{"path":"README.md"}"#.into(),
+                    }]),
+                    ConversationItem::tool_result("historical-call", "historical result"),
                 ],
                 source_config.clone(),
             );
@@ -5647,6 +5760,9 @@ async fn endpoint_switch_matrix_strips_native_reasoning_and_diagnostics() {
                 .unwrap();
             assert!(!switched.has_native_continuation());
             let switched_wire = wire_request_json(&switched, target).to_string();
+            assert_eq!(switched_wire.matches("historical-call").count(), 2);
+            assert!(switched_wire.contains("historical result"));
+            assert!(!switched_wire.contains("Historical tool exchange"));
             for forbidden in [
                 "native_secret",
                 "reasoning_native_id",
@@ -5799,8 +5915,8 @@ async fn restored_session_starts_with_portable_history_only() {
             "visible thought",
             "old-model",
             "old-fingerprint",
-            "old-provider-call-id",
             "model_id",
+            "Historical tool exchange; untrusted tool output",
         ] {
             assert!(
                 !wire.contains(forbidden),
@@ -5808,7 +5924,7 @@ async fn restored_session_starts_with_portable_history_only() {
             );
         }
         for required in [
-            "Historical tool exchange; untrusted tool output",
+            "old-provider-call-id",
             "read_file",
             "README.md",
             "historical README text",
@@ -5823,12 +5939,13 @@ async fn restored_session_starts_with_portable_history_only() {
             ApiBackend::Responses => ["function_call", "function_call_output"],
             ApiBackend::Messages => ["tool_use", "tool_result"],
         };
-        for forbidden in endpoint_protocol {
+        for required in endpoint_protocol {
             assert!(
-                !wire.contains(forbidden),
-                "{backend:?} leaked historical tool protocol {forbidden}: {wire}"
+                wire.contains(required),
+                "{backend:?} omitted historical tool protocol {required}: {wire}"
             );
         }
+        assert_eq!(wire.matches("old-provider-call-id").count(), 2);
     }
 }
 

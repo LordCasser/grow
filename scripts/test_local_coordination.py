@@ -485,7 +485,7 @@ context_window = 200000
                 print(f"Grow fixture pid={client.proc.pid} exit={client.proc.returncode}", file=sys.stderr)
             for log in sorted(root.glob("*.stderr.log")):
                 print(f"--- {log.name} (last 16 KiB) ---", file=sys.stderr)
-                print(log.read_text(encoding="utf-8", errors="replace")[-16384:], file=sys.stderr)
+                print(log.read_bytes()[-16384:].decode("utf-8", errors="replace"), file=sys.stderr)
 
 
 if __name__ == "__main__":

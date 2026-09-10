@@ -297,4 +297,6 @@ Grow 不为旧的可变 Chat 快照格式或旧 Timeline schema 保留执行兼�
 
 Messages thinking 的起始 signature 可由后续 delta 补齐；完整响应仍未签名时，只保留可见事实，不保留该响应的 native continuation。携带 native 的请求遇到明确缺失 signature 的序列化错误时，Shell 确认清理后用 portable 上下文重试。见 [签名与恢复契约](../../openspec/specs/model-sampling/spec.md#requirement-proxy-thinking-signatures-recover-without-losing-portable-history)。
 
+响应接纳时工具可能尚未执行，因此 native reset 保存的 prefix 不能直接作为下一请求的切点。`NativeContinuationProjection::portable_prefix_end` 在新消息及 native span 边界内吸收后续工具结果；wire、token 估算和来源证据共享该范围。完整往返保留结构化工具协议，图片预算替换的文本也保留；不明确或无效记录不伪造成协议，原始 Timeline 仍可审计。见 [工具往返边界](../../openspec/specs/model-sampling/spec.md#requirement-portable-boundaries-keep-tool-exchanges-together)。
+
 模型选择与配置热重载由 `shell/session/actor/model_switch.rs` 分别处理；核对同 ID 路由变化时应查看 `apply_model_config_reload` 的 `replace_sampling_route`，不能只看用户选择的 `route_changed` 判定。测试入口为 `same_model_catalog_reload_discards_signed_native_history`。

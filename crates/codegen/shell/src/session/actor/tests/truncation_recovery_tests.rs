@@ -514,6 +514,56 @@ fn missing_signature_native_continuation_retries_portably() {
     native_rejection_fallback(true);
 }
 
+#[test]
+fn unsigned_thinking_tool_exchange_survives_the_next_request() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response("/v1/messages", messages_turn(&[
+                thinking_block("unsigned private thought", ""),
+                text_block("继续，先记录任务："),
+                tool_use_block("unsigned_call", "todo_write",
+                    r#"{"todos":[{"id":"unsigned-todo","content":"verify portable history","status":"completed"}]}"#),
+            ], "tool_use"));
+            // A legal text-only end_turn stays terminal even when it ends in a colon.
+            server.enqueue_response("/v1/messages", messages_turn(&[text_block("记录结果：")], END_TURN));
+            let (actor, _gateway) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+            run_user_turn(&actor, "unsigned-tools").await.unwrap();
+
+            let requests = server.request_bodies();
+            assert_eq!(requests.len(), 2, "one tool Step and one final Step, with no heuristic retries");
+            let next = &requests[1];
+            let messages = next["messages"].as_array().unwrap();
+            let calls = messages.iter().filter(|message| message["role"] == "assistant")
+                .flat_map(|message| message["content"].as_array().into_iter().flatten())
+                .filter(|block| block["type"] == "tool_use").collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1, "unsigned thinking must not erase the executed call: {next}");
+            assert_eq!(calls[0]["id"], "unsigned_call");
+            assert_eq!(calls[0]["name"], "todo_write");
+            assert_eq!(calls[0]["input"]["todos"][0]["id"], "unsigned-todo");
+            let results = messages.iter().filter(|message| message["role"] == "user")
+                .flat_map(|message| message["content"].as_array().into_iter().flatten())
+                .filter(|block| block["type"] == "tool_result").collect::<Vec<_>>();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0]["tool_use_id"], "unsigned_call");
+            assert!(!next.to_string().contains("unsigned private thought"));
+            assert!(!next.to_string().contains("Historical tool exchange"));
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert_eq!(events.iter().filter(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed { call_id, .. })
+                    if call_id == "unsigned_call")).count(), 1, "the historical call must not execute twice");
+            let history = actor.chat_state_handle.get_conversation().await;
+            assert!(history.iter().any(|item| item.text_content() == "unsigned private thought"));
+            assert_eq!(history.last().unwrap().text_content(), "记录结果：");
+        }));
+    });
+}
+
 fn native_rejection_fallback(missing_signature: bool) {
     run_with_session_stack(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()

@@ -2,6 +2,8 @@
 
 Baseline: published v2.1.5 (`a8dc9371`). Reviewed committed changes through `c03a62fa` and the three archived implementations present in the working tree: `improve-goal-status-and-usage`, `preserve-async-compaction-task-continuity`, and `unify-sampling-attempt-recovery`.
 
+At the user's subsequent direction, the release also includes `audit-session-colon-stop` and `preserve-portable-tool-exchanges`, completed by another agent during validation. The follow-up review checked the complete implementation, callers, three backend encoders, token estimation, source-projection evidence, and regression changes before inclusion. The portable prefix now closes over appended results without crossing a new message or native span. Complete unambiguous exchanges retain structural tool roles; invalid/duplicate records and provider reasoning carriers remain excluded. Attachment eviction text is preserved by all three encoders. This fixes the reproduced request-pairing defect, without claiming that every valid provider end_turn will stop producing an action preamble.
+
 ## Findings
 
 The independent-process regression found a native unoptimized debug crash on an ordinary prompt: the explicitly sized 8 MiB session thread overflows its stack before reaching the model. macOS crash reports identify the fixture binary and stack guard in the conversation-turn poll chain; this does not establish an optimized release failure. Following the user's direction not to reshape production logic around test stack constraints, `allow-debug-session-stack-overhead` adjusts only debug stack capacity. A heap-pinning experiment did not resolve debug temporary frames and was fully reverted. The unchanged process regression and shell tests remain validation gates.
@@ -27,5 +29,5 @@ Atlas was opened on this checkout and used for scoped sampler symbol and call-ev
 
 - Existing scoped rustfmt checks report formatting differences. An attempted partial formatting operation during this review was reverted completely after it broke module declarations; the saved pre-format and restored rustfmt outputs match exactly. No formatter-induced source change is retained, and final tests are run again on the restored source with version 2.1.6.
 - Native macOS tests and mock HTTP streams do not prove real-provider billing or remote operation exactly-once behavior. Existing ignored cgroup/soak/environment tests remain explicitly ignored.
-- Previously documented preview resource bounds and portable tool-history debts remain in `openspec/backlog.md`; no unrelated architecture work is included.
+- Preview resource bounds and other unrelated debts remain in `openspec/backlog.md`. The user-requested portable tool-history correction closes its two documented items. A separate existing Messages ID-sanitization collision boundary is recorded for follow-up; the reproduced session uses safe IDs and does not exercise it.
 - Disk space fell to 1.6 GiB. Cargo's package-scoped cleanup removed generated shell/Pager/chat-state/sampler/tools outputs, restoring about 29 GiB. Subsequent local builds use `CARGO_INCREMENTAL=0` and preserve external dependency caches.

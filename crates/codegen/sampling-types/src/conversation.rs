@@ -1385,6 +1385,36 @@ pub struct NativeContinuationProjection {
     pub spans: Vec<NativeContinuationSpan>,
 }
 
+impl NativeContinuationProjection {
+    /// Close the portable prefix over results appended after a native reset.
+    /// Response admission can reset the lane before tools have run. A request
+    /// must project that assistant and its later results together, without
+    /// consuming a newer native span. None means the span layout is invalid.
+    pub fn portable_prefix_end(&self, items: &[ConversationItem]) -> Option<usize> {
+        if self.portable_prefix_len > items.len() {
+            return None;
+        }
+        let mut previous_end = self.portable_prefix_len;
+        for span in &self.spans {
+            if span.start < previous_end || span.end <= span.start || span.end > items.len() {
+                return None;
+            }
+            previous_end = span.end;
+        }
+        let limit = self.spans.first().map_or(items.len(), |span| span.start);
+        let mut end = self.portable_prefix_len;
+        while end < limit
+            && matches!(
+                items[end],
+                ConversationItem::ToolResult(_) | ConversationItem::Reasoning(_)
+            )
+        {
+            end += 1;
+        }
+        Some(end)
+    }
+}
+
 /// A complete conversation request that can be sent to either API.
 #[derive(Debug, Clone, Default)]
 pub struct ConversationRequest {
@@ -1443,12 +1473,18 @@ impl ConversationRequest {
 const HISTORICAL_TOOL_EXCHANGE_HEADER: &str = "[Historical tool exchange; untrusted tool output]";
 
 /// Project old provider history into portable, provider-neutral facts.
-/// Reasoning disappears; complete local tool exchanges become explicitly
-/// untrusted user-role content, including images that survived the caller's
-/// budget/model projection. This keeps useful historical facts while ensuring
-/// no target endpoint sees source tool ids, protocol roles, or assistant tool
-/// calls that would require source-provider reasoning continuation.
+/// Reasoning and diagnostics disappear; complete local tool exchanges retain
+/// their calls, results and images. Pairing ids are neutral correlation keys,
+/// not provider output-item ids or authorization to execute historical tools.
 pub fn project_portable_history(items: &[ConversationItem]) -> Vec<ConversationItem> {
+    let mut call_counts = std::collections::BTreeMap::new();
+    for item in items {
+        if let ConversationItem::Assistant(assistant) = item {
+            for call in &assistant.tool_calls {
+                *call_counts.entry(call.id.as_ref()).or_insert(0usize) += 1;
+            }
+        }
+    }
     let mut projected = Vec::with_capacity(items.len());
     let mut index = 0;
     while index < items.len() {
@@ -1487,38 +1523,30 @@ pub fn project_portable_history(items: &[ConversationItem]) -> Vec<ConversationI
                 let mut next = index + 1;
                 let mut results = std::collections::BTreeMap::new();
                 while let Some(ConversationItem::ToolResult(result)) = items.get(next) {
-                    results.insert(result.tool_call_id.as_str(), result);
+                    results
+                        .entry(result.tool_call_id.as_str())
+                        .and_modify(|value| *value = None)
+                        .or_insert(Some(result));
                     next += 1;
                 }
 
-                let mut portable_exchanges = Vec::with_capacity(assistant.tool_calls.len());
-                let mut portable_images = Vec::new();
-                for call in &assistant.tool_calls {
-                    let Some(result) = results.remove(call.id.as_ref()) else {
-                        // Never preserve a call without its result. It is neither
-                        // a complete fact nor safe input for a strict endpoint.
-                        continue;
-                    };
-
-                    let mut content = format!(
-                        "Tool: {}\nArguments: {}\nResult:",
-                        call.name, call.arguments
-                    );
-                    if !result.content.is_empty() {
-                        content.push('\n');
-                        content.push_str(&result.content);
-                    }
-                    for part in &result.images {
-                        match part {
-                            ContentPart::Text { text } => {
-                                content.push('\n');
-                                content.push_str(text);
-                            }
-                            ContentPart::Image { .. } => portable_images.push(part.clone()),
-                        }
-                    }
-                    portable_exchanges.push(content);
-                }
+                // Do not invent a call/result identity or repair bad arguments
+                // into {}. Ambiguous and incomplete records remain in Timeline,
+                // but cannot become executable-looking protocol in a request.
+                let calls: Vec<_> = assistant
+                    .tool_calls
+                    .iter()
+                    .filter(|call| {
+                        !call.id.trim().is_empty()
+                            && !call.name.trim().is_empty()
+                            && call_counts.get(call.id.as_ref()) == Some(&1)
+                            && results.get(call.id.as_ref()).is_some_and(Option::is_some)
+                            && serde_json::from_str::<serde_json::Value>(&call.arguments)
+                                .is_ok_and(|value| value.is_object())
+                    })
+                    .cloned()
+                    .collect();
+                let retained_ids: BTreeSet<_> = calls.iter().map(|call| call.id.clone()).collect();
 
                 let content = if assistant
                     .content
@@ -1529,24 +1557,21 @@ pub fn project_portable_history(items: &[ConversationItem]) -> Vec<ConversationI
                 } else {
                     assistant.content.clone()
                 };
-                if !content.is_empty() {
+                if !content.is_empty() || !calls.is_empty() {
                     projected.push(ConversationItem::Assistant(AssistantItem {
                         content,
-                        tool_calls: Vec::new(),
+                        tool_calls: calls,
                         model_id: None,
                         model_fingerprint: None,
                         reasoning_effort: None,
                     }));
                 }
-                if !portable_exchanges.is_empty() {
-                    let mut exchange = ConversationItem::user(format!(
-                        "{HISTORICAL_TOOL_EXCHANGE_HEADER}\n{}",
-                        portable_exchanges.join("\n\n")
-                    ));
-                    if let ConversationItem::User(user) = &mut exchange {
-                        user.content.extend(portable_images);
+                for item in &items[index + 1..next] {
+                    if let ConversationItem::ToolResult(result) = item
+                        && retained_ids.contains(result.tool_call_id.as_str())
+                    {
+                        projected.push(item.clone());
                     }
-                    projected.push(exchange);
                 }
                 index = next;
             }
@@ -1574,28 +1599,22 @@ fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<Reque
     let Some(native) = &req.native_continuation else {
         return vec![RequestSegment::Items(req.items.clone())];
     };
-    if native.portable_prefix_len > req.items.len() {
+    let Some(portable_end) = native.portable_prefix_end(&req.items) else {
         return vec![RequestSegment::Items(project_portable_history(&req.items))];
-    }
+    };
 
-    let mut previous_end = native.portable_prefix_len;
     for span in &native.spans {
-        if span.start < previous_end
-            || span.end <= span.start
-            || span.end > req.items.len()
-            || span.fragment.backend() != backend
-        {
+        if span.fragment.backend() != backend {
             return vec![RequestSegment::Items(project_portable_history(&req.items))];
         }
-        previous_end = span.end;
     }
 
     let mut segments = Vec::new();
-    let portable = project_portable_history(&req.items[..native.portable_prefix_len]);
+    let portable = project_portable_history(&req.items[..portable_end]);
     if !portable.is_empty() {
         segments.push(RequestSegment::Items(portable));
     }
-    let mut cursor = native.portable_prefix_len;
+    let mut cursor = portable_end;
     for span in &native.spans {
         if cursor < span.start {
             segments.push(RequestSegment::Items(
@@ -2688,13 +2707,16 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                     text: t.content.as_ref().to_owned(),
                 }];
                 for img in t.images {
-                    if let ContentPart::Image { url, .. } = img {
-                        blocks.push(ChatContentBlock::ImageUrl {
+                    blocks.push(match img {
+                        ContentPart::Text { text } => ChatContentBlock::Text {
+                            text: text.as_ref().to_owned(),
+                        },
+                        ContentPart::Image { url, .. } => ChatContentBlock::ImageUrl {
                             image_url: ImageUrl {
                                 url: url.as_ref().to_owned(),
                             },
-                        });
-                    }
+                        },
+                    });
                 }
                 ChatRequestMessage {
                     role: Role::Tool,
@@ -3301,13 +3323,20 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                         text: t.content.as_ref().to_owned(),
                     })];
                 for img in &t.images {
-                    if let ContentPart::Image { url, .. } = img {
-                        parts.push(rs::InputContent::InputImage(rs::InputImageContent {
-                            detail: rs::ImageDetail::Auto,
-                            file_id: None,
-                            image_url: Some(url.as_ref().to_owned()),
-                        }));
-                    }
+                    parts.push(match img {
+                        ContentPart::Text { text } => {
+                            rs::InputContent::InputText(rs::InputTextContent {
+                                text: text.as_ref().to_owned(),
+                            })
+                        }
+                        ContentPart::Image { url, .. } => {
+                            rs::InputContent::InputImage(rs::InputImageContent {
+                                detail: rs::ImageDetail::Auto,
+                                file_id: None,
+                                image_url: Some(url.as_ref().to_owned()),
+                            })
+                        }
+                    });
                 }
                 rs::FunctionCallOutput::Content(parts)
             };
@@ -4123,32 +4152,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                     text: t.content.as_ref().to_owned(),
                                     cache_control: None,
                                 }];
-                                for img in &t.images {
-                                    if let ContentPart::Image { url, .. } = img {
-                                        let source = if let Some(rest) = url.strip_prefix("data:") {
-                                            if let Some((media_type, data)) =
-                                                rest.split_once(";base64,")
-                                            {
-                                                ImageSource::Base64 {
-                                                    media_type: media_type.to_string(),
-                                                    data: data.to_string(),
-                                                }
-                                            } else {
-                                                ImageSource::Url {
-                                                    url: url.as_ref().to_owned(),
-                                                }
-                                            }
-                                        } else {
-                                            ImageSource::Url {
-                                                url: url.as_ref().to_owned(),
-                                            }
-                                        };
-                                        blocks.push(ContentBlock::Image {
-                                            source,
-                                            cache_control: None,
-                                        });
-                                    }
-                                }
+                                blocks.extend(content_parts_to_anthropic_blocks(&t.images));
                                 ToolResultContent::Blocks(blocks)
                             };
                             pending_tool_results.push(ContentBlock::ToolResult {
@@ -5423,6 +5427,189 @@ mod tests {
         }
     }
 
+    fn portable_wire(request: &ConversationRequest, backend: ApiBackend) -> serde_json::Value {
+        match backend {
+            ApiBackend::ChatCompletions => {
+                serde_json::to_value(ChatCompletionRequest::from(request.clone())).unwrap()
+            }
+            ApiBackend::Responses => {
+                serde_json::to_value(rs::CreateResponse::from(request)).unwrap()
+            }
+            ApiBackend::Messages => serde_json::to_value(build_messages_request(request)).unwrap(),
+        }
+    }
+
+    fn assert_wire_tool_pairs(wire: &serde_json::Value, expected: &[&str]) {
+        fn collect(value: &serde_json::Value, calls: &mut Vec<String>, results: &mut Vec<String>) {
+            if let Some(object) = value.as_object() {
+                let call = match value["type"].as_str() {
+                    Some("tool_use") => value["id"].as_str(),
+                    Some("function_call") => value["call_id"].as_str(),
+                    _ => None,
+                };
+                calls.extend(call.map(str::to_owned));
+                if let Some(tools) = value["tool_calls"].as_array() {
+                    calls.extend(
+                        tools
+                            .iter()
+                            .map(|call| call["id"].as_str().unwrap().to_owned()),
+                    );
+                }
+                let result = match value["type"].as_str() {
+                    Some("tool_result") => value["tool_use_id"].as_str(),
+                    Some("function_call_output") => value["call_id"].as_str(),
+                    _ if value["role"] == "tool" => value["tool_call_id"].as_str(),
+                    _ => None,
+                };
+                results.extend(result.map(str::to_owned));
+                for value in object.values() {
+                    collect(value, calls, results);
+                }
+            } else if let Some(values) = value.as_array() {
+                for value in values {
+                    collect(value, calls, results);
+                }
+            }
+        }
+        let (mut calls, mut results) = (Vec::new(), Vec::new());
+        collect(wire, &mut calls, &mut results);
+        calls.sort();
+        results.sort();
+        let mut expected = expected.to_vec();
+        expected.sort();
+        assert_eq!(calls, expected, "tool calls: {wire}");
+        assert_eq!(results, expected, "tool results: {wire}");
+    }
+
+    #[test]
+    fn portable_boundary_preserves_multi_tool_pairs_at_every_cut() {
+        let items = vec![
+            ConversationItem::user("inspect"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("unsigned thought")),
+            ConversationItem::assistant_tool_calls(vec![
+                ToolCall {
+                    id: "call_a".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a"}"#.into(),
+                },
+                ToolCall {
+                    id: "call_b".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"b"}"#.into(),
+                },
+            ]),
+            ConversationItem::tool_result("call_b", "second result first"),
+            ConversationItem::tool_result("call_a", "first result last"),
+            ConversationItem::user("continue"),
+        ];
+        for prefix in 0..=items.len() {
+            for backend in [
+                ApiBackend::ChatCompletions,
+                ApiBackend::Responses,
+                ApiBackend::Messages,
+            ] {
+                let mut request = ConversationRequest::from_items(items.clone());
+                request.native_continuation = Some(NativeContinuationProjection {
+                    portable_prefix_len: prefix,
+                    spans: Vec::new(),
+                });
+                assert_wire_tool_pairs(&portable_wire(&request, backend), &["call_a", "call_b"]);
+            }
+        }
+    }
+
+    #[test]
+    fn portable_history_omits_ambiguous_invalid_and_displaced_exchanges() {
+        let call = |id: &str, name: &str, arguments: &str| {
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: id.into(),
+                name: name.into(),
+                arguments: arguments.into(),
+            }])
+        };
+        let cases = vec![
+            vec![
+                call("duplicate", "read_file", "{}"),
+                ConversationItem::tool_result("duplicate", "one"),
+                call("duplicate", "read_file", "{}"),
+                ConversationItem::tool_result("duplicate", "two"),
+            ],
+            vec![
+                call("duplicate_result", "read_file", "{}"),
+                ConversationItem::tool_result("duplicate_result", "one"),
+                ConversationItem::tool_result("duplicate_result", "two"),
+            ],
+            vec![
+                call("bad_json", "read_file", "{"),
+                ConversationItem::tool_result("bad_json", "one"),
+            ],
+            vec![
+                call("array_json", "read_file", "[]"),
+                ConversationItem::tool_result("array_json", "one"),
+            ],
+            vec![
+                call("", "read_file", "{}"),
+                ConversationItem::tool_result("", "one"),
+            ],
+            vec![
+                call("no_name", "", "{}"),
+                ConversationItem::tool_result("no_name", "one"),
+            ],
+            vec![
+                call("displaced", "read_file", "{}"),
+                ConversationItem::user("intervening user"),
+                ConversationItem::tool_result("displaced", "one"),
+            ],
+        ];
+        for items in cases {
+            let mut request = ConversationRequest::from_items(items);
+            request.native_continuation = Some(NativeContinuationProjection {
+                portable_prefix_len: request.items.len(),
+                spans: Vec::new(),
+            });
+            for backend in [
+                ApiBackend::ChatCompletions,
+                ApiBackend::Responses,
+                ApiBackend::Messages,
+            ] {
+                assert_wire_tool_pairs(&portable_wire(&request, backend), &[]);
+            }
+        }
+    }
+
+    #[test]
+    fn portable_boundary_does_not_consume_a_new_signed_native_span() {
+        use crate::messages::ContentBlock;
+        let call = |id: &str| {
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: id.into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }])
+        };
+        let mut request = ConversationRequest::from_items(vec![
+            ConversationItem::user("inspect"),
+            call("old_call"),
+            ConversationItem::tool_result("old_call", "old result"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("native thought")),
+            call("native_call"),
+            ConversationItem::tool_result("native_call", "new result"),
+        ]);
+        request.native_continuation = Some(NativeContinuationProjection {
+            portable_prefix_len: 2,
+            spans: vec![NativeContinuationSpan { start: 3, end: 5,
+                fragment: NativeContinuationFragment::Messages(vec![
+                    ContentBlock::Thinking { thinking: "native thought".into(), signature: "signed-secret".into() },
+                    serde_json::from_value(serde_json::json!({"type":"tool_use", "id":"native_call", "name":"read_file", "input":{}})).unwrap(),
+                ]),
+            }],
+        });
+        let wire = portable_wire(&request, ApiBackend::Messages);
+        assert_wire_tool_pairs(&wire, &["old_call", "native_call"]);
+        assert_eq!(wire.to_string().matches("signed-secret").count(), 1);
+        assert_eq!(wire.to_string().matches("native thought").count(), 1);
+    }
+
     #[test]
     fn portable_history_is_allowlisted_for_all_wire_backends() {
         let mut user = ConversationItem::user("inspect both images");
@@ -5462,35 +5649,23 @@ mod tests {
             spans: Vec::new(),
         });
         let projected = project_portable_history(&request.items);
-        let historical_exchange = projected
-            .iter()
-            .find(|item| {
-                item.text_content()
-                    .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER)
-            })
-            .expect("complete historical tool exchange should remain as text");
-        assert!(matches!(historical_exchange, ConversationItem::User(_)));
+        assert!(
+            matches!(&projected[2], ConversationItem::Assistant(assistant)
+            if assistant.tool_calls.len() == 1 && assistant.content.as_ref() == "checking")
+        );
+        assert!(matches!(&projected[3], ConversationItem::ToolResult(result)
+            if result.images.len() == 2 && result.tool_call_id == "native_call_id"));
 
         for backend in [
             ApiBackend::ChatCompletions,
             ApiBackend::Responses,
             ApiBackend::Messages,
         ] {
-            let wire = match backend {
-                ApiBackend::ChatCompletions => {
-                    serde_json::to_value(ChatCompletionRequest::from(request.clone())).unwrap()
-                }
-                ApiBackend::Responses => {
-                    serde_json::to_value(rs::CreateResponse::from(&request)).unwrap()
-                }
-                ApiBackend::Messages => {
-                    serde_json::to_value(build_messages_request(&request)).unwrap()
-                }
-            };
+            let wire = portable_wire(&request, backend.clone());
+            assert_wire_tool_pairs(&wire, &["native_call_id"]);
             let text = wire.to_string();
             for required in [
                 "user_image_secret",
-                HISTORICAL_TOOL_EXCHANGE_HEADER,
                 "read_file",
                 "a.png",
                 "tool result text",
@@ -5506,9 +5681,8 @@ mod tests {
                 "visible_reasoning_secret",
                 "source_model_id",
                 "source_fingerprint",
-                "native_call_id",
-                "call_00000001",
                 "model_id",
+                HISTORICAL_TOOL_EXCHANGE_HEADER,
             ] {
                 assert!(
                     !text.contains(forbidden),
@@ -5516,15 +5690,58 @@ mod tests {
                 );
             }
 
-            let endpoint_protocol = match backend {
-                ApiBackend::ChatCompletions => ["tool_calls", "tool_call_id"],
-                ApiBackend::Responses => ["function_call", "function_call_output"],
-                ApiBackend::Messages => ["tool_use", "tool_result"],
-            };
-            for forbidden in endpoint_protocol {
+            if backend == ApiBackend::Responses {
+                let call = wire["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|item| item["type"] == "function_call")
+                    .unwrap();
                 assert!(
-                    !text.contains(forbidden),
-                    "{backend:?} leaked historical tool protocol {forbidden}: {text}"
+                    call.get("id").is_none(),
+                    "portable call is not a provider output item"
+                );
+                assert!(call.get("status").is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn tool_attachment_text_survives_live_and_portable_requests_without_images() {
+        let items = vec![
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "evicted_call".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }]),
+            ConversationItem::tool_result_with_images(
+                "evicted_call",
+                "result body",
+                vec![ContentPart::Text {
+                    text: "image removed by budget".into(),
+                }],
+            ),
+        ];
+        for portable in [false, true] {
+            let mut request = ConversationRequest::from_items(items.clone());
+            if portable {
+                request.native_continuation = Some(NativeContinuationProjection {
+                    portable_prefix_len: items.len(),
+                    spans: Vec::new(),
+                });
+            }
+            for backend in [
+                ApiBackend::ChatCompletions,
+                ApiBackend::Responses,
+                ApiBackend::Messages,
+            ] {
+                let wire = portable_wire(&request, backend);
+                assert_wire_tool_pairs(&wire, &["evicted_call"]);
+                let text = wire.to_string();
+                assert_eq!(text.matches("image removed by budget").count(), 1);
+                assert!(
+                    text.find("result body").unwrap()
+                        < text.find("image removed by budget").unwrap()
                 );
             }
         }

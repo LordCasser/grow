@@ -24,7 +24,7 @@ ladder that wires them together (Task C).
 
 `process_conversation_turn` 在闭合 Step 边界成功发布后台摘要后，仍先检查控制、预算、stationarity 和 foreground owner。只有同一 turn 的后继 Step 获准开始，才在现有准入 gate 内、tail 之后持久化一个 synthetic `AutoContinue` 提示，再开始 Step。它沿用原 turn，无真实用户权限证据；持久化失败不发送下一请求。已完成 turn 的外层边界也可发布摘要，但不会追加续接或打开新回合；摘要跨到新 turn 的首 Step 才提交时，由新输入承担任务接纳。见 [续接契约](../../openspec/specs/context-compaction/spec.md#requirement-async-compaction-hands-off-to-an-admitted-next-step)。
 
-Surface replacement 仍清空 native continuation epoch。当前 portable projector 将工具往返表示为不可信历史文本；保留尾部 Surface identity 不等于保留 provider 原生工具协议。合法 `stop` 加无工具调用仍按正常完成处理。提示改善输入衔接，不保证模型一定执行后续动作，也不提供额外重试预算。
+Surface replacement 仍清空 native continuation epoch。Portable projector 清除旧 reasoning、签名和模型诊断，同时用目标 backend 的工具协议保留 tail 中完整的调用、结果和图片；关联 ID 只用于配对，不恢复 provider 输出 item identity，也不触发历史工具执行。见 [压缩后的工具历史](../../openspec/specs/context-compaction/spec.md#requirement-compaction-retains-structured-completed-tool-history) 与 [portable 契约](../../openspec/specs/model-sampling/spec.md#requirement-portable-history-preserves-complete-local-tool-exchanges)。合法 `stop` 加无工具调用仍按正常完成处理。提示改善输入衔接，不保证模型一定执行后续动作，也不提供额外重试预算。
 
 ## 2. Trigger and Ladder
 

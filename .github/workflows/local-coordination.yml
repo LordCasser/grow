@@ -62,7 +62,16 @@ jobs:
         run: cargo test --locked -p pager --lib coordination -- --nocapture
       - if: ${{ !inputs.process_only }}
         run: cargo test --locked -p pager-minimal --lib coordination -- --nocapture
-      - run: cargo build --locked -p cli --bin grow
+      - name: Build coordination CLI
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            # RUST_MIN_STACK does not size the native main thread. Keep this
+            # allowance local to the unoptimized regression executable.
+            cargo rustc --locked -p cli --bin grow -- -C link-arg=/STACK:33554432
+          else
+            cargo build --locked -p cli --bin grow
+          fi
       - name: Real independent process regression
         shell: bash
         run: |

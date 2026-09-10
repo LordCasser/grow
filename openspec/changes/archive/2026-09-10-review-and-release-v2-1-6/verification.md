@@ -18,4 +18,6 @@
 
 ## Publication boundary
 
+The user explicitly requested inclusion of the other agent's concurrent portable-tool-history correction before publication. A fresh run on the combined working tree reused the existing build products (Cargo finished preparation in 0.94 s): chat-state 474 passed / 1 ignored, sampler 240 passed, sampling-types 274 passed; total 988 passed / 0 failed. Log: `/tmp/grow-v2.1.6-portable-final.log`. The complete Shell suite and remote gates are repeated for the combined candidate; previous CI results alone do not validate this newly included product change.
+
 Archiving this preparation record does not claim publication. GitHub core regression, platform checks, annotated-tag preflight and the all-platform release workflow will be verified from their actual run results before publication is reported to the user.

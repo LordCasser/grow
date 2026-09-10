@@ -337,6 +337,13 @@ fn async_compaction_scenario(action: &'static str) {
                 let wire = serde_json::to_string(&request).unwrap();
                 assert!(wire.contains(compaction::ASYNC_COMPACTION_CONTINUE_PROMPT), "next Step must carry the persisted async-compaction continuation");
                 assert!(wire.contains("latest todo while summary runs"), "next Step must retain the latest tool fact");
+                let messages = request["messages"].as_array().unwrap();
+                let blocks = messages.iter().flat_map(|message| message["content"].as_array().into_iter().flatten()).collect::<Vec<_>>();
+                assert_eq!(blocks.iter().filter(|block| block["type"] == "tool_use" && block["id"] == "async-todo").count(), 1, "compaction must retain the completed call");
+                assert_eq!(blocks.iter().filter(|block| block["type"] == "tool_result" && block["tool_use_id"] == "async-todo").count(), 1);
+                assert!(!wire.contains("Historical tool exchange"));
+                assert_eq!(events.iter().filter(|event| matches!(&event.kind,
+                    chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed { call_id, .. }) if call_id == "async-todo")).count(), 1, "compaction cannot execute retained history again");
                 assert!(wire.find(compaction::ASYNC_COMPACTION_CONTINUE_PROMPT).unwrap() > wire.rfind("latest todo while summary runs").unwrap(), "wire handoff must follow the retained tool exchange, not just the old summary");
                 assert_eq!(server.messages_request_count(), 3, "between-step continuation must not add an extra sample");
                 let auto_continues = surface.iter().filter_map(|item| match item {
