@@ -1,2 +1,0 @@
-- [ ] Refresh the digest and document the registry lookup.
-- [ ] Rerun all release assets, verify publication, and archive this maintenance record.

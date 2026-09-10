@@ -1,0 +1,2 @@
+- [x] Refresh the digest and document the registry lookup.
+- [x] Rerun all release assets, verify publication, and archive this maintenance record.
