@@ -2,11 +2,6 @@ name: Windows session storage
 
 on:
   workflow_dispatch:
-    inputs:
-      api_probe_only:
-        description: Run the isolated Win32 rename diagnostic without compiling Grow
-        type: boolean
-        default: false
   pull_request:
     paths:
       - ".github/workflows/windows-session-storage.yml"
@@ -24,14 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rename-api-probe:
-    if: ${{ inputs.api_probe_only }}
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v6
-      - run: python openspec/changes/fix-windows-coordination-release-regressions/rename-api-probe.py
   session-creation:
-    if: ${{ !inputs.api_probe_only }}
     name: Create and reopen a session
     runs-on: windows-2025
     timeout-minutes: 90
@@ -59,7 +47,9 @@ jobs:
             "session::storage::jsonl::tests::scan_opened_sessions_skips_non_sessions_and_invalid_summaries",
             "session::storage::tests::contained_no_replace_rename_preserves_both_existing_entities",
             "session::storage::tests::pinned_child_capability_publishes_without_reopening_source",
-            "session::input_inbox::tests::long_profile_payload_round_trip_preserves_immutable_artifacts"
+            "session::input_inbox::tests::long_profile_payload_round_trip_preserves_immutable_artifacts",
+            "session::storage::tests::publication_preserves_exact_names_across_buffer_alignments",
+            "coordination::manifest::tests::windows_long_home_supports_private_manifests_and_replacement"
           )
           foreach ($test in $tests) {
             cargo test --locked -p shell --lib $test -- --exact --nocapture

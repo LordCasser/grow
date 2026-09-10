@@ -21,3 +21,7 @@ Windows contained storage SHALL publish immutable artifacts and session entities
 #### Scenario: Scan contains ordinary files and valid sessions
 - **WHEN** session enumeration encounters ordinary files at cwd and session directory levels alongside a valid session
 - **THEN** it skips those files and invalid summaries while returning the valid session.
+
+#### Scenario: Publication target has any legal filename alignment
+- **WHEN** a file or session directory is published with a legal name of any UTF-16 alignment
+- **THEN** the exact intended name is committed, no extra suffix appears, and existing targets remain unchanged on collision.

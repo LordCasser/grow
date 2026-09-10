@@ -234,11 +234,12 @@ fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
         .open(source)?;
     crate::local_ipc::security::verify_private_file(&source)?;
-    let mut target = crate::local_ipc::security::wide_path(target)?;
-    target.pop(); // FILE_RENAME_INFO counts filename bytes without the terminator.
-    let name_bytes = u32::try_from(target.len().saturating_mul(2))
+    let target = crate::local_ipc::security::wide_path(target)?;
+    // Retain the NUL for Win32's path conversion, excluding it only from
+    // FileNameLength. A counted-only buffer can publish a spurious suffix.
+    let name_bytes = u32::try_from((target.len() - 1).saturating_mul(2))
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "manifest path is too long"))?;
-    let bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName) + name_bytes as usize;
+    let bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName) + name_bytes as usize + 2;
     let buffer_len = u32::try_from(bytes)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "rename buffer is too large"))?;
     let mut buffer = vec![0usize; bytes.div_ceil(std::mem::size_of::<usize>())];
@@ -507,7 +508,6 @@ mod tests {
             .join("nested".repeat(20));
         std::fs::create_dir_all(&home).unwrap();
         ensure_private_runtime_dirs(&home).unwrap();
-        let path = peers_dir(&home).join("peer.json");
         let mut manifest = PeerManifest {
             schema_version: SCHEMA_VERSION,
             peer_id: "peer".into(),
@@ -522,16 +522,22 @@ mod tests {
             capabilities: vec![],
             sessions: vec![],
         };
-        write_manifest(&path, &manifest).unwrap();
-        let reader = crate::local_ipc::security::open_private_file(&path).unwrap();
-        manifest.heartbeat_at = 2;
-        write_manifest(&path, &manifest).unwrap();
-        let current = read_manifest(&path).unwrap();
-        assert_eq!(current.token, "test-token");
-        assert_eq!(current.heartbeat_at, 2);
-        let previous: PeerManifest = serde_json::from_reader(&reader).unwrap();
-        assert_eq!(previous.heartbeat_at, 1);
-        drop(reader);
+        // Exercise every UTF-16 name alignment within the usize buffer.
+        for length in 1..=4 {
+            manifest.peer_id = "p".repeat(length);
+            manifest.heartbeat_at = 1;
+            let path = peers_dir(&home).join(format!("{}.json", manifest.peer_id));
+            write_manifest(&path, &manifest).unwrap();
+            let reader = crate::local_ipc::security::open_private_file(&path).unwrap();
+            manifest.heartbeat_at = 2;
+            write_manifest(&path, &manifest).unwrap();
+            let current = read_manifest(&path).unwrap();
+            assert_eq!(current.token, "test-token");
+            assert_eq!(current.heartbeat_at, 2);
+            let previous: PeerManifest = serde_json::from_reader(&reader).unwrap();
+            assert_eq!(previous.heartbeat_at, 1);
+            assert_eq!(std::fs::read_dir(peers_dir(&home)).unwrap().count(), length);
+        }
     }
 
     #[cfg(unix)]

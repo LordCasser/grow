@@ -1098,8 +1098,9 @@ impl ContainedDirectory {
         // FILE_SHARE_DELETE.
         // Direct Win32 rename requires a verbatim path beyond MAX_PATH.
         // The existing parent remains pinned while the encoder resolves it.
-        let mut target = crate::local_ipc::security::wide_path(target_display)?;
-        target.pop(); // FILE_RENAME_INFO counts bytes without the terminator.
+        let target = crate::local_ipc::security::wide_path(target_display)?;
+        // Win32 consumes a NUL-terminated string even though FileNameLength
+        // excludes that terminator. Keep it in both allocation and copy.
         let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
         let byte_len = header
             .checked_add(target.len().saturating_mul(std::mem::size_of::<u16>()))
@@ -1115,7 +1116,7 @@ impl ContainedDirectory {
             };
             (*info).RootDirectory = HANDLE::default();
             (*info).FileNameLength =
-                u32::try_from(target.len().saturating_mul(2)).map_err(|_| {
+                u32::try_from((target.len() - 1).saturating_mul(2)).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidInput, "rename target is too long")
                 })?;
             std::ptr::copy_nonoverlapping(
@@ -4085,6 +4086,28 @@ mod tests {
             std::fs::read(root.path().join("target/target-marker")).unwrap(),
             b"target"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publication_preserves_exact_names_across_buffer_alignments() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = ContainedDirectory::open(root.path(), Path::new(""), "name fixture", false).unwrap();
+        for length in 1..=8 {
+            let file_name = format!("file{}", "x".repeat(length));
+            let name = std::ffi::OsStr::new(&file_name);
+            parent.write_atomic(name, b"original", true, false).unwrap();
+            assert_eq!(std::fs::read(root.path().join(name)).unwrap(), b"original");
+            assert_eq!(parent.write_atomic(name, b"replacement", true, false).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(root.path().join(name)).unwrap(), b"original");
+
+            let staging = parent.create_child(std::ffi::OsStr::new("staging"), "name staging").unwrap();
+            let directory_name = format!("directory{}", "x".repeat(length));
+            let published = staging.publish_child_no_replace(&parent, std::ffi::OsStr::new(&directory_name)).unwrap();
+            assert!(root.path().join(&directory_name).is_dir());
+            assert_eq!(parent.list_names().unwrap().len(), length * 2);
+            drop(published);
+        }
     }
 
     #[cfg(any(unix, windows))]
