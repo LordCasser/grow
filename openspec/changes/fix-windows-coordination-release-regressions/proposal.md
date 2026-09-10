@@ -4,7 +4,7 @@ Windows coordination CI exposes three concrete problems: actor fixtures use `/tm
 
 # What changes
 
-Use platform-native temporary paths in the existing actor fixture. Publish Windows peer manifests with handle-based extended rename and POSIX replacement semantics, preserving existing readers of the old file. Use the existing shared-read contained-directory operations for independent session load operations, without inserting those observer capabilities into the writer cache. Reuse the opened entity for Workflow reads. Preserve writer leases, path/identity checks, no-reparse rules and sideband recovery ownership.
+Use platform-native temporary paths in the existing actor fixture and apply the existing Unix condition to the PTY harness import. Preserve dependency caches after failed coordination CI runs. Publish Windows peer manifests with handle-based extended rename and POSIX replacement semantics, preserving existing readers of the old file. Use the existing shared-read contained-directory operations for independent session load operations, without inserting those observer capabilities into the writer cache. Reuse the opened entity for Workflow reads. Preserve writer leases, path/identity checks, no-reparse rules and sideband recovery ownership.
 
 # Capabilities
 

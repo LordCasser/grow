@@ -15,6 +15,14 @@ Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，�
 - trigger：在继续评估此类语义停顿、跨模型迁移或 portable 请求协议时，由用户明确启动。
 - upgrade：分别证明三个后端对不含旧 reasoning carrier 的完整工具往返的接受边界，设计同 route 与跨 route 的投影策略；覆盖 partial compaction、完整/悬空/孤立工具项、模型切换和 replay。验证实际 wire 与后续工具执行，避免重发已执行副作用或从历史恢复 native state。
 
+## 无签名 Messages 回退切断工具往返
+
+2026-09-10 审计 session `01a08906-7afd-70e2-af4e-5ff9ea4db84c`：原始请求 seq 49616、49659 只有最新 tool_result，没有对应 tool_use；Timeline 中调用及执行结果完整。当前 2.1.6 的 `push_response_durably` 在 unsigned thinking 导致 native 缺失时，把 portable prefix 固定在 assistant 之后、尚未追加的结果之前。`request_segments` 分别投影两侧，prefix 内的调用因无结果被删除，后缀结果却继续以原生协议发送。审计与本地复现见 `changes/archive/2026-09-10-audit-session-colon-stop/`。
+
+- 范围：这是跨层请求配对缺口，区别于上述完整工具历史被文本化的问题；不能因服务端接受了请求就认定配对有效。
+- 限制：三次行动预告后均收到合法 end_turn，其中首个请求没有孤立结果，不能把所有提前结束归因于本缺口。
+- 后续验收：从 unsigned thinking + tool_use 经真实 ChatState 接纳、工具结果追加到下一 wire，保证工具往返完整表达或整体安全降级；覆盖多个工具、文本/推理混排、控制边界、模型切换和恢复。继续清除无效签名，不重放已执行工具，不通过冒号或短句猜测完成状态。修复需单独 change，不在本审计实施。
+
 ## 长期：MCP Elicitation 与交互式 MCP
 
 > **状态**：等待协议与生态稳定；满足条件也不会自动进入实现，必须由用户手动启动。
@@ -676,3 +684,5 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 - **可撤销预览的资源上限**：leader 的候选暂存和持久化投影暂存只保留当前未接纳候选，不保留已接纳历史；单个超长候选的内存上限仍需与现有 stream/body/evidence 限制统一审计。应独立设计有界溢出停止或落盘策略，不能为了限流提前把未接纳内容外发/写入回放。
 
 - **断线中的活跃候选前缀补传**：`unify-sampling-attempt-recovery` 隔离并清理未接纳预览，`updates.jsonl` 只包含已接纳内容。现有 root load 与子视图按需回放不能据此保证完整补传断线期间仍在生成的候选前缀。若需要不中断地恢复完整实时展示，应独立核对 leader 的 load cutoff、当前候选快照和子会话历史水位，在同一 session/attempt 归属下补传并去重；不得把临时预览重新写成接纳历史，也不能把该 UI 能力等同于重新执行 provider。
+
+- **会话读取与 Summary 投影修复的边界**：`JsonlStorageAdapter::load_session` / `load_light_data` 在读取后仍调用 `reconcile_session_title_projection` 和 `reconcile_model_projection`；投影滞后时会尝试持久化修复及写者准入。因此，即使 Windows 观察句柄已支持与运行中写者共存，也不能据此宣称所有滞后 Summary 都能纯只读加载。本次发布修复已一致投影下的共享冲突；后续独立定义只读投影与显式修复边界，验证运行中写者、滞后 title/model Summary、无写权限观察者及写者接管，不改变现有错误场景来隐藏差异。

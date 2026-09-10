@@ -11,3 +11,5 @@ The actor fixture uses `std::env::temp_dir()` for its mock cwd. Existing tests a
 Windows job 102846210811 in run 34469589238 reports Error 5 on replacement, Error 32 on observer load, and NotAbsolute for `/tmp`. Existing `ContainedDirectory::open_shared_read` already documents and handles retained DELETE-capable publication handles; the ordinary load route was not using it.
 
 Microsoft documents the rename flag union for [FILE_RENAME_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info) and old-handle/new-name semantics for [FileRenameInformationEx](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/4217551b-d2c0-42cb-9dc1-69a716cf6d0c). No backward-compatibility fallback is added for filesystems that reject the required atomic replacement semantics; failures preserve the old manifest.
+
+The PTY test harness import now mirrors its existing Unix-only export and call site. Coordination CI retains dependency caches on failure using the same rust-cache setting as core/storage validation; this does not change test selection.
