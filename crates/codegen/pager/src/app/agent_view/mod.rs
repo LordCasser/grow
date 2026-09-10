@@ -517,12 +517,28 @@ pub(crate) struct SessionReload {
     /// rationale).
     last_applied_event_seq: Option<u64>,
     last_applied_grow_event_seq: Option<u64>,
+    /// Child views with provisional sampling output are staged separately:
+    /// their identity/control state remains live, while their transcript and
+    /// tracker can be restored on a failed root reload.
+    child_sampling_stashes: HashMap<String, ChildSamplingReload>,
     /// Whether any `isReplay` update applied during this window. False means
     /// the agent resolved the cursor and sent only a live post-cursor tail.
     saw_replay: bool,
+    /// The reconnect request intentionally omitted its cursor because a
+    /// provisional sampling preview was stashed. An empty canonical replay is
+    /// still authoritative in this case; merging the stash would resurrect
+    /// the preview even though no replay update was emitted.
+    force_full_replay: bool,
     /// Whether a Plan update applied during this window: the cursor-merge
     /// outcome then keeps the staging todo list (newer) instead of the stash.
     saw_todo_update: bool,
+}
+
+pub(crate) struct ChildSamplingReload {
+    scrollback: Option<ScrollbackState>,
+    tracker: Option<crate::acp::tracker::AcpUpdateTracker>,
+    child_updates_replayed: Option<bool>,
+    descendants: HashMap<String, ChildSamplingReload>,
 }
 /// Lifecycle of the inline plugin CTA. `Hidden`/`Matched` cover the idle and
 /// prompt-matched states; `Installing`/`Installed`/`Error` cover an in-TUI
@@ -818,6 +834,7 @@ pub struct AgentView {
     pub hit_catalog_close: HitArea,
     pub hit_bg_status: HitArea,
     pub hit_goal_status: HitArea,
+    pub hit_usage_status: HitArea,
     pub hit_goal_close: HitArea,
     /// Compact/full-board projection toggle in the Goal detail footer.
     pub hit_bg_button: HitArea,

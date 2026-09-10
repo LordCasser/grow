@@ -159,7 +159,9 @@ fn plan_reconnect_load(
     let mut meta = serde_json::json!({
         "permissionMode": shell::util::config::permission_mode_canonical_str(mode),
     });
-    if let Some(ref cursor) = agent.session.last_seen_event_id {
+    if !agent.has_unconfirmed_sampling_preview()
+        && let Some(ref cursor) = agent.session.last_seen_event_id
+    {
         meta["cursor"] = serde_json::Value::String(cursor.clone());
     }
     Some(ReconnectLoadPlan {
@@ -529,7 +531,13 @@ fn report_pager_notice(
         if app.screen_mode.is_minimal() {
             terminal.insert_before(1, |buf| {
                 let area = buf.area;
-                buf.set_stringn(area.x, area.y, message, usize::from(area.width), ratatui::style::Style::default());
+                buf.set_stringn(
+                    area.x,
+                    area.y,
+                    message,
+                    usize::from(area.width),
+                    ratatui::style::Style::default(),
+                );
             })?;
         } else {
             app.show_toast(message);
@@ -545,17 +553,25 @@ fn transcript_pager_command(
 ) -> std::io::Result<std::process::Command> {
     let argv = shlex::split(pager)
         .filter(|argv| argv.first().is_some_and(|program| !program.is_empty()))
-        .ok_or_else(|| std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "invalid PAGER command: check quotes and executable name",
-        ))?;
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid PAGER command: check quotes and executable name",
+            )
+        })?;
     let mut args = argv[1..].to_vec();
     let is_less = std::path::Path::new(&argv[0])
-        .file_name().and_then(|name| name.to_str()) == Some("less");
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("less");
     // Keep ANSI interpretation and start-at-end behavior specific to less.
     if ansi && is_less {
-        if !args.iter().any(|arg| matches!(arg.as_str(),
-            "-R" | "-r" | "--RAW-CONTROL-CHARS" | "--raw-control-chars")) {
+        if !args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-R" | "-r" | "--RAW-CONTROL-CHARS" | "--raw-control-chars"
+            )
+        }) {
             args.push("-R".to_string());
         }
         if !args.iter().any(|arg| arg == "+G") {
@@ -567,9 +583,7 @@ fn transcript_pager_command(
     Ok(command)
 }
 
-fn transcript_pager_failure(
-    result: std::io::Result<std::process::ExitStatus>,
-) -> Option<String> {
+fn transcript_pager_failure(result: std::io::Result<std::process::ExitStatus>) -> Option<String> {
     match result {
         Ok(status) if status.success() => None,
         Ok(status) => Some(format!("Transcript pager failed: {status}")),
@@ -2491,14 +2505,19 @@ fn active_session_recap_due(app: &AppView) -> bool {
     if !app.session_recap_available || !app.notification_service.config().session_recap {
         return false;
     }
-    let ActiveView::Agent(id) = app.active_view else { return false; };
-    app.agents.get(&id)
+    let ActiveView::Agent(id) = app.active_view else {
+        return false;
+    };
+    app.agents
+        .get(&id)
         .and_then(|agent| agent.session.session_id.as_ref())
         .is_some_and(|sid| app.notification_service.focus_tracker.recap_due(&sid.0))
 }
 
 fn should_pregenerate_away_recap(app: &AppView) -> bool {
-    if !active_session_recap_due(app) { return false; }
+    if !active_session_recap_due(app) {
+        return false;
+    }
     let ActiveView::Agent(id) = app.active_view else {
         return false;
     };
@@ -3377,6 +3396,47 @@ mod tests {
     }
 
     #[test]
+    fn plan_reconnect_load_omits_cursor_for_unconfirmed_root_or_child_preview() {
+        fn mark_preview(agent: &mut crate::app::agent_view::AgentView) {
+            let meta = crate::acp::meta::NotificationMeta {
+                sampling_request_id: Some("request".into()),
+                sampling_attempt: Some(1),
+                ..Default::default()
+            };
+            assert!(agent.session.tracker.handle_update(
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new("pending preview")),
+                )),
+                &meta,
+                &mut agent.scrollback,
+            ));
+        }
+
+        let mut root = crate::test_util::make_agent_view(Some("sess-root"), "/work");
+        root.session.last_seen_event_id = Some("sess-root-7".into());
+        mark_preview(&mut root);
+        assert!(root.has_unconfirmed_sampling_preview());
+        let plan = plan_reconnect_load(&root, std::path::Path::new("/pager/cwd")).unwrap();
+        assert!(
+            plan.meta.get("cursor").is_none(),
+            "a pending root preview requires canonical full replay"
+        );
+
+        let mut root = crate::test_util::make_agent_view(Some("sess-root"), "/work");
+        root.session.last_seen_event_id = Some("sess-root-7".into());
+        let mut child = crate::test_util::make_agent_view(Some("sess-child"), "/work");
+        mark_preview(&mut child);
+        root.subagent_views
+            .insert("sess-child".into(), Box::new(child));
+        assert!(root.has_unconfirmed_sampling_preview());
+        let plan = plan_reconnect_load(&root, std::path::Path::new("/pager/cwd")).unwrap();
+        assert!(
+            plan.meta.get("cursor").is_none(),
+            "a pending child preview requires the root session's full replay"
+        );
+    }
+
+    #[test]
     fn plan_reconnect_load_meta_carries_auto_from_session() {
         let mut agent = crate::test_util::make_agent_view(Some("sess-1"), "/work");
         agent.session.permission_mode = shell::util::config::PermissionMode::Auto;
@@ -3702,7 +3762,10 @@ mod tests {
     fn pager_transcript_suspend_retry_retains_file_until_request_ends() {
         let mut app = crate::app::root::tests::test_app();
         let id = crate::app::session::AgentId(0);
-        app.agents.insert(id, crate::test_util::make_agent_view(Some("retry-owner"), "/tmp"));
+        app.agents.insert(
+            id,
+            crate::test_util::make_agent_view(Some("retry-owner"), "/tmp"),
+        );
         app.screen_mode = crate::app::ScreenMode::Minimal;
         app.active_view = ActiveView::Agent(id);
         crate::minimal_api::app_set_pending_pager(&mut app, id, "retry body", true).unwrap();
@@ -3725,21 +3788,43 @@ mod tests {
     fn transcript_pager_command_preserves_argument_boundaries_and_less_defaults() {
         let path = std::path::Path::new("/tmp/transcript with spaces.md");
         for (input, ansi, program, expected) in [
-            (r#""/app/my pager" "two words" '' escaped\ space"#, false,
-             "/app/my pager", vec!["two words", "", "escaped space"]),
+            (
+                r#""/app/my pager" "two words" '' escaped\ space"#,
+                false,
+                "/app/my pager",
+                vec!["two words", "", "escaped space"],
+            ),
             ("less", true, "less", vec!["-R", "+G"]),
-            ("'/app with spaces/less' -r +G", true, "/app with spaces/less", vec!["-r", "+G"]),
-            ("less --RAW-CONTROL-CHARS", true, "less", vec!["--RAW-CONTROL-CHARS", "+G"]),
+            (
+                "'/app with spaces/less' -r +G",
+                true,
+                "/app with spaces/less",
+                vec!["-r", "+G"],
+            ),
+            (
+                "less --RAW-CONTROL-CHARS",
+                true,
+                "less",
+                vec!["--RAW-CONTROL-CHARS", "+G"],
+            ),
             ("less", false, "less", vec![]),
             ("cat", true, "cat", vec![]),
         ] {
             let command = transcript_pager_command(input, ansi, path).unwrap();
             assert_eq!(command.get_program(), program);
-            let mut expected: Vec<std::ffi::OsString> = expected.into_iter().map(Into::into).collect();
+            let mut expected: Vec<std::ffi::OsString> =
+                expected.into_iter().map(Into::into).collect();
             expected.push(path.as_os_str().to_owned());
             assert_eq!(command.get_args().collect::<Vec<_>>(), expected, "{input}");
         }
-        for input in ["", "   ", "''", "'' argument", "less 'unterminated", "less \\"] {
+        for input in [
+            "",
+            "   ",
+            "''",
+            "'' argument",
+            "less 'unterminated",
+            "less \\",
+        ] {
             let error = transcript_pager_command(input, false, path).unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{input}");
         }
@@ -3755,7 +3840,10 @@ mod tests {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let input = format!("'{}' '$HOME' '$(echo expanded)' ';' ''", program.display());
         let transcript = directory.path().join("private transcript.md");
-        let output = transcript_pager_command(&input, true, &transcript).unwrap().output().unwrap();
+        let output = transcript_pager_command(&input, true, &transcript)
+            .unwrap()
+            .output()
+            .unwrap();
         assert!(output.status.success());
         let expected = format!("$HOME\0$(echo expanded)\0;\0\0{}\0", transcript.display());
         assert_eq!(output.stdout, expected.as_bytes());
@@ -3765,7 +3853,10 @@ mod tests {
     fn transcript_pager_missing_program_reports_start_error() {
         let directory = tempfile::tempdir().unwrap();
         let result = std::process::Command::new(directory.path().join("missing-pager")).status();
-        assert_eq!(result.as_ref().unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            result.as_ref().unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
         let message = transcript_pager_failure(result).unwrap();
         assert!(message.starts_with("Failed to start transcript pager: "));
         assert!(message.len() > "Failed to start transcript pager: ".len());
@@ -3775,9 +3866,13 @@ mod tests {
     #[cfg(unix)]
     fn transcript_pager_exit_status_preserves_success_failure_and_signal() {
         use std::os::unix::process::ExitStatusExt;
-        let success = std::process::Command::new("/bin/sh").args(["-c", "exit 0"]).status();
+        let success = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .status();
         assert!(transcript_pager_failure(success).is_none());
-        let failure = std::process::Command::new("/bin/sh").args(["-c", "exit 7"]).status();
+        let failure = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .status();
         let message = transcript_pager_failure(failure).unwrap();
         assert!(message.starts_with("Transcript pager failed: "));
         assert!(message.contains('7'));
@@ -3872,17 +3967,29 @@ mod tests {
         let mut app = crate::app::root::tests::test_app();
         let origin = crate::app::session::AgentId(0);
         let other = crate::app::session::AgentId(1);
-        app.agents.insert(origin, crate::test_util::make_agent_view(Some("origin"), "/tmp"));
-        app.agents.insert(other, crate::test_util::make_agent_view(Some("other"), "/tmp"));
+        app.agents.insert(
+            origin,
+            crate::test_util::make_agent_view(Some("origin"), "/tmp"),
+        );
+        app.agents.insert(
+            other,
+            crate::test_util::make_agent_view(Some("other"), "/tmp"),
+        );
         app.active_view = ActiveView::Agent(origin);
         app.screen_mode = crate::app::ScreenMode::Minimal;
-        crate::minimal_api::app_set_pending_pager(&mut app, origin, "origin transcript", true).unwrap();
+        crate::minimal_api::app_set_pending_pager(&mut app, origin, "origin transcript", true)
+            .unwrap();
         app.active_view = ActiveView::Agent(other);
         let request = app.pending_pager.take().unwrap();
         assert!(!request.report(&mut app, "pager-origin-failure"));
-        assert!(app.agents[&other].scrollback.is_empty(), "another session received old pager feedback");
-        assert!(matches!(&app.agents[&origin].scrollback.last().unwrap().block,
-            crate::scrollback::block::RenderBlock::Notice(block) if block.text == "pager-origin-failure"));
+        assert!(
+            app.agents[&other].scrollback.is_empty(),
+            "another session received old pager feedback"
+        );
+        assert!(
+            matches!(&app.agents[&origin].scrollback.last().unwrap().block,
+            crate::scrollback::block::RenderBlock::Notice(block) if block.text == "pager-origin-failure")
+        );
     }
 
     #[test]
@@ -4411,7 +4518,8 @@ mod tests {
 
     #[tokio::test]
     async fn large_unbracketed_paste_is_one_insertion_across_collection_budget() {
-        let payload = "fn example() {\n    // 中文注释\n\n    let value = \"text\";\n}\n".repeat(1000)
+        let payload = "fn example() {\n    // 中文注释\n\n    let value = \"text\";\n}\n"
+            .repeat(1000)
             + "unterminated tail";
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         for ch in payload.chars() {
@@ -4973,7 +5081,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod recap_session_tests {
     use super::*;
@@ -4988,14 +5095,19 @@ mod recap_session_tests {
         second.session.session_id = Some(acp::SessionId::new("second"));
         app.agents.insert(AgentId(1), second);
         let first_sid = app.agents[&AgentId(0)].session.session_id.clone().unwrap();
-        app.notification_service.focus_tracker = crate::notifications::focus::FocusTracker::new(0, 0);
+        app.notification_service.focus_tracker =
+            crate::notifications::focus::FocusTracker::new(0, 0);
         app.notification_service.focus_tracker.on_focus_lost();
-        app.notification_service.focus_tracker.note_auto_recap_attempt(&first_sid.0);
+        app.notification_service
+            .focus_tracker
+            .note_auto_recap_attempt(&first_sid.0);
         assert!(!active_session_recap_due(&app));
         app.active_view = ActiveView::Agent(AgentId(1));
         assert!(active_session_recap_due(&app));
         assert!(should_pregenerate_away_recap(&app));
-        app.notification_service.focus_tracker.mark_recap_shown("second");
+        app.notification_service
+            .focus_tracker
+            .mark_recap_shown("second");
         assert!(!active_session_recap_due(&app));
         app.active_view = ActiveView::Welcome;
         assert!(!active_session_recap_due(&app));

@@ -1327,6 +1327,15 @@ impl AgentView {
                     active_subagent_tokens,
                 ),
             );
+        } else if !self.is_subagent_view && self.session.session_id.is_some() {
+            status.push(
+                "usage",
+                crate::views::agent_status::session_usage_status_line(
+                    self.session.session_usage.as_ref(),
+                    &theme,
+                    self.hit_usage_status.hovered,
+                ),
+            );
         }
         if let Some(mcp_line) = self
             .session
@@ -1386,6 +1395,7 @@ impl AgentView {
         let areas = status.render(buf, layout.status_bar);
         self.hit_bg_status.rect = areas.get("bg_tasks").copied();
         self.hit_goal_status.rect = areas.get("goal").copied();
+        self.hit_usage_status.rect = areas.get("usage").copied();
         self.hit_context.rect = areas.get("context").copied();
         self.hit_plan_button.rect = areas.get("plan").copied();
         self.hit_queue_badge.rect = areas.get("queue").copied();
@@ -4418,6 +4428,93 @@ mod behavior_status_tests {
             "no diamond without any parked question (braille spinner \
              instead); rendered:\n{none}"
         );
+    }
+}
+#[cfg(test)]
+mod usage_status_tests {
+    use super::super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::bundle::BundleState;
+    use crate::app::root::InputOutcome;
+    use crate::app::session::GoalDisplayState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    fn usage() -> shell::extensions::notification::PromptUsage {
+        shell::extensions::notification::PromptUsage {
+            totals: shell::extensions::notification::PromptUsageModel {
+                input_tokens: 900,
+                output_tokens: 100,
+                cached_read_tokens: 810,
+                model_calls: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn draw(agent: &mut super::AgentView, width: u16) {
+        let area = Rect::new(0, 0, width, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+    }
+
+    #[test]
+    fn ordinary_usage_hit_area_dispatches_show_usage() {
+        let mut agent = make_agent();
+        agent.session.session_id = Some(agent_client_protocol::schema::v1::SessionId::new("s1"));
+        agent.session.session_usage = Some(usage());
+        draw(&mut agent, 100);
+        let hit = agent.hit_usage_status.rect.expect("usage is visible");
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x,
+            row: hit.y,
+            modifiers: KeyModifiers::empty(),
+        };
+
+        assert!(matches!(
+            agent.handle_mouse(&click, &mut Vec::new()),
+            InputOutcome::Action(Action::ShowUsage)
+        ));
+    }
+
+    #[test]
+    fn goal_status_keeps_priority_over_session_usage() {
+        let mut agent = make_agent();
+        agent.session.session_id = Some(agent_client_protocol::schema::v1::SessionId::new("s1"));
+        agent.session.session_usage = Some(usage());
+        agent.session.goal_state = Some(GoalDisplayState::test_stub());
+
+        draw(&mut agent, 100);
+
+        assert!(agent.hit_goal_status.rect.is_some());
+        assert!(agent.hit_usage_status.rect.is_none());
+    }
+
+    #[test]
+    fn child_view_does_not_offer_a_parent_usage_action() {
+        let mut agent = make_agent();
+        agent.session.session_id = Some(agent_client_protocol::schema::v1::SessionId::new("child"));
+        agent.is_subagent_view = true;
+        draw(&mut agent, 100);
+        assert!(agent.hit_usage_status.rect.is_none());
     }
 }
 #[cfg(test)]

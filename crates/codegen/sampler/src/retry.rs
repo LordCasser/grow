@@ -9,18 +9,19 @@
 //! - 500, 502, 503, 504, 520 (server errors)
 //! - Connection errors (timeout, refused, reset)
 //! - `EventStreamError` (mid-stream transport failures)
+//! - `IncompleteStream` and `IdleTimeout` (when no output has been observed)
 //! - `EmptyResponse` (model returned no content/tool calls)
 //!
 //! **Retried with lower cap** ([`RATE_LIMIT_RETRY_THRESHOLD`] = 2):
 //! - 429 (rate limited) — avoids burning long waits
 //!
-//! **Special handling** (not counted against retry budget):
-//! - 413 / image processing errors → strip images and retry once
+//! Image capability repair is session-owned after an exact zero-usage
+//! rejection; it is outside this pure classifier and follows the caller's
+//! shared recovery budget.
 //!
 //! **Not retried** (Fatal immediately):
 //! - 400, 401, 403, 404, 408, 422 (client errors)
 //! - `Auth` / `InvalidConfiguration` (credential/config issues)
-//! - `IdleTimeout` (model stuck, retry would stall again)
 //! - `Serialization` (response parsing failure)
 //!
 //! **Server hint** (`x-should-retry` header from CCP):
@@ -176,8 +177,12 @@ pub fn classify_error(
     // arm only keeps classification total so a stray doom failure through
     // any other path can never be Fatal.
     if matches!(err, SamplingError::DoomLoopDetected { .. }) {
-        return RetryDecision::Retry {
-            backoff: doom_loop_backoff(retry_count + 1),
+        return if retry_count.saturating_add(1) >= max_retries {
+            RetryDecision::Fatal(err.clone())
+        } else {
+            RetryDecision::Retry {
+                backoff: doom_loop_backoff(retry_count + 1),
+            }
         };
     }
 
@@ -212,6 +217,19 @@ pub fn classify_error(
         return RetryDecision::RetryWithBackoff {
             backoff,
             is_rate_limited: true,
+        };
+    }
+
+    if matches!(
+        err,
+        SamplingError::IncompleteStream { .. } | SamplingError::IdleTimeout { .. }
+    ) {
+        return if retry_count.saturating_add(1) >= max_retries {
+            RetryDecision::Fatal(err.clone())
+        } else {
+            RetryDecision::Retry {
+                backoff: retry_backoff_with_jitter(retry_count + 1),
+            }
         };
     }
 
@@ -257,6 +275,9 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
             )
         }
         SamplingError::Persistence(message) => format!("Attempt persistence failed: {message}"),
+        SamplingError::IncompleteStream { .. } | SamplingError::Lifecycle(_) => {
+            format!("{retry_prefix}{err}")
+        }
         SamplingError::InvalidConfiguration(msg) => {
             format!(
                 "{}Invalid configuration: {}. Please check your model settings.",
@@ -357,68 +378,9 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
 
 /// Reconstruct an owned [`SamplingError`] from a borrowed one.
 ///
-/// `SamplingError` does not implement `Clone` because its `Http` and
-/// `Serialization` variants wrap non-`Clone` types. The retry loop
-/// only borrows the error during classification, then needs to surface
-/// it; this helper produces a faithful copy where possible. `Http`
-/// falls back to a structured `EventStreamError` (still retryable, like
-/// the original transport error). `Serialization` must stay
-/// `Serialization`: laundering it into `EventStreamError` would flip a
-/// fatal response-parse failure into a retryable one and burn the full
-/// retry budget re-generating a response that fails the same way.
+/// Clone the typed cause, retaining the original transport/JSON error.
 pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
-    match err {
-        SamplingError::Auth {
-            message,
-            credential,
-        } => SamplingError::Auth {
-            message: message.clone(),
-            credential: *credential,
-        },
-        SamplingError::InvalidConfiguration(msg) => SamplingError::InvalidConfiguration(msg),
-        SamplingError::Persistence(message) => SamplingError::Persistence(message.clone()),
-        SamplingError::Http(e) => {
-            // reqwest::Error is not Clone; preserve the rendered message
-            // as an EventStreamError (the closest retryable transport
-            // variant) so callers see an equivalent description.
-            SamplingError::EventStreamError(e.to_string())
-        }
-        SamplingError::InvalidToolArguments(message) => {
-            SamplingError::InvalidToolArguments(message.clone())
-        }
-        SamplingError::Serialization(e) => {
-            // serde_json::Error is not Clone; its Display already carries the
-            // original line/column exactly once.
-            SamplingError::serialization_message(e)
-        }
-        SamplingError::Api {
-            status,
-            message,
-            model_metadata,
-            retry_after_secs,
-            should_retry,
-        } => SamplingError::Api {
-            status: *status,
-            message: message.clone(),
-            model_metadata: model_metadata.clone(),
-            retry_after_secs: *retry_after_secs,
-            should_retry: *should_retry,
-        },
-        SamplingError::EventStreamError(msg) => SamplingError::EventStreamError(msg.clone()),
-        SamplingError::IdleTimeout { elapsed_secs } => SamplingError::IdleTimeout {
-            elapsed_secs: *elapsed_secs,
-        },
-        SamplingError::EmptyResponse { context } => SamplingError::EmptyResponse {
-            context: context.clone(),
-        },
-        SamplingError::DoomLoopDetected {
-            triggers,
-            aborted_at_chunk,
-        } => SamplingError::DoomLoopDetected {
-            triggers: triggers.clone(),
-            aborted_at_chunk: *aborted_at_chunk,
-        },
-    }
+    err.clone()
 }
 
 #[cfg(test)]
@@ -633,11 +595,13 @@ mod tests {
     }
 
     #[test]
-    fn classify_idle_timeout_is_fatal() {
+    fn classify_idle_timeout_is_retryable() {
         let err = SamplingError::IdleTimeout { elapsed_secs: 300 };
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {
-            RetryDecision::Fatal(SamplingError::IdleTimeout { elapsed_secs: 300 }) => {}
-            other => panic!("expected Fatal(IdleTimeout), got {other:?}"),
+            RetryDecision::Retry { backoff } => {
+                assert!(backoff >= Duration::from_millis(1600));
+            }
+            other => panic!("expected Retry(IdleTimeout), got {other:?}"),
         }
     }
 
@@ -660,7 +624,7 @@ mod tests {
     }
 
     fn serialization_err() -> SamplingError {
-        SamplingError::Serialization(serde_json::from_str::<i32>("not a number").unwrap_err())
+        SamplingError::from(serde_json::from_str::<i32>("not a number").unwrap_err())
     }
 
     /// Regression: `clone_error` used to launder `Serialization` into the
@@ -781,21 +745,42 @@ mod tests {
     }
 
     #[test]
-    fn classify_doom_loop_detected_is_retry_with_immediate_backoff() {
+    fn classify_doom_loop_detected_obeys_total_retry_cap() {
         let err = SamplingError::DoomLoopDetected {
             triggers: vec!["tail_repetition:8@thinking".into()],
             aborted_at_chunk: None,
         };
-        // Whatever the counters say, classification is Retry — the recovery
-        // loop owns the budget by disarming the abort when it is spent.
-        for retry_count in [0, 5, 99] {
-            match classify_error(&err, retry_count, 2, RATE_LIMIT_RETRY_THRESHOLD) {
-                RetryDecision::Retry { backoff } => {
-                    assert!(backoff <= Duration::from_millis(250), "near-immediate");
-                }
-                other => panic!("expected Retry, got {other:?}"),
+        match classify_error(&err, 0, 2, RATE_LIMIT_RETRY_THRESHOLD) {
+            RetryDecision::Retry { backoff } => {
+                assert!(backoff <= Duration::from_millis(250), "near-immediate");
             }
+            other => panic!("expected first doom-loop retry, got {other:?}"),
         }
+        for retry_count in [1, 5, 99] {
+            assert!(
+                matches!(
+                    classify_error(&err, retry_count, 2, RATE_LIMIT_RETRY_THRESHOLD),
+                    RetryDecision::Fatal(SamplingError::DoomLoopDetected { .. })
+                ),
+                "doom-loop retry count {retry_count} must exhaust the cap"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_incomplete_stream_retries_until_cap() {
+        let err = SamplingError::IncompleteStream {
+            backend: sampling_types::ApiBackend::Responses,
+            message: "missing terminal event".into(),
+        };
+        assert!(matches!(
+            classify_error(&err, 0, 2, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Retry { .. }
+        ));
+        assert!(matches!(
+            classify_error(&err, 1, 2, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Fatal(SamplingError::IncompleteStream { .. })
+        ));
     }
 
     #[test]

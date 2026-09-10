@@ -257,6 +257,21 @@ async fn actor_with_sampler(
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
 ) {
+    let (actor, gateway, _events) =
+        actor_with_sampler_delivery(server, api_backend, sampler::OutputDelivery::Irreversible)
+            .await;
+    (actor, gateway)
+}
+
+async fn actor_with_sampler_delivery(
+    server: &MockInferenceServer,
+    api_backend: sampling_types::ApiBackend,
+    delivery: sampler::OutputDelivery,
+) -> (
+    std::sync::Arc<SessionActor>,
+    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    mpsc::UnboundedReceiver<SessionEvent>,
+) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
     tokio::task::spawn_local(async move {
@@ -266,7 +281,9 @@ async fn actor_with_sampler(
             }
         }
     });
-    let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    let (mut actor, events) =
+        create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    actor.tool_context.sampling_output_delivery = delivery;
     // Point the chat-state sampling config at the mock server so BOTH the
     // main turn requests and the compaction client (which rebuilds its
     // config from chat state) hit the same server.
@@ -302,7 +319,10 @@ async fn actor_with_sampler(
     let (sampler_event_tx, sampler_event_rx) = mpsc::unbounded_channel::<sampler::SamplingEvent>();
     actor.sampler_handle = sampler::SamplerActor::spawn(
         sampler_config,
-        sampler::RetryPolicy::default(),
+        sampler::RetryPolicy {
+            output_delivery: delivery,
+            ..Default::default()
+        },
         sampler_event_tx,
     );
     let actor = std::sync::Arc::new(actor);
@@ -313,7 +333,7 @@ async fn actor_with_sampler(
             drainer.handle_sampling_event(event).await;
         }
     });
-    (actor, gateway_rx)
+    (actor, gateway_rx, events)
 }
 
 /// Drive one user turn through the real loop. Bounded by a generous timeout
@@ -427,6 +447,62 @@ fn chat_completions_request_count(server: &MockInferenceServer) -> usize {
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
+
+#[test]
+fn retractable_stream_retry_accepts_only_the_second_candidate_and_bills_both() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            use crate::extensions::notification::{SamplingAttemptState, SessionUpdate as GrowUpdate};
+            use crate::session::replay_events::SessionNotification;
+            let server = MockInferenceServer::start().await.unwrap();
+            let prefix = json!({
+                "id":"partial", "object":"chat.completion.chunk", "model":"test-model", "created":0,
+                "choices":[{"index":0,"delta":{"content":"discard this candidate"},"finish_reason":null}]
+            });
+            // An explicit usage-only tail gives a final spend even though the
+            // candidate's finish_reason was lost. It is not a middle snapshot.
+            let usage = json!({
+                "id":"partial", "object":"chat.completion.chunk", "model":"test-model", "created":0,
+                "choices":[], "usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}
+            });
+            server.enqueue_response("/v1/chat/completions", ScriptedResponse::sse(vec![
+                SseEvent::data(prefix.to_string()), SseEvent::data(usage.to_string()),
+            ]));
+            server.enqueue_response("/v1/chat/completions", ScriptedResponse::sse(
+                test_support::sse::chat_completion_script_exact("accepted answer", "test-model")
+            ));
+            let (actor, _, mut events) = actor_with_sampler_delivery(
+                &server, sampling_types::ApiBackend::ChatCompletions, sampler::OutputDelivery::Retractable,
+            ).await;
+            run_user_turn(&actor, "recover-stream").await.expect("recover inside this model step");
+            assert_eq!(chat_completions_request_count(&server), 2);
+            let texts = assistant_texts(&actor.chat_state_handle.get_conversation().await);
+            assert!(texts.iter().any(|text| text.contains("accepted answer")), "{texts:?}");
+            assert!(!texts.iter().any(|text| text.contains("discard this candidate")), "{texts:?}");
+            let usage = actor.chat_state_handle.try_get_session_usage().await.unwrap();
+            assert_eq!(usage.totals.model_calls, 2, "failed and accepted attempts both settle");
+            assert!(usage.totals.output_tokens >= 4);
+            let mut boundaries = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if let SessionEvent::Notification(SessionNotification::Grow(notification)) = event
+                    && let GrowUpdate::SamplingAttempt { request_id, attempt, state } = notification.update
+                {
+                    boundaries.push((request_id, attempt, state));
+                }
+            }
+            assert_eq!(boundaries.len(), 4, "{boundaries:?}");
+            assert_eq!(boundaries.iter().map(|(_, attempt, state)| (*attempt, *state)).collect::<Vec<_>>(), vec![
+                (1, SamplingAttemptState::Started), (1, SamplingAttemptState::Discarded),
+                (2, SamplingAttemptState::Started), (2, SamplingAttemptState::Accepted),
+            ]);
+            assert!(boundaries.iter().all(|(id, _, _)| id == &boundaries[0].0));
+        }));
+    });
+}
 
 #[test]
 fn rejected_native_continuation_falls_back_silently_and_keeps_session_usable() {
@@ -754,9 +830,14 @@ fn protocol_invalid_tools_do_not_execute_and_the_next_turn_recovers() {
                 server.enqueue_response(path, ScriptedResponse::sse(vec![SseEvent::data(bad.to_string())]));
                 server.enqueue_response(path, ScriptedResponse::sse(good));
                 let has_terminal_usage = backend == ApiBackend::Responses || unfinished_json;
-                let (actor, _gateway_rx) = actor_with_sampler(&server, backend).await;
+                let (actor, _gateway_rx) = actor_with_sampler(&server, backend.clone()).await;
                 let error = run_user_turn(&actor, "bad-tool").await.expect_err("partial tool must fail");
-                assert!(format!("{error:?}").contains("protocol:"), "{error:?}");
+                let expected = if backend == ApiBackend::ChatCompletions {
+                    if unfinished_json { "invalid tool arguments" } else { "incomplete ChatCompletions stream" }
+                } else {
+                    "protocol:"
+                };
+                assert!(format!("{error:?}").contains(expected), "{error:?}");
                 assert_eq!(server.requests().iter().filter(|request| request.path == path).count(), 1, "no hidden retry");
                 assert_eq!(actor.chat_state_handle.try_get_session_usage().await.unwrap().totals.model_calls, u64::from(has_terminal_usage),
                     "settle known terminal usage, but do not promote a pre-terminal snapshot to a final total");

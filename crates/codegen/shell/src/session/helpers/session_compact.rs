@@ -72,12 +72,11 @@ impl Drop for CompactUsageMeter {
 pub(crate) use sampling_types::is_context_length_error;
 /// Classify an upstream `SamplingError` for the compaction retry loop.
 ///
-/// `Auth`, `InvalidConfiguration`, `Serialization` and
-/// `IdleTimeout` are all deterministic by construction (re-issuing the same
-/// request cannot change the outcome — auth state, config, payload shape,
-/// and stuck-model conditions all persist). 4xx API responses other than
-/// 408 (timeout) and 429 (rate limit) are likewise deterministic. Network
-/// transport errors, stream-level blips, and 5xx responses are transient.
+/// Authentication, configuration, protocol and local lifecycle failures stop
+/// this owner. Idle timeout and missing completion evidence are transient;
+/// callers still enforce their own cancellation, settlement and budget gates.
+/// 4xx API responses other than 408 and 429 are deterministic. Transport
+/// errors and 5xx responses are transient.
 fn classify_sampling_error(err: SamplingError, image_count: usize) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(format!("compact failed: {err}"));
     if let SamplingError::Api {
@@ -96,7 +95,7 @@ fn classify_sampling_error(err: SamplingError, image_count: usize) -> CompactFai
         | SamplingError::InvalidConfiguration(_)
         | SamplingError::Persistence(_)
         | SamplingError::Serialization(_)
-        | SamplingError::IdleTimeout { .. } => true,
+        | SamplingError::Lifecycle(_) => true,
         SamplingError::Api {
             status, message, ..
         } => {
@@ -106,6 +105,8 @@ fn classify_sampling_error(err: SamplingError, image_count: usize) -> CompactFai
                     && *status != StatusCode::TOO_MANY_REQUESTS)
         }
         SamplingError::Http(_)
+        | SamplingError::IdleTimeout { .. }
+        | SamplingError::IncompleteStream { .. }
         | SamplingError::EventStreamError(_)
         | SamplingError::EmptyResponse { .. }
         | SamplingError::DoomLoopDetected { .. }
@@ -865,8 +866,19 @@ mod classify_tests {
             SamplingError::InvalidConfiguration("missing key"),
             0,
         )));
-        assert!(is_det(&classify_sampling_error(
+        assert!(!is_det(&classify_sampling_error(
             SamplingError::IdleTimeout { elapsed_secs: 60 },
+            0,
+        )));
+        assert!(!is_det(&classify_sampling_error(
+            SamplingError::IncompleteStream {
+                backend: sampling_types::ApiBackend::ChatCompletions,
+                message: "missing finish_reason".into(),
+            },
+            0,
+        )));
+        assert!(is_det(&classify_sampling_error(
+            SamplingError::Lifecycle("owner closed".into()),
             0,
         )));
         assert!(!is_det(&classify_sampling_error(
@@ -958,7 +970,7 @@ mod classify_tests {
             .block_on(reqwest::get("http://127.0.0.1:0"))
             .expect_err("connecting to port 0 must fail");
         assert!(!is_det(&classify_sampling_error(
-            SamplingError::Http(http_err),
+            SamplingError::Http(http_err.into()),
             0
         )));
     }
@@ -966,7 +978,7 @@ mod classify_tests {
     fn sampling_serialization_is_deterministic() {
         let serde_err = serde_json::from_str::<u32>("not a number").unwrap_err();
         assert!(is_det(&classify_sampling_error(
-            SamplingError::Serialization(serde_err),
+            SamplingError::Serialization(serde_err.into()),
             0,
         )));
     }

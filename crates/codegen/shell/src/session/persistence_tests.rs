@@ -11,6 +11,22 @@ impl ActorGuard {
         self.task.abort();
         let _ = self.task.await;
     }
+
+    async fn stop_gracefully(self) {
+        self.handle.tx.send(PersistenceMsg::Stop).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), self.task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    async fn close_sender_gracefully(self) {
+        drop(self.handle);
+        tokio::time::timeout(std::time::Duration::from_secs(2), self.task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }
 
 fn test_actor(info: Info, storage: Arc<dyn StorageAdapter>) -> ActorGuard {
@@ -20,6 +36,9 @@ fn test_actor(info: Info, storage: Arc<dyn StorageAdapter>) -> ActorGuard {
             info,
             storage,
             pending_notification: None,
+            pending_sampling: None,
+            sampling_attempt: None,
+            terminal_sampling_attempt: None,
             rx,
             gateway: None,
         }
@@ -47,6 +66,70 @@ fn notification(info: &Info, text: &str) -> acp::SessionNotification {
 
 fn neutral_update(info: &Info, text: &str) -> SessionUpdate {
     SessionUpdate::Acp(Box::new(notification(info, text)))
+}
+
+fn sampling_update(info: &Info, request_id: &str, attempt: u32, text: &str) -> SessionUpdate {
+    sampling_update_with_event(info, request_id, attempt, text, None)
+}
+
+fn sampling_update_with_event(
+    info: &Info,
+    request_id: &str,
+    attempt: u32,
+    text: &str,
+    event_id: Option<&str>,
+) -> SessionUpdate {
+    let mut meta = serde_json::json!({
+        "samplingRequestId": request_id,
+        "samplingAttempt": attempt,
+    })
+    .as_object()
+    .cloned()
+    .unwrap();
+    if let Some(event_id) = event_id {
+        meta.insert("eventId".into(), event_id.into());
+    }
+    SessionUpdate::Acp(Box::new(notification(info, text).meta(Some(meta))))
+}
+
+fn neutral_update_with_event(info: &Info, text: &str, event_id: &str) -> SessionUpdate {
+    SessionUpdate::Acp(Box::new(
+        notification(info, text).meta(Some(
+            serde_json::json!({ "eventId": event_id })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        )),
+    ))
+}
+
+fn sampling_boundary(
+    request_id: &str,
+    attempt: u32,
+    state: crate::extensions::notification::SamplingAttemptState,
+) -> PersistenceMsg {
+    PersistenceMsg::SamplingAttempt {
+        request_id: request_id.to_owned(),
+        attempt,
+        state,
+    }
+}
+
+fn replay_texts(root: &std::path::Path, session_id: &str) -> Vec<String> {
+    crate::session::storage::load_updates_for_replay_at(session_id, root)
+        .unwrap()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|update| {
+            let acp::SessionUpdate::AgentMessageChunk(chunk) = update else {
+                return None;
+            };
+            let acp::ContentBlock::Text(text) = chunk.content else {
+                return None;
+            };
+            Some(text.text)
+        })
+        .collect()
 }
 
 fn break_summary_writes(dir: &std::path::Path) {
@@ -202,6 +285,306 @@ async fn durable_append_drains_pending_update_in_fifo_order() {
     actor.stop().await;
 }
 
+#[tokio::test]
+async fn replay_keeps_only_the_accepted_retry() {
+    use crate::extensions::notification::SamplingAttemptState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("sampling-replay-retry"),
+        cwd: dir.path().to_string_lossy().into_owned(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_root(dir.path().to_path_buf()));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let actor = test_actor(info.clone(), storage);
+
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            "request",
+            1,
+            SamplingAttemptState::Started,
+        ))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(sampling_update(
+            &info,
+            "request",
+            1,
+            "discarded",
+        )))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            "request",
+            1,
+            SamplingAttemptState::Discarded,
+        ))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            "request",
+            2,
+            SamplingAttemptState::Started,
+        ))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(sampling_update(
+            &info, "request", 2, "accepted",
+        )))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            "request",
+            2,
+            SamplingAttemptState::Accepted,
+        ))
+        .unwrap();
+    actor.stop_gracefully().await;
+
+    assert_eq!(replay_texts(dir.path(), info.id.0.as_ref()), ["accepted"]);
+}
+
+#[tokio::test]
+async fn unaccepted_sampling_candidate_is_absent_after_shutdown() {
+    use crate::extensions::notification::SamplingAttemptState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("sampling-replay-shutdown"),
+        cwd: dir.path().to_string_lossy().into_owned(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_root(dir.path().to_path_buf()));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let actor = test_actor(info.clone(), storage);
+
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            "request",
+            1,
+            SamplingAttemptState::Started,
+        ))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(sampling_update(
+            &info,
+            "request",
+            1,
+            "candidate",
+        )))
+        .unwrap();
+    actor.stop_gracefully().await;
+
+    assert!(replay_texts(dir.path(), info.id.0.as_ref()).is_empty());
+}
+
+#[tokio::test]
+async fn untagged_interleaving_survives_sampling_discard() {
+    use crate::extensions::notification::SamplingAttemptState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("sampling-replay-interleave"),
+        cwd: dir.path().to_string_lossy().into_owned(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_root(dir.path().to_path_buf()));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let actor = test_actor(info.clone(), storage);
+
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            "request",
+            1,
+            SamplingAttemptState::Started,
+        ))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(sampling_update(
+            &info,
+            "request",
+            1,
+            "discarded",
+        )))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(&info, "untagged")))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            "request",
+            1,
+            SamplingAttemptState::Discarded,
+        ))
+        .unwrap();
+    actor.stop_gracefully().await;
+
+    assert_eq!(replay_texts(dir.path(), info.id.0.as_ref()), ["untagged"]);
+}
+
+#[tokio::test]
+async fn untagged_interleaving_survives_channel_close() {
+    use crate::extensions::notification::SamplingAttemptState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("sampling-replay-close"),
+        cwd: dir.path().to_string_lossy().into_owned(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_root(dir.path().to_path_buf()));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let actor = test_actor(info.clone(), storage);
+
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            "request",
+            1,
+            SamplingAttemptState::Started,
+        ))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(sampling_update(
+            &info,
+            "request",
+            1,
+            "candidate",
+        )))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(&info, "untagged")))
+        .unwrap();
+    actor.close_sender_gracefully().await;
+
+    assert_eq!(replay_texts(dir.path(), info.id.0.as_ref()), ["untagged"]);
+}
+
+#[tokio::test]
+async fn accepted_sampling_and_untagged_interleaving_keep_event_order() {
+    use crate::extensions::notification::SamplingAttemptState;
+
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("sampling-replay-order"),
+        cwd: dir.path().to_string_lossy().into_owned(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_root(dir.path().to_path_buf()));
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let actor = test_actor(info.clone(), storage.clone());
+
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            "request",
+            1,
+            SamplingAttemptState::Started,
+        ))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(sampling_update_with_event(
+            &info,
+            "request",
+            1,
+            "first",
+            Some("event-1"),
+        )))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update_with_event(
+            &info, "untagged", "event-2",
+        )))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(sampling_update_with_event(
+            &info,
+            "request",
+            1,
+            "second",
+            Some("event-3"),
+        )))
+        .unwrap();
+    actor
+        .handle
+        .tx
+        .send(sampling_boundary(
+            "request",
+            1,
+            SamplingAttemptState::Accepted,
+        ))
+        .unwrap();
+    actor.stop_gracefully().await;
+
+    let loaded = storage.load_session(&info).await.unwrap();
+    let event_ids = loaded
+        .updates
+        .iter()
+        .filter_map(|update| {
+            let SessionUpdate::Acp(notification) = update else {
+                return None;
+            };
+            notification
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("eventId"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(event_ids, ["event-1", "event-2", "event-3"]);
+    assert_eq!(
+        replay_texts(dir.path(), info.id.0.as_ref()),
+        ["first", "untagged", "second"]
+    );
+}
+
 /// A `CurrentModel` mutation with omitted metadata replaces only the canonical
 /// catalog ID and preserves the persisted effort and agent name.
 #[tokio::test]
@@ -269,27 +652,59 @@ async fn current_model_write_preserves_omitted_metadata() {
 #[tokio::test]
 async fn stop_drains_accepted_updates_with_retained_sender() {
     let dir = tempfile::tempdir().unwrap();
-    let info = Info { id: acp::SessionId::new("stop-drain"), cwd: dir.path().to_string_lossy().into_owned() };
+    let info = Info {
+        id: acp::SessionId::new("stop-drain"),
+        cwd: dir.path().to_string_lossy().into_owned(),
+    };
     let storage = Arc::new(JsonlStorageAdapter::with_root(dir.path().into()));
-    storage.init_session(&info, default_model_id()).await.unwrap();
+    storage
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
     let actor = test_actor(info.clone(), storage);
     let retained = actor.handle.clone();
-    actor.handle.tx.send(PersistenceMsg::Update(neutral_update(&info, "before stop"))).unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(&info, "before stop")))
+        .unwrap();
     actor.handle.tx.send(PersistenceMsg::Stop).unwrap();
     // Accepted before the current-thread runtime polls the receiver closure.
-    actor.handle.tx.send(PersistenceMsg::Update(neutral_update(&info, "already queued"))).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), actor.task).await.unwrap().unwrap();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::Update(neutral_update(
+            &info,
+            "already queued",
+        )))
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), actor.task)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(retained.tx.send(PersistenceMsg::Flush).is_err());
     assert!(retained.task_completion().unwrap().is_finished());
     let replacement = JsonlStorageAdapter::with_root(dir.path().into());
-    let loaded = replacement.load_session_for_write_without_updates(&info).await.unwrap();
+    let loaded = replacement
+        .load_session_for_write_without_updates(&info)
+        .await
+        .unwrap();
     assert_eq!(loaded.summary.num_messages, 1); // Adjacent text chunks merge.
     let updates = replacement.load_session(&info).await.unwrap().updates;
-    let texts: Vec<_> = updates.iter().filter_map(|update| {
-        let SessionUpdate::Acp(notification) = update else { return None; };
-        let acp::SessionUpdate::AgentMessageChunk(chunk) = &notification.update else { return None; };
-        let acp::ContentBlock::Text(text) = &chunk.content else { return None; };
-        Some(text.text.as_str())
-    }).collect();
+    let texts: Vec<_> = updates
+        .iter()
+        .filter_map(|update| {
+            let SessionUpdate::Acp(notification) = update else {
+                return None;
+            };
+            let acp::SessionUpdate::AgentMessageChunk(chunk) = &notification.update else {
+                return None;
+            };
+            let acp::ContentBlock::Text(text) = &chunk.content else {
+                return None;
+            };
+            Some(text.text.as_str())
+        })
+        .collect();
     assert_eq!(texts, ["before stopalready queued"]);
 }

@@ -486,6 +486,27 @@ impl ChatStateActor {
             } => {
                 self.record_model_call_usage(model_id, &usage, api_duration_ms, cost_usd_ticks);
             }
+            ChatStateCommand::SettleModelAttemptUsage {
+                attempt_key,
+                captured_prompt_index,
+                model_id,
+                usage,
+                cost_usd_ticks,
+                api_duration_ms,
+                reply,
+            } => {
+                let result = self
+                    .settle_model_attempt_usage(
+                        attempt_key,
+                        captured_prompt_index,
+                        model_id,
+                        usage,
+                        cost_usd_ticks,
+                        api_duration_ms,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
             ChatStateCommand::RecordSubagentUsage {
                 by_model,
                 attribute_to_prompt,
@@ -724,6 +745,9 @@ impl ChatStateActor {
                     }
                 });
                 let _ = reply.send(materialized);
+            }
+            ChatStateCommand::CurrentPromptIndex { reply } => {
+                let _ = reply.send(self.state.timeline.current_prompt_index());
             }
             ChatStateCommand::GetPromptIndex { reply } => {
                 let _ = reply.send(self.state.timeline.next_prompt_index());

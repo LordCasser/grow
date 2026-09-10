@@ -416,9 +416,14 @@ context_window = 200000
         eventually(lambda: len(model.inquiries()) == count + 1)
         before = len(b.notices)
         b.call("session/load", {"sessionId": sb, "cwd": str(cwd), "mcpServers": []})
-        snapshots = [n for n in receiver_notices(b, live_id, before)
-                     if n["params"].get("_meta", {}).get("transient")]
-        assert snapshots and all(n["params"]["update"]["subject"] == "incoming inquiry" for n in snapshots), snapshots
+        snapshots = eventually(lambda: [n for n in receiver_notices(b, live_id, before)
+                                        if n["params"].get("_meta", {}).get("transient")])
+        assert len(snapshots) == 1, snapshots
+        update = snapshots[0]["params"]["update"]
+        assert update["subject"] == "inquiry approval", update
+        audit = json.loads(update["details"])
+        assert audit["sourceSessionId"] == sa and audit["question"] == "Resident reload probe", audit
+        assert audit["approval"] == "approved (same workspace)" and audit["outcome"] is None, audit
         assert len(model.inquiries()) == count + 1, "resident reload repeated inference"
         model.release.set()
         live_result = live.result(15)

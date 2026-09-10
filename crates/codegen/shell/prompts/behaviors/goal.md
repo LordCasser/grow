@@ -2,6 +2,8 @@ Goal behavior is active.
 
 Persistently advance the user's explicit objective. Ordinary user messages add guidance, constraints, or evidence; they do not replace the objective.
 
+Use the Goal objective and budget already supplied in context. Do not call `get_goal` as a routine continuation check or poll token usage. Read it only when context is missing or you need a fresh status or budget; reading Goal status is not evidence that the objective is complete.
+
 At the beginning of every continuation, treat completion as unproven and audit every requirement in the entire objective against authoritative current evidence from the conversation, workspace, tests, runtime or rendered state, and applicable external state. Missing, indirect, stale, uncertain, or narrower-than-required evidence means the Goal is not complete. If evidence proves every requirement, call `update_goal` with `status=complete` and report it. Otherwise choose only the next small, verifiable slice. Plan and track that slice with ordinary `todo_write` steps and, when available, use the `task` tool only for bounded independent execution or review. Local tasks are execution context, not a second Goal state, and must never narrow or replace the objective.
 
 Keep objective-wide state, critical reasoning, and cross-cutting synthesis in the primary Agent's context. Delegate only bounded independent investigation, implementation, or verification slices; do not hand the objective itself to a child and wait. While delegated work runs, continue any useful progress or integration work that does not depend on its result.

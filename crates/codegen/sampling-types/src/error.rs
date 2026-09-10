@@ -2,11 +2,13 @@
 //!
 //! TODO: Move from shell/src/sampling/error.rs
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::types::ApiBackend;
 
 pub type Result<T> = std::result::Result<T, SamplingError>;
 
@@ -140,7 +142,7 @@ impl SentCredential {
 /// can never drift from what Display actually emits.
 const SERIALIZATION_DISPLAY_PREFIX: &str = "serialization error: ";
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum SamplingError {
     #[error("{message}")]
     Auth {
@@ -154,10 +156,21 @@ pub enum SamplingError {
     /// repair this boundary and must never be treated as a transport retry.
     #[error("attempt persistence failed: {0}")]
     Persistence(String),
+    /// The provider stream ended before its protocol-specific completion
+    /// evidence arrived. The backend is retained as typed recovery context.
+    #[error("incomplete {backend:?} stream: {message}")]
+    IncompleteStream {
+        backend: ApiBackend,
+        message: String,
+    },
+    /// A local producer or lifecycle owner disappeared without a terminal
+    /// state. Replaying the provider request cannot repair this boundary.
+    #[error("sampling lifecycle failed: {0}")]
+    Lifecycle(String),
     #[error("request error: {0}")]
-    Http(reqwest::Error),
+    Http(Arc<reqwest::Error>),
     #[error("{prefix}{0}", prefix = SERIALIZATION_DISPLAY_PREFIX)]
-    Serialization(serde_json::Error),
+    Serialization(Arc<serde_json::Error>),
     /// Completed model output with invalid tool JSON; discard the whole sample.
     #[error("model returned invalid tool arguments: {0}")]
     InvalidToolArguments(String),
@@ -278,10 +291,10 @@ impl SamplingError {
         }
     }
 
-    /// Rebuild a `Serialization` error from a rendered message for non-`Clone`
-    /// contexts; it must stay `Serialization` so it remains non-retryable.
+    /// Rebuild a `Serialization` error from a rendered message; it must stay
+    /// `Serialization` so it remains non-retryable.
     pub fn serialization_message(msg: impl fmt::Display) -> Self {
-        Self::Serialization(serde::de::Error::custom(msg))
+        Self::Serialization(Arc::new(serde::de::Error::custom(msg)))
     }
 
     /// Rebuild from this variant's full rendered Display (e.g. a round-tripped
@@ -337,15 +350,17 @@ impl SamplingError {
     pub fn is_retryable(&self) -> bool {
         match self {
             SamplingError::Auth { .. } => false,
-            SamplingError::InvalidConfiguration(_) | SamplingError::Persistence(_) => false,
+            SamplingError::InvalidConfiguration(_)
+            | SamplingError::Persistence(_)
+            | SamplingError::Lifecycle(_) => false,
             SamplingError::Http(err) => is_retryable_reqwest(err),
             SamplingError::Serialization(_) => false,
+            SamplingError::IncompleteStream { .. } | SamplingError::IdleTimeout { .. } => true,
             SamplingError::InvalidToolArguments(_) => true,
             SamplingError::Api { status, .. } => {
                 matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520 | 529)
             }
             SamplingError::EventStreamError(_) => true,
-            SamplingError::IdleTimeout { .. } => false,
             SamplingError::EmptyResponse { .. } => true,
             SamplingError::DoomLoopDetected { .. } => true,
         }
@@ -418,14 +433,14 @@ impl SamplingError {
 
 impl From<reqwest::Error> for SamplingError {
     fn from(value: reqwest::Error) -> Self {
-        Self::Http(value)
+        Self::Http(Arc::new(value))
     }
 }
 
 impl From<serde_json::Error> for SamplingError {
     fn from(value: serde_json::Error) -> Self {
         tracing::debug!("Serde deserialization error: {:?}", &value);
-        Self::Serialization(value)
+        Self::Serialization(Arc::new(value))
     }
 }
 
@@ -809,8 +824,9 @@ mod tests {
     fn serialization_from_rendered_round_trips_display() {
         // Derived from a REAL error's Display so a template rewording cannot
         // silently desynchronize the strip from the prefix it mirrors.
-        let original =
-            SamplingError::Serialization(serde_json::from_str::<i32>("not a number").unwrap_err());
+        let original = SamplingError::Serialization(Arc::new(
+            serde_json::from_str::<i32>("not a number").unwrap_err(),
+        ));
         let rendered = original.to_string();
         let rebuilt = SamplingError::serialization_from_rendered(&rendered);
         assert!(matches!(rebuilt, SamplingError::Serialization(_)));
@@ -828,12 +844,9 @@ mod tests {
     }
 
     #[test]
-    fn idle_timeout_is_not_retryable() {
+    fn idle_timeout_is_retryable() {
         let err = SamplingError::IdleTimeout { elapsed_secs: 300 };
-        assert!(
-            !err.is_retryable(),
-            "IdleTimeout must not be retried — would cause 3× amplification"
-        );
+        assert!(err.is_retryable());
     }
 
     #[test]
@@ -851,6 +864,34 @@ mod tests {
             msg.contains("120s"),
             "Display should include elapsed_secs: {msg}"
         );
+    }
+
+    #[test]
+    fn incomplete_stream_and_idle_timeout_are_retryable() {
+        let incomplete = SamplingError::IncompleteStream {
+            backend: ApiBackend::Responses,
+            message: "response ended before terminal event".into(),
+        };
+        assert!(incomplete.is_retryable());
+        assert!(SamplingError::IdleTimeout { elapsed_secs: 1 }.is_retryable());
+    }
+
+    #[test]
+    fn lifecycle_is_not_retryable() {
+        assert!(!SamplingError::Lifecycle("event producer closed".into()).is_retryable());
+        assert!(!SamplingError::Persistence("writer unavailable".into()).is_retryable());
+    }
+
+    #[test]
+    fn cloned_http_error_preserves_variant_and_retry_classification() {
+        let raw = reqwest::Proxy::all("not a proxy url")
+            .expect_err("invalid proxy URL should produce a reqwest error");
+        let original = SamplingError::from(raw);
+        let cloned = original.clone();
+
+        assert!(matches!(&original, SamplingError::Http(_)));
+        assert!(matches!(&cloned, SamplingError::Http(_)));
+        assert_eq!(original.is_retryable(), cloned.is_retryable());
     }
 
     #[test]

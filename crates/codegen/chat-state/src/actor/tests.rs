@@ -1045,6 +1045,88 @@ async fn record_last_turn_usage_round_trip() {
 }
 
 #[tokio::test]
+async fn session_usage_events_replace_totals_and_include_late_children() {
+    let mut h = TestHarness::new();
+    let call = sampling_types::TokenUsage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        cached_prompt_tokens: 75,
+        ..Default::default()
+    };
+    h.handle
+        .record_model_call_usage(Some("parent".into()), call, None, None);
+    let ChatStateEvent::SessionUsageUpdated { usage } = h.next_event().await else {
+        panic!("usage mutation must publish its cumulative snapshot");
+    };
+    assert_eq!(usage.totals.total_tokens(), 120);
+    assert_eq!(usage.totals.cached_read_tokens, 75);
+    assert!(!usage.incomplete);
+
+    assert!(
+        h.handle
+            .record_subagent_usage(
+                vec![(
+                    "child".into(),
+                    crate::usage::UsageTotals {
+                        input_tokens: 900,
+                        output_tokens: 80,
+                        cached_read_tokens: 425,
+                        model_calls: 1,
+                        ..Default::default()
+                    }
+                )],
+                false,
+                false
+            )
+            .await
+    );
+    let ChatStateEvent::SessionUsageUpdated { usage } = h.next_event().await else {
+        panic!("late child usage must publish even without prompt attribution");
+    };
+    assert_eq!(usage.totals.total_tokens(), 1100);
+    assert_eq!(usage.totals.cached_read_tokens, 500);
+    assert_eq!(usage.totals.input_tokens, 1000);
+    assert_eq!(usage.by_model.len(), 2);
+    assert_eq!(
+        h.handle
+            .try_get_prompt_usage()
+            .await
+            .unwrap()
+            .unwrap()
+            .totals
+            .total_tokens(),
+        120
+    );
+
+    assert!(h.handle.mark_usage_incomplete(false, true).await);
+    let ChatStateEvent::SessionUsageUpdated { usage } = h.next_event().await else {
+        panic!("incomplete session usage must be visible");
+    };
+    assert!(usage.incomplete);
+    assert_eq!(usage.totals.total_tokens(), 1100);
+    assert!(h.handle.mark_usage_incomplete(false, true).await);
+    assert!(
+        h.drain_events().is_empty(),
+        "unchanged incomplete state must not emit again"
+    );
+    assert!(
+        h.drain_persistence().is_empty(),
+        "usage projection is not Timeline content"
+    );
+    let fresh = TestHarness::new();
+    assert_eq!(
+        fresh
+            .handle
+            .try_get_session_usage()
+            .await
+            .unwrap()
+            .totals
+            .total_tokens(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn prompt_usage_ledger_via_handle_resets_and_clears() {
     use sampling_types::TokenUsage;
 
@@ -1104,6 +1186,412 @@ async fn prompt_usage_ledger_via_handle_resets_and_clears() {
             .ok()
             .flatten()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn model_attempt_usage_settlement_is_durable_and_idempotent() {
+    let mut h = TestHarness::new();
+    record_prompt(&h.handle, "settle").await;
+    h.drain_events();
+    let usage = sampling_types::TokenUsage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        total_tokens: 120,
+        ..Default::default()
+    };
+
+    assert!(matches!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-1".into(),
+                0,
+                "model-a".into(),
+                Some(usage.clone()),
+                Some(7),
+                None
+            )
+            .await,
+        Ok(true)
+    ));
+    let prompt = h.handle.try_get_prompt_usage().await.unwrap().unwrap();
+    let session = h.handle.try_get_session_usage().await.unwrap();
+    assert_eq!(prompt.totals.model_calls, 1);
+    assert_eq!(session.totals.model_calls, 1);
+    assert_eq!(
+        h.handle
+            .get_last_turn_usage()
+            .await
+            .unwrap()
+            .completion_tokens,
+        20
+    );
+
+    assert!(matches!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-1".into(),
+                0,
+                "model-a".into(),
+                Some(usage.clone()),
+                Some(7),
+                None
+            )
+            .await,
+        Ok(false)
+    ));
+    assert_eq!(
+        h.handle
+            .try_get_session_usage()
+            .await
+            .unwrap()
+            .totals
+            .model_calls,
+        1
+    );
+    assert!(matches!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-1".into(),
+                0,
+                "model-b".into(),
+                Some(usage),
+                Some(7),
+                None
+            )
+            .await,
+        Err(crate::TimelineWriteError::AttemptUsageConflict)
+    ));
+    assert!(h
+        .handle
+        .timeline_events()
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| matches!(
+            &event.kind,
+            crate::TimelineEventKind::Observation(observation)
+                if observation.scope == "sampling_usage" && observation.name == "attempt_settled"
+        )));
+}
+
+#[tokio::test]
+async fn model_attempt_usage_settlement_preserves_api_duration_and_matches_it() {
+    let mut h = TestHarness::new();
+    record_prompt(&h.handle, "duration").await;
+    h.drain_events();
+    let usage = sampling_types::TokenUsage {
+        prompt_tokens: 3,
+        completion_tokens: 2,
+        total_tokens: 5,
+        ..Default::default()
+    };
+
+    assert!(matches!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-duration".into(),
+                0,
+                "model-a".into(),
+                Some(usage.clone()),
+                None,
+                Some(42),
+            )
+            .await,
+        Ok(true)
+    ));
+    assert_eq!(
+        h.handle
+            .try_get_session_usage()
+            .await
+            .unwrap()
+            .totals
+            .api_duration_ms,
+        42
+    );
+    let event = h
+        .handle
+        .timeline_events()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| {
+            matches!(
+                &event.kind,
+                crate::TimelineEventKind::Observation(observation)
+                    if observation.scope == "sampling_usage"
+                        && observation.name == "attempt_settled"
+            )
+        })
+        .expect("settlement observation");
+    let crate::TimelineEventKind::Observation(observation) = event.kind else {
+        unreachable!()
+    };
+    assert_eq!(observation.data.unwrap()["api_duration_ms"], 42);
+
+    assert!(matches!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-duration".into(),
+                0,
+                "model-a".into(),
+                Some(usage.clone()),
+                None,
+                Some(42),
+            )
+            .await,
+        Ok(false)
+    ));
+    assert!(matches!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-duration".into(),
+                0,
+                "model-a".into(),
+                Some(usage),
+                None,
+                Some(43),
+            )
+            .await,
+        Err(crate::TimelineWriteError::AttemptUsageConflict)
+    ));
+}
+
+#[tokio::test]
+async fn unknown_model_attempt_usage_marks_current_ledgers_incomplete() {
+    let mut h = TestHarness::new();
+    record_prompt(&h.handle, "unknown").await;
+    h.drain_events();
+    assert!(matches!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-unknown".into(),
+                0,
+                "model-a".into(),
+                None,
+                None,
+                None,
+            )
+            .await,
+        Ok(true)
+    ));
+    assert!(
+        h.handle
+            .try_get_prompt_usage()
+            .await
+            .unwrap()
+            .unwrap()
+            .incomplete
+    );
+    assert!(h.handle.try_get_session_usage().await.unwrap().incomplete);
+}
+
+#[tokio::test]
+async fn model_attempt_usage_waits_for_persistence_ack_before_folding() {
+    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+    let handle = h.handle.clone();
+    let mut settle = tokio::spawn(async move {
+        handle
+            .settle_model_attempt_usage(
+                "attempt-ack".into(),
+                0,
+                "model-a".into(),
+                Some(sampling_types::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 2,
+                    total_tokens: 3,
+                    ..Default::default()
+                }),
+                None,
+                None,
+            )
+            .await
+    });
+    let ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("settlement persistence request");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut settle)
+            .await
+            .is_err()
+    );
+    ack.send(Ok(())).expect("actor still waiting for ACK");
+    assert!(matches!(settle.await.unwrap(), Ok(true)));
+    assert_eq!(
+        h.handle
+            .try_get_session_usage()
+            .await
+            .unwrap()
+            .totals
+            .model_calls,
+        1
+    );
+}
+
+#[tokio::test]
+async fn model_attempt_usage_retries_exact_event_and_restores_dedup_index() {
+    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+    let usage = sampling_types::TokenUsage {
+        prompt_tokens: 11,
+        completion_tokens: 7,
+        total_tokens: 18,
+        ..Default::default()
+    };
+    let handle = h.handle.clone();
+    let settle_usage = usage.clone();
+    let settle = async move {
+        handle
+            .settle_model_attempt_usage(
+                "attempt-retry".into(),
+                0,
+                "model-a".into(),
+                Some(settle_usage),
+                Some(9),
+                Some(17),
+            )
+            .await
+    };
+    let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
+    let (result, ()) = tokio::join!(settle, retry);
+    assert!(matches!(result, Ok(true)));
+
+    let session = h.handle.try_get_session_usage().await.unwrap();
+    assert_eq!(session.totals.model_calls, 1);
+    assert_eq!(session.totals.api_duration_ms, 17);
+
+    let records = h.drain_persistence();
+    let persisted = records
+        .iter()
+        .filter_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(persisted.len(), 2, "failed write must retry the same event");
+    assert_eq!(
+        serde_json::to_value(persisted[0]).unwrap(),
+        serde_json::to_value(persisted[1]).unwrap(),
+    );
+
+    let timeline = h.handle.timeline_events().await.unwrap();
+    let (mock, _persistence_rx) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        timeline,
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        restored
+            .settle_model_attempt_usage(
+                "attempt-retry".into(),
+                0,
+                "model-a".into(),
+                Some(usage),
+                Some(9),
+                Some(17),
+            )
+            .await,
+        Ok(false)
+    ));
+    assert_eq!(
+        restored
+            .try_get_session_usage()
+            .await
+            .unwrap()
+            .totals
+            .model_calls,
+        0,
+        "restored settlement must deduplicate without refolding live ledgers"
+    );
+}
+
+#[tokio::test]
+async fn restored_model_attempt_usage_is_deduplicated_and_late_prompt_is_session_only() {
+    let mut h = TestHarness::new();
+    record_prompt(&h.handle, "first").await;
+    h.drain_events();
+    let usage = sampling_types::TokenUsage {
+        prompt_tokens: 10,
+        completion_tokens: 4,
+        total_tokens: 14,
+        ..Default::default()
+    };
+    h.handle
+        .settle_model_attempt_usage(
+            "attempt-restore".into(),
+            0,
+            "model-a".into(),
+            Some(usage.clone()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let events = h.handle.timeline_events().await.unwrap();
+
+    let (persistence, _records) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let token = tokio_util::sync::CancellationToken::new();
+    let restored = ChatStateActor::spawn_from_timeline(
+        events,
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        token,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        restored
+            .settle_model_attempt_usage(
+                "attempt-restore".into(),
+                0,
+                "model-a".into(),
+                Some(usage),
+                None,
+                None
+            )
+            .await,
+        Ok(false)
+    ));
+
+    record_prompt(&restored, "second").await;
+    assert!(matches!(
+        restored
+            .settle_model_attempt_usage(
+                "attempt-late".into(),
+                0,
+                "model-a".into(),
+                Some(sampling_types::TokenUsage {
+                    prompt_tokens: 5,
+                    completion_tokens: 2,
+                    total_tokens: 7,
+                    ..Default::default()
+                }),
+                None,
+                None,
+            )
+            .await,
+        Ok(true)
+    ));
+    assert!(restored.try_get_prompt_usage().await.unwrap().is_none());
+    // Session usage remains live-only across restore; the historical fact is
+    // still present in the dedup index, so only the late new attempt applies.
+    assert_eq!(
+        restored
+            .try_get_session_usage()
+            .await
+            .unwrap()
+            .totals
+            .model_calls,
+        1
     );
 }
 

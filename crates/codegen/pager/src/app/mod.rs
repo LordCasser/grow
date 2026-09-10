@@ -10,8 +10,8 @@
 pub mod actions;
 pub mod agent_view;
 pub mod bundle;
-pub mod doctor;
 pub mod cli;
+pub mod doctor;
 pub mod root;
 pub mod session;
 pub use crate::link_opener;
@@ -32,8 +32,8 @@ pub(crate) mod external_pager;
 mod leader_cluster;
 pub(crate) mod screen_mode_relaunch;
 pub(crate) mod setting_persistence;
-pub(crate) mod transcript_file_writes;
 pub mod signal_handler;
+pub(crate) mod transcript_file_writes;
 mod xt_filter;
 pub(crate) use crate::terminal::kitty_flags_pushed;
 pub use cli::{
@@ -175,6 +175,22 @@ impl ScreenMode {
             Self::Inline => "inline",
             Self::Minimal => "minimal",
         }
+    }
+}
+/// Whether the active renderer can retract an unaccepted sampling preview.
+///
+/// Fullscreen and Inline redraw retained scrollback state, so removing a
+/// discarded attempt in [`crate::acp::tracker::AcpUpdateTracker`] retracts it
+/// on the next frame. Minimal commits finalized entries
+/// through `insert_before` into the terminal's native scrollback; after that
+/// print-once boundary, tracker removability cannot undo what the terminal
+/// already displayed. Keep this keyed to the effective mode returned by the
+/// terminal probe, rather than to `client_identifier` or a guessed client
+/// type.
+fn supports_sampling_attempt_lifecycle(screen_mode: ScreenMode) -> bool {
+    match screen_mode {
+        ScreenMode::Fullscreen | ScreenMode::Inline => true,
+        ScreenMode::Minimal => false,
     }
 }
 /// Install the process-wide render globals that depend on the screen mode.
@@ -580,7 +596,11 @@ pub async fn run(
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
     );
-    let connect_flags = crate::acp::ConnectFlags {
+    let mut connect_flags = crate::acp::ConnectFlags {
+        // The effective mode is only known after init_terminal's probe. Keep
+        // this conservative until that point so a failed minimal setup never
+        // advertises a capability it cannot honor.
+        sampling_attempt_lifecycle: false,
         subagents: !args.no_subagents,
         experimental_memory: args.experimental_memory,
         no_memory: args.no_memory,
@@ -672,6 +692,10 @@ pub async fn run(
     );
     apply_screen_mode_globals(screen_mode);
     finish_theme_after_probe(minimal, screen_mode);
+    // `init_terminal` may downgrade Minimal to Inline when its native
+    // scrollback probe fails; publish the capability for the actual renderer
+    // before initialize/new/load can be sent.
+    connect_flags.sampling_attempt_lifecycle = supports_sampling_attempt_lifecycle(screen_mode);
     if let Some(ref t) = session_title {
         set_terminal_title(t);
     }
@@ -1427,6 +1451,12 @@ fn set_panic_hook(mode: ScreenMode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sampling_attempt_lifecycle_matches_effective_screen_mode() {
+        assert!(supports_sampling_attempt_lifecycle(ScreenMode::Fullscreen));
+        assert!(supports_sampling_attempt_lifecycle(ScreenMode::Inline));
+        assert!(!supports_sampling_attempt_lifecycle(ScreenMode::Minimal));
+    }
     #[test]
     fn restore_runs_teardown_even_when_writer_failed() {
         use ratatui::{TerminalOptions, Viewport};

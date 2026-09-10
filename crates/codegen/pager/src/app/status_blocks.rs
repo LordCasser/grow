@@ -247,7 +247,7 @@ pub(crate) fn session_usage_block_text(
 }
 
 /// Cache reads are part of full input; output never belongs in this ratio.
-fn cache_hit_rate(input: u64, cached: u64) -> String {
+pub(crate) fn cache_hit_rate(input: u64, cached: u64) -> String {
     if input == 0 || cached > input {
         "N/A".into()
     } else {

@@ -50,7 +50,7 @@ const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 #[cfg(test)]
 fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
     let mut event = serde_json::from_str::<rs::ResponseStreamEvent>(data)
-        .map_err(SamplingError::Serialization)?;
+        .map_err(SamplingError::from)?;
     apply_terminal_event_overrides(&mut event, data);
     Ok(event)
 }
@@ -83,7 +83,7 @@ fn decode_tagged_event<T: serde::de::DeserializeOwned>(data: &str) -> Result<Opt
                 // Custom frames make no progress and never reach the L2 idle timer.
                 return Ok(None);
             }
-            Err(SamplingError::Serialization(error))
+            Err(SamplingError::Serialization(error.into()))
         }
     }
 }
@@ -141,7 +141,7 @@ fn decode_chat_chunk(data: &str) -> Result<Option<ChatCompletionChunk>> {
                     return Ok(None);
                 }
             }
-            Err(SamplingError::Serialization(error))
+            Err(SamplingError::Serialization(error.into()))
         }
     }
 }
@@ -617,9 +617,9 @@ impl SamplingClient {
 
         let http = if config.force_http1 {
             tracing::info!("Using HTTP/1.1 for sampling client (force_http1=true)");
-            crate::shared_http::client_http1().map_err(SamplingError::Http)?
+            crate::shared_http::client_http1().map_err(SamplingError::from)?
         } else {
-            crate::shared_http::client().map_err(SamplingError::Http)?
+            crate::shared_http::client().map_err(SamplingError::from)?
         };
 
         tracing::info!(
@@ -882,7 +882,7 @@ impl SamplingClient {
                 raw_body = %raw_body,
                 "Failed to deserialize ChatCompletionResponse"
             );
-            SamplingError::Serialization(e)
+            SamplingError::Serialization(e.into())
         })?;
         Ok(completion)
     }
@@ -964,7 +964,7 @@ impl SamplingClient {
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
-            SamplingError::Http(e)
+            SamplingError::Http(e.into())
         })?;
 
         tracing::debug!(
@@ -1025,7 +1025,14 @@ impl SamplingClient {
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
         let mut is_first = true;
         let audit = crate::audit::AttemptEvidence::current();
-        let byte_stream = response.bytes_stream().map(move |result| {
+        let end_audit = audit.clone();
+        let byte_stream = response.bytes_stream().map(Some)
+            .chain(futures_util::stream::once(async move {
+                if let Some(audit) = &end_audit { audit.stream_end("body_eof"); }
+                None
+            }))
+            .filter_map(std::future::ready)
+            .map(move |result| {
             result.map_err(|error| error.to_string()).and_then(|bytes| {
                 if let Some(audit) = &audit {
                     audit.response(&bytes)?;
@@ -1057,6 +1064,7 @@ impl SamplingClient {
                     Ok(event) => {
                         let data = &event.data;
                         if data == "[DONE]" {
+                            if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("sse_done"); }
                             return std::future::ready(None);
                         }
 
@@ -1075,6 +1083,7 @@ impl SamplingClient {
                     }
                     Err(e) => {
                         *had_transport_error = true;
+                        if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("transport_error"); }
                         Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
                     }
                 };
@@ -1145,7 +1154,7 @@ impl SamplingClient {
 
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
             tracing::error!("Failed to serialize responses request: {}", e);
-            SamplingError::Serialization(e)
+            SamplingError::Serialization(e.into())
         })?;
         // async-openai's ReasoningTextContent struct omits the `type`
         // discriminator that the Responses API requires on input. Patch
@@ -1208,7 +1217,7 @@ impl SamplingClient {
                 raw_body = %raw_body,
                 "Failed to deserialize rs::Response"
             );
-            SamplingError::Serialization(e)
+            SamplingError::Serialization(e.into())
         })?;
         Ok(response_obj)
     }
@@ -1263,7 +1272,7 @@ impl SamplingClient {
 
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
             tracing::error!("Failed to serialize responses request: {}", e);
-            SamplingError::Serialization(e)
+            SamplingError::Serialization(e.into())
         })?;
         // Inject optional backend fields not in async-openai's CreateResponse type.
         if self.defaults.stream_tool_calls {
@@ -1290,7 +1299,7 @@ impl SamplingClient {
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
-            SamplingError::Http(e)
+            SamplingError::Http(e.into())
         })?;
 
         tracing::debug!(
@@ -1353,7 +1362,14 @@ impl SamplingClient {
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
         let mut is_first = true;
         let audit = crate::audit::AttemptEvidence::current();
-        let byte_stream = response.bytes_stream().map(move |result| {
+        let end_audit = audit.clone();
+        let byte_stream = response.bytes_stream().map(Some)
+            .chain(futures_util::stream::once(async move {
+                if let Some(audit) = &end_audit { audit.stream_end("body_eof"); }
+                None
+            }))
+            .filter_map(std::future::ready)
+            .map(move |result| {
             result.map_err(|error| error.to_string()).and_then(|bytes| {
                 if let Some(audit) = &audit {
                     audit.response(&bytes)?;
@@ -1385,6 +1401,7 @@ impl SamplingClient {
                     Ok(event) => {
                         let data = &event.data;
                         if data == "[DONE]" {
+                            if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("sse_done"); }
                             return std::future::ready(None);
                         }
 
@@ -1415,6 +1432,7 @@ impl SamplingClient {
                     }
                     Err(e) => {
                         *had_transport_error = true;
+                        if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("transport_error"); }
                         Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
                     }
                 };
@@ -1528,7 +1546,7 @@ impl SamplingClient {
                     raw_body = %raw_body,
                     "Failed to deserialize MessagesResponse"
                 );
-                SamplingError::Serialization(e)
+                SamplingError::Serialization(e.into())
             })?;
         Ok(response_obj)
     }
@@ -1580,7 +1598,7 @@ impl SamplingClient {
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
-            SamplingError::Http(e)
+            SamplingError::Http(e.into())
         })?;
 
         tracing::debug!(
@@ -1643,7 +1661,14 @@ impl SamplingClient {
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
         let mut is_first = true;
         let audit = crate::audit::AttemptEvidence::current();
-        let byte_stream = response.bytes_stream().map(move |result| {
+        let end_audit = audit.clone();
+        let byte_stream = response.bytes_stream().map(Some)
+            .chain(futures_util::stream::once(async move {
+                if let Some(audit) = &end_audit { audit.stream_end("body_eof"); }
+                None
+            }))
+            .filter_map(std::future::ready)
+            .map(move |result| {
             result.map_err(|error| error.to_string()).and_then(|bytes| {
                 if let Some(audit) = &audit {
                     audit.response(&bytes)?;
@@ -1673,6 +1698,7 @@ impl SamplingClient {
                     Ok(event) => {
                         let data = &event.data;
                         if data == "[DONE]" {
+                            if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("sse_done"); }
                             return std::future::ready(None);
                         }
 
@@ -1694,6 +1720,7 @@ impl SamplingClient {
                     }
                     Err(e) => {
                         *had_transport_error = true;
+                        if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("transport_error"); }
                         Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
                     }
                 };

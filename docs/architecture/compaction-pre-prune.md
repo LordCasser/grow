@@ -18,6 +18,14 @@ Tasks A) and the actor-side application in `chat-state`
 (`ChatStateHandle::prune_tool_results`, Task B). This document covers the shell-side
 ladder that wires them together (Task C).
 
+## 异步摘要与当前任务
+
+摘要只描述被替换的旧片段；其后的 Surface tail 保留更新的用户请求和工具结果。Shell 在摘要载体中追加这个范围说明，避免旧任务的“已完成”或“等待用户”被当成当前状态。契约见 [摘要范围](../../openspec/specs/context-compaction/spec.md#requirement-compaction-summaries-describe-only-replaced-history)。
+
+`process_conversation_turn` 在闭合 Step 边界成功发布后台摘要后，仍先检查控制、预算、stationarity 和 foreground owner。只有同一 turn 的后继 Step 获准开始，才在现有准入 gate 内、tail 之后持久化一个 synthetic `AutoContinue` 提示，再开始 Step。它沿用原 turn，无真实用户权限证据；持久化失败不发送下一请求。已完成 turn 的外层边界也可发布摘要，但不会追加续接或打开新回合；摘要跨到新 turn 的首 Step 才提交时，由新输入承担任务接纳。见 [续接契约](../../openspec/specs/context-compaction/spec.md#requirement-async-compaction-hands-off-to-an-admitted-next-step)。
+
+Surface replacement 仍清空 native continuation epoch。当前 portable projector 将工具往返表示为不可信历史文本；保留尾部 Surface identity 不等于保留 provider 原生工具协议。合法 `stop` 加无工具调用仍按正常完成处理。提示改善输入衔接，不保证模型一定执行后续动作，也不提供额外重试预算。
+
 ## 2. Trigger and Ladder
 
 Insertion point: `run_compact_only` (shell `session/compaction.rs`), after the

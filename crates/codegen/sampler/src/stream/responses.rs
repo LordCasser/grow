@@ -41,6 +41,46 @@ fn same_tool_identity(left: &rs::FunctionToolCall, right: &rs::FunctionToolCall)
         && left.namespace == right.namespace
 }
 
+fn responses_replay_is_unsafe(event: &rs::ResponseStreamEvent) -> bool {
+    use rs::ResponseStreamEvent as E;
+    let unsafe_item = |item: &rs::OutputItem| {
+        !matches!(
+            item,
+            rs::OutputItem::Message(_)
+                | rs::OutputItem::FunctionCall(_)
+                | rs::OutputItem::Reasoning(_)
+                | rs::OutputItem::Compaction(_)
+        )
+    };
+    match event {
+        E::ResponseOutputItemAdded(event) => unsafe_item(&event.item),
+        E::ResponseOutputItemDone(event) => unsafe_item(&event.item),
+        E::ResponseCompleted(event) => event.response.output.iter().any(unsafe_item),
+        E::ResponseIncomplete(event) => event.response.output.iter().any(unsafe_item),
+        E::ResponseFailed(event) => event.response.output.iter().any(unsafe_item),
+        // Unknown replay properties of provider tool progress are conservative.
+        E::ResponseCreated(event) => event.response.output.iter().any(unsafe_item),
+        E::ResponseInProgress(event) => event.response.output.iter().any(unsafe_item),
+        E::ResponseQueued(event) => event.response.output.iter().any(unsafe_item),
+        E::ResponseOutputTextDelta(_)
+        | E::ResponseOutputTextDone(_)
+        | E::ResponseContentPartAdded(_)
+        | E::ResponseContentPartDone(_)
+        | E::ResponseRefusalDelta(_)
+        | E::ResponseRefusalDone(_)
+        | E::ResponseFunctionCallArgumentsDelta(_)
+        | E::ResponseFunctionCallArgumentsDone(_)
+        | E::ResponseReasoningSummaryPartAdded(_)
+        | E::ResponseReasoningSummaryPartDone(_)
+        | E::ResponseReasoningSummaryTextDelta(_)
+        | E::ResponseReasoningSummaryTextDone(_)
+        | E::ResponseReasoningTextDelta(_)
+        | E::ResponseReasoningTextDone(_)
+        | E::ResponseError(_) => false,
+        _ => true,
+    }
+}
+
 /// Returns whether a Responses API event reflects real model progress
 /// rather than a liveness-only heartbeat / status transition.
 pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamEvent) -> bool {
@@ -249,6 +289,9 @@ pub(crate) fn stream_responses_tracked<'a>(
                 }
             };
 
+            if responses_replay_is_unsafe(&event) {
+                yield SamplingEvent::ReplayUnsafe { request_id: request_id.clone() };
+            }
             if responses_event_may_have_output(&event) {
                 output_observed.store(true, Ordering::Relaxed);
             }
@@ -515,7 +558,8 @@ pub(crate) fn stream_responses_tracked<'a>(
         let mut response = match final_response {
             Some(r) => r,
             None => {
-                yield protocol_failure(&request_id, "Responses protocol: stream ended without a terminal response", None);
+                yield super::incomplete_stream(&request_id, sampling_types::ApiBackend::Responses,
+                    "stream ended without a terminal response", None);
                 return;
             }
         };
@@ -609,6 +653,7 @@ pub(crate) fn stream_responses_tracked<'a>(
             Err(err) => {
                 let mut error = SamplingErrorInfo::from(&err);
                 error.usage = usage;
+                error.cost_usd_ticks = cost_usd_ticks;
                 yield SamplingEvent::Failed { request_id: request_id.clone(), error };
                 return;
             }
@@ -770,25 +815,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_completed_event_yields_failed() {
-        let raw =
-            stream::iter(Vec::<Result<rs::ResponseStreamEvent, SamplingError>>::new()).boxed();
-        let events = collect(stream_responses(
-            raw,
-            None,
-            rid(),
-            Duration::from_secs(60),
-            None,
-        ))
-        .await;
+    async fn missing_terminal_event_yields_retryable_incomplete_stream() {
+        for wire in [
+            Vec::<rs::ResponseStreamEvent>::new(),
+            vec![text_delta_event("partial")],
+        ] {
+            let raw = stream::iter(wire.into_iter().map(Ok)).boxed();
+            let events = collect(stream_responses(
+                raw,
+                None,
+                rid(),
+                Duration::from_secs(60),
+                None,
+            ))
+            .await;
 
-        match events.last().unwrap() {
-            SamplingEvent::Failed { error, .. } => {
-                assert_eq!(error.kind, crate::events::SamplingErrorKind::Serialization);
-                assert_eq!(error.status_code, None);
-                assert!(!error.is_retryable);
+            match events.last().unwrap() {
+                SamplingEvent::Failed { error, .. } => {
+                    assert_eq!(
+                        error.kind,
+                        crate::events::SamplingErrorKind::IncompleteStream
+                    );
+                    assert_eq!(error.status_code, None);
+                    assert!(error.is_retryable);
+                    assert_eq!(error.backend, Some(sampling_types::ApiBackend::Responses));
+                }
+                other => panic!("expected Failed, got {other:?}"),
             }
-            other => panic!("expected Failed, got {other:?}"),
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+            );
         }
     }
 
@@ -1156,6 +1214,11 @@ mod tests {
                 added(),
                 completed_tools(&[("call_other", "test_tool", "{}")]),
             ],
+            vec![
+                added(),
+                function_call_args_delta_event(0, "{"),
+                completed_tools(&[("call_other", "test_tool", "{")]),
+            ],
             vec![done(), done(), good()],
             vec![
                 done(),
@@ -1199,6 +1262,38 @@ mod tests {
                 "{events:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn complete_invalid_tool_arguments_reject_the_whole_responses_candidate() {
+        let raw = stream::iter(vec![Ok(completed_tools(&[
+            ("call_bad", "bad_tool", "{"),
+            ("call_good", "good_tool", "{}"),
+        ]))])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            error.kind,
+            crate::events::SamplingErrorKind::InvalidToolArguments
+        );
+        assert!(error.is_retryable);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+        );
+        assert!(tool_call_deltas(&events).is_empty());
     }
 
     #[tokio::test]

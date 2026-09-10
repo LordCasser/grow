@@ -86,6 +86,11 @@ fn async_compaction_runs_beside_foreground_and_publishes_only_at_boundary() {
 }
 
 #[test]
+fn async_compaction_between_steps_continues_the_latest_task_once() {
+    async_compaction_scenario("between_step");
+}
+
+#[test]
 fn async_compaction_promotes_the_same_provider_request() {
     async_compaction_scenario("promote");
 }
@@ -160,7 +165,8 @@ fn async_compaction_scenario(action: &'static str) {
             use test_support::{InferenceEndpoint, InferenceRequestMatcher};
             let server = MockInferenceServer::start().await.unwrap();
             let promotes = matches!(action, "promote" | "timeout" | "promote_control" | "promote_incomplete" | "promote_model");
-            let summary = format!("background compacted summary: {}", "Old decisions and verified evidence. ".repeat(35));
+            let between_step = action == "between_step";
+            let summary = format!("background compacted summary: The old task is complete. No pending tasks; wait for the user. {}", "Old decisions and verified evidence. ".repeat(35));
             let summary_response = if action == "failure" {
                 ScriptedResponse::json(400, json!({"type":"error","error":{"type":"invalid_request_error","message":"unsupported summary parameter"}}))
             } else {
@@ -169,7 +175,7 @@ fn async_compaction_scenario(action: &'static str) {
             let mut auxiliary = server.expect_response_blocked("background summary",
                 InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
                 summary_response);
-            let mut tool = server.expect_response("foreground executes tool",
+            let mut tool = server.expect_response_blocked("foreground executes tool",
                 InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
                 ScriptedResponse::sse([
                     json!({"type":"message_start","message":{"id":"tool-msg","type":"message","role":"assistant","content":[],"model":"test","usage":{"input_tokens":74_000,"output_tokens":0}}}),
@@ -204,15 +210,29 @@ fn async_compaction_scenario(action: &'static str) {
             ]).await;
             let turn = tokio::task::spawn_local({ let actor = actor.clone(); async move { run_user_turn(&actor, "async-foreground").await } });
             tokio::time::timeout(std::time::Duration::from_secs(10), auxiliary.wait_blocked()).await.expect("background request starts");
-            tokio::time::timeout(std::time::Duration::from_secs(10), turn).await.expect("foreground is not blocked by summary").unwrap().unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(5), tool.wait_satisfied()).await.expect("tool exchange completed beside the summary");
-            tokio::time::timeout(std::time::Duration::from_secs(5), foreground.wait_satisfied()).await.expect("foreground expectation consumed");
+            if between_step {
+                tokio::time::timeout(std::time::Duration::from_secs(5), tool.wait_blocked()).await.expect("first Step tool request starts");
+                let step_gate = actor.step_control_gate.lock().await;
+                tool.release();
+                auxiliary.release();
+                tokio::time::timeout(std::time::Duration::from_secs(5), actor.session_activities.wait_idle()).await.expect("async summary generation settles before StepEnded");
+                drop(step_gate);
+                tokio::time::timeout(std::time::Duration::from_secs(10), turn).await.expect("next Step is admitted after compaction").unwrap().unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), foreground.wait_satisfied()).await.expect("next Step expectation consumed");
+            } else {
+                tool.release();
+                tokio::time::timeout(std::time::Duration::from_secs(10), turn).await.expect("foreground is not blocked by summary").unwrap().unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), tool.wait_satisfied()).await.expect("tool exchange completed beside the summary");
+                tokio::time::timeout(std::time::Duration::from_secs(5), foreground.wait_satisfied()).await.expect("foreground expectation consumed");
+            }
             if action == "goal" { assert_eq!(actor.goal_tokens_used(), 148_010); }
-            assert_eq!(actor.compaction.background.borrow().is_some(), action != "budget");
+            assert_eq!(actor.compaction.background.borrow().is_some(), action != "budget" && !between_step);
             let events = actor.chat_state_handle.timeline_events().await.unwrap();
-            assert!(!events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Summary { .. }))));
+            assert_eq!(events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Summary { .. }))), between_step);
             let mut early_notifications = Vec::new();
-            while let Ok(message) = notifications.try_recv() { early_notifications.push(format!("{message:?}")); }
+            if !between_step {
+                while let Ok(message) = notifications.try_recv() { early_notifications.push(format!("{message:?}")); }
+            }
             assert!(!early_notifications.iter().any(|message| message.contains("auto_compact_started")), "background must not display foreground compaction");
             let mut promotion = None;
             if action == "cancel" {
@@ -298,7 +318,7 @@ fn async_compaction_scenario(action: &'static str) {
             }
             let events = actor.chat_state_handle.timeline_events().await.unwrap();
             let completed = events.iter().filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Completed { .. }))).count();
-            let should_commit = matches!(action, "publish" | "promote" | "goal" | "cross_turn");
+            let should_commit = matches!(action, "publish" | "between_step" | "promote" | "goal" | "cross_turn");
             assert_eq!(completed, usize::from(should_commit));
             assert_eq!(server.messages_request_count(), 3 + usize::from(action == "cross_turn"), "promotion must not issue another summary request");
             let surface = actor.chat_state_handle.get_conversation().await;
@@ -308,6 +328,29 @@ fn async_compaction_scenario(action: &'static str) {
             assert_eq!(text.contains("background compacted summary"), should_commit);
             if should_commit {
                 assert!(surface.iter().any(|item| matches!(item, ConversationItem::User(user) if user.synthetic_reason == Some(sampling_types::SyntheticReason::CompactionMeta)) && item.text_content().contains("latest todo while summary runs")), "reminders must use the Todo state at commit, not at preparation");
+                assert!(text.contains(compaction::COMPACTION_HISTORY_SCOPE), "compaction replacement must describe the range it summarizes");
+            }
+            let auto_continue_count = surface.iter().filter(|item| matches!(item, ConversationItem::User(user) if user.synthetic_reason == Some(sampling_types::SyntheticReason::AutoContinue))).count();
+            assert_eq!(auto_continue_count, usize::from(between_step), "only an admitted between-step handoff may add AutoContinue");
+            if between_step {
+                let request = server.request_bodies().last().cloned().expect("next Step request");
+                let wire = serde_json::to_string(&request).unwrap();
+                assert!(wire.contains(compaction::ASYNC_COMPACTION_CONTINUE_PROMPT), "next Step must carry the persisted async-compaction continuation");
+                assert!(wire.contains("latest todo while summary runs"), "next Step must retain the latest tool fact");
+                assert!(wire.find(compaction::ASYNC_COMPACTION_CONTINUE_PROMPT).unwrap() > wire.rfind("latest todo while summary runs").unwrap(), "wire handoff must follow the retained tool exchange, not just the old summary");
+                assert_eq!(server.messages_request_count(), 3, "between-step continuation must not add an extra sample");
+                let auto_continues = surface.iter().filter_map(|item| match item {
+                    ConversationItem::User(user) if user.synthetic_reason == Some(sampling_types::SyntheticReason::AutoContinue) => Some(user),
+                    _ => None,
+                }).collect::<Vec<_>>();
+                assert_eq!(auto_continues.len(), 1, "between-step publication must persist exactly one continuation");
+                assert!(auto_continues[0].permission_evidence.is_none());
+                assert!(auto_continues[0].prompt_index.is_none());
+                let tool_index = surface.iter().position(|item| matches!(item, ConversationItem::ToolResult(result) if result.tool_call_id == "async-todo")).expect("retained tool result");
+                let continue_index = surface.iter().position(|item| matches!(item, ConversationItem::User(user) if user.synthetic_reason == Some(sampling_types::SyntheticReason::AutoContinue))).expect("auto-continue item");
+                assert!(continue_index > tool_index, "continuation must follow the retained tool result");
+                let ended = events.iter().filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { .. }))).count();
+                assert_eq!(ended, 1, "the continued work remains one turn");
             }
             let (notifications, completions) = drain_session_updates(&mut notifications);
             assert_eq!(completions.len(), usize::from(should_commit));

@@ -902,6 +902,8 @@ pub struct AgentSession {
     pub cwd: PathBuf,
     /// Cached server-reported context state.
     pub(crate) context_state: Option<shell::session::ContextInfo>,
+    /// Latest server-authoritative usage snapshot for this process window.
+    pub(crate) session_usage: Option<shell::extensions::notification::PromptUsage>,
     /// Current long-lived Goal state. Set by `GoalUpdated` session
     /// notifications, cleared when a new session starts.
     pub(crate) goal_state: Option<GoalDisplayState>,
@@ -1260,6 +1262,7 @@ impl AgentSession {
             state: AgentState::Idle,
             cwd,
             context_state: None,
+            session_usage: None,
             goal_state: None,
             last_cleared_goal_id: None,
             workflow_runs: Vec::new(),

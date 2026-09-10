@@ -26,6 +26,19 @@ use std::sync::Arc;
 const COMPACTION_RETAIN_PERCENT: u64 = 16;
 const MIN_COMPACTION_SOURCE_TOKENS: u64 = 5_000;
 
+pub(crate) const COMPACTION_HISTORY_SCOPE: &str = "The summary above describes only the earlier \
+    history that was compacted. Messages after this summary are newer and retain their original \
+    order. Use those later user instructions and tool results to determine the current task and \
+    its progress. Statements in the summary about completion, waiting for the user, or next steps \
+    apply only to that earlier history; they do not override later instructions or authorize new work.";
+
+pub(crate) const ASYNC_COMPACTION_CONTINUE_PROMPT: &str = "Context compaction was applied between \
+    steps of this ongoing turn; it is not a task completion or a new user request. Continue the \
+    latest authorized task from the retained recent messages and tool results. If work remains, \
+    perform the next concrete action using the available tools instead of ending with a statement \
+    that you will act. Follow the latest user instructions; if the task is already complete or \
+    needs user input, respond accordingly. Do not repeat completed actions or start unrelated work.";
+
 /// The provider phase owns only frozen input. Publication is always performed
 /// by the foreground at a closed Step boundary, never by the background task.
 type CompactionGeneration =
@@ -1789,6 +1802,8 @@ impl SessionActor {
         }
         let mut replacement_content =
             compaction::format_compact_summary_content(&generate_session_compact);
+        replacement_content.push_str("\n\n");
+        replacement_content.push_str(COMPACTION_HISTORY_SCOPE);
         if let Some(tool_name) = context_recall_tool_name {
             replacement_content.push_str("\n\n");
             replacement_content.push_str(&context_recall_hint(&tool_name));
@@ -3029,6 +3044,8 @@ mod context_recall_tests {
 
     fn api_error(message: &str, context_window: Option<u64>) -> sampler::SamplingErrorInfo {
         sampler::SamplingErrorInfo {
+            source: None,
+            backend: None,
             kind: sampler::SamplingErrorKind::Api,
             status_code: Some(400),
             message: message.to_owned(),
@@ -3045,6 +3062,7 @@ mod context_recall_tests {
             doom_loop_aborted_at_chunk: None,
             credential: sampling_types::SentCredential::Unknown,
             usage: None,
+            cost_usd_ticks: None,
         }
     }
 

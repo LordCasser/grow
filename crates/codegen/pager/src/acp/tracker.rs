@@ -21,7 +21,7 @@ use crate::scrollback::state::verb_group::verb_group_kind_changed;
 use acp_transport::protocol as acp;
 use chrono::{DateTime, Local, TimeZone};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tools::types::output::{BashOutput, ToolOutput};
 use tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
@@ -206,6 +206,12 @@ pub struct PendingCompaction {
     pub elapsed_ms: Option<i64>,
     pub last_used: Option<u64>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SamplingAttemptKey {
+    request_id: String,
+    attempt: u32,
+}
 /// Tracks in-flight streaming state for one agent's turn.
 ///
 /// Converts ACP `SessionUpdate` variants into scrollback entry mutations.
@@ -302,6 +308,17 @@ pub struct AcpUpdateTracker {
     behavior_availability: Option<tools::types::BehaviorAvailability>,
     /// Live Edit completions awaiting full-file HL (drained via [`Self::take_pending_edit_hl`]).
     pending_edit_hl: Vec<EntryId>,
+    /// Current sampler attempt used to separate preview chunks across retries.
+    sampling_attempt: Option<SamplingAttemptKey>,
+    /// Preview entries created from each sampler attempt. Canonical tool rows
+    /// and other scrollback entries are intentionally never added here.
+    sampling_preview_entries: HashMap<SamplingAttemptKey, Vec<EntryId>>,
+    /// Discarded attempts reject late ACP chunks after their preview is removed.
+    discarded_sampling_attempts: HashSet<SamplingAttemptKey>,
+    /// Accepted attempts also reject late chunks, while retaining their preview.
+    accepted_sampling_attempts: HashSet<SamplingAttemptKey>,
+    /// Highest attempt observed for each logical sampler request.
+    sampling_attempt_watermark: HashMap<String, u32>,
 }
 /// A tool call that's been started but not yet completed.
 #[derive(Debug)]
@@ -744,6 +761,188 @@ impl AcpUpdateTracker {
             self.pending_edit_hl.push(survivor);
         }
     }
+
+    fn sampling_key(meta: &NotificationMeta) -> Option<SamplingAttemptKey> {
+        // Replay contains only durably accepted ACP projections. Historical
+        // attribution is evidence, not an invitation to reopen a live preview.
+        if meta.is_replay {
+            return None;
+        }
+        match (&meta.sampling_request_id, meta.sampling_attempt) {
+            (Some(request_id), Some(attempt)) => Some(SamplingAttemptKey {
+                request_id: request_id.clone(),
+                attempt,
+            }),
+            _ => None,
+        }
+    }
+
+    fn prepare_sampling_preview(
+        &mut self,
+        meta: &NotificationMeta,
+        scrollback: &mut ScrollbackState,
+    ) -> Option<SamplingAttemptKey> {
+        let Some(key) = Self::sampling_key(meta) else {
+            // An untagged ACP chunk must not append to a tagged preview. Cut
+            // the active preview boundary while leaving its entry tracked for
+            // a possible later discard.
+            if self.sampling_attempt.is_some() {
+                if self.current_thinking.is_some() {
+                    self.finish_thinking(scrollback);
+                }
+                if let Some(agent_id) = self.current_agent_msg.take() {
+                    scrollback.finish_running(agent_id);
+                }
+                self.sampling_attempt = None;
+            }
+            return None;
+        };
+        if self.sampling_preview_rejected(&key) {
+            return Some(key);
+        }
+        if self.sampling_attempt.as_ref() != Some(&key) {
+            if self.current_thinking.is_some() {
+                self.finish_thinking(scrollback);
+            }
+            if let Some(agent_id) = self.current_agent_msg.take() {
+                scrollback.finish_running(agent_id);
+            }
+            self.sampling_attempt = Some(key.clone());
+        }
+        Some(key)
+    }
+
+    fn sampling_preview_rejected(&self, key: &SamplingAttemptKey) -> bool {
+        self.discarded_sampling_attempts.contains(key)
+            || self.accepted_sampling_attempts.contains(key)
+            || self
+                .sampling_attempt_watermark
+                .get(&key.request_id)
+                .is_some_and(|latest| *latest > key.attempt)
+            || self.sampling_attempt.as_ref().is_some_and(|active| {
+                active.request_id == key.request_id && active.attempt > key.attempt
+            })
+    }
+
+    fn note_sampling_attempt(&mut self, key: &SamplingAttemptKey) {
+        self.sampling_attempt_watermark
+            .entry(key.request_id.clone())
+            .and_modify(|latest| *latest = (*latest).max(key.attempt))
+            .or_insert(key.attempt);
+    }
+
+    fn remember_sampling_preview(&mut self, key: &SamplingAttemptKey, entry_id: EntryId) {
+        let entries = self
+            .sampling_preview_entries
+            .entry(key.clone())
+            .or_default();
+        if !entries.contains(&entry_id) {
+            entries.push(entry_id);
+        }
+    }
+
+    /// Whether this tracker still owns a live, unconfirmed sampling preview.
+    /// A reconnect must full-replay such a session: the reconnect cursor may
+    /// point past an interleaved durable update while the stashed tracker still
+    /// contains the provisional entry.
+    pub fn has_unconfirmed_sampling_preview(&self) -> bool {
+        self.sampling_attempt.is_some() || !self.sampling_preview_entries.is_empty()
+    }
+
+    /// Resolve a disconnected preview without changing independently admitted
+    /// content. The old tracker retains entry ownership until this boundary.
+    pub(crate) fn discard_unconfirmed_sampling_preview(
+        &mut self,
+        scrollback: &mut ScrollbackState,
+    ) {
+        let mut keys: HashSet<_> = self.sampling_preview_entries.keys().cloned().collect();
+        keys.extend(self.sampling_attempt.clone());
+        for key in keys {
+            self.handle_sampling_attempt(
+                key.request_id,
+                key.attempt,
+                shell::extensions::notification::SamplingAttemptState::Discarded,
+                scrollback,
+            );
+        }
+    }
+
+    /// Apply the shell's logical sampler attempt lifecycle. Discard removes
+    /// only ACP preview entries created under the matching attempt; canonical
+    /// tool results and unrelated notifications are never tracked here.
+    pub fn handle_sampling_attempt(
+        &mut self,
+        request_id: String,
+        attempt: u32,
+        state: shell::extensions::notification::SamplingAttemptState,
+        scrollback: &mut ScrollbackState,
+    ) -> bool {
+        use shell::extensions::notification::SamplingAttemptState;
+        let key = SamplingAttemptKey {
+            request_id,
+            attempt,
+        };
+        match state {
+            SamplingAttemptState::Started => {
+                if self.sampling_preview_rejected(&key) {
+                    return false;
+                }
+                self.note_sampling_attempt(&key);
+                if self.sampling_attempt.as_ref() != Some(&key) {
+                    if self.current_thinking.is_some() {
+                        self.finish_thinking(scrollback);
+                    }
+                    if let Some(agent_id) = self.current_agent_msg.take() {
+                        scrollback.finish_running(agent_id);
+                    }
+                    self.sampling_attempt = Some(key);
+                }
+                false
+            }
+            SamplingAttemptState::Discarded => {
+                if self.accepted_sampling_attempts.contains(&key) {
+                    return false;
+                }
+                self.note_sampling_attempt(&key);
+                self.discarded_sampling_attempts.insert(key.clone());
+                let entry_ids = self
+                    .sampling_preview_entries
+                    .remove(&key)
+                    .unwrap_or_default();
+                let mut changed = false;
+                for entry_id in &entry_ids {
+                    changed |= scrollback.remove_entry(*entry_id);
+                }
+                if self
+                    .current_agent_msg
+                    .is_some_and(|id| entry_ids.contains(&id))
+                {
+                    self.current_agent_msg = None;
+                }
+                if self
+                    .current_thinking
+                    .is_some_and(|id| entry_ids.contains(&id))
+                {
+                    self.current_thinking = None;
+                    self.last_thinking_elapsed_ms = None;
+                }
+                if self.sampling_attempt.as_ref() == Some(&key) {
+                    self.sampling_attempt = None;
+                }
+                changed
+            }
+            SamplingAttemptState::Accepted => {
+                self.note_sampling_attempt(&key);
+                self.accepted_sampling_attempts.insert(key.clone());
+                self.sampling_preview_entries.remove(&key);
+                if self.sampling_attempt.as_ref() == Some(&key) {
+                    self.sampling_attempt = None;
+                }
+                false
+            }
+        }
+    }
+
     /// Process a single SessionUpdate, mutating the scrollback.
     ///
     /// The `meta` carries server-side timestamps used for thinking elapsed time.
@@ -761,6 +960,16 @@ impl AcpUpdateTracker {
                 update_summary(&update),
                 meta_summary(meta),
             );
+        }
+        let is_sampling_preview = matches!(
+            &update,
+            acp::SessionUpdate::AgentMessageChunk(_) | acp::SessionUpdate::AgentThoughtChunk(_)
+        );
+        if is_sampling_preview
+            && let Some(key) = Self::sampling_key(meta)
+            && self.sampling_preview_rejected(&key)
+        {
+            return false;
         }
         if self.retry_activity.is_some() {
             self.retry_activity = None;
@@ -797,12 +1006,38 @@ impl AcpUpdateTracker {
         }
         match update {
             acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                let key = self.prepare_sampling_preview(meta, scrollback);
+                if key
+                    .as_ref()
+                    .is_some_and(|key| self.sampling_preview_rejected(key))
+                {
+                    return false;
+                }
                 self.blocking_waits.clear();
-                self.handle_agent_chunk(chunk, meta, scrollback)
+                let changed = self.handle_agent_chunk(chunk, meta, scrollback);
+                if let (Some(key), Some(entry_id)) = (key, self.current_agent_msg)
+                    && changed
+                {
+                    self.remember_sampling_preview(&key, entry_id);
+                }
+                changed
             }
             acp::SessionUpdate::AgentThoughtChunk(thought) => {
+                let key = self.prepare_sampling_preview(meta, scrollback);
+                if key
+                    .as_ref()
+                    .is_some_and(|key| self.sampling_preview_rejected(key))
+                {
+                    return false;
+                }
                 self.drop_stale_blocking_waits(meta.stream_start_ms);
-                self.handle_thought_chunk(thought, meta, scrollback)
+                let changed = self.handle_thought_chunk(thought, meta, scrollback);
+                if let (Some(key), Some(entry_id)) = (key, self.current_thinking)
+                    && changed
+                {
+                    self.remember_sampling_preview(&key, entry_id);
+                }
+                changed
             }
             acp::SessionUpdate::ToolCall(tc) => {
                 self.handle_tool_call(tc, scrollback, meta.is_replay)
@@ -862,6 +1097,11 @@ impl AcpUpdateTracker {
         self.last_stream_start_ms = None;
         self.compaction_activity = None;
         self.retry_activity = None;
+        self.sampling_attempt = None;
+        self.sampling_preview_entries.clear();
+        self.discarded_sampling_attempts.clear();
+        self.accepted_sampling_attempts.clear();
+        self.sampling_attempt_watermark.clear();
         self.suppressed_tools.clear();
         self.blocking_waits.clear();
         self.orphan_updates.clear();
@@ -2551,6 +2791,253 @@ mod tests {
         assert_eq!(sb.len(), 1);
         assert!(tracker.current_thinking.is_some());
     }
+
+    fn sampling_meta(request_id: &str, attempt: u32) -> NotificationMeta {
+        NotificationMeta {
+            sampling_request_id: Some(request_id.to_owned()),
+            sampling_attempt: Some(attempt),
+            ..NotificationMeta::default()
+        }
+    }
+
+    #[test]
+    fn replayed_sampling_attribution_does_not_reopen_or_retract_history() {
+        use shell::extensions::notification::SamplingAttemptState;
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_sampling_attempt(
+            "history".into(),
+            1,
+            SamplingAttemptState::Accepted,
+            &mut sb,
+        );
+        let mut historical = sampling_meta("history", 1);
+        historical.is_replay = true;
+        assert!(tracker.handle_update(agent_chunk("accepted history"), &historical, &mut sb));
+        assert!(tracker.sampling_preview_entries.is_empty());
+        tracker.handle_sampling_attempt("live".into(), 1, SamplingAttemptState::Started, &mut sb);
+        assert!(tracker.handle_update(
+            agent_chunk("live preview"),
+            &sampling_meta("live", 1),
+            &mut sb
+        ));
+        tracker.handle_sampling_attempt("live".into(), 1, SamplingAttemptState::Discarded, &mut sb);
+        assert_eq!(sb.len(), 1);
+        let RenderBlock::AgentMessage(message) = &sb.get(0).unwrap().block else {
+            panic!("history")
+        };
+        assert_eq!(message.text(), "accepted history");
+    }
+
+    #[test]
+    fn discarded_sampling_attempt_removes_text_and_rejects_late_chunks() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let old_meta = sampling_meta("request", 1);
+        assert!(!tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Started,
+            &mut sb,
+        ));
+        assert!(tracker.handle_update(agent_chunk("old preview"), &old_meta, &mut sb));
+        assert_eq!(sb.len(), 1);
+
+        assert!(tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Discarded,
+            &mut sb,
+        ));
+        assert_eq!(sb.len(), 0, "discard removes only the old preview entry");
+        assert!(!tracker.handle_update(agent_chunk("late old"), &old_meta, &mut sb));
+        assert_eq!(
+            sb.len(),
+            0,
+            "late chunks from discarded attempts are ignored"
+        );
+
+        let new_meta = sampling_meta("request", 2);
+        assert!(!tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            2,
+            shell::extensions::notification::SamplingAttemptState::Started,
+            &mut sb,
+        ));
+        assert!(tracker.handle_update(agent_chunk("accepted preview"), &new_meta, &mut sb));
+        assert_eq!(sb.len(), 1);
+        assert!(!tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            2,
+            shell::extensions::notification::SamplingAttemptState::Accepted,
+            &mut sb,
+        ));
+        assert!(
+            !tracker.handle_update(agent_chunk("late accepted"), &new_meta, &mut sb),
+            "accepted attempts must reject late preview chunks"
+        );
+        assert_eq!(sb.len(), 1);
+        let RenderBlock::AgentMessage(message) = &sb.get(0).expect("new preview").block else {
+            panic!("expected agent message preview");
+        };
+        assert_eq!(message.text(), "accepted preview");
+    }
+
+    #[test]
+    fn untagged_text_is_separated_from_sampling_preview_before_discard() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let tagged = sampling_meta("request", 1);
+        tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Started,
+            &mut sb,
+        );
+        assert!(tracker.handle_update(agent_chunk("sampled"), &tagged, &mut sb));
+        assert!(tracker.handle_update(agent_chunk("external"), &meta(), &mut sb));
+        assert_eq!(sb.len(), 2, "untagged text gets its own entry");
+
+        assert!(tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Discarded,
+            &mut sb,
+        ));
+        assert_eq!(sb.len(), 1, "discard must preserve untagged text");
+        let RenderBlock::AgentMessage(message) = &sb.get(0).expect("external text").block else {
+            panic!("expected untagged agent message");
+        };
+        assert_eq!(message.text(), "external");
+    }
+
+    #[test]
+    fn untagged_thought_is_separated_from_sampling_preview_before_discard() {
+        crate::appearance::cache::set_show_thinking_blocks(true);
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let tagged = sampling_meta("request", 1);
+        tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Started,
+            &mut sb,
+        );
+        assert!(tracker.handle_update(thought_chunk("sampled thought"), &tagged, &mut sb));
+        assert!(tracker.handle_update(thought_chunk("external thought"), &meta(), &mut sb));
+        assert_eq!(sb.len(), 2, "untagged thought gets its own entry");
+
+        assert!(tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Discarded,
+            &mut sb,
+        ));
+        assert_eq!(sb.len(), 1, "discard must preserve untagged thought");
+        let RenderBlock::Thinking(thought) = &sb.get(0).expect("external thought").block else {
+            panic!("expected untagged thought");
+        };
+        assert_eq!(thought.text(), "external thought");
+    }
+
+    #[test]
+    fn stale_started_attempt_cannot_rewind_active_attempt() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Started,
+            &mut sb,
+        );
+        tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            2,
+            shell::extensions::notification::SamplingAttemptState::Started,
+            &mut sb,
+        );
+        assert!(!tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Started,
+            &mut sb,
+        ));
+        let old_meta = sampling_meta("request", 1);
+        assert!(!tracker.handle_update(agent_chunk("stale"), &old_meta, &mut sb));
+        assert!(
+            tracker
+                .sampling_attempt
+                .as_ref()
+                .is_some_and(|key| key.attempt == 2)
+        );
+    }
+
+    #[test]
+    fn discarded_late_chunk_cannot_change_stream_boundary_or_current_preview() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            2,
+            shell::extensions::notification::SamplingAttemptState::Started,
+            &mut sb,
+        );
+        let mut current_meta = sampling_meta("request", 2);
+        current_meta.stream_start_ms = Some(200);
+        assert!(tracker.handle_update(agent_chunk("current"), &current_meta, &mut sb));
+        assert_eq!(tracker.last_stream_start_ms, Some(200));
+
+        tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Discarded,
+            &mut sb,
+        );
+        let mut stale_meta = sampling_meta("request", 1);
+        stale_meta.stream_start_ms = Some(999);
+        assert!(!tracker.handle_update(agent_chunk("late stale"), &stale_meta, &mut sb));
+        assert_eq!(tracker.last_stream_start_ms, Some(200));
+        let RenderBlock::AgentMessage(message) = &sb.get(0).expect("current preview").block else {
+            panic!("expected current agent message");
+        };
+        assert_eq!(message.text(), "current");
+    }
+
+    #[test]
+    fn discarded_sampling_attempt_keeps_interleaved_tool_result_and_thought_late_chunk() {
+        crate::appearance::cache::set_show_thinking_blocks(true);
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let old_meta = sampling_meta("request", 1);
+        tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Started,
+            &mut sb,
+        );
+        assert!(tracker.handle_update(thought_chunk("old reasoning"), &old_meta, &mut sb));
+        tracker.handle_update(
+            tool_call("stable-tool", acp::ToolKind::Read, "src/main.rs"),
+            &meta(),
+            &mut sb,
+        );
+        tracker.handle_update(tool_update_completed("stable-tool"), &meta(), &mut sb);
+        assert_eq!(sb.len(), 2);
+
+        assert!(tracker.handle_sampling_attempt(
+            "request".to_owned(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Discarded,
+            &mut sb,
+        ));
+        assert_eq!(sb.len(), 1, "the canonical tool result must remain");
+        assert!(matches!(
+            sb.get(0).map(|entry| &entry.block),
+            Some(RenderBlock::ToolCall(_))
+        ));
+        assert!(!tracker.handle_update(thought_chunk("late reasoning"), &old_meta, &mut sb));
+        assert_eq!(sb.len(), 1, "late discarded reasoning must stay hidden");
+    }
     #[test]
     fn pre_create_thinking_no_op_when_flag_off() {
         crate::appearance::cache::set_show_thinking_blocks(false);
@@ -2640,6 +3127,62 @@ mod tests {
             "live thinking must keep a local elapsed timer (started_at armed)"
         );
     }
+    #[test]
+    fn goal_read_result_finishes_running_row_before_turn_end() {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        tracker.handle_update(
+            tool_call("goal-call", acp::ToolKind::Other, "get_goal"),
+            &meta(),
+            &mut sb,
+        );
+        tracker.handle_update(
+            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new("goal-call"),
+                acp::ToolCallUpdateFields::new()
+                    .title(Some("Goal: read status".into()))
+                    .raw_input(Some(serde_json::json!({ "variant": "GetGoal" }))),
+            )),
+            &meta(),
+            &mut sb,
+        );
+        assert!(sb.has_running_entries());
+        assert_eq!(tracker.pending_tools.len(), 1);
+        let output = tools::types::output::ToolOutput::GetGoal(
+            tools::implementations::grow_build::update_goal::GoalView {
+                goal_id: "goal-1".into(),
+                definition_revision: 1,
+                objective: "objective".into(),
+                status: "active".into(),
+                token_budget: None,
+                tokens_used: 100,
+                usage_incomplete: false,
+                elapsed_ms: 500,
+                created_at: "now".into(),
+                updated_at: "now".into(),
+                status_message: None,
+            },
+        );
+        let completed =
+            shell::session::acp_conversion::acp_tool_update(&output, "goal-call", None, None)
+                .expect("Goal read must emit a terminal update");
+        tracker.handle_update(
+            acp::SessionUpdate::ToolCallUpdate(completed),
+            &meta(),
+            &mut sb,
+        );
+        assert!(tracker.pending_tools.is_empty());
+        assert!(
+            !sb.has_running_entries(),
+            "tool timing ends without finish_turn or another model response"
+        );
+        assert_eq!(
+            sb.len(),
+            1,
+            "complete the existing row without adding another"
+        );
+    }
+
     #[test]
     fn tool_call_lifecycle() {
         let mut sb = ScrollbackState::new();

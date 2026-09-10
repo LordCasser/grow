@@ -783,6 +783,7 @@ async fn run_agent_command(
             .or(agent_config.models.default.clone());
         let client_type = std::env::args().collect::<Vec<_>>().join(" ");
         let capabilities = ClientCapabilities {
+            sampling_attempt_lifecycle: false,
             permission_mode: launch_permission.mode,
             default_model,
             client_version: Some(PAGER_CLIENT_VERSION.to_string()),

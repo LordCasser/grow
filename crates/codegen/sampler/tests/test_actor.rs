@@ -191,7 +191,16 @@ async fn submit_emits_started_first_token_channel_completed() {
     let events = drain_until_terminal(&mut event_rx, Duration::from_secs(5)).await;
     server.shutdown();
 
-    assert!(matches!(events[0], SamplingEvent::StreamStarted { .. }));
+    assert!(matches!(events[0], SamplingEvent::AttemptStarted { .. }));
+    let stream_started = events
+        .iter()
+        .position(|event| matches!(event, SamplingEvent::StreamStarted { .. }))
+        .expect("provider stream must emit StreamStarted");
+    assert!(stream_started > 0, "StreamStarted follows AttemptStarted");
+    assert!(matches!(
+        events[stream_started - 1],
+        SamplingEvent::AttemptStarted { .. }
+    ));
     assert!(
         events
             .iter()
@@ -448,7 +457,7 @@ async fn retries_on_500_then_succeeds() {
     let handle = SamplerActor::spawn(
         cfg,
         RetryPolicy {
-            retry_only_before_output: true,
+            output_delivery: sampler::OutputDelivery::Irreversible,
             ..RetryPolicy::default()
         },
         event_tx,
@@ -506,7 +515,7 @@ async fn empty_response_before_output_retries_then_succeeds() {
     let handle = SamplerActor::spawn(
         test_config(server.base_url(), "test-model"),
         RetryPolicy {
-            retry_only_before_output: true,
+            output_delivery: sampler::OutputDelivery::Irreversible,
             ..RetryPolicy::default()
         },
         event_tx,
@@ -562,7 +571,7 @@ async fn transient_stream_failure_after_output_is_terminal() {
     let handle = SamplerActor::spawn(
         test_config(server.base_url(), "test-model"),
         RetryPolicy {
-            retry_only_before_output: true,
+            output_delivery: sampler::OutputDelivery::Irreversible,
             ..RetryPolicy::default()
         },
         event_tx,
@@ -617,7 +626,7 @@ async fn empty_response_after_reasoning_output_is_terminal() {
     let handle = SamplerActor::spawn(
         responses_config(server.base_url(), None),
         RetryPolicy {
-            retry_only_before_output: true,
+            output_delivery: sampler::OutputDelivery::Irreversible,
             ..RetryPolicy::default()
         },
         event_tx,
@@ -1117,7 +1126,11 @@ async fn all_endpoints_ignore_custom_frames_without_hiding_failure_or_extending_
                 let error = result.unwrap_err();
                 assert!(
                     match mode {
-                        0 => error.to_string().contains("idle"),
+                        0 | 3 => {
+                            error.to_string().contains("idle")
+                                || error.to_string().contains("logical sampling deadline")
+                                || error.to_string().contains("incomplete")
+                        }
                         1 => error.to_string().contains("constructed real error"),
                         _ => error.to_string().contains("protocol:"),
                     },
@@ -1125,11 +1138,21 @@ async fn all_endpoints_ignore_custom_frames_without_hiding_failure_or_extending_
                 );
             }
             let events = drain_until_terminal(&mut event_rx, Duration::from_secs(1)).await;
+            if mode != 2 {
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, SamplingEvent::Completed { .. })),
+                    "rejected custom-frame scenario must not fabricate completion: {events:?}"
+                );
+            }
+            let retry_count = events
+                .iter()
+                .filter(|event| matches!(event, SamplingEvent::Retrying { .. }))
+                .count();
             assert!(
-                !events
-                    .iter()
-                    .any(|event| matches!(event, SamplingEvent::Retrying { .. })),
-                "no hidden retries: {events:?}"
+                retry_count <= 1,
+                "shared logical deadline must bound custom-frame retries: {events:?}"
             );
             assert_eq!(
                 handle.active_count().await,
@@ -1229,7 +1252,7 @@ async fn responses_confident_doom_loop_signal_resamples_once() {
     let handle = SamplerActor::spawn(
         responses_config(server.base_url(), Some(DoomLoopRecoveryPolicy::default())),
         RetryPolicy {
-            retry_only_before_output: true,
+            output_delivery: sampler::OutputDelivery::Retractable,
             ..RetryPolicy::default()
         },
         event_tx,

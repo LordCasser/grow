@@ -3,8 +3,9 @@
 #[cfg(test)]
 use super::test_agent_view;
 use super::{
-    ActivePane, AgentView, InlineMediaHitAreas, InputMode, PaneAreas, PluginCtaState,
-    PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, SELF_ORIGINATED_PROMPT_CAP, SessionReload,
+    ActivePane, AgentView, ChildSamplingReload, InlineMediaHitAreas, InputMode, PaneAreas,
+    PluginCtaState, PromptInputMode, PromptMode, REWOUND_PROMPT_ID_CAP, SELF_ORIGINATED_PROMPT_CAP,
+    SessionReload,
 };
 use crate::app::root::InputOutcome;
 use crate::app::session::AgentSession;
@@ -251,6 +252,7 @@ impl AgentView {
             hit_catalog_close: Default::default(),
             hit_bg_status: Default::default(),
             hit_goal_status: Default::default(),
+            hit_usage_status: Default::default(),
             hit_goal_close: Default::default(),
             hit_bg_button: Default::default(),
             last_bg_click: None,
@@ -473,6 +475,96 @@ impl AgentView {
         }
     }
 
+    /// Stage only child transcript state that still contains a provisional
+    /// sampler preview. Child view/session identity remains live so routing
+    /// and controls keep their stable ownership during root replay.
+    fn stash_sampling_children(&mut self) -> HashMap<String, ChildSamplingReload> {
+        let child_ids: Vec<String> = self.subagent_views.keys().cloned().collect();
+        let mut stashes = HashMap::new();
+        for child_sid in child_ids {
+            let (own_preview, descendants, scrollback, tracker) = {
+                let child = self
+                    .subagent_views
+                    .get_mut(&child_sid)
+                    .expect("child id collected from subagent_views");
+                let descendants = child.stash_sampling_children();
+                let own_preview = child.session.tracker.has_unconfirmed_sampling_preview();
+                if own_preview {
+                    let fresh = child.scrollback.fresh_continuation();
+                    let old_scrollback = std::mem::replace(&mut child.scrollback, fresh);
+                    let old_tracker = std::mem::replace(
+                        &mut child.session.tracker,
+                        crate::acp::tracker::AcpUpdateTracker::new(),
+                    );
+                    (
+                        own_preview,
+                        descendants,
+                        Some(old_scrollback),
+                        Some(old_tracker),
+                    )
+                } else {
+                    (own_preview, descendants, None, None)
+                }
+            };
+            if !own_preview && descendants.is_empty() {
+                continue;
+            }
+            let child_updates_replayed = if own_preview {
+                self.session
+                    .subagent_sessions
+                    .get(&child_sid)
+                    .map(|info| info.child_updates_replayed)
+            } else {
+                None
+            };
+            if own_preview && let Some(info) = self.session.subagent_sessions.get_mut(&child_sid) {
+                info.child_updates_replayed = false;
+            }
+            stashes.insert(
+                child_sid,
+                ChildSamplingReload {
+                    scrollback,
+                    tracker,
+                    child_updates_replayed,
+                    descendants,
+                },
+            );
+        }
+        stashes
+    }
+
+    /// Resolve only the staged child transcript. Root replay reuses child
+    /// view/control identity and does not replay their complete ACP history.
+    /// Keep independent old entries and the new tail, dropping only the old
+    /// unconfirmed candidate on success; a failed load restores full ownership.
+    fn resolve_sampling_children(
+        &mut self,
+        stashes: HashMap<String, ChildSamplingReload>,
+        success: bool,
+    ) {
+        for (child_sid, stash) in stashes {
+            let Some(child) = self.subagent_views.get_mut(&child_sid) else {
+                continue;
+            };
+            if let (Some(mut scrollback), Some(mut tracker)) = (stash.scrollback, stash.tracker) {
+                if success {
+                    tracker.discard_unconfirmed_sampling_preview(&mut scrollback);
+                    let tail = std::mem::replace(&mut child.scrollback, scrollback);
+                    child.scrollback.append_entries_from(tail);
+                } else {
+                    child.scrollback = scrollback;
+                    child.session.tracker = tracker;
+                }
+            }
+            if let Some(child_updates_replayed) = stash.child_updates_replayed
+                && let Some(info) = self.session.subagent_sessions.get_mut(&child_sid)
+            {
+                info.child_updates_replayed = child_updates_replayed;
+            }
+            child.resolve_sampling_children(stash.descendants, success);
+        }
+    }
+
     pub(crate) fn begin_session_reload(&mut self, generation: u64) {
         self.dismiss_jump_picker();
         if let Some(prev) = self.session_reload.take() {
@@ -489,12 +581,15 @@ impl AgentView {
             self.scrollback.end_batch();
         }
         self.session.clear_live_feedback("recap");
+        self.session.session_usage = None;
         // Normalize edit blocks before stashing the old transcript. The
         // generic replay reset below runs after `scrollback` is replaced, which
         // would otherwise leave a restored block marked Pending without its
         // discarded worker runtime.
         self.reset_edit_hl_runtime();
         self.rearm_controls_for_reconnect_recursively();
+        let force_full_replay = self.has_unconfirmed_sampling_preview();
+        let child_sampling_stashes = self.stash_sampling_children();
         let fresh = self.scrollback.fresh_continuation();
         self.session_reload = Some(SessionReload {
             generation,
@@ -511,7 +606,9 @@ impl AgentView {
             last_seen_event_id: self.session.last_seen_event_id.clone(),
             last_applied_event_seq: self.session.last_applied_event_seq,
             last_applied_grow_event_seq: self.session.last_applied_grow_event_seq,
+            child_sampling_stashes,
             saw_replay: false,
+            force_full_replay,
             saw_todo_update: false,
         });
         self.session.set_live_feedback(
@@ -521,6 +618,19 @@ impl AgentView {
         );
         self.scrollback.begin_batch();
         self.begin_replay_window();
+    }
+
+    /// A cursor-resolved reconnect can keep the old transcript and append only
+    /// a live tail. That is unsafe while this root or one of its descendants
+    /// still has a provisional sampler entry in its stashed tracker: the
+    /// candidate is absent from canonical replay and would otherwise reappear
+    /// after reload. Force the existing full-replay path in that case.
+    pub(crate) fn has_unconfirmed_sampling_preview(&self) -> bool {
+        self.session.tracker.has_unconfirmed_sampling_preview()
+            || self
+                .subagent_views
+                .values()
+                .any(|child| child.has_unconfirmed_sampling_preview())
     }
     /// Record that an `isReplay` update applied while a reload window is open.
     /// No-op otherwise.
@@ -667,7 +777,14 @@ impl AgentView {
     fn apply_reload_outcome(&mut self, reload: SessionReload, success: bool) -> bool {
         let minimal_mode = self.is_minimal_mode();
         let dropped_heavy;
-        if success && reload.saw_replay {
+        let mut restored_tracker = None;
+        if !success {
+            // Finish staging state before restoring the original scrollback;
+            // replay-only compaction/tool cleanup must not enter the stash.
+            self.session.tracker.finish_turn(&mut self.scrollback);
+        }
+        self.resolve_sampling_children(reload.child_sampling_stashes, success);
+        if success && (reload.saw_replay || reload.force_full_replay) {
             self.scrollback.end_batch();
             if minimal_mode {
                 // Reload commits were frozen for the whole window. Carry only
@@ -723,7 +840,7 @@ impl AgentView {
             self.scrollback.raise_id_floor(floor);
             self.scrollback
                 .raise_invalidation_floor(staging_generations);
-            self.session.tracker = reload.tracker;
+            restored_tracker = Some(reload.tracker);
             self.todo = reload.todo;
             self.workflow_blocks = reload.workflow_blocks;
             self.session.workflow_runs = reload.workflow_runs;
@@ -738,7 +855,20 @@ impl AgentView {
         self.session.replay_live_cursor_seen = false;
         self.session.clear_live_feedback("session-load");
         self.session.prompt_history_loading = false;
+        if success && self.session.tracker.has_unconfirmed_sampling_preview() {
+            // Live notifications may reach the app before the load RPC's
+            // completion event. Their ownership must survive reload cleanup.
+            restored_tracker = Some(std::mem::replace(
+                &mut self.session.tracker,
+                crate::acp::tracker::AcpUpdateTracker::new(),
+            ));
+        }
         self.session.finish_turn(&mut self.scrollback);
+        if let Some(tracker) = restored_tracker {
+            // Generic cleanup must not erase ownership of the restored
+            // provisional entries. A later Discard or reconnect still needs it.
+            self.session.tracker = tracker;
+        }
         self.scrollback.finish_all_running();
         self.session.clear_live_feedback("recap");
         self.mark_turn_finished();
@@ -2003,6 +2133,192 @@ mod reconnect_workflow_maps_tests {
 }
 
 #[cfg(test)]
+mod reconnect_sampling_tests {
+    use super::super::test_agent_view;
+    use crate::acp::meta::NotificationMeta;
+    use crate::scrollback::block::RenderBlock;
+    use acp_transport::protocol as acp;
+
+    fn pending_preview(agent: &mut super::super::AgentView) {
+        let meta = NotificationMeta {
+            sampling_request_id: Some("request".into()),
+            sampling_attempt: Some(1),
+            ..Default::default()
+        };
+        assert!(agent.session.tracker.handle_update(
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new("pending preview")
+            ),)),
+            &meta,
+            &mut agent.scrollback,
+        ));
+    }
+
+    #[test]
+    fn pending_preview_forces_empty_full_replay_but_failed_load_restores_stash() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::notice("before reconnect"));
+        pending_preview(&mut agent);
+        agent.session.last_seen_event_id = Some("s1-7".into());
+        agent.begin_session_reload(1);
+        assert!(
+            agent
+                .session_reload
+                .as_ref()
+                .is_some_and(|reload| reload.force_full_replay),
+            "an unconfirmed preview must select full replay"
+        );
+        assert!(agent.finish_session_reload(1, true));
+        assert_eq!(
+            agent.scrollback.len(),
+            0,
+            "empty canonical replay replaces the stash"
+        );
+
+        let mut failed = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        failed
+            .scrollback
+            .push_block(RenderBlock::notice("before reconnect"));
+        pending_preview(&mut failed);
+        failed.begin_session_reload(1);
+        assert!(failed.finish_session_reload(1, false));
+        assert_eq!(
+            failed.scrollback.len(),
+            2,
+            "failed load restores the complete stash"
+        );
+        assert!(
+            failed.has_unconfirmed_sampling_preview(),
+            "failed cleanup must retain complete entry ownership for the restored preview"
+        );
+        failed.begin_session_reload(2);
+        assert!(
+            failed
+                .session_reload
+                .as_ref()
+                .is_some_and(|reload| reload.force_full_replay),
+            "a second reconnect must not cursor-merge over the restored preview"
+        );
+        assert!(failed.finish_session_reload(2, true));
+        assert!(!failed.has_unconfirmed_sampling_preview());
+    }
+
+    #[test]
+    fn live_preview_before_reload_completion_remains_retractable() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::notice("accepted history"));
+        agent.begin_session_reload(1);
+        pending_preview(&mut agent);
+        assert!(agent.finish_session_reload(1, true));
+        assert!(agent.has_unconfirmed_sampling_preview());
+        assert_eq!(agent.scrollback.len(), 2);
+        agent.session.tracker.handle_sampling_attempt(
+            "request".into(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Discarded,
+            &mut agent.scrollback,
+        );
+        assert_eq!(
+            agent.scrollback.len(),
+            1,
+            "late discard removes only the live candidate"
+        );
+        assert!(!agent.has_unconfirmed_sampling_preview());
+    }
+
+    #[test]
+    fn failed_reload_preserves_entry_ownership_for_later_discard() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent
+            .scrollback
+            .push_block(RenderBlock::notice("accepted history"));
+        pending_preview(&mut agent);
+        agent.begin_session_reload(1);
+        assert!(agent.finish_session_reload(1, false));
+        agent.session.tracker.handle_sampling_attempt(
+            "request".into(),
+            1,
+            shell::extensions::notification::SamplingAttemptState::Discarded,
+            &mut agent.scrollback,
+        );
+        assert_eq!(agent.scrollback.len(), 1);
+        assert!(!agent.has_unconfirmed_sampling_preview());
+    }
+
+    #[test]
+    fn child_preview_is_replaced_for_replay_and_restored_on_failure() {
+        let mut root = test_agent_view(Some("root"), std::path::PathBuf::from("/tmp"));
+        let mut child = test_agent_view(Some("child"), std::path::PathBuf::from("/tmp"));
+        pending_preview(&mut child);
+        child
+            .scrollback
+            .push_block(RenderBlock::notice("independent history"));
+        root.insert_subagent_view("child".into(), Box::new(child));
+        let child_ptr =
+            (&**root.subagent_views.get("child").unwrap()) as *const super::super::AgentView;
+
+        root.begin_session_reload(1);
+        let staged = root
+            .subagent_views
+            .get("child")
+            .expect("child remains indexed while root reloads");
+        assert_eq!(
+            (&**staged) as *const super::super::AgentView,
+            child_ptr,
+            "reconnect keeps the child view identity used by controls/routing"
+        );
+        assert_eq!(
+            staged.scrollback.len(),
+            0,
+            "preview is staged out before replay"
+        );
+        assert!(root.finish_session_reload(1, true));
+        assert_eq!(
+            root.subagent_views["child"].scrollback.len(),
+            1,
+            "successful replay discards the preview but preserves independent history"
+        );
+
+        let mut failed_root = test_agent_view(Some("root"), std::path::PathBuf::from("/tmp"));
+        let mut failed_child = test_agent_view(Some("child"), std::path::PathBuf::from("/tmp"));
+        failed_child
+            .scrollback
+            .push_block(RenderBlock::notice("child history"));
+        pending_preview(&mut failed_child);
+        failed_root.insert_subagent_view("child".into(), Box::new(failed_child));
+        failed_root.begin_session_reload(1);
+        assert!(failed_root.finish_session_reload(1, false));
+        let restored = failed_root
+            .subagent_views
+            .get("child")
+            .expect("failed reload keeps child view");
+        assert_eq!(
+            restored.scrollback.len(),
+            2,
+            "failed reload restores child history"
+        );
+        assert!(
+            restored.has_unconfirmed_sampling_preview(),
+            "restored child preview remains eligible for a full retry"
+        );
+        failed_root.begin_session_reload(2);
+        assert!(
+            failed_root
+                .session_reload
+                .as_ref()
+                .is_some_and(|reload| reload.force_full_replay),
+            "child ownership must force the root retry onto full replay"
+        );
+        assert!(failed_root.finish_session_reload(2, true));
+        assert_eq!(failed_root.subagent_views["child"].scrollback.len(), 1);
+    }
+}
+
+#[cfg(test)]
 mod reconnect_control_tests {
     use super::super::test_agent_view;
     use crate::app::session::SessionControlCompletion;
@@ -2031,5 +2347,20 @@ mod reconnect_control_tests {
             SessionControlCompletion::Stale,
             "a pre-reconnect child completion cannot mutate the new generation"
         );
+    }
+}
+
+#[cfg(test)]
+mod reconnect_usage_tests {
+    use super::super::test_agent_view;
+
+    #[test]
+    fn reconnect_clears_usage_from_the_previous_process_window() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.session.session_usage = Some(Default::default());
+
+        agent.begin_session_reload(1);
+
+        assert!(agent.session.session_usage.is_none());
     }
 }

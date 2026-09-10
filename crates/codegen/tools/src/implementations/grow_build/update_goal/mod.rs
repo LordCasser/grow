@@ -266,7 +266,7 @@ pub struct GetGoalTool;
 goal_metadata!(
     GetGoalTool,
     ToolKind::GoalRead,
-    "Read the current long-lived Goal, including status, budget, usage, and elapsed time.",
+    "Read the current long-lived Goal when context is missing or fresh status, budget, usage, or elapsed time is needed. Use supplied Goal context directly; do not routinely call this at continuation boundaries or poll token usage. Reading status is not completion evidence.",
     false
 );
 

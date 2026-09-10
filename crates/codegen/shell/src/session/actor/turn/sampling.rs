@@ -145,11 +145,7 @@ impl SessionActor {
     async fn resolve_image_description_route(
         &self,
         rejected_key: &sampling_types::ModelImageInputKey,
-    ) -> Option<(
-        sampler::SamplingClient,
-        String,
-        String,
-    )> {
+    ) -> Option<(sampler::SamplingClient, String, String)> {
         let configured_model = self.image_description_model.read().clone()?;
         let mut sampler_config = match self.resolve_aux_sampler_config(&configured_model).await {
             Some(config) => config,
@@ -175,7 +171,10 @@ impl SessionActor {
             );
             return None;
         }
-        if self.model_image_input_is_unsupported(&configured_model).await {
+        if self
+            .model_image_input_is_unsupported(&configured_model)
+            .await
+        {
             tracing::info!(
                 model = auxiliary_key.model(),
                 "skipping known text-only image description runtime"
@@ -228,8 +227,12 @@ impl SessionActor {
         let conversation = &materialized.transcript;
         let groups = conversation_image_groups(conversation)
             .into_iter()
-            .filter(|group| sampling_types::conversation::item_image_description(
-                &conversation[group.item_index]).is_none())
+            .filter(|group| {
+                sampling_types::conversation::item_image_description(
+                    &conversation[group.item_index],
+                )
+                .is_none()
+            })
             .collect::<Vec<_>>();
         if groups.is_empty() {
             return Ok(chat_state::ImageProjectionReport::default());
@@ -242,7 +245,8 @@ impl SessionActor {
         {
             self.send_grow_notification(GrowSessionUpdate::ImageProcessing {
                 message: "当前模型不支持多模态，调用视觉辅助LLM处理中...".into(),
-            }).await;
+            })
+            .await;
             let prepared = groups.iter().map(|group| {
                 let source_kind = match group.source {
                     ConversationImageSource::User => "User",
@@ -510,23 +514,35 @@ impl SessionActor {
             }
         }
 
-        let missing = groups.iter().filter(|group| {
-            let source = materialized.transcript_ids[group.item_index];
-            !shadows.iter().any(|shadow| shadow.source == source)
-        }).collect::<Vec<_>>();
+        let missing = groups
+            .iter()
+            .filter(|group| {
+                let source = materialized.transcript_ids[group.item_index];
+                !shadows.iter().any(|shadow| shadow.source == source)
+            })
+            .collect::<Vec<_>>();
         if !missing.is_empty() {
             self.send_grow_notification(GrowSessionUpdate::ImageProcessing {
                 message: "视觉辅助模型未配置或者调用失败，使用OCR处理中...".into(),
-            }).await;
+            })
+            .await;
             for group in missing {
                 match crate::session::image_describe::describe_images_with_local_ocr(
-                    &group.image_urls, deadline).await {
+                    &group.image_urls,
+                    deadline,
+                )
+                .await
+                {
                     Ok(description) => shadows.push(chat_state::ImageShadow {
                         source: materialized.transcript_ids[group.item_index],
                         fingerprint: group.fingerprint.clone(),
                         image_count: group.image_count(),
-                        replacement: crate::session::image_describe::render_image_description_block(&description),
-                        provenance: chat_state::ImageShadowSource::LocalOcr { engine: "tesseract".into() },
+                        replacement: crate::session::image_describe::render_image_description_block(
+                            &description,
+                        ),
+                        provenance: chat_state::ImageShadowSource::LocalOcr {
+                            engine: "tesseract".into(),
+                        },
                     }),
                     Err(error) => tracing::warn!(%error, "local OCR image fallback failed"),
                 }
@@ -639,7 +655,10 @@ impl SessionActor {
         let Some(key) = self.current_model_image_input_key().await else {
             return Ok(chat_state::ImageProjectionReport::default());
         };
-        if !self.model_image_input_is_unsupported(&self.current_catalog_model_id()).await {
+        if !self
+            .model_image_input_is_unsupported(&self.current_catalog_model_id())
+            .await
+        {
             return Ok(chat_state::ImageProjectionReport::default());
         }
         self.project_conversation_images_for_text_model(&key)
@@ -1577,14 +1596,11 @@ impl SessionActor {
     /// refreshed BYOK credentials. The previous client cache inside
     /// the sampler actor is invalidated automatically by
     /// `update_config`.
-    pub(crate) async fn prepare_sampler_for_turn(&self) -> (String, sampling_types::ModelImageInputKey) {
+    pub(crate) async fn prepare_sampler_for_turn(
+        &self,
+    ) -> (String, sampling_types::ModelImageInputKey) {
         self.refresh_byok_credential().await;
         let mut sampler_config = self.reconstruct_full_config().await;
-        if self.tool_context.task_output_token_budget.is_some()
-            || self.tool_context.sampler_retry_only_before_output
-        {
-            sampler_config.doom_loop_recovery = None;
-        }
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.get().as_secs());
         let image_input_key = sampler_model_image_input_key(&sampler_config);
         self.sampler_handle.update_config(sampler_config);
@@ -1620,8 +1636,7 @@ impl SessionActor {
             && let Some((model_id, key)) = request_image_input_key
         {
             let model = key.model().to_string();
-            let first_rejection = match self.record_unsupported_model_image_input(model_id).await
-            {
+            let first_rejection = match self.record_unsupported_model_image_input(model_id).await {
                 Ok(first_rejection) => first_rejection,
                 Err(persist_error) => {
                     let message = format!(
@@ -1664,30 +1679,16 @@ impl SessionActor {
             }
             return Ok(SamplerFailureRecovery::ImageInputUnsupportedAndResubmit);
         }
-        if self.tool_context.task_output_token_budget.is_some() {
-            self.tool_context.fail_task_output_usage_closed();
-            let message = format!(
-                "budgeted workflow child model request failed; output grant exhausted: {}",
+        if self
+            .tool_context
+            .task_output_token_budget
+            .as_ref()
+            .is_some_and(|budget| budget.remaining() == Some(0))
+        {
+            return Err(acp::Error::internal_error().data(format!(
+                "task model output budget is closed: {}",
                 error.message
-            );
-            self.log_terminal_failure("output_budget_usage_unknown", error.status_code, &message);
-            return Err(acp::Error::internal_error().data(message));
-        }
-        if self.tool_context.sampler_retry_only_before_output {
-            let handle = self.chat_state_handle.clone();
-            tokio::spawn(async move {
-                let _ = handle.mark_usage_incomplete(true, true).await;
-            });
-            let message = format!(
-                "workflow child model request failed; usage may understate real spend: {}",
-                error.message
-            );
-            self.log_terminal_failure(
-                "workflow_child_sampling_failed",
-                error.status_code,
-                &message,
-            );
-            return Err(acp::Error::internal_error().data(message));
+            )));
         }
         if let Some(cw) = self.compaction_window_on_error(&error).await {
             {
@@ -1896,6 +1897,7 @@ impl SessionActor {
     pub(crate) async fn run_turn_via_sampler(
         self: &Arc<Self>,
         mut request: ConversationRequest,
+        recovery: sampler::RecoveryBudget,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
         let _prompt_blob_export =
             crate::session::persistence::materialize_prompt_blob_refs_from_directory(
@@ -1925,7 +1927,7 @@ impl SessionActor {
         self.events
             .request_started(
                 request_id_str.clone(),
-                request_model,
+                request_model.clone(),
                 input_message_count,
                 request_tool_count,
             )
@@ -1940,66 +1942,37 @@ impl SessionActor {
             goal_usage_window.owner_epoch(&goal_usage_owner),
         );
         let expected_goal_id = self.events.current_goal_id();
+        let admission_budget = self.tool_context.task_output_token_budget.clone();
         let scope_capture: sampler::AttemptScopeCapture = std::sync::Arc::new(move || {
             let window = goal_usage_window.clone();
             let owner = goal_usage_owner.clone();
             let expected_goal_id = expected_goal_id.clone();
+            let budget = admission_budget.clone();
             Box::pin(async move {
-                window
-                    .begin_model_attempt(&owner, goal_usage_epoch, expected_goal_id.as_deref())
-                    .await
-            })
-        });
-        let goal_usage_window = self.goal_usage_window.clone();
-        let usage_state = self.chat_state_handle.clone();
-        let usage_sink: sampler::AttemptUsageSink = std::sync::Arc::new(move |attempt| {
-            let goal_usage_window = goal_usage_window.clone();
-            let usage_state = usage_state.clone();
-            Box::pin(async move {
-                match attempt {
-                    sampler::AttemptUsage::Known {
-                        scope: Some(attempt_id),
-                        usage,
-                    } => {
-                        let tokens = crate::session::goal_tracker::model_usage_goal_tokens(&usage);
-                        let _ = goal_usage_window
-                            .settle_attempt_via_root(attempt_id, Some(tokens))
-                            .await?;
-                    }
-                    sampler::AttemptUsage::Incomplete {
-                        scope: Some(attempt_id),
-                    } => {
-                        // These are two independent durable ledgers. Failure
-                        // to stain the prompt ledger must never strand the
-                        // already-admitted Goal attempt: the owner fence would
-                        // then wait forever. Always hand the attempt to the
-                        // root settlement path before surfacing either error.
-                        let prompt_usage_marked =
-                            usage_state.mark_usage_incomplete(true, true).await;
-                        let goal_settlement = goal_usage_window
-                            .settle_attempt_via_root(attempt_id, None)
-                            .await;
-                        match (prompt_usage_marked, goal_settlement) {
-                            (true, Ok(_)) => {}
-                            (false, Ok(_)) => {
-                                return Err(
-                                    "failed to persist incomplete provider-attempt usage".into()
-                                );
-                            }
-                            (true, Err(error)) => return Err(error),
-                            (false, Err(error)) => {
-                                return Err(format!(
-                                    "failed to persist incomplete provider-attempt usage; Goal settlement also failed: {error}"
-                                ));
-                            }
-                        }
-                    }
-                    sampler::AttemptUsage::Known { scope: None, .. }
-                    | sampler::AttemptUsage::Incomplete { scope: None } => {}
+                let max_output_tokens = budget
+                    .as_ref()
+                    .and_then(|budget| budget.clamp_request(None));
+                if max_output_tokens == Some(0) {
+                    return Err("task output budget exhausted before provider admission".into());
                 }
-                Ok(())
+                let scope = window
+                    .begin_model_attempt(&owner, goal_usage_epoch, expected_goal_id.as_deref())
+                    .await?;
+                Ok(sampler::AttemptAdmission {
+                    scope,
+                    max_output_tokens,
+                })
             })
         });
+        let captured_prompt_index = self
+            .chat_state_handle
+            .current_prompt_index()
+            .await
+            .ok_or_else(|| {
+                acp::Error::internal_error().data("sampling has no durable prompt owner")
+            })?;
+        let usage_sink =
+            self.sampling_usage_sink(self.current_catalog_model_id(), captured_prompt_index);
         let evidence_owner = serde_json::json!({
             "request_id": request_id_str,
             "source_projection": request.source_projection,
@@ -2015,6 +1988,7 @@ impl SessionActor {
                 evidence_owner,
                 Some(request_id_str.clone()),
             )),
+            recovery.clone(),
         );
         tokio::pin!(collect);
         let (collected, steered) = tokio::select! {
@@ -2060,7 +2034,7 @@ impl SessionActor {
         if steered
             && matches!(
                 &collected,
-                Err(sampling_types::SamplingError::Auth { message, .. })
+                Err(sampling_types::SamplingError::Lifecycle(message))
                     if message == "request cancelled"
             )
         {
@@ -2088,6 +2062,9 @@ impl SessionActor {
                 ))
             }
             Err(rich_err) => {
+                if !recovery.can_recover() && !self.goal_provider_admission_closed() {
+                    return Err(self.to_acp_error(rich_err));
+                }
                 let info = sampler::SamplingErrorInfo::from(&rich_err);
                 match self
                     .handle_sampling_failure(
@@ -2182,52 +2159,107 @@ impl SessionActor {
         }
         key
     }
-    /// Propagate the model-reported token usage from a turn response into
-    /// chat state, the per-prompt usage ledger, and per-turn signals.
-    ///
-    /// The provider total replaces current-context pressure only when the
-    /// response was admitted without quarantine. Repaired context retains its
-    /// local estimate; all reported usage still enters the independent billing
-    /// and output-budget ledgers.
+    pub(crate) fn sampling_usage_sink(
+        &self,
+        usage_model_id: String,
+        captured_prompt_index: usize,
+    ) -> sampler::AttemptUsageSink {
+        let goal_usage_window = self.goal_usage_window.clone();
+        let usage_state = self.chat_state_handle.clone();
+        let output_budget = self.tool_context.task_output_token_budget.clone();
+        let signals = self.signals_handle();
+        std::sync::Arc::new(move |attempt| {
+            let window = goal_usage_window.clone();
+            let state = usage_state.clone();
+            let model = usage_model_id.clone();
+            let budget = output_budget.clone();
+            let signals = signals.clone();
+            Box::pin(async move {
+                let (key, scope, usage, cost, api_duration_ms) = match attempt {
+                    sampler::AttemptUsage::Known {
+                        attempt_key,
+                        scope,
+                        usage,
+                        cost_usd_ticks,
+                        api_duration_ms,
+                    } => (
+                        attempt_key,
+                        scope,
+                        Some(usage),
+                        cost_usd_ticks,
+                        api_duration_ms,
+                    ),
+                    sampler::AttemptUsage::Incomplete { attempt_key, scope } => {
+                        (attempt_key, scope, None, None, None)
+                    }
+                };
+                let recorded = state
+                    .settle_model_attempt_usage(
+                        key,
+                        captured_prompt_index,
+                        model,
+                        usage.clone(),
+                        cost,
+                        api_duration_ms,
+                    )
+                    .await;
+                // Goal has an independent owner fence: always hand back its
+                // lease even when another ledger fails. Neither failure permits retry.
+                let goal_result = if let Some(scope) = scope {
+                    window
+                        .settle_attempt_via_root(
+                            scope,
+                            usage
+                                .as_ref()
+                                .map(crate::session::goal_tracker::model_usage_goal_tokens),
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    Ok(())
+                };
+                if matches!(recorded, Ok(true)) {
+                    match &usage {
+                        Some(usage) => {
+                            if let Some(budget) = &budget {
+                                budget.record_reported_output(u64::from(usage.completion_tokens));
+                            }
+                            signals.record_response_output_usage(
+                                usage.completion_tokens,
+                                usage.reasoning_tokens,
+                            );
+                        }
+                        None => {
+                            if let Some(budget) = &budget {
+                                budget.mark_incomplete_and_exhaust();
+                            }
+                        }
+                    }
+                } else if recorded.is_err()
+                    && let Some(budget) = &budget
+                {
+                    budget.mark_incomplete_and_exhaust();
+                }
+                recorded.map_err(|error| format!("attempt usage ledger: {error}"))?;
+                goal_result?;
+                Ok(())
+            })
+        })
+    }
+
+    /// Only admitted output may replace the context-pressure estimate. Spending
+    /// was settled per provider attempt before the sampler returned this candidate.
     pub(crate) async fn record_response_token_usage(
         &self,
         response: &ConversationResponse,
-        api_duration_ms: Option<u64>,
-        response_model_id: Option<String>,
-        admitted_goal_id: Option<&str>,
+        _api_duration_ms: Option<u64>,
+        _response_model_id: Option<String>,
+        _admitted_goal_id: Option<&str>,
         accept_context_anchor: bool,
     ) -> Result<(), String> {
-        if let Some(ref u) = response.usage {
-            self.tool_context
-                .record_task_model_output(u64::from(u.completion_tokens));
-            if accept_context_anchor {
-                self.chat_state_handle
-                    .record_provider_context_anchor(u64::from(u.total_tokens));
-            }
-            self.chat_state_handle.record_last_turn_usage(u.clone());
-            self.chat_state_handle.record_model_call_usage(
-                response_model_id,
-                u.clone(),
-                api_duration_ms,
-                response.cost_usd_ticks,
-            );
-            let goal_charge = crate::session::goal_tracker::model_usage_goal_tokens(u);
-            let _ = self
-                .record_goal_model_usage(admitted_goal_id, goal_charge)
-                .await?;
-            self.signals_handle()
-                .record_response_output_usage(u.completion_tokens, u.reasoning_tokens);
-        } else if self.tool_context.task_output_token_budget.is_some() {
-            self.tool_context.fail_task_output_usage_closed();
-            let handle = self.chat_state_handle.clone();
-            tokio::spawn(async move {
-                let _ = handle.mark_usage_incomplete(true, true).await;
-            });
-        } else if self.tool_context.sampler_retry_only_before_output {
-            let handle = self.chat_state_handle.clone();
-            tokio::spawn(async move {
-                let _ = handle.mark_usage_incomplete(true, true).await;
-            });
+        if accept_context_anchor && let Some(usage) = &response.usage {
+            self.chat_state_handle
+                .record_provider_context_anchor(u64::from(usage.total_tokens));
         }
         Ok(())
     }
@@ -2268,6 +2300,8 @@ mod image_input_rejection_tests {
 
     fn api_400(message: &str) -> sampler::SamplingErrorInfo {
         sampler::SamplingErrorInfo {
+            source: None,
+            backend: None,
             kind: sampler::SamplingErrorKind::Api,
             status_code: Some(400),
             message: message.to_string(),
@@ -2279,6 +2313,7 @@ mod image_input_rejection_tests {
             doom_loop_aborted_at_chunk: None,
             credential: sampling_types::SentCredential::Unknown,
             usage: None,
+            cost_usd_ticks: None,
         }
     }
 

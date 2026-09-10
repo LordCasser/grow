@@ -1003,6 +1003,9 @@ pub(super) async fn run_session(
                         // model-context facts.
                         session.emit_context_pressure_update(projected_tokens);
                     }
+                    Some(chat_state::ChatStateEvent::SessionUsageUpdated { usage }) => {
+                        session.emit_session_usage_update(&usage);
+                    }
                     None => {
                         tracing::error!(
                             "closing session because the Timeline writer actor stopped"
@@ -2486,6 +2489,11 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::AdvertiseCommands => {
                         session.send_available_commands_update().await;
+                        // Reattach advertises current process state after replay;
+                        // old transcript usage never restores this ledger.
+                        if let Ok(usage) = session.chat_state_handle.try_get_session_usage().await {
+                            session.emit_session_usage_update(&usage);
+                        }
                     }
                     SessionCommand::GetWorkflowCatalogState { respond_to } => {
                         let tool_names = session.registered_tool_names().await;

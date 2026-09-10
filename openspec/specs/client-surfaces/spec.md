@@ -1576,3 +1576,76 @@ A detected unbracketed multiline paste SHALL remain one pending insertion across
 #### Scenario: Existing display paths
 - **WHEN** usage is opened in fullscreen, inline or minimal mode
 - **THEN** the same statistics projection is shown, and `/session-info` remains unchanged.
+
+### Requirement: Goal tool success closes its running UI row
+CreateGoal、GetGoal 与 UpdateGoal 成功结果 SHALL 投影为带原工具调用 id 和结构化输出的 ACP Completed 更新，使客户端在当前 turn 内停止对应工具行的运行状态与计时。
+
+#### Scenario: Read or create completes while the turn continues
+- **WHEN** Goal 查询或创建成功，模型随后继续推理或执行其他工具
+- **THEN** 对应 Goal 工具行立即完成，不把后续工作耗时记为该工具的读取或创建耗时。
+
+#### Scenario: Goal update or failure
+- **WHEN** Goal 状态更新成功或工具返回错误
+- **THEN** 既有成功 Completed 和错误 Failed 语义保持不变，不把错误伪装成成功。
+
+证据入口：`crates/codegen/shell/src/session/acp_conversion.rs::acp_tool_update`、`crates/codegen/pager/src/acp/tracker.rs`。
+
+### Requirement: Detailed token counts use comma grouping
+Usage 与 Goal 详情中的完整 token 数字 SHALL 使用每三位逗号分隔，并保留不完整账本的 ≥ 标记；预算及未分类历史 SHALL 使用相同格式。紧凑状态栏可以保留 k/M 单位。
+
+#### Scenario: Large incomplete Goal usage
+- **WHEN** Goal 详情包含累计、缓存命中、缓存未命中、输出、预算或未分类历史的大数
+- **THEN** 例如 100000000 显示为 100,000,000，≥ 和分类含义不变。
+
+### Requirement: Ordinary agent status shows session usage
+没有 Goal 的普通主会话 Agent 视图 SHALL 在原 Goal 插槽显示本会话账本累计 token 与输入缓存命中率，并在点击时打开 Usage 页。数据 SHALL 来自既有 session ledger 的变化投影及当前连接快照，不使用定时轮询、context 窗口压力或 prompt 总额累加替代账本。子 Agent 内嵌视图不增加一个指向父会话用量的入口。
+
+#### Scenario: Calls and late child settlement
+- **WHEN** 普通会话产生主调用、已归属的子任务消费或不完整标记
+- **THEN** 状态栏按账本的累计 input + output（含 cache hit）更新，重复累计快照不会重复加账，缓存率按总 cached input / 总 input 计算。
+
+#### Scenario: Empty or incomplete usage
+- **WHEN** 没有输入、缓存数超过输入或账本不完整
+- **THEN** 无效比例显示 N/A；不完整累计显示 ≥，缓存率仅表示 recorded usage，不伪装精确完整用量。
+
+#### Scenario: Open usage or Goal details
+- **WHEN** 用户点击普通会话用量或已有 Goal 的状态区域
+- **THEN** 普通用量打开既有 Usage 面板的 Usage 页，Goal 继续打开 Goal 详情；窄屏下点击区域不能超出可见区域。
+
+#### Scenario: Resume or reconnect
+- **WHEN** 客户端重新连接存活进程或在新进程恢复会话
+- **THEN** 投影当前进程账本，与 Usage 的 since start or last resume 窗口一致，不从历史通知恢复旧进程总额。
+
+证据入口：`chat-state/src/actor/mutations.rs`、`shell/src/extensions/usage.rs`、`pager/src/views/agent_status.rs`、`pager/src/app/agent_view/render.rs` 和 `mouse.rs`（均位于 `crates/codegen/`）。
+
+### Requirement: Sampling previews are isolated by attempt and delivery capability
+
+采样输出 SHALL 显式声明最终结果交付、可废弃 attempt 预览或不可撤销流的交付能力。可废弃预览 SHALL 在 text、reasoning、工具参数、signature、合并缓冲及终态上保留请求与 attempt 归属，废弃旧 attempt 后才能显示下一 attempt 的内容。不可撤销的响应帧一经外发 SHALL 阻止透明重新采样。多个消费者 SHALL 按实际交付边界采用最严格限制；对可废弃候选，不支持撤回的附加观察者 SHALL 先缓冲到接纳后交付，从而不暴露被废弃的预览。发起不可撤销标准流的客户端 SHALL 保持实时输出及输出后停止恢复的约束。
+
+#### Scenario: Retry after preview output
+- **WHEN** 支持 attempt 废弃的 Pager 已展示部分文本和工具参数，随后允许恢复
+- **THEN** 旧 attempt 的预览被标为废弃或移除，合并缓冲先处理废弃屏障，新 attempt 独立累积且旧迟到 delta 不污染它。
+
+#### Scenario: Irreversible headless output
+- **WHEN** Minimal 的原生终端滚动区、标准 headless 或外部客户端已经收到无法撤销的响应帧
+- **THEN** 后续失败终止当前输出，不把新生成内容拼成同一成功响应；只收最终结果模式可依其能力恢复。
+
+#### Scenario: Consumer capability becomes stricter
+- **WHEN** 同一请求存在多个消费者或中途接入不支持撤销的消费者
+- **THEN** 不假定所有已发布输出可撤销；可废弃候选的未知观察者只在 Accepted 后收到缓冲内容，Discarded 后零候选内容外发，已接纳历史的 load 不重复补发该候选。
+
+#### Scenario: Durable admission is not acknowledged
+- **WHEN** 候选流完成但会话接纳尚未确认
+- **THEN** 客户端仍将其视为未接纳候选，不发布 Accepted 或可执行工具结果。
+
+#### Scenario: Recovery is denied
+- **WHEN** 请求因输出不可撤销、用量不完整、额度耗尽、owner 失效或协议冲突而停止
+- **THEN** 终止诊断在既有 attempt evidence 中保留对应停止条件及累计 attempt 数，常规自动恢复保持正常运行活动而不额外弹出警告。
+
+#### Scenario: Reconnect misses the candidate terminal boundary
+- **WHEN** Pager 断线期间错过候选的 Accepted 或 Discarded，主会话或复用的子任务视图仍持有未确认预览
+- **THEN** 重连丢弃未重新确认的旧预览，只以已接纳内容展示成功历史，不因较新的独立事件 cursor 保留废弃预览；加载失败保留候选归属，再次重连也不能把未确认候选变成已接纳历史。
+
+#### Scenario: Interaction or replay overlaps a sampling candidate
+- **WHEN** 候选仍待接纳时到达文件/终端等驱动客户端请求、权限请求或定向历史回放
+- **THEN** 原交互与定向路由继续生效，不把请求缓冲到接纳之后或广播给附加观察者；普通交织通知与候选在最终交付时保持原 eventId 顺序。

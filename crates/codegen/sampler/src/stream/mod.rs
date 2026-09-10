@@ -25,8 +25,26 @@ fn protocol_failure(
     message: impl std::fmt::Display,
     usage: Option<sampling_types::TokenUsage>,
 ) -> crate::events::SamplingEvent {
-    let error = sampling_types::SamplingError::Serialization(serde::de::Error::custom(message));
+    let error = sampling_types::SamplingError::serialization_message(message);
     let mut error = crate::events::SamplingErrorInfo::from(&error);
+    error.usage = usage;
+    crate::events::SamplingEvent::Failed {
+        request_id: request_id.clone(),
+        error,
+    }
+}
+
+fn incomplete_stream(
+    request_id: &crate::types::RequestId,
+    backend: sampling_types::ApiBackend,
+    message: impl Into<String>,
+    usage: Option<sampling_types::TokenUsage>,
+) -> crate::events::SamplingEvent {
+    let cause = sampling_types::SamplingError::IncompleteStream {
+        backend,
+        message: message.into(),
+    };
+    let mut error = crate::events::SamplingErrorInfo::from(&cause);
     error.usage = usage;
     crate::events::SamplingEvent::Failed {
         request_id: request_id.clone(),

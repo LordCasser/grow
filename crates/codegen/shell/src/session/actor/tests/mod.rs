@@ -22,6 +22,7 @@ mod prompt_mode_transition_tests;
 mod read_file_image_description_tests;
 mod recap_display_only_tests;
 mod record_response_token_usage_tests;
+mod sampling_attempt_delivery_tests;
 mod reminder_policy_tests;
 mod reverse_request_session_id_tests;
 mod rewind_cross_compaction_tests;

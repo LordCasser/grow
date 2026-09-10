@@ -1,0 +1,4 @@
+- [x] Compare the failing assertion against Timeline folding, approval ordering and transient projection.
+- [x] Correct the fixture to assert the latest approved nonterminal snapshot.
+- [x] Pass the complete native process harness with every existing scenario retained.
+- [x] Validate and archive the maintenance change.

@@ -396,6 +396,11 @@ fn merge_acp_chunks(
     acp::SessionNotification,
     Option<acp::SessionNotification>,
 ) {
+    if prev.session_id != new.session_id
+        || !sampling_metadata_compatible(prev.meta.as_ref(), new.meta.as_ref())
+    {
+        return (true, prev, Some(new));
+    }
     let (new_session_id, new_update, new_meta) = (new.session_id, new.update, new.meta);
     let (prev_session_id, prev_update, prev_meta) = (prev.session_id, prev.update, prev.meta);
     match (prev_update, new_update) {
@@ -462,11 +467,17 @@ fn merge_grow_chunks(
 ) {
     use crate::extensions::notification::SessionUpdate as XUpdate;
 
-    if prev.session_id != new.session_id {
+    if prev.session_id != new.session_id
+        || !sampling_metadata_compatible(
+            prev.meta.as_ref().and_then(serde_json::Value::as_object),
+            new.meta.as_ref().and_then(serde_json::Value::as_object),
+        )
+    {
         return (true, prev, Some(new));
     }
 
     let prev_session_id = prev.session_id.clone();
+    let merged_sampling_meta = merged_sampling_metadata(prev.meta.as_ref(), new.meta.as_ref());
     match (prev.update, new.update) {
         (
             XUpdate::ToolCallDeltaChunk {
@@ -499,7 +510,10 @@ fn merge_grow_chunks(
                     name: prev_name.or(new_name),
                     arguments_delta: merged_args,
                 },
-                meta: None,
+                // Grow deltas historically dropped metadata on merge. Preserve
+                // the sampling ownership pair so a merged chunk remains
+                // attributable to exactly one request attempt.
+                meta: merged_sampling_meta,
             };
             (false, merged, None)
         }
@@ -533,6 +547,82 @@ fn same_tool_call(
         (Some(a), Some(b)) => a == b,
         _ => prev_idx == new_idx,
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SamplingAttribution {
+    Absent,
+    Present { request_id: String, attempt: u32 },
+    Invalid,
+}
+
+fn sampling_attribution(meta: Option<&acp::Meta>) -> SamplingAttribution {
+    let Some(object) = meta else {
+        return SamplingAttribution::Absent;
+    };
+    let request_id = object.get("samplingRequestId");
+    let attempt = object.get("samplingAttempt");
+    match (request_id, attempt) {
+        (None, None) => SamplingAttribution::Absent,
+        (Some(serde_json::Value::String(request_id)), Some(attempt)) => attempt
+            .as_u64()
+            .and_then(|attempt| u32::try_from(attempt).ok())
+            .map_or(SamplingAttribution::Invalid, |attempt| {
+                SamplingAttribution::Present {
+                    request_id: request_id.clone(),
+                    attempt,
+                }
+            }),
+        _ => SamplingAttribution::Invalid,
+    }
+}
+
+/// Unattributed notifications retain the historical merge behavior. Once a
+/// notification carries sampling ownership, both fields must be present and
+/// equal on the adjacent notification; a partial/malformed pair is a barrier.
+fn sampling_metadata_compatible(prev: Option<&acp::Meta>, new: Option<&acp::Meta>) -> bool {
+    match (sampling_attribution(prev), sampling_attribution(new)) {
+        (SamplingAttribution::Absent, SamplingAttribution::Absent) => true,
+        (
+            SamplingAttribution::Present {
+                request_id: prev_request,
+                attempt: prev_attempt,
+            },
+            SamplingAttribution::Present {
+                request_id: new_request,
+                attempt: new_attempt,
+            },
+        ) => prev_request == new_request && prev_attempt == new_attempt,
+        _ => false,
+    }
+}
+
+fn merged_sampling_metadata(
+    prev: Option<&serde_json::Value>,
+    new: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let prev_obj = prev?.as_object()?;
+    let SamplingAttribution::Present {
+        request_id,
+        attempt,
+    } = sampling_attribution(Some(prev_obj))
+    else {
+        return None;
+    };
+    if !sampling_metadata_compatible(Some(prev_obj), new.and_then(serde_json::Value::as_object)) {
+        return None;
+    }
+    // The merged notification represents the first chunk. Preserve its
+    // eventId (and other established metadata) so leader load replay can use
+    // the same event sequence cutoff as an unmerged stream. New chunk metadata
+    // is intentionally not copied into the merged first-chunk identity.
+    let mut merged = prev_obj.clone();
+    merged.insert(
+        "samplingRequestId".to_string(),
+        serde_json::json!(request_id),
+    );
+    merged.insert("samplingAttempt".to_string(), serde_json::json!(attempt));
+    Some(serde_json::Value::Object(merged))
 }
 
 fn estimate_payload_bytes(n: &SessionNotification) -> u64 {
@@ -587,6 +677,55 @@ mod tests {
             .as_object()
             .cloned(),
         )
+    }
+
+    fn thought_chunk(session: &str, agent_ts_ms: u64, text: &str) -> acp::SessionNotification {
+        acp::SessionNotification::new(
+            acp::SessionId::new(session),
+            acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(text.to_string()),
+            ))),
+        )
+        .meta(
+            json!({
+                "agentTimestampMs": agent_ts_ms,
+            })
+            .as_object()
+            .cloned(),
+        )
+    }
+
+    fn stamp_sampling<T>(mut notification: T, request_id: &str, attempt: u32) -> T
+    where
+        T: SamplingNotificationMeta,
+    {
+        notification.set_sampling_meta(request_id, attempt);
+        notification
+    }
+
+    trait SamplingNotificationMeta {
+        fn set_sampling_meta(&mut self, request_id: &str, attempt: u32);
+    }
+
+    impl SamplingNotificationMeta for acp::SessionNotification {
+        fn set_sampling_meta(&mut self, request_id: &str, attempt: u32) {
+            self.meta
+                .get_or_insert_with(Default::default)
+                .insert("samplingRequestId".to_string(), json!(request_id));
+            self.meta
+                .as_mut()
+                .expect("metadata inserted")
+                .insert("samplingAttempt".to_string(), json!(attempt));
+        }
+    }
+
+    impl SamplingNotificationMeta for crate::extensions::notification::SessionNotification {
+        fn set_sampling_meta(&mut self, request_id: &str, attempt: u32) {
+            self.meta = Some(json!({
+                "samplingRequestId": request_id,
+                "samplingAttempt": attempt,
+            }));
+        }
     }
 
     fn pending_text(buf: &ReplayBuffer) -> Option<String> {
@@ -975,6 +1114,52 @@ mod tests {
         assert!(replay_buffer.flush().is_none());
     }
 
+    #[test]
+    fn acp_text_and_reasoning_do_not_merge_across_sampling_attempts() {
+        let mut text_buffer = ReplayBuffer::new(Some(settings(100, 1_000_000)));
+        let text_first = stamp_sampling(msg_chunk("s", 1, "old"), "request", 1);
+        let text_second = stamp_sampling(msg_chunk("s", 1, "new"), "request", 2);
+        assert!(text_buffer.consume_chunk(text_first).is_none());
+        let (text_flushed, text_rest) = text_buffer
+            .consume_chunk(text_second)
+            .expect("attempt change must force-flush text");
+        assert_eq!(pending_text_value(&text_flushed), Some("old".to_string()));
+        assert_eq!(
+            pending_text_value(text_rest.as_ref().expect("new text")),
+            Some("new".to_string())
+        );
+
+        let mut thought_buffer = ReplayBuffer::new(Some(settings(100, 1_000_000)));
+        let thought_first = stamp_sampling(thought_chunk("s", 1, "old"), "request", 1);
+        let thought_second = stamp_sampling(thought_chunk("s", 1, "new"), "request", 2);
+        assert!(thought_buffer.consume_chunk(thought_first).is_none());
+        let (thought_flushed, thought_rest) = thought_buffer
+            .consume_chunk(thought_second)
+            .expect("attempt change must force-flush reasoning");
+        assert_eq!(
+            pending_text_value(&thought_flushed),
+            Some("old".to_string())
+        );
+        assert_eq!(
+            pending_text_value(thought_rest.as_ref().expect("new reasoning")),
+            Some("new".to_string())
+        );
+    }
+
+    fn pending_text_value(notification: &SessionNotification) -> Option<String> {
+        match notification {
+            SessionNotification::Acp(n) => match &n.update {
+                acp::SessionUpdate::AgentMessageChunk(chunk)
+                | acp::SessionUpdate::AgentThoughtChunk(chunk) => match &chunk.content {
+                    acp::ContentBlock::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            SessionNotification::Grow(_) => None,
+        }
+    }
+
     // ── Grow / ToolCallDeltaChunk tests ─────────────────────────────
 
     fn delta_chunk(
@@ -1025,6 +1210,77 @@ mod tests {
             }
             other => panic!("expected ToolCallDeltaChunk, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn grow_same_index_deltas_do_not_merge_across_sampling_attempts() {
+        let mut buf = ReplayBuffer::new(Some(settings(100, 1_000_000)));
+        let first = stamp_sampling(
+            delta_chunk("s", None, 0, Some("read_file"), Some("old")),
+            "request",
+            1,
+        );
+        let second = stamp_sampling(delta_chunk("s", None, 0, None, Some("new")), "request", 2);
+
+        assert!(buf.consume_chunk(first).is_none());
+        let (flushed, rest) = buf
+            .consume_chunk(second)
+            .expect("attempt change must force-flush same-index tool deltas");
+        assert!(matches!(flushed, SessionNotification::Grow(_)));
+        assert!(matches!(rest, Some(SessionNotification::Grow(_))));
+        assert!(buf.pending.is_none());
+    }
+
+    #[test]
+    fn grow_merge_preserves_sampling_ownership_metadata() {
+        let mut buf = ReplayBuffer::new(Some(settings(100, 1_000_000)));
+        let mut first = stamp_sampling(
+            delta_chunk(
+                "s",
+                Some("call_1"),
+                0,
+                Some("read_file"),
+                Some("{\"path\":"),
+            ),
+            "request",
+            7,
+        );
+        first
+            .meta
+            .as_mut()
+            .expect("sampling metadata")
+            .as_object_mut()
+            .expect("sampling metadata object")
+            .insert("eventId".to_string(), json!("s-10"));
+        let mut second = stamp_sampling(
+            delta_chunk("s", None, 0, None, Some("\"src\"}")),
+            "request",
+            7,
+        );
+        second
+            .meta
+            .as_mut()
+            .expect("sampling metadata")
+            .as_object_mut()
+            .expect("sampling metadata object")
+            .insert("eventId".to_string(), json!("s-11"));
+
+        assert!(buf.consume_chunk(first).is_none());
+        assert!(buf.consume_chunk(second).is_none());
+        let merged = buf.flush().expect("same attempt should merge");
+        let SessionNotification::Grow(notification) = merged else {
+            panic!("expected Grow extension update");
+        };
+        let meta = notification
+            .meta
+            .expect("sampling ownership must survive merge");
+        assert_eq!(meta["samplingRequestId"], json!("request"));
+        assert_eq!(meta["samplingAttempt"], json!(7));
+        assert_eq!(
+            meta["eventId"],
+            json!("s-10"),
+            "merged Grow frame must retain first frame eventId for replay cutoff"
+        );
     }
 
     #[test]

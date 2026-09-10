@@ -1,5 +1,31 @@
 # Session / provider robustness repair
 
+采样断流的恢复入口见 `sampler/src/actor/request_task.rs` 和
+`sampler/src/recovery.rs`。三协议的 parser 只判定候选是否完整、是否合法；缺少
+finish/terminal 的流使用 `IncompleteStream`，身份或状态冲突仍然停止。
+`SamplingErrorInfo` 是诊断投影，内部策略保留原始错误类型。
+
+每个 attempt 先等待证据和用量结算，再决定是否重新准入。普通用量写入
+`chat-state::settle_model_attempt_usage`，Goal 继续使用原 owner window；子任务
+输出上限在每次准入时按余额重算。接纳后的上下文压力锚点与已消费 token 分开。
+session 的认证、native continuation 等修复与 sampler 共用一个 `RecoveryBudget`。
+行为契约见 [model-sampling](../../openspec/specs/model-sampling/spec.md)。
+
+通知中的 `samplingRequestId` / `samplingAttempt` 标识临时候选，
+`SamplingAttempt` 按 Started → Discarded / Accepted 经过相同 FIFO 和合并缓冲。
+Pager Fullscreen/Inline 明确声明撤回能力；Minimal、headless 和未知发起方使用
+不可撤销交付。leader 对
+可撤回会话的未知附加观察者缓冲到 Accepted。Accepted 由 session 在 Timeline
+接纳确认后发布，工具执行仍受原接纳边界约束。阅读入口为 `updates.rs`、
+`update_chunk_merge.rs`、`leader/server.rs` 和 Pager 的 `acp/tracker.rs`。
+`SessionPersistence` 只在 Accepted 后把候选写入 `updates.jsonl` 回放缓存，
+废弃时保留窗口内的独立消息；交互请求和定向回放继续使用原路由。断线留下的
+未确认预览需要通过已接纳历史重新确认，不能直接按旧 cursor 保留；
+契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md) 与
+[session-timeline](../../openspec/specs/session-timeline/spec.md)。
+
+以下保留此前修复的背景和验证记录，不作为当前恢复策略的另一份契约。
+
 Baseline: v2.1.2 (`1ca5c6b1`). Scope: the five issues investigated on 2026-09-03.
 
 ## Implementation and acceptance plan

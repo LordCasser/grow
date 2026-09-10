@@ -1585,6 +1585,15 @@ impl MvpAgent {
             )
             .with_hunk_tracking_enabled(hunk_tracking_enabled);
         tool_ctx.process_scope = Some(ProcessScope::new());
+        // A per-session declaration overrides initialize, including explicit
+        // false injected by the leader. Client names are never capabilities.
+        let lifecycle = session_meta.and_then(|meta| meta.get("samplingAttemptLifecycle"))
+            .or_else(|| init.meta.as_ref().and_then(|meta| meta.get("samplingAttemptLifecycle")))
+            .and_then(serde_json::Value::as_bool).unwrap_or(false);
+        tool_ctx.sampling_output_delivery = if lifecycle {
+            sampler::OutputDelivery::Retractable
+        } else { sampler::OutputDelivery::Irreversible };
+
         let workspace_ops = self
             .resolve_workspace_ops()
             .map_err(|_| {

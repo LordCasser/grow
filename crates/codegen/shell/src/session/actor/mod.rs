@@ -1816,6 +1816,7 @@ pub(crate) struct SessionActor {
     /// terminal `SamplingEvent::Completed` (every text/thought chunk has been
     /// `send_update`d by then). `None` between turns.
     pub(crate) turn_stream_drained: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    pub(crate) sampling_preview: parking_lot::Mutex<Option<(String, u32)>>,
     /// Handle to the per-session `sampler` actor.
     ///
     /// Live sessions get a real handle from `spawn_session_actor`;

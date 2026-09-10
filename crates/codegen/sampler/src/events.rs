@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use sampling_types::{
-    ConversationResponse, EmptyResponseContext, ResponseModelMetadata, SamplingError,
+    ApiBackend, ConversationResponse, EmptyResponseContext, ResponseModelMetadata, SamplingError,
     SentCredential,
 };
 
@@ -27,6 +27,13 @@ pub enum SamplingChannel {
 /// session translates these into ACP notifications.
 #[derive(Debug, Clone)]
 pub enum SamplingEvent {
+    /// A provider-managed operation may already have executed. It can be
+    /// accepted on success, but cannot be replayed on a later stream failure.
+    ReplayUnsafe { request_id: RequestId },
+    /// Ordered before every preview of this attempt.
+    AttemptStarted { request_id: RequestId, attempt: u32 },
+    /// Retract this candidate, including on cancellation or a local failure.
+    AttemptDiscarded { request_id: RequestId, attempt: u32 },
     /// HTTP stream established, headers read. Emitted before any content.
     StreamStarted {
         request_id: RequestId,
@@ -159,6 +166,18 @@ pub struct SamplingErrorInfo {
     /// protocol validation. A failed call can still have consumed tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<sampling_types::TokenUsage>,
+    /// Provider-reported cost retained when a terminal response fails local
+    /// protocol validation. This is absent for transport/EOF failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_ticks: Option<i64>,
+    /// Backend identity for an incomplete provider stream. This is typed
+    /// context for external diagnostics; it is never inferred from `message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<ApiBackend>,
+    /// The in-process typed cause. This is deliberately omitted from the DTO
+    /// wire representation; deserialized DTOs use the legacy fallback below.
+    #[serde(skip)]
+    pub source: Option<SamplingError>,
 }
 
 /// Coarse-grained classification of a sampling failure.
@@ -174,6 +193,8 @@ pub enum SamplingErrorKind {
     Api,
     Serialization,
     InvalidToolArguments,
+    IncompleteStream,
+    Lifecycle,
     IdleTimeout,
     RateLimited,
     EmptyResponse,
@@ -194,6 +215,8 @@ impl SamplingErrorKind {
             SamplingErrorKind::Api => "api",
             SamplingErrorKind::Serialization => "serialization",
             SamplingErrorKind::InvalidToolArguments => "invalid_tool_arguments",
+            SamplingErrorKind::IncompleteStream => "incomplete_stream",
+            SamplingErrorKind::Lifecycle => "lifecycle",
             SamplingErrorKind::IdleTimeout => "idle_timeout",
             SamplingErrorKind::RateLimited => "rate_limited",
             SamplingErrorKind::EmptyResponse => "empty_response",
@@ -211,6 +234,10 @@ impl From<&SamplingError> for SamplingErrorInfo {
             SamplingError::Auth { .. } => (SamplingErrorKind::Auth, None, None, None),
             SamplingError::InvalidConfiguration(_) => (SamplingErrorKind::Api, None, None, None),
             SamplingError::Persistence(_) => (SamplingErrorKind::Persistence, None, None, None),
+            SamplingError::IncompleteStream { .. } => {
+                (SamplingErrorKind::IncompleteStream, None, None, None)
+            }
+            SamplingError::Lifecycle(_) => (SamplingErrorKind::Lifecycle, None, None, None),
             SamplingError::Http(_) => (SamplingErrorKind::Http, None, None, None),
             SamplingError::Serialization(_) => (SamplingErrorKind::Serialization, None, None, None),
             SamplingError::InvalidToolArguments(_) => {
@@ -259,6 +286,10 @@ impl From<&SamplingError> for SamplingErrorInfo {
             SamplingError::Auth { credential, .. } => *credential,
             _ => SentCredential::Unknown,
         };
+        let backend = match err {
+            SamplingError::IncompleteStream { backend, .. } => Some(backend.clone()),
+            _ => None,
+        };
 
         Self {
             kind,
@@ -272,6 +303,9 @@ impl From<&SamplingError> for SamplingErrorInfo {
             doom_loop_aborted_at_chunk,
             credential,
             usage: None,
+            cost_usd_ticks: None,
+            backend,
+            source: Some(err.clone()),
         }
     }
 }
@@ -279,10 +313,29 @@ impl From<&SamplingError> for SamplingErrorInfo {
 /// Reconstruct the rich error semantics after an L2 stream transform has
 /// crossed the serializable `SamplingErrorInfo` boundary.
 pub(crate) fn sampling_error_from_info(info: &SamplingErrorInfo) -> SamplingError {
+    if let Some(source) = &info.source {
+        return source.clone();
+    }
+
     match info.kind {
         SamplingErrorKind::Persistence => SamplingError::Persistence(
             info.message
                 .strip_prefix("attempt persistence failed: ")
+                .unwrap_or(&info.message)
+                .to_owned(),
+        ),
+        SamplingErrorKind::IncompleteStream => SamplingError::IncompleteStream {
+            backend: info.backend.clone().unwrap_or_default(),
+            message: info
+                .message
+                .strip_prefix("incomplete ")
+                .and_then(|message| message.split_once(" stream: ").map(|(_, reason)| reason))
+                .unwrap_or(&info.message)
+                .to_owned(),
+        },
+        SamplingErrorKind::Lifecycle => SamplingError::Lifecycle(
+            info.message
+                .strip_prefix("sampling lifecycle failed: ")
                 .unwrap_or(&info.message)
                 .to_owned(),
         ),
@@ -338,9 +391,10 @@ mod tests {
         let original = SamplingError::InvalidToolArguments(
             "Responses output index 2 contains invalid JSON".into(),
         );
-        let info: SamplingErrorInfo =
-            serde_json::from_value(serde_json::to_value(SamplingErrorInfo::from(&original)).unwrap())
-                .unwrap();
+        let info: SamplingErrorInfo = serde_json::from_value(
+            serde_json::to_value(SamplingErrorInfo::from(&original)).unwrap(),
+        )
+        .unwrap();
         let restored = sampling_error_from_info(&info);
         assert!(matches!(restored, SamplingError::InvalidToolArguments(_)));
         assert!(restored.is_retryable());
@@ -555,8 +609,57 @@ mod tests {
         let err = SamplingError::IdleTimeout { elapsed_secs: 300 };
         let info = SamplingErrorInfo::from(&err);
         assert_eq!(info.kind, SamplingErrorKind::IdleTimeout);
-        assert!(!info.is_retryable);
+        assert!(info.is_retryable);
         assert!(info.message.contains("300s"));
+    }
+
+    #[test]
+    fn typed_cause_projection_is_cloneable_and_not_serialized() {
+        let original = SamplingError::IncompleteStream {
+            backend: ApiBackend::Messages,
+            message: "missing message_stop".into(),
+        };
+        let mut info = SamplingErrorInfo::from(&original);
+
+        assert_eq!(info.kind, SamplingErrorKind::IncompleteStream);
+        assert_eq!(info.backend, Some(ApiBackend::Messages));
+        assert!(info.source.is_some());
+
+        let json = serde_json::to_value(&info).expect("sampling error info serializes");
+        assert!(json.get("source").is_none());
+
+        info.kind = SamplingErrorKind::Lifecycle;
+        info.message.clear();
+        info.backend = None;
+        let restored = sampling_error_from_info(&info);
+        assert!(matches!(
+            restored,
+            SamplingError::IncompleteStream {
+                backend: ApiBackend::Messages,
+                message
+            } if message == "missing message_stop"
+        ));
+    }
+
+    #[test]
+    fn external_incomplete_stream_dto_uses_structured_backend() {
+        let original = SamplingError::IncompleteStream {
+            backend: ApiBackend::Responses,
+            message: "missing response.completed".into(),
+        };
+        let info = SamplingErrorInfo::from(&original);
+        let external: SamplingErrorInfo =
+            serde_json::from_value(serde_json::to_value(info).unwrap()).unwrap();
+
+        assert!(external.source.is_none());
+        let restored = sampling_error_from_info(&external);
+        assert!(matches!(
+            restored,
+            SamplingError::IncompleteStream {
+                backend: ApiBackend::Responses,
+                message
+            } if message == "missing response.completed"
+        ));
     }
 }
 

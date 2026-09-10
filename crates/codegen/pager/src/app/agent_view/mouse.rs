@@ -83,6 +83,9 @@ impl AgentView {
                     }
                     return InputOutcome::Changed;
                 }
+                if self.hit_usage_status.contains(mouse.column, mouse.row) {
+                    return InputOutcome::Action(Action::ShowUsage);
+                }
                 if self.hit_context.contains(mouse.column, mouse.row) {
                     let now = Instant::now();
                     let too_soon = self.last_context_click_at.is_some_and(|t| {
@@ -1073,6 +1076,7 @@ impl AgentView {
                     .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_status.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_goal_status.update_hover(mouse.column, mouse.row);
+                changed |= self.hit_usage_status.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_catalog_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cwd.update_hover(mouse.column, mouse.row);

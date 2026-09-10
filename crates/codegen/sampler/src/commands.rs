@@ -31,6 +31,7 @@ pub(crate) enum SamplerCommand {
         scope_capture: Option<crate::handle::AttemptScopeCapture>,
         usage_sink: Option<crate::handle::AttemptUsageSink>,
         evidence_sink: Option<crate::audit::EvidenceSink>,
+        recovery: Option<crate::recovery::RecoveryBudget>,
     },
 
     /// Cancel an in-flight request.

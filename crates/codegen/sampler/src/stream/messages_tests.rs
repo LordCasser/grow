@@ -120,6 +120,47 @@ fn assert_protocol_failure(events: &[SamplingEvent]) -> &SamplingErrorInfo {
     error
 }
 
+fn assert_incomplete_stream_failure(events: &[SamplingEvent]) -> &SamplingErrorInfo {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                SamplingEvent::Completed { .. } | SamplingEvent::Failed { .. }
+            ))
+            .count(),
+        1
+    );
+    let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+        panic!("expected incomplete stream failure: {events:?}");
+    };
+    assert_eq!(
+        error.kind,
+        crate::events::SamplingErrorKind::IncompleteStream
+    );
+    assert!(error.is_retryable);
+    assert_eq!(error.backend, Some(sampling_types::ApiBackend::Messages));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SamplingEvent::Completed { .. })));
+    error
+}
+
+fn assert_invalid_tool_arguments_failure(events: &[SamplingEvent]) -> &SamplingErrorInfo {
+    let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+        panic!("expected invalid tool arguments failure: {events:?}");
+    };
+    assert_eq!(
+        error.kind,
+        crate::events::SamplingErrorKind::InvalidToolArguments
+    );
+    assert!(error.is_retryable);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, SamplingEvent::Completed { .. })));
+    error
+}
+
 fn tool_start(index: u32, input: serde_json::Value) -> MessageStreamEvent {
     MessageStreamEvent::ContentBlockStart {
         index,
@@ -136,44 +177,96 @@ fn tool_start(index: u32, input: serde_json::Value) -> MessageStreamEvent {
 async fn malformed_lifecycles_fail_without_completed_items() {
     let end = || message_delta_with_stop(messages::StopReason::EndTurn);
     let cases = vec![
-        vec![MessageStreamEvent::MessageStop],
-        vec![message_start(), MessageStreamEvent::MessageStop],
-        vec![message_start(), end()],
-        vec![message_start(), message_start()],
-        vec![message_start(), text_delta(0, "orphan")],
-        vec![message_start(), block_stop(0)],
-        vec![message_start(), text_block_start(0), text_block_start(0)],
-        vec![
-            message_start(),
-            text_block_start(0),
-            block_stop(0),
-            text_block_start(0),
-        ],
-        vec![
-            message_start(),
-            text_block_start(0),
-            block_stop(0),
-            block_stop(0),
-        ],
-        vec![
-            message_start(),
-            text_block_start(0),
-            block_stop(0),
-            text_delta(0, "late"),
-        ],
-        vec![
-            message_start(),
-            tool_start(0, serde_json::json!({})),
-            text_delta(0, "wrong type"),
-        ],
-        vec![message_start(), end(), text_block_start(0)],
-        vec![
-            message_start(),
-            end(),
-            message_delta_with_stop(messages::StopReason::MaxTokens),
-        ],
+        (
+            vec![MessageStreamEvent::MessageStop],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
+        (
+            vec![message_start(), MessageStreamEvent::MessageStop],
+            crate::events::SamplingErrorKind::IncompleteStream,
+            true,
+        ),
+        (
+            vec![message_start(), end()],
+            crate::events::SamplingErrorKind::IncompleteStream,
+            true,
+        ),
+        (
+            vec![message_start(), message_start()],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
+        (
+            vec![message_start(), text_delta(0, "orphan")],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
+        (
+            vec![message_start(), block_stop(0)],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
+        (
+            vec![message_start(), text_block_start(0), text_block_start(0)],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
+        (
+            vec![
+                message_start(),
+                text_block_start(0),
+                block_stop(0),
+                text_block_start(0),
+            ],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
+        (
+            vec![
+                message_start(),
+                text_block_start(0),
+                block_stop(0),
+                block_stop(0),
+            ],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
+        (
+            vec![
+                message_start(),
+                text_block_start(0),
+                block_stop(0),
+                text_delta(0, "late"),
+            ],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
+        (
+            vec![
+                message_start(),
+                tool_start(0, serde_json::json!({})),
+                text_delta(0, "wrong type"),
+            ],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
+        (
+            vec![message_start(), end(), text_block_start(0)],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
+        (
+            vec![
+                message_start(),
+                end(),
+                message_delta_with_stop(messages::StopReason::MaxTokens),
+            ],
+            crate::events::SamplingErrorKind::Serialization,
+            false,
+        ),
     ];
-    for (index, events) in cases.into_iter().enumerate() {
+    for (index, (events, expected_kind, expected_retryable)) in cases.into_iter().enumerate() {
         let events = collect(stream_messages(
             stream::iter(events.into_iter().map(Ok)).boxed(),
             None,
@@ -181,7 +274,14 @@ async fn malformed_lifecycles_fail_without_completed_items() {
             Duration::from_secs(1),
         ))
         .await;
-        let error = assert_protocol_failure(&events);
+        let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+            panic!("expected rejected candidate: {events:?}");
+        };
+        assert_eq!(error.kind, expected_kind, "case {index}");
+        assert_eq!(error.is_retryable, expected_retryable, "case {index}");
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, SamplingEvent::Completed { .. })));
         assert!(
             error.usage.is_none(),
             "nonterminal usage cannot be called final, case {index}"
@@ -191,17 +291,45 @@ async fn malformed_lifecycles_fail_without_completed_items() {
 
 #[tokio::test]
 async fn tool_json_validation_is_atomic_and_preserves_initial_objects() {
-    for (input, delta, valid) in [
-        (serde_json::json!({}), None, true),
-        (serde_json::json!({"x":1}), None, true),
-        (serde_json::json!({}), Some("{\"x\":1}"), true),
-        (serde_json::json!({}), Some(""), false),
-        (serde_json::json!({}), Some("{\"x\":"), false),
-        (serde_json::json!({}), Some("{}{}"), false),
-        (serde_json::json!({}), Some("[]"), false),
-        (serde_json::json!({}), Some("null"), false),
-        (serde_json::json!({"x":1}), Some("{\"y\":2}"), false),
-        (serde_json::json!(null), None, false),
+    for (input, delta, expected_kind) in [
+        (serde_json::json!({}), None, None),
+        (serde_json::json!({"x":1}), None, None),
+        (serde_json::json!({}), Some("{\"x\":1}"), None),
+        (
+            serde_json::json!({}),
+            Some(""),
+            Some(crate::events::SamplingErrorKind::InvalidToolArguments),
+        ),
+        (
+            serde_json::json!({}),
+            Some("{\"x\":"),
+            Some(crate::events::SamplingErrorKind::InvalidToolArguments),
+        ),
+        (
+            serde_json::json!({}),
+            Some("{}{}"),
+            Some(crate::events::SamplingErrorKind::InvalidToolArguments),
+        ),
+        (
+            serde_json::json!({}),
+            Some("[]"),
+            Some(crate::events::SamplingErrorKind::InvalidToolArguments),
+        ),
+        (
+            serde_json::json!({}),
+            Some("null"),
+            Some(crate::events::SamplingErrorKind::InvalidToolArguments),
+        ),
+        (
+            serde_json::json!({"x":1}),
+            Some("{\"y\":2}"),
+            Some(crate::events::SamplingErrorKind::Serialization),
+        ),
+        (
+            serde_json::json!(null),
+            None,
+            Some(crate::events::SamplingErrorKind::Serialization),
+        ),
     ] {
         // A healthy sibling must not execute if the second tool is invalid.
         let mut wire = vec![
@@ -230,7 +358,7 @@ async fn tool_json_validation_is_atomic_and_preserves_initial_objects() {
             Duration::from_secs(1),
         ))
         .await;
-        if valid {
+        if expected_kind.is_none() {
             let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
                 panic!("{events:?}");
             };
@@ -240,12 +368,15 @@ async fn tool_json_validation_is_atomic_and_preserves_initial_objects() {
                 delta.map(str::to_owned).unwrap_or(input.to_string())
             );
         } else {
+            let error = match expected_kind.unwrap() {
+                crate::events::SamplingErrorKind::InvalidToolArguments => {
+                    assert_invalid_tool_arguments_failure(&events)
+                }
+                crate::events::SamplingErrorKind::Serialization => assert_protocol_failure(&events),
+                expected => panic!("unexpected expected kind {expected:?}"),
+            };
             assert_eq!(
-                assert_protocol_failure(&events)
-                    .usage
-                    .as_ref()
-                    .unwrap()
-                    .completion_tokens,
+                error.usage.as_ref().unwrap().completion_tokens,
                 5
             );
         }
@@ -313,12 +444,12 @@ async fn empty_content_deltas_do_not_extend_idle_deadline() {
 }
 
 #[tokio::test]
-async fn empty_stream_yields_started_then_protocol_failure() {
+async fn empty_stream_yields_started_then_incomplete_stream_failure() {
     let raw = stream::iter(Vec::<Result<MessageStreamEvent, SamplingError>>::new()).boxed();
     let events = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
     assert_eq!(events.len(), 2);
     assert!(matches!(events[0], SamplingEvent::StreamStarted { .. }));
-    assert_protocol_failure(&events);
+    assert_incomplete_stream_failure(&events);
 }
 
 #[tokio::test]

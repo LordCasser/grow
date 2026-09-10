@@ -150,7 +150,7 @@ pub struct RetryPolicy {
     /// Lower than `max_retries` because rate-limit waits can be long.
     pub rate_limit_retry_threshold: u32,
     #[serde(default)]
-    pub retry_only_before_output: bool,
+    pub output_delivery: crate::recovery::OutputDelivery,
 }
 
 impl Default for RetryPolicy {
@@ -158,7 +158,7 @@ impl Default for RetryPolicy {
         Self {
             max_retries: DEFAULT_MAX_RETRIES,
             rate_limit_retry_threshold: RATE_LIMIT_RETRY_THRESHOLD,
-            retry_only_before_output: false,
+            output_delivery: crate::recovery::OutputDelivery::Irreversible,
         }
     }
 }

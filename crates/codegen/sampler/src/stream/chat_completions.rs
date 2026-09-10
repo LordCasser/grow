@@ -39,8 +39,8 @@ fn merge_tool_identity(
     } else if *current == value {
         Ok(None)
     } else {
-        Err(SamplingError::Serialization(serde::de::Error::custom(
-            format!("Chat stream protocol: conflicting tool {field} at index {index}"),
+        Err(SamplingError::serialization_message(format!(
+            "Chat stream protocol: conflicting tool {field} at index {index}"
         )))
     }
 }
@@ -59,7 +59,8 @@ fn merge_tool_identity(
 /// 2. The transport keeps yielding empty / keepalive chunks but no
 ///    meaningful content (separate `last_content_chunk_at` timer).
 ///
-/// Both produce `SamplingEvent::Failed { kind: IdleTimeout }`.
+/// A stalled transport produces `IdleTimeout`; EOF without finish evidence
+/// produces `IncompleteStream`.
 pub fn stream_chat_completions<'a>(
     raw_stream: BoxStream<'a, Result<ChatCompletionChunk, SamplingError>>,
     model_metadata: Option<ResponseModelMetadata>,
@@ -149,6 +150,14 @@ pub fn stream_chat_completions<'a>(
             };
             let chunk = match next {
                 Ok(chunk) => chunk,
+                Err(err) if finish_reason.is_some()
+                    && matches!(&err, SamplingError::Http(_) | SamplingError::EventStreamError(_)
+                        | SamplingError::IdleTimeout { .. } | SamplingError::IncompleteStream { .. }) => {
+                    // A transport loss during the optional usage tail cannot
+                    // invalidate a provider-completed candidate. Missing usage
+                    // remains unknown and is settled by the accounting gate.
+                    break;
+                }
                 Err(err) => {
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
@@ -175,17 +184,11 @@ pub fn stream_chat_completions<'a>(
                 yield protocol_failure(&request_id, "Chat stream protocol: multiple choices in a single-candidate response", None);
                 return;
             }
-
-            if let Some(u) = chunk.usage.clone() {
-                // Wire cost is cumulative for the response, so last-write-wins.
-                // Never clobber a known cost with missing/unreported.
-                let chunk_cost = sampling_types::reported_cost_ticks(u.cost_in_usd_ticks);
-                cost_usd_ticks = match (cost_usd_ticks, chunk_cost) {
-                    (_, Some(n)) => Some(n),
-                    (prev, None) => prev,
-                };
-                usage = Some(u.into());
-            }
+            // A provider may attach an intermediate usage snapshot to a
+            // content chunk. It is only accounting evidence after a finish
+            // reason, or on an independent choices=[] usage tail frame.
+            let chunk_usage = chunk.usage.clone();
+            let choices_empty = chunk.choices.is_empty();
 
             // Track whether this chunk carried meaningful content.
             // Set inside the choices loop and checked at the end.
@@ -195,9 +198,7 @@ pub fn stream_chat_completions<'a>(
                 // Grow requests one candidate. Never combine different
                 // candidates' text or executable calls into one response.
                 if choice.index != 0 {
-                    let err = SamplingError::Serialization(serde::de::Error::custom(
-                        "Chat stream protocol: unexpected nonzero choice index",
-                    ));
+                    let err = SamplingError::serialization_message("Chat stream protocol: unexpected nonzero choice index");
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -224,9 +225,7 @@ pub fn stream_chat_completions<'a>(
                         || delta.reasoning_content.as_ref().is_some_and(|text| !text.is_empty())
                         || !delta.tool_calls.is_empty())
                 {
-                    let err = SamplingError::Serialization(serde::de::Error::custom(
-                        "Chat stream protocol: output received after finish_reason",
-                    ));
+                    let err = SamplingError::serialization_message("Chat stream protocol: output received after finish_reason");
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -326,6 +325,19 @@ pub fn stream_chat_completions<'a>(
                 }
             }
 
+            if (finish_reason.is_some() || choices_empty)
+                && let Some(u) = chunk_usage
+            {
+                // Wire cost is cumulative for the response, so last-write-wins.
+                // Never clobber a known cost with missing/unreported.
+                let chunk_cost = sampling_types::reported_cost_ticks(u.cost_in_usd_ticks);
+                cost_usd_ticks = match (cost_usd_ticks, chunk_cost) {
+                    (_, Some(n)) => Some(n),
+                    (prev, None) => prev,
+                };
+                usage = Some(u.into());
+            }
+
             if chunk_has_content {
                 last_content_chunk_at = Instant::now();
             } else if last_content_chunk_at.elapsed() > idle_timeout {
@@ -345,16 +357,18 @@ pub fn stream_chat_completions<'a>(
 
         // EOF is not completion evidence, even for text-only or empty output.
         if !first_choice_seen || finish_reason.is_none() {
-            yield protocol_failure(&request_id, "Chat stream protocol: stream ended without a choice finish_reason", None);
+            yield super::incomplete_stream(&request_id, sampling_types::ApiBackend::ChatCompletions,
+                "stream ended without a choice finish_reason", usage);
             return;
         }
         for (index, (_, _, arguments)) in &tool_call_acc {
             if serde_json::from_str::<serde::de::IgnoredAny>(arguments).is_err() {
-                let err = SamplingError::Serialization(serde::de::Error::custom(format!(
-                    "Chat stream protocol: incomplete or invalid JSON arguments at tool index {index}"
-                )));
+                let err = SamplingError::InvalidToolArguments(format!(
+                    "Chat tool index {index} contains invalid JSON arguments"
+                ));
                 let mut error = SamplingErrorInfo::from(&err);
                 error.usage = usage;
+                error.cost_usd_ticks = cost_usd_ticks;
                 yield SamplingEvent::Failed {
                     request_id: request_id.clone(),
                     error,
@@ -494,7 +508,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_stream_yields_started_then_protocol_failure() {
+    async fn completed_candidate_survives_transport_failure_in_usage_tail() {
+        let events = collect(stream_chat_completions(
+            stream::iter(vec![
+                Ok(text_chunk("answer")),
+                Ok(final_chunk(FinishReason::Stop)),
+                Err(SamplingError::EventStreamError("connection reset".into())),
+            ])
+            .boxed(),
+            None,
+            rid(),
+            Duration::from_secs(1),
+        ))
+        .await;
+        let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
+            panic!("{events:?}")
+        };
+        assert_eq!(response.assistant_text(), "answer");
+        assert!(response.usage.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_stream_yields_started_then_incomplete_stream_failure() {
         let raw = stream::iter(Vec::<Result<ChatCompletionChunk, SamplingError>>::new()).boxed();
         let events = collect(stream_chat_completions(
             raw,
@@ -508,15 +543,52 @@ mod tests {
         assert!(matches!(events[0], SamplingEvent::StreamStarted { .. }));
         match &events[1] {
             SamplingEvent::Failed { error, .. } => {
-                assert_eq!(error.kind, crate::events::SamplingErrorKind::Serialization);
-                assert!(!error.is_retryable);
+                assert_eq!(
+                    error.kind,
+                    crate::events::SamplingErrorKind::IncompleteStream
+                );
+                assert!(error.is_retryable);
+                assert_eq!(
+                    error.backend,
+                    Some(sampling_types::ApiBackend::ChatCompletions)
+                );
             }
             other => panic!("expected Failed, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn text_eof_and_conflicting_terminals_are_protocol_failures() {
+    async fn text_or_empty_eof_is_an_incomplete_stream() {
+        for chunks in [vec![text_chunk("partial")], vec![make_chunk(vec![])]] {
+            let events = collect(stream_chat_completions(
+                stream::iter(chunks.into_iter().map(Ok)).boxed(),
+                None,
+                rid(),
+                Duration::from_secs(1),
+            ))
+            .await;
+            let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+                panic!("{events:?}")
+            };
+            assert_eq!(
+                error.kind,
+                crate::events::SamplingErrorKind::IncompleteStream
+            );
+            assert!(error.is_retryable);
+            assert_eq!(
+                error.backend,
+                Some(sampling_types::ApiBackend::ChatCompletions)
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deterministic_protocol_failures_are_not_downgraded_to_eof() {
         let mut wrong_id = text_chunk("wrong");
         wrong_id.id = "another-response".into();
         let mut unknown_tool = make_chunk(vec![ChatChunkDelta {
@@ -533,8 +605,6 @@ mod tests {
         }]);
         unknown_tool.choices[0].finish_reason = Some(FinishReason::ToolCalls);
         for chunks in [
-            vec![text_chunk("partial")],
-            vec![make_chunk(vec![])],
             vec![text_chunk("hello"), wrong_id],
             vec![
                 final_chunk(FinishReason::Stop),
@@ -564,6 +634,11 @@ mod tests {
                 matches!(events.last(), Some(SamplingEvent::Failed { error, .. })
                 if error.kind == crate::events::SamplingErrorKind::Serialization && !error.is_retryable),
                 "{events:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, SamplingEvent::Completed { .. }))
             );
         }
     }
@@ -1045,9 +1120,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conflicting_identity_and_bare_tool_eof_fail_closed() {
+    async fn bare_tool_eof_is_an_incomplete_stream() {
+        let events = collect(stream_chat_completions(
+            stream::iter(vec![Ok(tool_delta(0, Some("a"), Some("f"), "{}"))]).boxed(),
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+        let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            error.kind,
+            crate::events::SamplingErrorKind::IncompleteStream
+        );
+        assert!(error.is_retryable);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_tool_identity_stays_a_deterministic_failure() {
         for chunks in [
-            vec![Ok(tool_delta(0, Some("a"), Some("f"), "{}"))],
             vec![
                 Ok(tool_delta(0, Some("a"), Some("f"), "{")),
                 Ok(tool_delta(0, Some("b"), None, "}")),
@@ -1075,6 +1173,35 @@ mod tests {
                     .any(|event| matches!(event, SamplingEvent::Completed { .. }))
             );
         }
+    }
+
+    #[tokio::test]
+    async fn complete_invalid_tool_arguments_reject_the_whole_chat_candidate() {
+        let chunks = vec![
+            Ok(tool_delta(0, Some("bad"), Some("bad_tool"), "{")),
+            Ok(tool_delta(1, Some("good"), Some("good_tool"), "{}")),
+            Ok(final_chunk(FinishReason::ToolCalls)),
+        ];
+        let events = collect(stream_chat_completions(
+            stream::iter(chunks).boxed(),
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+        let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+            panic!("{events:?}")
+        };
+        assert_eq!(
+            error.kind,
+            crate::events::SamplingErrorKind::InvalidToolArguments
+        );
+        assert!(error.is_retryable);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+        );
     }
 
     #[tokio::test]
@@ -1289,7 +1416,7 @@ mod tests {
 
     #[tokio::test]
     async fn usage_is_extracted_from_chunk() {
-        let mut chunk_with_usage = make_chunk(vec![ChatChunkDelta::default()]);
+        let mut chunk_with_usage = make_chunk(vec![]);
         chunk_with_usage.usage = Some(Usage {
             prompt_tokens: 100,
             completion_tokens: 50,
@@ -1301,8 +1428,8 @@ mod tests {
 
         let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
             Ok(text_chunk("ok")),
-            Ok(chunk_with_usage),
             Ok(final_chunk(FinishReason::Stop)),
+            Ok(chunk_with_usage),
         ];
         let raw = stream::iter(chunks).boxed();
         let events = collect(stream_chat_completions(
@@ -1329,7 +1456,7 @@ mod tests {
     #[tokio::test]
     async fn cost_is_extracted_and_zero_is_unreported() {
         for (wire, expected) in [(Some(78), Some(78)), (Some(0), None), (None, None)] {
-            let mut chunk_with_usage = make_chunk(vec![ChatChunkDelta::default()]);
+            let mut chunk_with_usage = make_chunk(vec![]);
             chunk_with_usage.usage = Some(Usage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
@@ -1340,8 +1467,8 @@ mod tests {
             });
             let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
                 Ok(text_chunk("ok")),
-                Ok(chunk_with_usage),
                 Ok(final_chunk(FinishReason::Stop)),
+                Ok(chunk_with_usage),
             ];
             let raw = stream::iter(chunks).boxed();
             let events = collect(stream_chat_completions(
@@ -1362,7 +1489,7 @@ mod tests {
 
     #[tokio::test]
     async fn later_missing_cost_does_not_clobber_earlier_ticks() {
-        let mut first = make_chunk(vec![ChatChunkDelta::default()]);
+        let mut first = make_chunk(vec![]);
         first.usage = Some(Usage {
             prompt_tokens: 10,
             completion_tokens: 5,
@@ -1371,7 +1498,7 @@ mod tests {
             completion_tokens_details: None,
             cost_in_usd_ticks: Some(99),
         });
-        let mut second = make_chunk(vec![ChatChunkDelta::default()]);
+        let mut second = make_chunk(vec![]);
         second.usage = Some(Usage {
             prompt_tokens: 12,
             completion_tokens: 6,
@@ -1382,9 +1509,9 @@ mod tests {
         });
         let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
             Ok(text_chunk("ok")),
+            Ok(final_chunk(FinishReason::Stop)),
             Ok(first),
             Ok(second),
-            Ok(final_chunk(FinishReason::Stop)),
         ];
         let raw = stream::iter(chunks).boxed();
         let events = collect(stream_chat_completions(
@@ -1400,5 +1527,35 @@ mod tests {
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn partial_usage_snapshot_is_not_confirmed_before_terminal_evidence() {
+        let mut partial = make_chunk(vec![ChatChunkDelta::default()]);
+        partial.usage = Some(Usage {
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            total_tokens: 14,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+            cost_in_usd_ticks: Some(17),
+        });
+        let events = collect(stream_chat_completions(
+            stream::iter(vec![Ok(text_chunk("partial")), Ok(partial)]).boxed(),
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+
+        let Some(SamplingEvent::Failed { error, .. }) = events.last() else {
+            panic!("expected incomplete stream, got {events:?}")
+        };
+        assert_eq!(
+            error.kind,
+            crate::events::SamplingErrorKind::IncompleteStream
+        );
+        assert!(error.usage.is_none());
+        assert!(error.cost_usd_ticks.is_none());
     }
 }

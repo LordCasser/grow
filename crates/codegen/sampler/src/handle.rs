@@ -19,15 +19,31 @@ use crate::types::RequestId;
 /// admission must not create a usage scope. The sampler remains unaware of
 /// Goal/session semantics.
 pub type AttemptScopeCapture =
-    std::sync::Arc<dyn Fn() -> BoxFuture<'static, Result<Option<String>, String>> + Send + Sync>;
+    std::sync::Arc<dyn Fn() -> BoxFuture<'static, Result<AttemptAdmission, String>> + Send + Sync>;
+
+#[derive(Debug, Clone, Default)]
+pub struct AttemptAdmission {
+    pub scope: Option<String>,
+    pub max_output_tokens: Option<u32>,
+}
+
+impl From<Option<String>> for AttemptAdmission {
+    fn from(scope: Option<String>) -> Self {
+        Self { scope, max_output_tokens: None }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum AttemptUsage {
     Known {
+        attempt_key: String,
+        cost_usd_ticks: Option<i64>,
+        api_duration_ms: Option<u64>,
         scope: Option<String>,
         usage: TokenUsage,
     },
     Incomplete {
+        attempt_key: String,
         scope: Option<String>,
     },
 }
@@ -94,6 +110,7 @@ impl SamplerHandle {
             scope_capture: None,
             usage_sink: None,
             evidence_sink: None,
+                recovery: None,
         });
     }
 
@@ -116,6 +133,7 @@ impl SamplerHandle {
             scope_capture: None,
             usage_sink: None,
             evidence_sink: None,
+                recovery: None,
         });
     }
 
@@ -168,9 +186,7 @@ impl SamplerHandle {
         request: ConversationRequest,
     ) -> Result<(ConversationResponse, InferenceLatencyStats), SamplingError> {
         if !self.accepting.load(Ordering::Acquire) {
-            return Err(SamplingError::auth_unknown(
-                "sampler actor is shutting down",
-            ));
+            return Err(SamplingError::Lifecycle("sampler actor is shutting down".into()));
         }
         // RAII guard: when this future is dropped (cancel, panic, or normal return),
         // tell the sampler actor to cancel the in-flight request_id. No-op if the
@@ -202,6 +218,7 @@ impl SamplerHandle {
                 scope_capture: None,
                 usage_sink: None,
                 evidence_sink: None,
+                recovery: None,
             })
             .ok()
             .map(|_| CancelOnDrop {
@@ -209,9 +226,7 @@ impl SamplerHandle {
                 request_id: cancel_id,
             });
         completion_rx.await.unwrap_or_else(|_| {
-            Err(SamplingError::auth_unknown(
-                "sampler actor dropped before completion",
-            ))
+            Err(SamplingError::Lifecycle("sampler actor dropped before completion".into()))
         })
     }
 
@@ -225,11 +240,10 @@ impl SamplerHandle {
         scope_capture: Option<AttemptScopeCapture>,
         usage_sink: Option<AttemptUsageSink>,
         evidence_sink: Option<crate::audit::EvidenceSink>,
+        recovery: crate::recovery::RecoveryBudget,
     ) -> Result<(sampling_types::ConversationResponse, InferenceLatencyStats), SamplingError> {
         if !self.accepting.load(Ordering::Acquire) {
-            return Err(SamplingError::auth_unknown(
-                "sampler actor is shutting down",
-            ));
+            return Err(SamplingError::Lifecycle("sampler actor is shutting down".into()));
         }
         struct CancelOnDrop {
             cmd_tx: mpsc::UnboundedSender<SamplerCommand>,
@@ -254,6 +268,7 @@ impl SamplerHandle {
                 scope_capture,
                 usage_sink,
                 evidence_sink,
+                recovery: Some(recovery),
             })
             .ok()
             .map(|_| CancelOnDrop {
@@ -261,9 +276,7 @@ impl SamplerHandle {
                 request_id: cancel_id,
             });
         completion_rx.await.unwrap_or_else(|_| {
-            Err(SamplingError::auth_unknown(
-                "sampler actor dropped before completion",
-            ))
+            Err(SamplingError::Lifecycle("sampler actor dropped before completion".into()))
         })
     }
 }

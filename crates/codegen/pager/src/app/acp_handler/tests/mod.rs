@@ -202,6 +202,40 @@ fn canonical_session_info_title_update_replaces_legacy_extension_channel() {
 }
 
 #[test]
+fn transient_session_usage_replaces_totals_without_context_or_scrollback() {
+    let mut app = make_app_with_agent("session-usage");
+    let id = AgentId(0);
+    let before = app.agents[&id].scrollback.len();
+    for (tokens, incomplete, replay) in [(1000, false, false), (1000, false, false), (1200, true, false), (1000, false, false), (9, false, true)] {
+        let (response_tx, _) = tokio::sync::oneshot::channel();
+        let usage = shell::extensions::notification::PromptUsage {
+            totals: shell::extensions::notification::PromptUsageModel {
+                input_tokens: tokens, cached_read_tokens: tokens / 2,
+                output_tokens: 100, model_calls: 1, ..Default::default()
+            },
+            usage_is_incomplete: incomplete,
+            ..Default::default()
+        };
+        let update = acp::SessionInfoUpdate::new().meta(
+            serde_json::json!({ "grow/sessionUsage": usage }).as_object().cloned(),
+        );
+        let notification = acp::SessionNotification::new(
+            acp::SessionId::new("session-usage"), acp::SessionUpdate::SessionInfoUpdate(update),
+        ).meta(serde_json::json!({ "transient": true, "isReplay": replay }).as_object().cloned());
+        handle(AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+            request: notification, response_tx,
+        }), &mut app);
+    }
+    let session = &app.agents[&id].session;
+    let usage = session.session_usage.as_ref().unwrap();
+    assert_eq!(usage.totals.input_tokens, 1200);
+    assert_eq!(usage.totals.cached_read_tokens, 600);
+    assert!(usage.usage_is_incomplete);
+    assert!(session.context_state.is_none());
+    assert_eq!(app.agents[&id].scrollback.len(), before);
+}
+
+#[test]
 fn transient_context_pressure_refreshes_state_without_scrollback() {
     let mut app = make_app_with_agent("session-context-pressure");
     let id = AgentId(0);

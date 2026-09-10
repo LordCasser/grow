@@ -32,7 +32,50 @@ pub(super) enum SubagentUsageApply {
     /// Sticky report only — do not stain ledgers for "missing" spend.
     SessionOnly,
 }
+/// Ensures a returned error, cancellation, or dropped turn cannot leave a
+/// provisional candidate accepted implicitly by a later turn.
+pub(super) struct SamplingPreviewGuard<'a>(pub &'a SessionActor);
+impl Drop for SamplingPreviewGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finish_sampling_preview(false);
+    }
+}
 impl SessionActor {
+    pub(super) fn finish_sampling_preview(&self, accepted: bool) {
+        use crate::extensions::notification::SamplingAttemptState;
+        if let Some((request_id, attempt)) = self.sampling_preview.lock().take() {
+            let notification = GrowSessionNotification {
+                session_id: self.session_info.id.clone(),
+                update: GrowSessionUpdate::SamplingAttempt {
+                    request_id,
+                    attempt,
+                    state: if accepted {
+                        SamplingAttemptState::Accepted
+                    } else {
+                        SamplingAttemptState::Discarded
+                    },
+                },
+                meta: Some(
+                    json!({"samplingOutputDelivery": self.tool_context.sampling_output_delivery, "eventId": self.generate_event_id()}),
+                ),
+            };
+            let _ = self
+                .event_tx
+                .send(SessionEvent::Notification(notification.into()));
+        }
+    }
+
+    fn sampling_preview_meta(&self) -> Option<acp::Meta> {
+        self.sampling_preview
+            .lock()
+            .as_ref()
+            .map(|(request_id, attempt)| {
+                json!({"samplingRequestId": request_id, "samplingAttempt": attempt})
+                    .as_object()
+                    .cloned()
+                    .expect("object literal")
+            })
+    }
     /// Apply subagent usage. `Ok` after chat-state acked; `Err` if apply failed.
     pub(super) async fn record_subagent_usage(
         &self,
@@ -164,6 +207,15 @@ impl SessionActor {
         if let Some(update_params) = update_params {
             obj.insert("updateParams".to_string(), update_params);
         }
+        if !is_replay
+            && matches!(
+                &update,
+                acp::SessionUpdate::AgentMessageChunk(_) | acp::SessionUpdate::AgentThoughtChunk(_)
+            )
+            && let Some(ownership) = self.sampling_preview_meta()
+        {
+            obj.extend(ownership);
+        }
         if let Some(idx) = chunk_index {
             obj.insert("chunkId".to_string(), idx.into());
         }
@@ -188,10 +240,30 @@ impl SessionActor {
     /// buffered) and `emit_notification_direct` (low-frequency, direct).
     pub(super) async fn send_buffered_grow_update(&self, update: GrowSessionUpdate) {
         self.close_rewind_window().await;
+        let meta = if matches!(&update, GrowSessionUpdate::SamplingAttempt { .. }) {
+            Some(
+                json!({"samplingOutputDelivery": self.tool_context.sampling_output_delivery, "eventId": self.generate_event_id()}),
+            )
+        } else {
+            matches!(
+                &update,
+                GrowSessionUpdate::ToolCallDeltaChunk { .. }
+                    | GrowSessionUpdate::ResponseStarted { .. }
+                    | GrowSessionUpdate::ReasoningCompleted { .. }
+            )
+            .then(|| self.sampling_preview_meta().map(serde_json::Value::Object))
+            .flatten()
+        };
+        let mut meta = meta;
+        if let Some(serde_json::Value::Object(object)) = &mut meta {
+            object
+                .entry("eventId")
+                .or_insert_with(|| self.generate_event_id().into());
+        }
         let notification = GrowSessionNotification {
             session_id: self.session_info.id.clone(),
             update,
-            meta: None,
+            meta,
         };
         let _ = self
             .event_tx
@@ -261,6 +333,21 @@ impl SessionActor {
             }
             SessionNotification::Grow(n) => {
                 self.log_outbound_grow_buffered(&n);
+                if let GrowSessionUpdate::SamplingAttempt {
+                    request_id,
+                    attempt,
+                    state,
+                } = &n.update
+                {
+                    let _ =
+                        self.notifications
+                            .persistence_tx
+                            .send(PersistenceMsg::SamplingAttempt {
+                                request_id: request_id.clone(),
+                                attempt: *attempt,
+                                state: *state,
+                            });
+                }
                 if self
                     .notifications
                     .gateway_enabled
@@ -395,6 +482,28 @@ impl SessionActor {
             .cloned(),
         );
         self.emit_transient_notification(notification);
+    }
+
+    /// Billing is a live process-local ledger, never replayable transcript.
+    pub(super) fn emit_session_usage_update(&self, usage: &chat_state::UsageLedger) {
+        let update = acp::SessionInfoUpdate::new().meta(
+            serde_json::json!({
+                "grow/sessionUsage": crate::extensions::notification::PromptUsage::from(usage),
+            })
+            .as_object()
+            .cloned(),
+        );
+        self.emit_transient_notification(
+            acp::SessionNotification::new(
+                self.session_info.id.clone(),
+                acp::SessionUpdate::SessionInfoUpdate(update),
+            )
+            .meta(
+                serde_json::json!({ "transient": true })
+                    .as_object()
+                    .cloned(),
+            ),
+        );
     }
     /// Flush buffered notifications and drain the persistence merge buffer to
     /// disk. Blocks until the persistence actor confirms the write is complete.
@@ -929,6 +1038,65 @@ fn acking_persistence_channel() -> (
 mod grow_event_id_stamping_tests {
     use super::super::tests::support::create_test_actor;
     use super::*;
+    #[tokio::test]
+    async fn session_usage_projection_is_transient_and_matches_usage_query() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                let mut ledger = chat_state::UsageLedger::default();
+                ledger.record_main_loop_call(
+                    "provider/model",
+                    &sampling_types::TokenUsage {
+                        prompt_tokens: 1000,
+                        completion_tokens: 200,
+                        cached_prompt_tokens: 750,
+                        ..Default::default()
+                    },
+                    None,
+                    None,
+                );
+                ledger.mark_incomplete();
+                actor.emit_session_usage_update(&ledger);
+                let message = gateway_rx.recv().await.unwrap();
+                let acp_transport::AcpClientMessage::SessionNotification(args) = message else {
+                    panic!("expected transient session info update");
+                };
+                assert_eq!(
+                    args.request.meta.as_ref().unwrap().get("transient"),
+                    Some(&json!(true))
+                );
+                assert!(args.request.meta.as_ref().unwrap().get("eventId").is_none());
+                assert!(
+                    args.request
+                        .meta
+                        .as_ref()
+                        .unwrap()
+                        .get("totalTokens")
+                        .is_none()
+                );
+                let acp::SessionUpdate::SessionInfoUpdate(update) = args.request.update else {
+                    panic!("usage is metadata, not transcript content");
+                };
+                assert_eq!(
+                    update.meta.unwrap()["grow/sessionUsage"],
+                    serde_json::to_value(crate::extensions::notification::PromptUsage::from(
+                        &ledger
+                    ))
+                    .unwrap()
+                );
+                assert!(!std::iter::from_fn(|| persistence_rx.try_recv().ok()).any(
+                    |msg| matches!(
+                        msg,
+                        PersistenceMsg::Update(_)
+                            | PersistenceMsg::AppendUpdateDurablyAndAck { .. }
+                    )
+                ));
+            })
+            .await;
+    }
+
     #[tokio::test]
     async fn sampling_failure_notice_waits_for_exact_turn_outcome() {
         tokio::task::LocalSet::new()

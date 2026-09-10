@@ -93,6 +93,10 @@ Every terminal Goal transition first retires the exact producing prompt and then
 
 The Goal detail overlay is a read-only projection of that same state. It contains no task board or hidden planner state.
 
+Goal tools finish their ACP rows through `acp_tool_update`, including creation and reads. A successful model-facing result must also produce `Completed`; otherwise Pager retains the row's running timer until the turn ends. Continuation context already contains the objective and budget, so the behavior and tool descriptions discourage routine `get_goal` checks. See [Goal tool completion](../../openspec/specs/client-surfaces/spec.md#requirement-goal-tool-success-closes-its-running-ui-row) and [on-demand reads](../../openspec/specs/behavior-goal/spec.md#requirement-goal-status-is-queried-on-demand).
+
+Detailed token counts use comma grouping, including budgets and lower-bound history. The compact Goal chip keeps k/M units. Outside a Goal, the ordinary session chip reads the process-local session ledger and opens Usage; it does not reuse Goal's durable totals or context-window pressure. See [usage presentation](../../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage).
+
 ## Recovery invariants
 
 Completed Responses output with invalid tool JSON is discarded and resampled before the turn can fail. This uses the sampler's existing retry, evidence and usage settlement path, with at most three attempts (or a lower configured cap). Preview output does not authorize tool execution; only validated completion admits calls and native continuation. Recovery emits Retrying diagnostics while the TUI keeps its normal running activity and Goal remains active. Cancellation, admission closure and persistence failures stop recovery, and exhaustion follows the normal Goal pause path. Generic serialization and inconsistent identities remain terminal. See [model-sampling](../../openspec/specs/model-sampling/spec.md).

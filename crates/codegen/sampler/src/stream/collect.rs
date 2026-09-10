@@ -44,7 +44,9 @@ pub async fn collect_response(
     }
 
     Err(SamplingErrorInfo {
-        kind: SamplingErrorKind::Api,
+        source: None,
+        backend: None,
+        kind: SamplingErrorKind::Lifecycle,
         status_code: None,
         message: "stream ended without Completed or Failed".to_string(),
         is_retryable: false,
@@ -55,6 +57,7 @@ pub async fn collect_response(
         doom_loop_aborted_at_chunk: None,
         credential: sampling_types::SentCredential::Unknown,
         usage: None,
+        cost_usd_ticks: None,
     })
 }
 
@@ -151,7 +154,7 @@ mod tests {
         let err = collect_response(truncated)
             .await
             .expect_err("truncated stream returns Err");
-        assert_eq!(err.kind, SamplingErrorKind::Api);
+        assert_eq!(err.kind, SamplingErrorKind::Lifecycle);
         assert!(err.message.contains("stream ended without"));
     }
 

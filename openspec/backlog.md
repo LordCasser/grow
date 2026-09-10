@@ -7,6 +7,14 @@ Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，�
 
 远程配置管理、deployment-config 服务、签名策略同步及其专用 CLI 不在规划范围内。
 
+## 压缩后的 portable 工具历史
+
+2026-09-10 核对 session `01a08910-219a-78f1-a45c-98b448764a05`：局部压缩保留了 tail identity，但 `finish_surface_replacement` 重置整个 native epoch 后，`project_portable_history` 把最新的成对工具调用/结果也转换成 Historical tool exchange 文本。已观察到压缩后模型只给出行动预告便合法 stop，因果强度仍受单样本限制。本次修复历史摘要范围与下一 Step 续接；结构化 portable tail 单独立项。
+
+- ceiling：继续清除旧 native 签名/加密 reasoning，不按相同 model/backend 猜测它们仍合法，也不通过回复长度/冒号强制重采样。
+- trigger：在继续评估此类语义停顿、跨模型迁移或 portable 请求协议时，由用户明确启动。
+- upgrade：分别证明三个后端对不含旧 reasoning carrier 的完整工具往返的接受边界，设计同 route 与跨 route 的投影策略；覆盖 partial compaction、完整/悬空/孤立工具项、模型切换和 replay。验证实际 wire 与后续工具执行，避免重发已执行副作用或从历史恢复 native state。
+
 ## 长期：MCP Elicitation 与交互式 MCP
 
 > **状态**：等待协议与生态稳定；满足条件也不会自动进入实现，必须由用户手动启动。
@@ -39,6 +47,8 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 ## 长期：v2.1.0 架构审计后续
 
 以下项目不是 v2.1.0 的实现内容。它们只记录已经确认的边界、影响与未来验收条件，不能作为当前代码的第二事实源。
+
+- **子 Agent 诊断面板目标路由**：`pager/src/app/root/dispatch/status.rs` 的 Usage/Context/SessionInfo 打开及异步结果处理固定定位根 Agent，而 `ctx.rs` 已有可定位当前子视图的 helper。若对子视图增加用量点击入口，会错误打开父账本；`improve-goal-status-and-usage` 仅在普通主会话提供新入口。后续单独统一打开与异步结果的目标身份，验证切换/关闭/重开子视图、父子同时读取和迟到结果不会串用数据，不改变账本 owner 或把子用量重复计入父会话。
 
 - **LLM 非聚合失败的因果取证**：工具协议污染修复已保留聚合响应和 `IntegrityRepair` replacement，但这不等于覆盖解析失败、半截 SSE、空响应重试及所有 Sideband 失败中的原始证据。后续应沿现有 request/attempt/result 生命周期核对记录边界；凡参与重试、停止、计费或降级的部分输出和决定，都必须在所属 Timeline 中留有可验证的证据或不可变 artifact 引用。验收要求在流中断、解析错误、重试和崩溃窗口注入故障后仍能重建因果链，不能只保留成功 attempt 或另建调试日志充当事实源。此项与已实现的 Surface 工具身份/配对修复分开处理。
 
@@ -661,3 +671,8 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 ## 审计债务：跨 resume 的会话用量账本
 
 2026-09-09 核对 `/usage`：`extensions/usage.rs` 读取进程内 UsageLedger，当前窗口为启动或最近 resume 之后。历史 Request 完成记录保留部分用量，但失败/重试调用、Sideband、子会话和旧 wire model 的 provider 归属需要统一核对，不能简单叠加展示日志或猜测回填。后续单独立项完善持久化归属与恢复；本次仅实现 `/usage` 的 provider/model 分项与缓存命中率。
+
+- **辅助采样的统计口径与恢复所有者**：本次 `unify-sampling-attempt-recovery` 统一了主/子 agent 的模型步骤账本与恢复预算。Sideband 仍使用其既有独立 attempt、证据、Goal 结算及预算，不混入 main-loop usage；若产品需要统一全部辅助消费展示，应独立核对 SidebandUsage、session totals、parent fold 的统计口径后立项，不能简单重复累计。
+- **可撤销预览的资源上限**：leader 的候选暂存和持久化投影暂存只保留当前未接纳候选，不保留已接纳历史；单个超长候选的内存上限仍需与现有 stream/body/evidence 限制统一审计。应独立设计有界溢出停止或落盘策略，不能为了限流提前把未接纳内容外发/写入回放。
+
+- **断线中的活跃候选前缀补传**：`unify-sampling-attempt-recovery` 隔离并清理未接纳预览，`updates.jsonl` 只包含已接纳内容。现有 root load 与子视图按需回放不能据此保证完整补传断线期间仍在生成的候选前缀。若需要不中断地恢复完整实时展示，应独立核对 leader 的 load cutoff、当前候选快照和子会话历史水位，在同一 session/attempt 归属下补传并去重；不得把临时预览重新写成接纳历史，也不能把该 UI 能力等同于重新执行 provider。

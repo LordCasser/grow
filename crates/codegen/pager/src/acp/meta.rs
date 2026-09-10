@@ -44,6 +44,10 @@ pub struct NotificationMeta {
     /// pager keeps a highwater and drops anything `<=` it. `None` when the agent
     /// didn't stamp an `eventId` (older shell) — such updates always apply.
     pub event_seq: Option<u64>,
+    /// Logical sampler request identity for preview chunks.
+    pub sampling_request_id: Option<String>,
+    /// Provider attempt number within the logical sampler request.
+    pub sampling_attempt: Option<u32>,
 }
 
 /// Serializable counterpart of the replay stamp the agent injects on
@@ -126,6 +130,14 @@ impl NotificationMeta {
             is_replay: m.get("isReplay").and_then(|v| v.as_bool()).unwrap_or(false),
             event_id,
             event_seq,
+            sampling_request_id: m
+                .get("samplingRequestId")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            sampling_attempt: m
+                .get("samplingAttempt")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok()),
         }
     }
 }

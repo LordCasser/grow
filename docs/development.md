@@ -2,6 +2,17 @@
 
 项目使用 OpenSpec SDD。先把本次要改变的行为写清楚，再实现和验证，最后归档成为当前规范。纯文档修正也保留最小变更记录，但不增加无意义需求。
 
+采样断流排查从 attempt evidence 的 `attempt_number`、`stream_end`、
+`output_delivery`、`output_observed` 和 `recovery_stop` 决定开始，再核对
+Timeline 的 `sampling_usage/attempt_settled`。`[DONE]` 或 body EOF 不能代替
+协议完成证据；没有对应会话的原始尾帧时，不能仅凭错误文字归因于代理。
+当前 `GROW_MAX_RETRIES` / `max_retries` 沿用字段名，表示同一未接纳模型步骤的
+总 attempt 上限，包含初次调用；0 仅允许初次调用。session 默认上限为 5，
+独立 sampler 默认值为 15。共享期限取首次 idle timeout × 总上限，后续修复
+不会延长；精确预算或不可撤销输出可能更早关闭恢复。
+实现导航见 [采样恢复边界](architecture/session-robustness-repair.md)，
+行为以 [model-sampling](../openspec/specs/model-sampling/spec.md) 为准。
+
 ## 环境
 
 Rust toolchain 由 `rust-toolchain.toml` 声明，构建仍使用 Cargo。OpenSpec 是开发工具，不进入 Cargo 运行时依赖。
@@ -70,7 +81,11 @@ cargo test --locked --lib -p chat-state -p sampling-types -p sampler -p memory -
 cargo build --locked -p cli --bin grow
 ```
 
+原生 debug CLI 的会话线程为未优化 async 临时状态预留 32 MiB 栈；release 仍使用 8 MiB。该线程显式指定栈大小，不受测试运行器的 `RUST_MIN_STACK` 控制，不为调试栈开销改动生产调用链。
+
 跨会话协调与 Windows 存储还应检查对应 `.github/workflows/` 的平台回归。OpenSpec CI 只做文档格式与归档完成状态检查，语义由场景、源码、测试和 review 共同核对。
+
+用量状态栏由 `ChatStateEvent::SessionUsageUpdated` 投影到账本变化时的 transient `SessionInfoUpdate.meta["grow/sessionUsage"]`，复用 `PromptUsage`，不增加周期查询、Timeline 消息或模型输入。新建/重新连接时的状态 advertisement 补发当前账本；Pager 按累计值替换、丢弃同窗口倒退及历史 replay，用 reload 清空旧窗口。计费窗口和点击行为见 [会话用量契约](../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage)。
 
 ## 债务与历史
 

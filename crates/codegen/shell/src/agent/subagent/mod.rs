@@ -96,6 +96,7 @@ impl AutoCompactThresholdTiers {
 /// Avoids passing `&MvpAgent` (which would require the coordinator to know
 /// about the full agent struct). Built by `MvpAgent::build_subagent_spawn_context()`.
 pub(crate) struct SubagentSpawnContext {
+    pub sampling_output_delivery: sampler::OutputDelivery,
     /// Live child-session control routes. Child sessions intentionally stay
     /// out of the primary resident-session roster, but ACP model/Agent
     /// selection still needs to address their actor by exact session id.

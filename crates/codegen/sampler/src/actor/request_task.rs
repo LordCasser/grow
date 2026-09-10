@@ -18,13 +18,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use sampling_types::{
-    ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError, SentCredential,
-    TokenUsage, error::Result as SamplingResult,
+    ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError, TokenUsage,
+    error::Result as SamplingResult,
 };
 
 use crate::client::{ApiBackend, SamplingClient};
 use crate::config::{RetryPolicy, SamplerConfig};
-use crate::events::{SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
+use crate::events::{SamplingErrorInfo, SamplingEvent};
 use crate::handle::{AttemptScopeCapture, AttemptUsage, AttemptUsageSink};
 use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
@@ -63,6 +63,7 @@ enum AttemptOutcome {
     Empty {
         context: EmptyResponseContext,
         usage: Option<TokenUsage>,
+        cost_usd_ticks: Option<i64>,
     },
     /// Stream emitted [`SamplingEvent::Failed`]. The captured raw
     /// error is what the retry loop classifies; if no rich error was
@@ -72,6 +73,7 @@ enum AttemptOutcome {
     Failed {
         error: SamplingError,
         usage: Option<TokenUsage>,
+        cost_usd_ticks: Option<i64>,
     },
     /// `cancel_token` fired mid-attempt. The retry loop bails out
     /// without further attempts.
@@ -107,6 +109,25 @@ struct AttemptRun {
     provider_started: bool,
 }
 
+/// Drop closes every unsuccessful attempt, including early returns and unwind.
+/// A completed candidate stays provisional until its consumer durably admits it.
+struct AttemptPreview {
+    tx: mpsc::UnboundedSender<SamplingEvent>,
+    request_id: RequestId,
+    attempt: u32,
+    candidate: bool,
+}
+impl Drop for AttemptPreview {
+    fn drop(&mut self) {
+        if !self.candidate {
+            let _ = self.tx.send(SamplingEvent::AttemptDiscarded {
+                request_id: self.request_id.clone(),
+                attempt: self.attempt,
+            });
+        }
+    }
+}
+
 /// Run a single sampling request to completion (or final failure).
 ///
 /// Returns the request id so the actor can clean it up from
@@ -122,6 +143,7 @@ pub(crate) async fn run_request_task(
     scope_capture: Option<AttemptScopeCapture>,
     usage_sink: Option<AttemptUsageSink>,
     evidence_sink: Option<crate::audit::EvidenceSink>,
+    recovery: Option<crate::recovery::RecoveryBudget>,
 ) -> RequestId {
     let mut completion_tx = completion_tx;
     let idle_timeout = Duration::from_secs(
@@ -135,6 +157,15 @@ pub(crate) async fn run_request_task(
     } else {
         resolve_max_retries(configured_max_retries)
     };
+    let recovery = recovery.unwrap_or_default();
+    recovery.configure(max_retries, idle_timeout);
+    if request
+        .items
+        .iter()
+        .any(|item| matches!(item, sampling_types::ConversationItem::BackendToolCall(_)))
+    {
+        recovery.prohibit_replay();
+    }
 
     // Build the initial client. Configuration errors here are fatal
     // (no point retrying with the same broken config).
@@ -167,17 +198,35 @@ pub(crate) async fn run_request_task(
         .flatten();
     let doom_max_retries = doom_policy.map_or(0, |p| p.max_retries);
     let mut doom_retry_count: u32 = 0;
-    let output_observed = Arc::new(AtomicBool::new(false));
     loop {
         if cancel_token.is_cancelled() {
             handle_cancellation(&event_tx, &request_id, &mut completion_tx);
             return request_id;
         }
+        let attempt_number = match recovery.admit() {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                emit_failed(&event_tx, &request_id, &error, None);
+                send_completion(&mut completion_tx, Err(error));
+                return request_id;
+            }
+        };
+        let attempt_started_at = std::time::Instant::now();
+        let mut preview = AttemptPreview {
+            tx: event_tx.clone(),
+            request_id: request_id.clone(),
+            attempt: attempt_number,
+            candidate: false,
+        };
+        let _ = event_tx.send(SamplingEvent::AttemptStarted {
+            request_id: request_id.clone(),
+            attempt: attempt_number,
+        });
+        let output_observed = Arc::new(AtomicBool::new(false));
 
         // Once the resample budget is spent, the attempt runs with the abort
         // disarmed so it can complete and be accepted as-is.
         let doom_check = doom_policy.filter(|_| doom_retry_count < doom_max_retries);
-        let attempt_number = retry_count + doom_retry_count + 1;
         let evidence_sink: Option<crate::audit::EvidenceSink> =
             evidence_sink.as_ref().map(|sink| {
                 let sink = sink.clone();
@@ -189,21 +238,45 @@ pub(crate) async fn run_request_task(
         let evidence = evidence_sink
             .as_ref()
             .map(|sink| crate::audit::AttemptEvidence::new(sink.clone()));
-        let attempt = run_one_attempt(
-            &client,
-            request.clone(),
-            request_id.clone(),
-            idle_timeout,
-            &event_tx,
-            &cancel_token,
-            doom_check,
-            Arc::clone(&output_observed),
-            scope_capture.as_ref(),
-        )
-        .instrument(sampling_span.clone());
-        let attempt = match &evidence {
-            Some(evidence) => evidence.scope(attempt).await,
-            None => attempt.await,
+        let attempt = {
+            let attempt_cancel = cancel_token.child_token();
+            let attempt = run_one_attempt(
+                &client,
+                request.clone(),
+                request_id.clone(),
+                idle_timeout,
+                &event_tx,
+                &attempt_cancel,
+                doom_check,
+                Arc::clone(&output_observed),
+                scope_capture.as_ref(),
+                Some(&recovery),
+            )
+            .instrument(sampling_span.clone());
+            let attempt = async {
+                match &evidence {
+                    Some(evidence) => evidence.scope(attempt).await,
+                    None => attempt.await,
+                }
+            };
+            tokio::pin!(attempt);
+            tokio::select! {
+                biased;
+                result = &mut attempt => result,
+                _ = tokio::time::sleep_until(recovery.deadline()) => {
+                    attempt_cancel.cancel();
+                    let mut result = attempt.await;
+                    if let Ok(run) = &mut result
+                        && matches!(run.outcome, AttemptOutcome::Cancelled) {
+                        run.outcome = AttemptOutcome::Failed {
+                            error: SamplingError::Lifecycle("logical sampling deadline exceeded".into()),
+                            usage: None,
+                            cost_usd_ticks: None,
+                        };
+                    }
+                    result
+                }
+            }
         };
         let AttemptRun {
             outcome,
@@ -212,9 +285,9 @@ pub(crate) async fn run_request_task(
         } = match attempt {
             Ok(attempt) => attempt,
             Err(error) => {
-                let error = SamplingError::EventStreamError(format!(
-                    "provider attempt admission failed: {error}"
-                ));
+                let error =
+                    SamplingError::Lifecycle(format!("provider attempt admission failed: {error}"));
+                drop(preview);
                 emit_failed(&event_tx, &request_id, &error, None);
                 send_completion(&mut completion_tx, Err(error));
                 return request_id;
@@ -265,16 +338,61 @@ pub(crate) async fn run_request_task(
             )
             .then(sampling_types::TokenUsage::default)
         });
+        let cost_usd_ticks = match &outcome {
+            AttemptOutcome::Completed { response, .. }
+            | AttemptOutcome::Truncated {
+                partial_response: response,
+                ..
+            }
+            | AttemptOutcome::ContextWindowExceeded {
+                partial_response: response,
+                ..
+            }
+            | AttemptOutcome::PauseTurn { response, .. } => response.cost_usd_ticks,
+            AttemptOutcome::Empty { cost_usd_ticks, .. }
+            | AttemptOutcome::Failed { cost_usd_ticks, .. } => *cost_usd_ticks,
+            _ => None,
+        };
+        let attempt_key = format!("{}:{attempt_number}", request_id.as_str());
         let evidence_result = if let Some(evidence) = &evidence {
+            let output_observed_for_evidence = output_observed.load(Ordering::Relaxed);
+            let recovery_can_recover = recovery.can_recover();
+            let mut recovery_stop_reasons = Vec::new();
+            if !retry_policy
+                .output_delivery
+                .permits_resampling(output_observed_for_evidence)
+            {
+                recovery_stop_reasons.push("irreversible_output");
+            }
+            if !recovery_can_recover {
+                if recovery.remaining() == 0 {
+                    recovery_stop_reasons.push("attempt_budget");
+                }
+                if tokio::time::Instant::now() >= recovery.deadline() {
+                    recovery_stop_reasons.push("deadline");
+                }
+                if recovery_stop_reasons.is_empty() {
+                    recovery_stop_reasons.push("provider_side_effect");
+                }
+            }
             let details = match &outcome {
                 AttemptOutcome::Failed { error, .. } | AttemptOutcome::InitFailed { error } => {
                     serde_json::json!({"error": SamplingErrorInfo::from(error)})
                 }
                 AttemptOutcome::Empty { context, .. } => serde_json::json!({"empty": context}),
                 AttemptOutcome::Cancelled => serde_json::json!({"cancelled": true}),
-                _ => serde_json::json!({"accepted": true}),
+                _ => serde_json::json!({"candidate_complete": true}),
             };
-            evidence.finish(serde_json::json!({"attempt": retry_count + doom_retry_count + 1, "details": details})).await
+            evidence
+                .finish(serde_json::json!({
+                    "attempt": attempt_number, "details": details,
+                    "output_delivery": retry_policy.output_delivery,
+                    "output_observed": output_observed_for_evidence,
+                    "recovery_can_recover": recovery_can_recover,
+                    "recovery_stop_reasons": recovery_stop_reasons,
+                    "remaining_attempts": recovery.remaining(),
+                }))
+                .await
         } else {
             Ok(())
         };
@@ -283,50 +401,77 @@ pub(crate) async fn run_request_task(
             && let Some(usage) = &outcome_usage
             && let Some(sink) = &usage_sink
             && let Err(error) = sink(AttemptUsage::Known {
+                attempt_key: attempt_key.clone(),
+                cost_usd_ticks,
+                api_duration_ms: Some(attempt_started_at.elapsed().as_millis() as u64),
                 scope: attempt_scope.clone(),
                 usage: usage.clone(),
             })
             .await
         {
+            drop(preview);
             finish_attempt_persistence_failure(&event_tx, &request_id, &mut completion_tx, error);
             return request_id;
         } else if provider_started
             && outcome_usage.is_none()
             && let Some(sink) = &usage_sink
             && let Err(error) = sink(AttemptUsage::Incomplete {
+                attempt_key,
                 scope: attempt_scope,
             })
             .await
         {
+            drop(preview);
             finish_attempt_persistence_failure(&event_tx, &request_id, &mut completion_tx, error);
             return request_id;
         }
 
         if let Err(error) = evidence_result {
+            drop(preview);
             finish_attempt_persistence_failure(&event_tx, &request_id, &mut completion_tx, error);
             return request_id;
         }
         if cancel_token.is_cancelled() {
+            drop(preview);
             handle_cancellation(&event_tx, &request_id, &mut completion_tx);
             return request_id;
         }
 
-        // Transport and empty-response retries are safe only while the
-        // attempt has produced no model output. Doom-loop recovery has its
-        // own discard-and-resample semantics and budget below.
-        let effective_max_retries =
-            if retry_policy.retry_only_before_output && output_observed.load(Ordering::Relaxed) {
-                0
-            } else {
-                max_retries
-            };
+        preview.candidate = matches!(
+            &outcome,
+            AttemptOutcome::Completed { .. }
+                | AttemptOutcome::Truncated { .. }
+                | AttemptOutcome::ContextWindowExceeded { .. }
+                | AttemptOutcome::PauseTurn { .. }
+        );
+        drop(preview);
+
+        let output_observed = output_observed.load(Ordering::Relaxed);
+        if !retry_policy
+            .output_delivery
+            .permits_resampling(output_observed)
+        {
+            recovery.prohibit_replay();
+        }
+
+        // Every recovery category obeys the same delivery and shared-budget
+        // gates. Category limits below can only tighten that allowance.
+        let effective_max_retries = if !recovery.can_recover()
+            || !retry_policy
+                .output_delivery
+                .permits_resampling(output_observed)
+        {
+            0
+        } else {
+            max_retries.min(retry_count + 1 + recovery.remaining())
+        };
 
         match outcome {
             AttemptOutcome::Completed {
                 response,
                 mut metrics,
             } => {
-                metrics.attempts = retry_count + doom_retry_count + 1;
+                metrics.attempts = recovery.attempts();
                 if let Some(policy) = doom_policy {
                     let confident = policy.confident_triggers(&response.doom_loop_signals);
                     if !confident.is_empty() {
@@ -382,6 +527,7 @@ pub(crate) async fn run_request_task(
                     &mut client,
                     &config,
                     &cancel_token,
+                    recovery.deadline(),
                     &mut completion_tx,
                     None,
                     evidence_sink.as_ref(),
@@ -391,11 +537,14 @@ pub(crate) async fn run_request_task(
                     return request_id;
                 }
             }
-            AttemptOutcome::Failed { error, usage } => {
+            AttemptOutcome::Failed { error, usage, .. } => {
                 // Doom-loop resamples run on their own budget and never
                 // consult the transport classifier, so no classifier change
                 // can silently debit the transport budget for a doom failure.
-                if let SamplingError::DoomLoopDetected { .. } = &error {
+                if matches!(&error, SamplingError::DoomLoopDetected { .. })
+                    && effective_max_retries > 0
+                    && recovery.remaining() > 0
+                {
                     let backoff = retry_mod::doom_loop_backoff(doom_retry_count + 1);
                     doom_retry_count += 1;
                     tracing::warn!(
@@ -434,17 +583,27 @@ pub(crate) async fn run_request_task(
                         doom_max_retries,
                         &error,
                     );
-                    if sleep_or_cancel(backoff, &cancel_token).await {
-                        continue;
+                    match sleep_or_cancel(backoff, &cancel_token, recovery.deadline()).await {
+                        SleepOutcome::Completed => continue,
+                        SleepOutcome::Cancelled => {
+                            handle_cancellation(&event_tx, &request_id, &mut completion_tx);
+                            return request_id;
+                        }
+                        SleepOutcome::Deadline => {
+                            let error = SamplingError::Lifecycle(
+                                "logical sampling deadline exceeded".into(),
+                            );
+                            emit_failed(&event_tx, &request_id, &error, None);
+                            send_completion(&mut completion_tx, Err(error));
+                            return request_id;
+                        }
                     }
-                    handle_cancellation(&event_tx, &request_id, &mut completion_tx);
-                    return request_id;
                 }
                 // Preview deltas never admit tools. A completed malformed sample
                 // can be discarded even when preview output was observed.
                 let effective_max_retries =
                     if matches!(error, SamplingError::InvalidToolArguments(_)) {
-                        max_retries.min(retry_mod::INVALID_TOOL_ARGUMENTS_MAX_ATTEMPTS)
+                        effective_max_retries.min(retry_mod::INVALID_TOOL_ARGUMENTS_MAX_ATTEMPTS)
                     } else {
                         effective_max_retries
                     };
@@ -458,6 +617,7 @@ pub(crate) async fn run_request_task(
                     &mut client,
                     &config,
                     &cancel_token,
+                    recovery.deadline(),
                     &mut completion_tx,
                     usage,
                     evidence_sink.as_ref(),
@@ -482,6 +642,7 @@ pub(crate) async fn run_request_task(
                     &mut client,
                     &config,
                     &cancel_token,
+                    recovery.deadline(),
                     &mut completion_tx,
                     None,
                     evidence_sink.as_ref(),
@@ -509,7 +670,7 @@ pub(crate) async fn run_request_task(
                 metrics,
             } => {
                 let mut metrics = metrics;
-                metrics.attempts = retry_count + doom_retry_count + 1;
+                metrics.attempts = recovery.attempts();
                 // Surface token usage on the sampling span alongside effort.
                 if let Some(usage) = partial_response.usage.as_ref() {
                     sampling_span.record("output_tokens", usage.completion_tokens);
@@ -550,6 +711,7 @@ async fn apply_retry_decision(
     client: &mut SamplingClient,
     config: &SamplerConfig,
     cancel_token: &CancellationToken,
+    deadline: tokio::time::Instant,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
     terminal_usage: Option<TokenUsage>,
     evidence_sink: Option<&crate::audit::EvidenceSink>,
@@ -561,12 +723,13 @@ async fn apply_retry_decision(
     };
     let decision = classify_error(err, *retry_count, max_retries, rate_limit_threshold);
 
-    if matches!(
-        &decision,
-        RetryDecision::Retry { .. }
-            | RetryDecision::RetryWithBackoff { .. }
-            | RetryDecision::RetryWithClientRebuild { .. }
-    ) {
+    {
+        let is_retry = matches!(
+            &decision,
+            RetryDecision::Retry { .. }
+                | RetryDecision::RetryWithBackoff { .. }
+                | RetryDecision::RetryWithClientRebuild { .. }
+        );
         let details = serde_json::json!({
             "attempt": *retry_count + 1, "max_retries": max_retries,
             "decision": format!("{decision:?}"), "error": SamplingErrorInfo::from(err),
@@ -577,7 +740,7 @@ async fn apply_retry_decision(
                 handle_cancellation(event_tx, request_id, completion_tx);
                 return false;
             }
-            persisted = crate::audit::record(evidence_sink, "retry", details) => persisted,
+            persisted = crate::audit::record(evidence_sink, if is_retry { "retry" } else { "recovery_stop" }, details) => persisted,
         };
         if let Err(error) = persisted {
             finish_attempt_persistence_failure(event_tx, request_id, completion_tx, error);
@@ -588,29 +751,55 @@ async fn apply_retry_decision(
         RetryDecision::Retry { backoff } => {
             *retry_count += 1;
             emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
-            if sleep_or_cancel(backoff, cancel_token).await {
-                true
-            } else {
-                handle_cancellation(event_tx, request_id, completion_tx);
-                false
+            match sleep_or_cancel(backoff, cancel_token, deadline).await {
+                SleepOutcome::Completed => true,
+                SleepOutcome::Cancelled => {
+                    handle_cancellation(event_tx, request_id, completion_tx);
+                    false
+                }
+                SleepOutcome::Deadline => {
+                    let error =
+                        SamplingError::Lifecycle("logical sampling deadline exceeded".into());
+                    emit_failed(event_tx, request_id, &error, terminal_usage);
+                    send_completion(completion_tx, Err(error));
+                    false
+                }
             }
         }
         RetryDecision::RetryWithBackoff { backoff, .. } => {
             *retry_count += 1;
             emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
-            if sleep_or_cancel(backoff, cancel_token).await {
-                true
-            } else {
-                handle_cancellation(event_tx, request_id, completion_tx);
-                false
+            match sleep_or_cancel(backoff, cancel_token, deadline).await {
+                SleepOutcome::Completed => true,
+                SleepOutcome::Cancelled => {
+                    handle_cancellation(event_tx, request_id, completion_tx);
+                    false
+                }
+                SleepOutcome::Deadline => {
+                    let error =
+                        SamplingError::Lifecycle("logical sampling deadline exceeded".into());
+                    emit_failed(event_tx, request_id, &error, terminal_usage);
+                    send_completion(completion_tx, Err(error));
+                    false
+                }
             }
         }
         RetryDecision::RetryWithClientRebuild { backoff } => {
             *retry_count += 1;
             emit_retrying(event_tx, request_id, *retry_count, max_retries, err);
-            if !sleep_or_cancel(backoff, cancel_token).await {
-                handle_cancellation(event_tx, request_id, completion_tx);
-                return false;
+            match sleep_or_cancel(backoff, cancel_token, deadline).await {
+                SleepOutcome::Completed => {}
+                SleepOutcome::Cancelled => {
+                    handle_cancellation(event_tx, request_id, completion_tx);
+                    return false;
+                }
+                SleepOutcome::Deadline => {
+                    let error =
+                        SamplingError::Lifecycle("logical sampling deadline exceeded".into());
+                    emit_failed(event_tx, request_id, &error, terminal_usage);
+                    send_completion(completion_tx, Err(error));
+                    return false;
+                }
             }
 
             // Rebuild client with HTTP/1.1 fallback to escape poisoned
@@ -674,20 +863,38 @@ async fn apply_retry_decision(
     }
 }
 
-async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SleepOutcome {
+    Completed,
+    Cancelled,
+    Deadline,
+}
+
+async fn sleep_or_cancel(
+    duration: Duration,
+    cancel_token: &CancellationToken,
+    deadline: tokio::time::Instant,
+) -> SleepOutcome {
+    let wake_at = std::cmp::min(tokio::time::Instant::now() + duration, deadline);
     tokio::select! {
         biased;
-        _ = cancel_token.cancelled() => false,
-        _ = tokio::time::sleep(duration) => true,
+        _ = cancel_token.cancelled() => SleepOutcome::Cancelled,
+        _ = tokio::time::sleep_until(wake_at) => {
+            if tokio::time::Instant::now() >= deadline {
+                SleepOutcome::Deadline
+            } else {
+                SleepOutcome::Completed
+            }
+        },
     }
 }
 
 async fn capture_attempt_scope(
     capture: Option<&AttemptScopeCapture>,
-) -> Result<Option<String>, String> {
+) -> Result<crate::handle::AttemptAdmission, String> {
     match capture {
         Some(capture) => capture().await,
-        None => Ok(None),
+        None => Ok(Default::default()),
     }
 }
 
@@ -724,7 +931,7 @@ fn cancelled_attempt_from_scope_slot(slot: &Mutex<Option<Option<String>>>) -> At
 #[allow(clippy::too_many_arguments)]
 async fn run_one_attempt(
     client: &SamplingClient,
-    request: ConversationRequest,
+    mut request: ConversationRequest,
     request_id: RequestId,
     idle_timeout: Duration,
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
@@ -732,6 +939,7 @@ async fn run_one_attempt(
     doom_check: Option<sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
     scope_capture: Option<&AttemptScopeCapture>,
+    recovery: Option<&crate::RecoveryBudget>,
 ) -> Result<AttemptRun, String> {
     // The provider-open future can be dropped by the cancellation branch
     // after an earlier poll admitted Goal usage but before it returns a raw
@@ -748,8 +956,11 @@ async fn run_one_attempt(
                     return Ok(cancelled_attempt_from_scope_slot(&scope_slot));
                 },
                 result = async {
-                    let scope = capture_attempt_scope(scope_capture).await?;
-                    *branch_scope.lock().expect("attempt scope slot poisoned") = Some(scope);
+                    let admission = capture_attempt_scope(scope_capture).await?;
+                    if let Some(limit) = admission.max_output_tokens {
+                        request.max_output_tokens = Some(request.max_output_tokens.map_or(limit, |old| old.min(limit)));
+                    }
+                    *branch_scope.lock().expect("attempt scope slot poisoned") = Some(admission.scope);
                     let opened = client.conversation_stream(request).await;
                     Ok::<_, String>(opened)
                 } => result?,
@@ -776,6 +987,7 @@ async fn run_one_attempt(
                     captured,
                     None,
                     output_observed,
+                    recovery,
                 )
                 .await,
                 scope,
@@ -790,8 +1002,11 @@ async fn run_one_attempt(
                     return Ok(cancelled_attempt_from_scope_slot(&scope_slot));
                 },
                 result = async {
-                    let scope = capture_attempt_scope(scope_capture).await?;
-                    *branch_scope.lock().expect("attempt scope slot poisoned") = Some(scope);
+                    let admission = capture_attempt_scope(scope_capture).await?;
+                    if let Some(limit) = admission.max_output_tokens {
+                        request.max_output_tokens = Some(request.max_output_tokens.map_or(limit, |old| old.min(limit)));
+                    }
+                    *branch_scope.lock().expect("attempt scope slot poisoned") = Some(admission.scope);
                     let opened = client.conversation_stream_responses(request).await;
                     Ok::<_, String>(opened)
                 } => result?,
@@ -830,6 +1045,7 @@ async fn run_one_attempt(
                     captured,
                     doom_check,
                     output_observed,
+                    recovery,
                 )
                 .await,
                 scope,
@@ -844,8 +1060,11 @@ async fn run_one_attempt(
                     return Ok(cancelled_attempt_from_scope_slot(&scope_slot));
                 },
                 result = async {
-                    let scope = capture_attempt_scope(scope_capture).await?;
-                    *branch_scope.lock().expect("attempt scope slot poisoned") = Some(scope);
+                    let admission = capture_attempt_scope(scope_capture).await?;
+                    if let Some(limit) = admission.max_output_tokens {
+                        request.max_output_tokens = Some(request.max_output_tokens.map_or(limit, |old| old.min(limit)));
+                    }
+                    *branch_scope.lock().expect("attempt scope slot poisoned") = Some(admission.scope);
                     let opened = client.conversation_stream_messages(request).await;
                     Ok::<_, String>(opened)
                 } => result?,
@@ -872,6 +1091,7 @@ async fn run_one_attempt(
                     captured,
                     None,
                     output_observed,
+                    recovery,
                 )
                 .await,
                 scope,
@@ -925,12 +1145,16 @@ async fn drive_l2(
     captured: ErrorCell,
     doom_check: Option<sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
+    recovery: Option<&crate::RecoveryBudget>,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
     loop {
         tokio::select! {
             biased;
             next = l2.next() => match next {
+                Some(SamplingEvent::ReplayUnsafe { .. }) => {
+                    if let Some(recovery) = recovery { recovery.prohibit_replay(); }
+                }
                 Some(SamplingEvent::Completed { response, metrics, .. }) => {
                     if response_has_observed_output(&response) {
                         output_observed.store(true, Ordering::Relaxed);
@@ -946,6 +1170,7 @@ async fn drive_l2(
                                     aborted_at_chunk: None,
                                 },
                                 usage: response.usage.clone(),
+                                cost_usd_ticks: response.cost_usd_ticks,
                             };
                         }
                     }
@@ -980,7 +1205,11 @@ async fn drive_l2(
                     if !content_filtered && let Some(reason) = response.empty_reason() {
                         let context = build_empty_context(reason, &response);
                         let usage = response.usage.clone();
-                        return AttemptOutcome::Empty { context, usage };
+                        return AttemptOutcome::Empty {
+                            context,
+                            usage,
+                            cost_usd_ticks: response.cost_usd_ticks,
+                        };
                     }
                     return AttemptOutcome::Completed { response, metrics };
                 }
@@ -990,7 +1219,11 @@ async fn drive_l2(
                         .ok()
                         .and_then(|mut g| g.take());
                     let error = raw.unwrap_or_else(|| synthesize_from_info(&info));
-                    return AttemptOutcome::Failed { error, usage: info.usage };
+                    return AttemptOutcome::Failed {
+                        error,
+                        usage: info.usage,
+                        cost_usd_ticks: info.cost_usd_ticks,
+                    };
                 }
                 Some(other) => {
                     if matches!(
@@ -998,6 +1231,8 @@ async fn drive_l2(
                         SamplingEvent::FirstToken { .. }
                             | SamplingEvent::ChannelToken { .. }
                             | SamplingEvent::ToolCallDelta { .. }
+                            | SamplingEvent::ResponseStarted { .. }
+                            | SamplingEvent::ReasoningCompleted { .. }
                     ) {
                         output_observed.store(true, Ordering::Relaxed);
                     }
@@ -1016,10 +1251,11 @@ async fn drive_l2(
                     // dropped without termination -- treat as a
                     // synthetic transport error.
                     return AttemptOutcome::Failed {
-                        error: SamplingError::EventStreamError(
+                        error: SamplingError::Lifecycle(
                             "stream dropped without terminal event".to_string(),
                         ),
                         usage: None,
+                        cost_usd_ticks: None,
                     };
                 }
             },
@@ -1059,7 +1295,9 @@ fn retag(event: SamplingEvent, _request_id: &RequestId) -> SamplingEvent {
 /// `ResponseFailed`, server error event) and there is no captured raw
 /// error in the cell.
 fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
-    crate::events::sampling_error_from_info(info)
+    info.source
+        .clone()
+        .unwrap_or_else(|| SamplingError::Lifecycle("L2 failure missing typed source".into()))
 }
 
 /// Build an [`EmptyResponseContext`] from a completed-but-empty response.
@@ -1148,30 +1386,14 @@ fn handle_cancellation(
     request_id: &RequestId,
     completion_tx: &mut Option<oneshot::Sender<CompletionResult>>,
 ) {
-    // No status code, no upstream API error -- this is a client-side
-    // termination. Use kind=Api so consumers that switch on kind have
-    // a sensible default; the message clearly identifies it.
-    let info = SamplingErrorInfo {
-        kind: SamplingErrorKind::Api,
-        status_code: None,
-        message: "request cancelled".to_string(),
-        is_retryable: false,
-        retry_after_secs: None,
-        model_metadata: None,
-        empty_response_context: None,
-        doom_loop_triggers: None,
-        doom_loop_aborted_at_chunk: None,
-        credential: SentCredential::Unknown,
-        usage: None,
-    };
+    let error = SamplingError::Lifecycle("request cancelled".into());
+    let mut info = SamplingErrorInfo::from(&error);
+    info.message = "request cancelled".into();
     let _ = event_tx.send(SamplingEvent::Failed {
         request_id: request_id.clone(),
         error: info,
     });
-    send_completion(
-        completion_tx,
-        Err(SamplingError::auth_unknown("request cancelled")),
-    );
+    send_completion(completion_tx, Err(error));
 }
 
 fn finish_attempt_persistence_failure(
@@ -1201,6 +1423,7 @@ fn send_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::SamplingErrorKind;
     use futures_util::stream;
 
     #[tokio::test]
@@ -1215,6 +1438,7 @@ mod tests {
             "persistence",
             "usage_failure",
             "cancel",
+            "irreversible",
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -1234,7 +1458,8 @@ mod tests {
                         }
                         request.extend_from_slice(&buf[..n]);
                         if let Some(end) = request.windows(4).position(|b| b == b"\r\n\r\n") {
-                            let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                            let headers =
+                                String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
                             let len: usize = headers
                                 .lines()
                                 .find_map(|l| l.strip_prefix("content-length:"))
@@ -1244,10 +1469,14 @@ mod tests {
                                 .unwrap();
                             if request.len() >= end + 4 + len {
                                 let body: serde_json::Value =
-                                    serde_json::from_slice(&request[end + 4..end + 4 + len]).unwrap();
+                                    serde_json::from_slice(&request[end + 4..end + 4 + len])
+                                        .unwrap();
                                 let input = body["input"].clone();
                                 if let Some(first) = &first_input {
-                                    assert_eq!(first, &input, "retry must preserve last valid input");
+                                    assert_eq!(
+                                        first, &input,
+                                        "retry must preserve last valid input"
+                                    );
                                 } else {
                                     first_input = Some(input);
                                 }
@@ -1264,7 +1493,7 @@ mod tests {
                     let added = serde_json::json!({"type":"response.output_item.added", "sequence_number":0, "output_index":0,
                         "item":{"type":"function_call", "id":"fc_1", "call_id":"call_1", "name":"test_tool", "arguments":"", "status":"in_progress"}});
                     let mut completed = serde_json::json!({"type":"response.completed", "sequence_number":1,
-                        "response":{"id":"resp_1", "object":"response", "created_at":0, "model":"test-model", "status":"completed", "output":[item],
+                        "response":{"id":"resp_1", "object":"response", "created_at":0, "model":"test-model", "status":"completed", "metadata":{"grow.cost_usd_ticks":"42"}, "output":[item],
                         "usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":0},"output_tokens":4,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":14}}});
                     if mode == "unknown_usage" && attempt == 0 {
                         completed["response"]
@@ -1328,7 +1557,11 @@ mod tests {
                         ..Default::default()
                     },
                     RetryPolicy {
-                        retry_only_before_output: true,
+                        output_delivery: if mode == "irreversible" {
+                            crate::recovery::OutputDelivery::Irreversible
+                        } else {
+                            crate::recovery::OutputDelivery::Retractable
+                        },
                         ..Default::default()
                     },
                     event_tx,
@@ -1337,6 +1570,7 @@ mod tests {
                     None,
                     Some(usage_sink),
                     Some(evidence),
+                    None,
                 ),
             )
             .await
@@ -1364,6 +1598,15 @@ mod tests {
                     assert!(
                         matches!(charge, AttemptUsage::Known { usage, .. } if usage.total_tokens == 14)
                     );
+                    if mode != "unknown_usage" || index > 0 {
+                        assert!(matches!(
+                            charge,
+                            AttemptUsage::Known {
+                                cost_usd_ticks: Some(42),
+                                ..
+                            }
+                        ));
+                    }
                 }
             }
             let completions: Vec<_> = collected
@@ -1388,6 +1631,14 @@ mod tests {
                 );
             } else {
                 assert!(completions.is_empty(), "bad calls must never be admitted");
+                if mode == "irreversible" {
+                    assert!(
+                        !collected
+                            .iter()
+                            .any(|event| matches!(event, SamplingEvent::Retrying { .. })),
+                        "irreversible malformed output must not be retried"
+                    );
+                }
             }
         }
     }
@@ -1398,17 +1649,15 @@ mod tests {
         let calls_for_capture = Arc::clone(&calls);
         let capture: AttemptScopeCapture = Arc::new(move || {
             let n = calls_for_capture.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async move { Ok(Some(format!("scope-{n}"))) })
+            Box::pin(async move { Ok(Some(format!("scope-{n}")).into()) })
         });
 
-        assert_eq!(
-            capture_attempt_scope(Some(&capture)).await,
-            Ok(Some("scope-0".into()))
-        );
-        assert_eq!(
-            capture_attempt_scope(Some(&capture)).await,
-            Ok(Some("scope-1".into()))
-        );
+        let admission = capture_attempt_scope(Some(&capture)).await.unwrap();
+        assert_eq!(admission.scope.as_deref(), Some("scope-0"));
+        assert_eq!(admission.max_output_tokens, None);
+        let admission = capture_attempt_scope(Some(&capture)).await.unwrap();
+        assert_eq!(admission.scope.as_deref(), Some("scope-1"));
+        assert_eq!(admission.max_output_tokens, None);
         assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
@@ -1425,7 +1674,7 @@ mod tests {
         let calls_for_capture = Arc::clone(&calls);
         let capture: AttemptScopeCapture = Arc::new(move || {
             calls_for_capture.fetch_add(1, Ordering::Relaxed);
-            Box::pin(async { Ok(Some("must-not-be-created".into())) })
+            Box::pin(async { Ok(Some("must-not-be-created".into()).into()) })
         });
         let cancel = CancellationToken::new();
         cancel.cancel();
@@ -1441,6 +1690,7 @@ mod tests {
             None,
             Arc::new(AtomicBool::new(false)),
             Some(&capture),
+            None,
         )
         .await
         .unwrap();
@@ -1495,10 +1745,11 @@ mod tests {
                 cancel.clone(),
                 None,
                 Some(Arc::new(|| {
-                    Box::pin(async { Ok(Some("pre-wire-lease".into())) })
+                    Box::pin(async { Ok(Some("pre-wire-lease".into()).into()) })
                 })),
                 Some(usage_sink),
                 Some(sink),
+                None,
             ));
             let request = tokio::time::timeout(Duration::from_secs(2), records.recv())
                 .await
@@ -1520,7 +1771,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(matches!(usage_rx.recv().await,
-                Some(AttemptUsage::Known { scope: Some(scope), usage })
+                Some(AttemptUsage::Known { scope: Some(scope), usage, .. })
                 if scope == "pre-wire-lease" && usage.total_tokens == 0));
             assert!(
                 tokio::time::timeout(Duration::from_millis(25), listener.accept())
@@ -1611,6 +1862,7 @@ mod tests {
                     None,
                     None,
                     Some(sink),
+                    None,
                 ));
                 let mut saw_raw = false;
                 loop {
@@ -1691,6 +1943,7 @@ mod tests {
                 None,
                 Arc::new(AtomicBool::new(false)),
                 Some(&capture),
+                None,
             ));
             tokio::select! {
                 biased;
@@ -1737,7 +1990,7 @@ mod tests {
             let (scope_tx, mut scope_rx) = mpsc::unbounded_channel();
             let capture: AttemptScopeCapture = Arc::new(move || {
                 let _ = scope_tx.send(());
-                Box::pin(async { Ok(Some("scope-on-wire".into())) })
+                Box::pin(async { Ok(Some("scope-on-wire".into()).into()) })
             });
             let (usage_tx, mut usage_rx) = mpsc::unbounded_channel();
             let sink: AttemptUsageSink = Arc::new(move |usage| {
@@ -1761,6 +2014,7 @@ mod tests {
                 Some(capture),
                 Some(sink),
                 None,
+                None,
             ));
 
             tokio::time::timeout(Duration::from_secs(2), scope_rx.recv())
@@ -1775,7 +2029,7 @@ mod tests {
 
             assert!(matches!(
                 usage_rx.recv().await,
-                Some(AttemptUsage::Incomplete { scope: Some(scope) })
+                Some(AttemptUsage::Incomplete { scope: Some(scope), .. })
                     if scope == "scope-on-wire"
             ));
             server.abort();
@@ -1805,19 +2059,8 @@ mod tests {
 
     #[test]
     fn synthesize_idle_timeout_extracts_elapsed_secs() {
-        let info = SamplingErrorInfo {
-            kind: SamplingErrorKind::IdleTimeout,
-            status_code: None,
-            message: "inference idle timeout after 240s with no chunks".to_string(),
-            is_retryable: false,
-            retry_after_secs: None,
-            model_metadata: None,
-            empty_response_context: None,
-            doom_loop_triggers: None,
-            doom_loop_aborted_at_chunk: None,
-            credential: SentCredential::Unknown,
-            usage: None,
-        };
+        let original = SamplingError::IdleTimeout { elapsed_secs: 240 };
+        let info = SamplingErrorInfo::from(&original);
         let err = synthesize_from_info(&info);
         match err {
             SamplingError::IdleTimeout { elapsed_secs } => assert_eq!(elapsed_secs, 240),
@@ -1827,19 +2070,14 @@ mod tests {
 
     #[test]
     fn synthesize_api_500_round_trips() {
-        let info = SamplingErrorInfo {
-            kind: SamplingErrorKind::Api,
-            status_code: Some(500),
-            message: "boom".to_string(),
-            is_retryable: true,
-            retry_after_secs: None,
+        let original = SamplingError::Api {
+            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            message: "boom".into(),
             model_metadata: None,
-            empty_response_context: None,
-            doom_loop_triggers: None,
-            doom_loop_aborted_at_chunk: None,
-            credential: SentCredential::Unknown,
-            usage: None,
+            retry_after_secs: None,
+            should_retry: None,
         };
+        let info = SamplingErrorInfo::from(&original);
         let err = synthesize_from_info(&info);
         match err {
             SamplingError::Api {
@@ -1854,19 +2092,14 @@ mod tests {
 
     #[test]
     fn synthesize_rate_limited_preserves_retry_after() {
-        let info = SamplingErrorInfo {
-            kind: SamplingErrorKind::RateLimited,
-            status_code: Some(429),
-            message: "slow down".to_string(),
-            is_retryable: true,
-            retry_after_secs: Some(7),
+        let original = SamplingError::Api {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            message: "slow down".into(),
             model_metadata: None,
-            empty_response_context: None,
-            doom_loop_triggers: None,
-            doom_loop_aborted_at_chunk: None,
-            credential: SentCredential::Unknown,
-            usage: None,
+            retry_after_secs: Some(7),
+            should_retry: None,
         };
+        let info = SamplingErrorInfo::from(&original);
         let err = synthesize_from_info(&info);
         match err {
             SamplingError::Api {
@@ -1882,12 +2115,30 @@ mod tests {
     }
 
     #[test]
+    fn synthesize_without_typed_source_fails_closed() {
+        let original = SamplingError::Api {
+            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            message: "text says this is retryable".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        let mut info = SamplingErrorInfo::from(&original);
+        info.source = None;
+        let err = synthesize_from_info(&info);
+        assert!(matches!(
+            err,
+            SamplingError::Lifecycle(message)
+                if message == "L2 failure missing typed source"
+        ));
+    }
+
+    #[test]
     fn synthesize_serialization_stays_serialization() {
         // Round-trip a REAL error's Display so a Display-template rewording
         // cannot silently reintroduce double-prefixing.
-        let original = SamplingError::Serialization(
-            serde_json::from_str::<i32>("missing field `delta`").unwrap_err(),
-        );
+        let original =
+            SamplingError::from(serde_json::from_str::<i32>("missing field `delta`").unwrap_err());
         let info = SamplingErrorInfo::from(&original);
         let err = synthesize_from_info(&info);
         assert!(
@@ -1905,11 +2156,24 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn retry_sleep_returns_immediately_on_cancellation() {
         let cancel_token = CancellationToken::new();
-        let sleeper = sleep_or_cancel(Duration::from_secs(120), &cancel_token);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        let sleeper = sleep_or_cancel(Duration::from_secs(120), &cancel_token, deadline);
         tokio::pin!(sleeper);
 
         cancel_token.cancel();
-        assert!(!sleeper.await);
+        assert_eq!(sleeper.await, SleepOutcome::Cancelled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_sleep_stops_at_recovery_deadline() {
+        let cancel_token = CancellationToken::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let sleeper = sleep_or_cancel(Duration::from_secs(120), &cancel_token, deadline);
+        tokio::pin!(sleeper);
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(sleeper.await, SleepOutcome::Deadline);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1938,6 +2202,7 @@ mod tests {
             &mut client,
             &config,
             &cancel_token,
+            tokio::time::Instant::now() + Duration::from_secs(120),
             &mut completion_tx,
             None,
             None,
@@ -1955,6 +2220,361 @@ mod tests {
         ));
         assert!(event_rx.try_recv().is_err());
         assert!(completion_rx.await.expect("completion sent").is_err());
+    }
+
+    #[tokio::test]
+    async fn retry_decision_cancellation_during_backoff_stops_without_next_attempt() {
+        let cancel_token = CancellationToken::new();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let mut completion_tx = Some(completion_tx);
+        let mut retry_count = 0;
+        let retry_policy = RetryPolicy::default();
+        let request_id = RequestId::from("cancel-during-backoff");
+        let config = SamplerConfig {
+            base_url: "http://localhost".into(),
+            model: "test-model".into(),
+            ..Default::default()
+        };
+        let mut client = SamplingClient::new(config.clone()).expect("test client");
+        let error = SamplingError::EventStreamError("retry me".into());
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        let cancel_for_task = cancel_token.clone();
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            cancel_for_task.cancel();
+        });
+        let decision = apply_retry_decision(
+            &error,
+            &mut retry_count,
+            2,
+            &retry_policy,
+            &event_tx,
+            &request_id,
+            &mut client,
+            &config,
+            &cancel_token,
+            deadline,
+            &mut completion_tx,
+            None,
+            None,
+        );
+
+        assert!(!decision.await);
+        canceller.await.unwrap();
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SamplingEvent::Retrying { .. })
+        ));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SamplingEvent::Failed { .. })
+        ));
+        assert!(completion_rx.await.expect("completion sent").is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_decision_deadline_emits_lifecycle_failure() {
+        let cancel_token = CancellationToken::new();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let mut completion_tx = Some(completion_tx);
+        let mut retry_count = 0;
+        let retry_policy = RetryPolicy::default();
+        let request_id = RequestId::from("deadline-during-backoff");
+        let config = SamplerConfig {
+            base_url: "http://localhost".into(),
+            model: "test-model".into(),
+            ..Default::default()
+        };
+        let mut client = SamplingClient::new(config.clone()).expect("test client");
+        let error = SamplingError::EventStreamError("retry me".into());
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let decision = Box::pin(apply_retry_decision(
+            &error,
+            &mut retry_count,
+            2,
+            &retry_policy,
+            &event_tx,
+            &request_id,
+            &mut client,
+            &config,
+            &cancel_token,
+            deadline,
+            &mut completion_tx,
+            None,
+            None,
+        ));
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(!decision.await);
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SamplingEvent::Retrying { .. })
+        ));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SamplingEvent::Failed { error, .. })
+                if error.kind == SamplingErrorKind::Lifecycle
+        ));
+        assert!(completion_rx.await.expect("completion sent").is_err());
+    }
+
+    #[tokio::test]
+    async fn shared_recovery_budget_blocks_second_real_http_attempt() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let requests_seen = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            requests_seen.fetch_add(1, Ordering::SeqCst);
+            socket
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 4\r\nconnection: close\r\n\r\nboom",
+                )
+                .await
+                .unwrap();
+        });
+        let budget = crate::recovery::RecoveryBudget::default();
+        let config = SamplerConfig {
+            api_backend: ApiBackend::Responses,
+            base_url: format!("http://{address}"),
+            model: "test-model".into(),
+            max_retries: Some(0),
+            ..Default::default()
+        };
+
+        let (first_events, _first_rx) = mpsc::unbounded_channel();
+        run_request_task(
+            RequestId::from("shared-budget-first"),
+            ConversationRequest::default(),
+            config.clone(),
+            RetryPolicy::default(),
+            first_events,
+            CancellationToken::new(),
+            None,
+            None,
+            None,
+            None,
+            Some(budget.clone()),
+        )
+        .await;
+        let (second_events, _second_rx) = mpsc::unbounded_channel();
+        run_request_task(
+            RequestId::from("shared-budget-second"),
+            ConversationRequest::default(),
+            config,
+            RetryPolicy::default(),
+            second_events,
+            CancellationToken::new(),
+            None,
+            None,
+            None,
+            None,
+            Some(budget.clone()),
+        )
+        .await;
+
+        server.await.unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(budget.attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn real_http_retry_recomputes_output_grant_and_unknown_spend_closes_admission() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for unknown in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+            let observed = requests.clone();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    let body = loop {
+                        let mut buffer = [0; 4096];
+                        let count = socket.read(&mut buffer).await.unwrap();
+                        assert!(count > 0);
+                        bytes.extend_from_slice(&buffer[..count]);
+                        if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                            let length: usize = headers
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .unwrap()
+                                .trim()
+                                .parse()
+                                .unwrap();
+                            if bytes.len() >= end + 4 + length {
+                                break serde_json::from_slice::<serde_json::Value>(
+                                    &bytes[end + 4..end + 4 + length],
+                                )
+                                .unwrap();
+                            }
+                        }
+                    };
+                    let attempt = {
+                        let mut requests = observed.lock().unwrap();
+                        requests.push(body);
+                        requests.len()
+                    };
+                    let mut chunk = serde_json::json!({
+                        "id":"candidate", "object":"chat.completion.chunk", "created":0, "model":"test",
+                        "choices":[{"index":0,"delta":{"content":if attempt == 1 {"discard me"}else{"accepted"}},
+                            "finish_reason":if attempt == 1 {serde_json::Value::Null}else{serde_json::json!("stop")}}]
+                    });
+                    let usage = serde_json::json!({"prompt_tokens":10,"completion_tokens":4,"total_tokens":14});
+                    // A middle snapshot alone must remain unknown. The known
+                    // case also reports an independent aggregate usage tail.
+                    chunk["usage"] = usage.clone();
+                    let usage_tail = if !unknown || attempt > 1 {
+                        format!(
+                            "data: {}\n\n",
+                            serde_json::json!({
+                                "id":"candidate", "object":"chat.completion.chunk", "created":0,
+                                "model":"test", "choices":[], "usage":usage,
+                            })
+                        )
+                    } else {
+                        String::new()
+                    };
+                    let body = format!("data: {chunk}\n\n{usage_tail}data: [DONE]\n\n");
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+            });
+            let remaining = Arc::new(std::sync::atomic::AtomicU32::new(10));
+            let budget = remaining.clone();
+            let admission: AttemptScopeCapture = Arc::new(move || {
+                let limit = budget.load(Ordering::SeqCst);
+                Box::pin(async move {
+                    if limit == 0 {
+                        return Err("output budget closed".into());
+                    }
+                    Ok(crate::AttemptAdmission {
+                        scope: None,
+                        max_output_tokens: Some(limit),
+                    })
+                })
+            });
+            let settlements = Arc::new(Mutex::new(Vec::new()));
+            let captured = settlements.clone();
+            let budget = remaining.clone();
+            let settlement: AttemptUsageSink = Arc::new(move |attempt| {
+                match &attempt {
+                    AttemptUsage::Known { usage, .. } => {
+                        budget.fetch_sub(usage.completion_tokens, Ordering::SeqCst);
+                    }
+                    AttemptUsage::Incomplete { .. } => budget.store(0, Ordering::SeqCst),
+                }
+                captured.lock().unwrap().push(attempt);
+                Box::pin(async { Ok(()) })
+            });
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let (completion, result) = oneshot::channel();
+            run_request_task(
+                RequestId::from("grant"),
+                ConversationRequest::default().with_max_output_tokens(100),
+                SamplerConfig {
+                    model: "test".into(),
+                    base_url: format!("http://{address}"),
+                    api_backend: ApiBackend::ChatCompletions,
+                    max_retries: Some(3),
+                    ..Default::default()
+                },
+                RetryPolicy {
+                    output_delivery: crate::OutputDelivery::Retractable,
+                    ..Default::default()
+                },
+                tx,
+                CancellationToken::new(),
+                Some(completion),
+                Some(admission),
+                Some(settlement),
+                None,
+                None,
+            )
+            .await;
+            let result = result.await.unwrap();
+            server.abort();
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), if unknown { 1 } else { 2 });
+            assert_eq!(requests[0]["max_tokens"], 10);
+            if unknown {
+                assert!(matches!(result, Err(SamplingError::Lifecycle(_))));
+            } else {
+                assert_eq!(requests[1]["max_tokens"], 6);
+                assert_eq!(requests[0]["messages"], requests[1]["messages"]);
+                assert_eq!(result.unwrap().0.assistant_text(), "accepted");
+                assert_eq!(settlements.lock().unwrap().len(), 2);
+            }
+            let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            let discard = events
+                .iter()
+                .position(|event| {
+                    matches!(event, SamplingEvent::AttemptDiscarded { attempt: 1, .. })
+                })
+                .unwrap();
+            let next = events
+                .iter()
+                .position(|event| matches!(event, SamplingEvent::AttemptStarted { attempt: 2, .. }))
+                .unwrap();
+            assert!(discard < next, "discard must precede the next preview");
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_operation_then_eof_is_not_replayed_even_with_retractable_output() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let event = serde_json::json!({"type":"response.output_item.added","sequence_number":0,"output_index":0,
+                "item":{"type":"web_search_call","id":"remote-operation","status":"in_progress"}});
+            let body = format!("data: {event}\n\ndata: [DONE]\n\n");
+            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        });
+        let budget = crate::RecoveryBudget::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (completion, result) = oneshot::channel();
+        run_request_task(
+            RequestId::from("side-effect"),
+            ConversationRequest::default(),
+            SamplerConfig {
+                model: "test".into(),
+                base_url: format!("http://{address}"),
+                api_backend: ApiBackend::Responses,
+                max_retries: Some(3),
+                ..Default::default()
+            },
+            RetryPolicy {
+                output_delivery: crate::OutputDelivery::Retractable,
+                ..Default::default()
+            },
+            tx,
+            CancellationToken::new(),
+            Some(completion),
+            None,
+            None,
+            None,
+            Some(budget.clone()),
+        )
+        .await;
+        server.await.unwrap();
+        let outcome = result.await.unwrap();
+        assert!(
+            matches!(outcome, Err(SamplingError::IncompleteStream { .. })),
+            "provider operation must be decoded before its incomplete stream is stopped: {outcome:?}"
+        );
+        assert_eq!(budget.attempts(), 1);
+        assert!(!budget.can_recover());
     }
 
     #[tokio::test]
@@ -2090,6 +2710,7 @@ mod tests {
             captured,
             doom_check,
             Arc::clone(&output_observed),
+            None,
         )
         .await;
         (outcome, output_observed.load(Ordering::Relaxed))
@@ -2226,6 +2847,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             None,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .await;
 
@@ -2244,8 +2866,8 @@ mod tests {
     #[tokio::test]
     async fn drive_l2_protocol_rejection_preserves_terminal_usage() {
         let request_id = RequestId::from("invalid-terminal-usage");
-        let mut error = SamplingErrorInfo::from(&SamplingError::Serialization(
-            serde::de::Error::custom("Responses protocol: incomplete tool call"),
+        let mut error = SamplingErrorInfo::from(&SamplingError::serialization_message(
+            "Responses protocol: incomplete tool call",
         ));
         error.usage = Some(TokenUsage {
             prompt_tokens: 11,
@@ -2266,12 +2888,14 @@ mod tests {
             Arc::new(Mutex::new(None)),
             None,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .await;
         match outcome {
             AttemptOutcome::Failed {
                 error,
                 usage: Some(usage),
+                ..
             } => {
                 assert!(!error.is_retryable());
                 assert_eq!(usage.total_tokens, 18);

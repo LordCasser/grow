@@ -563,9 +563,23 @@ pub struct ControlStateUpdate {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SamplingAttemptState {
+    Started,
+    Discarded,
+    Accepted,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "sessionUpdate", deny_unknown_fields)]
 pub enum SessionUpdate {
+    /// Lifecycle of provisional model output. Accepted follows durable admission.
+    SamplingAttempt {
+        request_id: String,
+        attempt: u32,
+        state: SamplingAttemptState,
+    },
     /// Durable UI-only terminal fact from a Shell command or lifecycle.
     UiNotice(UiNotice),
     /// UI-only projection of a session control domain.

@@ -720,11 +720,14 @@ pub fn item_image_description(item: &ConversationItem) -> Option<&str> {
 /// Select text on a request copy. Validate all groups before changing any item.
 pub fn select_image_descriptions(items: &mut [ConversationItem]) -> Result<usize, &'static str> {
     let groups = conversation_image_groups(items);
-    let replacements = groups.iter().map(|group| {
-        item_image_description(&items[group.item_index])
-            .map(|text| (group.item_index, text.to_owned()))
-            .ok_or("image description unavailable")
-    }).collect::<Result<Vec<_>, _>>()?;
+    let replacements = groups
+        .iter()
+        .map(|group| {
+            item_image_description(&items[group.item_index])
+                .map(|text| (group.item_index, text.to_owned()))
+                .ok_or("image description unavailable")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut replaced = 0;
     for (index, text) in replacements {
         replaced += replace_item_images_with_text(&mut items[index], &text);
@@ -2802,11 +2805,9 @@ pub fn response_to_conversation_items(
             _ => false,
         };
         if !complete {
-            return Err(crate::SamplingError::Serialization(
-                serde::de::Error::custom(format!(
-                    "Responses protocol: incomplete function call at output index {index}"
-                )),
-            ));
+            return Err(crate::SamplingError::serialization_message(format!(
+                "Responses protocol: incomplete function call at output index {index}"
+            )));
         }
         if serde_json::from_str::<serde::de::IgnoredAny>(&call.arguments).is_err() {
             invalid_arguments.get_or_insert(index);
@@ -9038,7 +9039,9 @@ mod tests {
 
         if let ConversationItem::ToolResult(t) = &back {
             assert_eq!(t.images.len(), 1);
-            assert!(matches!(&t.images[0], ContentPart::Image { url, .. } if url.contains("iVBOR")));
+            assert!(
+                matches!(&t.images[0], ContentPart::Image { url, .. } if url.contains("iVBOR"))
+            );
         } else {
             panic!("Expected ToolResult");
         }
@@ -10213,21 +10216,30 @@ mod paired_image_description_tests {
     use super::*;
     fn image_item(text: &str, url: &str) -> ConversationItem {
         let mut item = ConversationItem::user(text);
-        if let ConversationItem::User(user) = &mut item { user.add_image(url); }
+        if let ConversationItem::User(user) = &mut item {
+            user.add_image(url);
+        }
         item
     }
 
     #[test]
     fn description_selection_retains_original_for_another_model_and_replay() {
         let mut original = image_item("inspect", "data:image/png;base64,a");
-        assert_eq!(attach_item_image_description(&mut original, "diagram text"), 1);
-        let restored: ConversationItem = serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+        assert_eq!(
+            attach_item_image_description(&mut original, "diagram text"),
+            1
+        );
+        let restored: ConversationItem =
+            serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
         assert_eq!(item_image_description(&restored), Some("diagram text"));
         let mut text_request = vec![restored.clone()];
         assert_eq!(select_image_descriptions(&mut text_request), Ok(1));
         assert!(conversation_image_groups(&text_request).is_empty());
         assert!(text_request[0].text_content().contains("diagram text"));
-        assert_eq!(conversation_image_groups(&[restored])[0].image_urls[0].as_ref(), "data:image/png;base64,a");
+        assert_eq!(
+            conversation_image_groups(&[restored])[0].image_urls[0].as_ref(),
+            "data:image/png;base64,a"
+        );
     }
 
     #[test]

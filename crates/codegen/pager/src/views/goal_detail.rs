@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 
 use crate::app::session::{GoalDisplayState, GoalDisplayStatus};
 use crate::theme::Theme;
+use crate::util::group_thousands;
 
 fn usage_lines(goal: &GoalDisplayState) -> Vec<String> {
     let historical = goal
@@ -16,25 +17,36 @@ fn usage_lines(goal: &GoalDisplayState) -> Vec<String> {
         .saturating_sub(goal.usage_breakdown.total());
     let partial = goal.usage_incomplete || historical > 0;
     let marker = if partial { "≥" } else { "" };
-    let mut lines = vec![format!("Total tokens  {marker}{}", goal.tokens_used)];
+    let mut lines = vec![format!(
+        "Total tokens  {marker}{}",
+        group_thousands(goal.tokens_used as u64)
+    )];
     let usage = goal.usage_breakdown;
     lines.extend([
-        format!("Input (cache hit)   {marker}{}", usage.cached_input_tokens),
+        format!(
+            "Input (cache hit)   {marker}{}",
+            group_thousands(usage.cached_input_tokens)
+        ),
         format!(
             "Input (cache miss)  {marker}{}",
-            usage.uncached_input_tokens
+            group_thousands(usage.uncached_input_tokens)
         ),
-        format!("Output              {marker}{}", usage.output_tokens),
+        format!(
+            "Output              {marker}{}",
+            group_thousands(usage.output_tokens)
+        ),
     ]);
     if historical > 0 {
         lines.push(format!(
-            "Unclassified history  ≥{historical} (categories unavailable)"
+            "Unclassified history  ≥{} (categories unavailable)",
+            group_thousands(historical as u64)
         ));
     }
     if let Some(budget) = goal.token_budget {
         lines.push(format!(
             "Budget  {marker}{}/{} tokens",
-            goal.tokens_used, budget
+            group_thousands(goal.tokens_used as u64),
+            group_thousands(budget as u64)
         ));
     }
     lines.push("Budget basis: all input + output, including cache hits".into());
@@ -316,8 +328,27 @@ mod tests {
         assert!(lines.contains(&"Input (cache hit)   200".into()));
         assert!(lines.contains(&"Input (cache miss)  300".into()));
         assert!(lines.contains(&"Output              80".into()));
-        assert!(lines.contains(&"Budget  580/1000 tokens".into()));
+        assert!(lines.contains(&"Budget  580/1,000 tokens".into()));
         assert!(!lines.iter().any(|line| line.contains('≥')));
+    }
+
+    #[test]
+    fn detail_groups_large_token_counts() {
+        let mut goal = GoalDisplayState::test_stub();
+        goal.tokens_used = 300_000_000;
+        goal.token_budget = Some(900_000_000);
+        goal.usage_incomplete = true;
+        goal.usage_breakdown =
+            shell::session::goal_tracker::GoalTokenUsage::new(123_456_789, 12_345_678, 34_567_890);
+        let lines = usage_lines(&goal);
+        assert!(lines.contains(&"Total tokens  ≥300,000,000".into()));
+        assert!(lines.contains(&"Input (cache hit)   ≥12,345,678".into()));
+        assert!(lines.contains(&"Input (cache miss)  ≥111,111,111".into()));
+        assert!(lines.contains(&"Output              ≥34,567,890".into()));
+        assert!(
+            lines.contains(&"Unclassified history  ≥141,975,321 (categories unavailable)".into())
+        );
+        assert!(lines.contains(&"Budget  ≥300,000,000/900,000,000 tokens".into()));
     }
 
     #[test]

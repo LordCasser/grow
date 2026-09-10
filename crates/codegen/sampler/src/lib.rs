@@ -26,6 +26,7 @@ pub mod doom_loop;
 pub mod events;
 pub mod handle;
 pub mod metrics;
+pub mod recovery;
 pub mod retry;
 pub mod sampling_log;
 mod shared_http;
@@ -41,8 +42,9 @@ pub use config::{
 };
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
-pub use handle::{AttemptScopeCapture, AttemptUsage, AttemptUsageSink, SamplerHandle};
+pub use handle::{AttemptAdmission, AttemptScopeCapture, AttemptUsage, AttemptUsageSink, SamplerHandle};
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
+pub use recovery::{OutputDelivery, RecoveryBudget};
 pub use retry::{
     DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error,
     format_sampling_error, resolve_max_retries, retry_backoff_with_jitter,

@@ -253,6 +253,34 @@ impl ChatStateHandle {
         });
     }
 
+    /// Durably settle one real provider model attempt and fold it into the
+    /// ordinary ledgers exactly once. `captured_prompt_index` is captured when
+    /// the attempt starts; a late completion is retained in the session bill
+    /// without being attributed to a newer prompt.
+    pub async fn settle_model_attempt_usage(
+        &self,
+        attempt_key: String,
+        captured_prompt_index: usize,
+        model_id: String,
+        usage: Option<TokenUsage>,
+        cost_usd_ticks: Option<i64>,
+        api_duration_ms: Option<u64>,
+    ) -> Result<bool, TimelineWriteError> {
+        self.query("SettleModelAttemptUsage", |reply| {
+            ChatStateCommand::SettleModelAttemptUsage {
+                attempt_key,
+                model_id,
+                captured_prompt_index,
+                usage,
+                cost_usd_ticks,
+                api_duration_ms,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
     /// Apply subagent usage; returns false if the actor did not acknowledge.
     pub async fn record_subagent_usage(
         &self,
@@ -650,7 +678,14 @@ impl ChatStateHandle {
         .flatten()
     }
 
-    /// Get current prompt index.
+    /// The selected branch's latest prompt coordinate. Callers settling a
+    /// model attempt capture this after TurnStarted and retain it across retries.
+    pub async fn current_prompt_index(&self) -> Option<usize> {
+        self.query("CurrentPromptIndex", |reply| ChatStateCommand::CurrentPromptIndex { reply })
+            .await.flatten()
+    }
+
+    /// Get the next free prompt index.
     pub async fn get_prompt_index(&self) -> usize {
         self.query("GetPromptIndex", |reply| ChatStateCommand::GetPromptIndex {
             reply,

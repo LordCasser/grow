@@ -151,6 +151,12 @@ pub struct ClientCapabilities {
     /// Same per-client isolation rationale as `terminal`.
     pub fs_read: bool,
     pub fs_write: bool,
+
+    /// Whether this client can render provisional sampling-attempt lifecycle
+    /// updates in real time. Older clients receive accepted candidates as a
+    /// complete buffered burst instead.
+    #[serde(default)]
+    pub sampling_attempt_lifecycle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

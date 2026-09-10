@@ -413,6 +413,12 @@ impl MvpAgent {
             )
         };
         Some(crate::agent::subagent::SubagentSpawnContext {
+            sampling_output_delivery: self
+                .sessions
+                .borrow()
+                .get(&parent_sid)
+                .map(|handle| handle.tool_context.sampling_output_delivery)
+                .unwrap_or_default(),
             active_child_sessions: self.active_child_sessions.clone(),
             lsp: parent_lsp,
             process_scope: parent_process_scope,
@@ -566,6 +572,7 @@ impl MvpAgent {
         ctx.delegation_session_info = Some(handle.info.clone());
         ctx.permission_mode = handle.permission_mode;
         ctx.parent_depth = handle.tool_context.subagent_depth;
+        ctx.sampling_output_delivery = handle.tool_context.sampling_output_delivery;
         ctx.hunk_tracker_handle = handle.tool_context.hunk_tracker_handle.clone();
         ctx.hunk_tracking_enabled = handle.tool_context.hunk_tracking_enabled;
         ctx.fs = handle.tool_context.fs.inner().clone();

@@ -2140,6 +2140,13 @@ impl Timeline {
         self.next_prompt_index
     }
 
+    /// Most recently selected branch-local prompt coordinate, if a turn has
+    /// started on this branch. Unlike `next_prompt_index`, this remains safe
+    /// when coordinates contain holes.
+    pub(crate) fn current_prompt_index(&self) -> Option<usize> {
+        self.prompt_indices.iter().next_back().copied()
+    }
+
     fn apply_prompt_coordinate(&mut self, kind: &TimelineEventKind) {
         match kind {
             TimelineEventKind::Turn(TurnEvent::Started { prompt_index, .. }) => {

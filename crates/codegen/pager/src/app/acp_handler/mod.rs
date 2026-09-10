@@ -281,6 +281,29 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             .and_then(|meta| meta.get("grow/contextPressure"))
                             .and_then(serde_json::Value::as_bool)
                             == Some(true);
+                        let usage: Option<shell::extensions::notification::PromptUsage> = (!meta
+                            .is_replay)
+                            .then(|| update.meta.as_ref()?.get("grow/sessionUsage").cloned())
+                            .flatten()
+                            .and_then(|value| serde_json::from_value(value).ok())
+                            .filter(|next: &shell::extensions::notification::PromptUsage| {
+                                // A reconnect snapshot can overtake queued ledger
+                                // events. Counters and incompleteness only advance
+                                // within one process window; reload clears it.
+                                agent.session.session_usage.as_ref().is_none_or(|current| {
+                                    next.totals.input_tokens >= current.totals.input_tokens
+                                        && next.totals.output_tokens >= current.totals.output_tokens
+                                        && next.totals.cached_read_tokens
+                                            >= current.totals.cached_read_tokens
+                                        && next.totals.model_calls >= current.totals.model_calls
+                                        && (!current.usage_is_incomplete
+                                            || next.usage_is_incomplete)
+                                })
+                            });
+                        let usage_changed = usage.is_some();
+                        if let Some(usage) = usage {
+                            agent.session.session_usage = Some(usage);
+                        }
                         let changed = match &update.title {
                             acp::MaybeUndefined::Value(title) => {
                                 let title = crate::util::decode_html_entities(title).into_owned();
@@ -301,7 +324,9 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                                 agent.display_name = None;
                                 true
                             }
-                            acp::MaybeUndefined::Undefined => context_pressure_changed,
+                            acp::MaybeUndefined::Undefined => {
+                                context_pressure_changed || usage_changed
+                            }
                         };
                         advance_reconnect_cursor(agent, &mut meta);
                         changed

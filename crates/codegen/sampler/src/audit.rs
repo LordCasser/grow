@@ -24,6 +24,7 @@ struct Capture {
     overflow: bool,
     failure: Option<String>,
     dispatched: bool,
+    stream_end: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -85,6 +86,14 @@ impl AttemptEvidence {
             .status = Some(status);
     }
 
+    pub(crate) fn stream_end(&self, reason: &'static str) {
+        let mut capture = self.capture.lock().expect("evidence capture poisoned");
+        // A final buffered SSE frame can be decoded after the body reports EOF.
+        if capture.stream_end.is_none() || capture.stream_end == Some("body_eof") {
+            capture.stream_end = Some(reason);
+        }
+    }
+
     /// ACK gates HTTP emission. Credentials and request headers are deliberately
     /// outside this evidence payload; the body is the exact encoded projection.
     pub(crate) async fn request(
@@ -112,13 +121,15 @@ impl AttemptEvidence {
     /// captures raw bytes before BOM removal, SSE decoding or extension filters.
     /// A bounded prefix is retained on overflow and the attempt fails closed.
     pub async fn finish(&self, metadata: Value) -> Result<(), String> {
-        let (body, status, overflow, failure) = {
+        let (body, status, overflow, failure, stream_end, dispatched) = {
             let capture = self.capture.lock().expect("evidence capture poisoned");
             (
                 capture.response.clone(),
                 capture.status,
                 capture.overflow,
                 capture.failure.clone(),
+                capture.stream_end,
+                capture.dispatched,
             )
         };
         if let Some(error) = failure {
@@ -126,7 +137,7 @@ impl AttemptEvidence {
         }
         (self.sink)(Evidence {
             kind: "response",
-            metadata: json!({"status": status, "truncated_by_evidence_limit": overflow, "outcome": metadata}),
+            metadata: json!({"status": status, "stream_end": stream_end, "http_dispatched": dispatched, "truncated_by_evidence_limit": overflow, "outcome": metadata}),
             body,
         }).await?;
         self.capture

@@ -1,6 +1,8 @@
 //! Internal state types for the ChatStateActor.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
 
 use sampling_types::{
     ConversationItem, ConversationRequest, DanglingToolCallReason, JsonOutputFormat,
@@ -231,10 +233,79 @@ pub(crate) struct ChatState {
     pub prompt_usage: Option<UsageLedger>,
     /// Lifetime session usage (not persisted).
     pub session_usage: UsageLedger,
+    /// Durable attempt facts already applied in this actor epoch. This is
+    /// reconstructed from Timeline observations so a replay cannot charge a
+    /// settled attempt a second time.
+    pub(crate) settled_model_attempts: BTreeMap<String, AttemptUsageSettlement>,
     /// Event-sequence turn capture state. `Some` = capture active, `None` = inactive.
     /// Cleared on `TakeTurnMessages` (consumed), `BeginTurnCapture` (new turn),
     /// and the durable rewind transaction (which abandons the turn capture).
     pub(super) turn_capture: Option<TurnCaptureState>,
+}
+
+/// The immutable payload recorded for one model-attempt settlement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttemptUsageSettlement {
+    pub(crate) attempt_key: String,
+    pub(crate) model_id: String,
+    pub(crate) captured_prompt_index: usize,
+    pub(crate) usage: Option<TokenUsage>,
+    pub(crate) cost_usd_ticks: Option<i64>,
+    pub(crate) api_duration_ms: Option<u64>,
+}
+
+impl AttemptUsageSettlement {
+    pub(crate) fn matches(
+        &self,
+        model_id: &str,
+        captured_prompt_index: usize,
+        usage: Option<&TokenUsage>,
+        cost_usd_ticks: Option<i64>,
+        api_duration_ms: Option<u64>,
+    ) -> bool {
+        self.model_id == model_id
+            && self.captured_prompt_index == captured_prompt_index
+            && token_usage_matches(self.usage.as_ref(), usage)
+            && self.cost_usd_ticks == cost_usd_ticks
+            && self.api_duration_ms == api_duration_ms
+    }
+}
+
+fn token_usage_matches(left: Option<&TokenUsage>, right: Option<&TokenUsage>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.prompt_tokens == right.prompt_tokens
+                && left.completion_tokens == right.completion_tokens
+                && left.total_tokens == right.total_tokens
+                && left.reasoning_tokens == right.reasoning_tokens
+                && left.cached_prompt_tokens == right.cached_prompt_tokens
+                && left.cache_creation_prompt_tokens == right.cache_creation_prompt_tokens
+        }
+        _ => false,
+    }
+}
+
+fn settled_model_attempts_from_timeline(
+    timeline: &Timeline,
+) -> BTreeMap<String, AttemptUsageSettlement> {
+    timeline
+        .events()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            crate::TimelineEventKind::Observation(observation)
+                if observation.scope == "sampling_usage"
+                    && observation.name == "attempt_settled" => observation
+                        .data
+                        .as_ref()
+                        .and_then(|data| serde_json::from_value(data.clone()).ok()),
+            _ => None,
+        })
+        .fold(BTreeMap::new(), |mut settled, payload: AttemptUsageSettlement| {
+            settled.entry(payload.attempt_key.clone()).or_insert(payload);
+            settled
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -407,6 +478,7 @@ impl ChatState {
     /// Restore state from an already validated durable timeline.
     pub fn from_timeline(timeline: Timeline, sampling_config: SamplingConfig) -> Self {
         let initial_tokens = estimate_conversation_tokens(timeline.surface());
+        let settled_model_attempts = settled_model_attempts_from_timeline(&timeline);
 
         Self {
             continuation: ContinuationLane::new(
@@ -425,6 +497,7 @@ impl ChatState {
             last_turn_usage: None,
             prompt_usage: None,
             session_usage: UsageLedger::default(),
+            settled_model_attempts,
             turn_capture: None,
         }
     }

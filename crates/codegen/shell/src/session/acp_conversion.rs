@@ -489,7 +489,9 @@ pub fn acp_tool_update(
                     .raw_output(raw_output_json(output, rewriter)),
             ))
         }
-        ToolOutput::UpdateGoal(_)
+        ToolOutput::CreateGoal(_)
+        | ToolOutput::GetGoal(_)
+        | ToolOutput::UpdateGoal(_)
         | ToolOutput::Workflow(_)
         | ToolOutput::Monitor(_)
         | ToolOutput::SchedulerCreate(_)
@@ -538,6 +540,46 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use tools::types::output::*;
+
+    #[test]
+    fn goal_outputs_emit_completed_updates_with_original_identity() {
+        use tools::implementations::grow_build::update_goal::{
+            CreateGoalOutput, GoalView, UpdateGoalOutput,
+        };
+        let outputs = [
+            ToolOutput::CreateGoal(CreateGoalOutput {
+                success: true,
+                summary: "created".into(),
+            }),
+            ToolOutput::GetGoal(GoalView {
+                goal_id: "goal-1".into(),
+                definition_revision: 1,
+                objective: "objective".into(),
+                status: "active".into(),
+                token_budget: None,
+                tokens_used: 100,
+                usage_incomplete: false,
+                elapsed_ms: 500,
+                created_at: "now".into(),
+                updated_at: "now".into(),
+                status_message: None,
+            }),
+            ToolOutput::UpdateGoal(UpdateGoalOutput {
+                success: true,
+                summary: "completed".into(),
+            }),
+        ];
+        for output in outputs {
+            let update = acp_tool_update(&output, "goal-call", None, None)
+                .expect("every successful Goal output closes its UI call");
+            assert_eq!(update.tool_call_id.0.as_ref(), "goal-call");
+            assert_eq!(update.fields.status, Some(acp::ToolCallStatus::Completed));
+            assert_eq!(
+                update.fields.raw_output,
+                Some(serde_json::to_value(output).unwrap())
+            );
+        }
+    }
 
     #[test]
     fn web_fetch_redirect_requires_new_call_in_acp() {

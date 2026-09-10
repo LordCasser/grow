@@ -370,6 +370,7 @@ fn handle_session_notification_inner(
                 | GrowSessionUpdate::AutoCompactCompleted { .. }
                 | GrowSessionUpdate::AutoCompactFailed { .. }
                 | GrowSessionUpdate::AutoCompactCancelled { .. }
+                | GrowSessionUpdate::SamplingAttempt { .. }
                 | GrowSessionUpdate::RetryState(_)
                 | GrowSessionUpdate::MemoryFlushCompleted { .. }
                 | GrowSessionUpdate::MemoryDreamCompleted { .. }
@@ -492,6 +493,16 @@ fn handle_session_notification_inner(
         GrowSessionUpdate::ControlStateUpdate(update) => {
             apply_control_state_update(agent, update, meta.event_id.clone(), meta.is_replay)
         }
+        GrowSessionUpdate::SamplingAttempt {
+            request_id,
+            attempt,
+            state,
+        } => agent.session.tracker.handle_sampling_attempt(
+            request_id,
+            attempt,
+            state,
+            &mut agent.scrollback,
+        ),
         GrowSessionUpdate::RetryState(ref retry) => {
             let stale = !meta.is_replay
                 && meta.prompt_id.as_deref().is_some_and(|pid| {
@@ -1482,8 +1493,23 @@ pub(super) fn handle_child_session_notification(
                     .get_mut(child_sid)
                     .is_some_and(|child| {
                         child.dismiss_resolved_interaction(child_sid, &tool_call_id)
-                    })
+                })
         }
+        GrowSessionUpdate::SamplingAttempt {
+            request_id,
+            attempt,
+            state,
+        } => agent
+            .subagent_views
+            .get_mut(child_sid)
+            .is_some_and(|child| {
+                child.session.tracker.handle_sampling_attempt(
+                    request_id,
+                    attempt,
+                    state,
+                    &mut child.scrollback,
+                )
+            }),
         GrowSessionUpdate::AutoCompactStarted { .. }
         | GrowSessionUpdate::AutoCompactCompleted { .. }
         | GrowSessionUpdate::AutoCompactFailed { .. }

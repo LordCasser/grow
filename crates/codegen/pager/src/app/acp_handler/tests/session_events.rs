@@ -2,6 +2,113 @@
     use super::*;
     use crate::scrollback::blocks::ToolCallBlock;
 
+    fn sampling_agent_chunk(
+        session_id: &str,
+        request_id: &str,
+        attempt: u32,
+        text: &str,
+    ) -> AcpClientMessage {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = acp::SessionNotification::new(
+            acp::SessionId::new(session_id),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                acp::ContentBlock::Text(acp::TextContent::new(text)),
+            )),
+        )
+        .meta(
+            serde_json::json!({
+                "samplingRequestId": request_id,
+                "samplingAttempt": attempt,
+            })
+            .as_object()
+            .cloned(),
+        );
+        AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+            request,
+            response_tx: tx,
+        })
+    }
+
+    #[test]
+    fn root_sampling_attempt_reaches_tracker_and_discards_tagged_preview() {
+        let mut app = make_app_with_agent("root-sampling");
+        let started = GrowSessionUpdate::SamplingAttempt {
+            request_id: "request-root".into(),
+            attempt: 1,
+            state: shell::extensions::notification::SamplingAttemptState::Started,
+        };
+        let discarded = GrowSessionUpdate::SamplingAttempt {
+            request_id: "request-root".into(),
+            attempt: 1,
+            state: shell::extensions::notification::SamplingAttemptState::Discarded,
+        };
+        assert!(!handle(
+            make_ext_session_notification("root-sampling", started),
+            &mut app,
+        ));
+        assert!(handle(
+            sampling_agent_chunk("root-sampling", "request-root", 1, "discarded root preview"),
+            &mut app,
+        ));
+        assert_eq!(
+            agent_message_text(&app.agents[&AgentId(0)]),
+            "discarded root preview"
+        );
+        assert!(handle(
+            make_ext_session_notification("root-sampling", discarded),
+            &mut app,
+        ));
+        assert!(agent_message_text(&app.agents[&AgentId(0)]).is_empty());
+    }
+
+    #[test]
+    fn child_sampling_attempt_reaches_child_tracker_and_discards_tagged_preview() {
+        let mut app = make_app_with_parent_and_child("root-sampling", "child-sampling");
+        let started = GrowSessionUpdate::SamplingAttempt {
+            request_id: "request-child".into(),
+            attempt: 1,
+            state: shell::extensions::notification::SamplingAttemptState::Started,
+        };
+        let discarded = GrowSessionUpdate::SamplingAttempt {
+            request_id: "request-child".into(),
+            attempt: 1,
+            state: shell::extensions::notification::SamplingAttemptState::Discarded,
+        };
+        assert!(!handle(
+            make_ext_session_notification("child-sampling", started),
+            &mut app,
+        ));
+        assert!(handle(
+            sampling_agent_chunk(
+                "child-sampling",
+                "request-child",
+                1,
+                "discarded child preview",
+            ),
+            &mut app,
+        ));
+        assert_eq!(
+            agent_message_text(
+                app.agents[&AgentId(0)]
+                    .subagent_views
+                    .get("child-sampling")
+                    .expect("child view"),
+            ),
+            "discarded child preview"
+        );
+        assert!(handle(
+            make_ext_session_notification("child-sampling", discarded),
+            &mut app,
+        ));
+        assert!(agent_message_text(
+            app.agents[&AgentId(0)]
+                .subagent_views
+                .get("child-sampling")
+                .expect("child view"),
+        )
+        .is_empty());
+    }
+
     // ── apply_session_event ────────────────────────────────────────────
 
     #[test]

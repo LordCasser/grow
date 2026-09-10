@@ -13,6 +13,10 @@ pub enum ChatStateEvent {
     /// metadata and auto-compaction threshold checks).
     ContextPressureUpdated { projected_tokens: u64 },
 
+    /// Cumulative process-local billing changed. A replace-only UI projection,
+    /// independent of prompt completion and projected context pressure.
+    SessionUsageUpdated { usage: crate::usage::UsageLedger },
+
     /// Conversation was replaced (compaction/rewind) — session may need to
     /// reset idle-flush counters, memory injection flags, etc.
     ConversationReset { new_len: usize },

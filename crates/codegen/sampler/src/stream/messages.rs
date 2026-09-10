@@ -120,6 +120,7 @@ pub fn stream_messages<'a>(
         // Validate closed tools immediately, but drain to a legitimate terminal
         // usage snapshot before failing. No calls are dispatched by this layer.
         let mut invalid_response: Option<String> = None;
+        let mut invalid_tool_arguments: Option<String> = None;
 
         // Final-message-level accumulators
         let mut final_model: Option<String> = None;
@@ -483,11 +484,15 @@ pub fn stream_messages<'a>(
                                 if !state.args_started {
                                     state.args_acc = input.to_string();
                                 }
-                                if !initial_valid || !state.args_acc.trim_start().starts_with('{')
+                                if !initial_valid {
+                                    invalid_response.get_or_insert_with(|| format!(
+                                        "conflicting initial tool input at block {index}"
+                                    ));
+                                } else if !state.args_acc.trim_start().starts_with('{')
                                     || serde_json::from_str::<serde::de::IgnoredAny>(&state.args_acc).is_err()
                                 {
-                                    invalid_response.get_or_insert_with(|| format!(
-                                        "invalid or incomplete JSON object at tool block {index}"
+                                    invalid_tool_arguments.get_or_insert_with(|| format!(
+                                        "Messages tool block {index} contains invalid JSON object"
                                     ));
                                 } else {
                                     let input_value = serde_json::from_str(&state.args_acc)
@@ -633,11 +638,19 @@ pub fn stream_messages<'a>(
             None
         };
 
-        if !message_stop_seen || !message_delta_seen || final_stop_reason.is_none() || !blocks.is_empty() {
-            invalid_response.get_or_insert_with(|| "stream ended without message_start, closed blocks, stop_reason and message_stop".into());
-        }
         if let Some(message) = invalid_response {
             yield protocol_failure(&request_id, format!("Messages stream protocol: {message}"), usage);
+            return;
+        }
+        if !message_stop_seen || !message_delta_seen || final_stop_reason.is_none() || !blocks.is_empty() {
+            yield super::incomplete_stream(&request_id, sampling_types::ApiBackend::Messages,
+                "stream ended without message_start, closed blocks, stop_reason and message_stop", usage);
+            return;
+        }
+        if let Some(message) = invalid_tool_arguments {
+            let mut error = SamplingErrorInfo::from(&SamplingError::InvalidToolArguments(message));
+            error.usage = usage;
+            yield SamplingEvent::Failed { request_id: request_id.clone(), error };
             return;
         }
 

@@ -1,0 +1,4 @@
+- [x] Confirm the debug stack overflow and inspect the explicit session-thread stack setting.
+- [x] Adjust only debug session stack capacity; retain release capacity and existing turn logic.
+- [x] Pass native independent-process coordination and relevant shell regression.
+- [x] Validate and archive this development-build correction.

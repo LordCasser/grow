@@ -626,6 +626,9 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             );
         }
         let config_options = self.session_config_options(Some(&session_id), &models);
+        if let Some(handle) = self.sessions.borrow().get(&session_id) {
+            let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
+        }
         Ok(acp::NewSessionResponse::new(session_id)
             .config_options(config_options)
             .meta(meta.as_object().cloned()))

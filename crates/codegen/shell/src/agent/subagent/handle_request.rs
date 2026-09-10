@@ -1048,7 +1048,7 @@ pub(crate) async fn run_shell_child(
         .output_token_budget
         .map(crate::tools::tool_context::TaskOutputTokenBudget::limited);
     tool_ctx.task_output_token_budget = task_output_budget.clone();
-    tool_ctx.sampler_retry_only_before_output = task_output_budget.is_some();
+    tool_ctx.sampling_output_delivery = ctx.sampling_output_delivery;
     tool_ctx.subagent_depth = child_depth;
     tool_ctx.lsp = ctx.lsp.clone();
     tool_ctx.process_scope = ctx.process_scope.clone();

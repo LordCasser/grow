@@ -185,7 +185,7 @@ pub struct ToolContext {
     /// non-zero takes the send-now path.
     pub blocking_wait_depth: Arc<BlockingWaitState>,
     pub task_output_token_budget: Option<TaskOutputTokenBudget>,
-    pub(crate) sampler_retry_only_before_output: bool,
+    pub(crate) sampling_output_delivery: sampler::OutputDelivery,
     /// This session's child-process reaper, set at session spawn; `None` for
     /// contexts without one (subagents, defaults). Spawn sites enroll children
     /// into it; enrolled children are killed when the session closes.
@@ -247,7 +247,7 @@ impl ToolContext {
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
             task_output_token_budget: None,
-            sampler_retry_only_before_output: false,
+            sampling_output_delivery: sampler::OutputDelivery::Irreversible,
             process_scope: None,
         }
     }
@@ -281,7 +281,7 @@ impl ToolContext {
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
             task_output_token_budget: None,
-            sampler_retry_only_before_output: false,
+            sampling_output_delivery: sampler::OutputDelivery::Irreversible,
             process_scope: None,
         }
     }
@@ -368,7 +368,7 @@ mod tests {
                 goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 blocking_wait_depth: Arc::new(BlockingWaitState::new()),
                 task_output_token_budget: None,
-                sampler_retry_only_before_output: false,
+                sampling_output_delivery: sampler::OutputDelivery::Irreversible,
                 process_scope: None,
             }
         }

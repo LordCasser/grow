@@ -514,61 +514,34 @@ impl TimelineBootstrap {
 }
 
 fn configure_session_sampler_retry(
-    config: &mut SamplingConfig,
     max_retries: Option<u32>,
-    task_output_budgeted: bool,
-    workflow_child_fail_closed: bool,
+    output_delivery: sampler::OutputDelivery,
 ) -> sampler::RetryPolicy {
-    // Budgeted and workflow-child attempts retain their stricter accounting
-    // policy: doom-loop resampling is disabled because discarded attempts can
-    // consume an output grant whose exact usage is not always recoverable.
-    if task_output_budgeted || workflow_child_fail_closed {
-        config.doom_loop_recovery = None;
-    }
     sampler::RetryPolicy {
         max_retries: max_retries.unwrap_or(5),
         rate_limit_retry_threshold: 2,
-        // The primary session must not replay a transiently failed attempt
-        // after any model output has crossed the irreversible stream boundary.
-        retry_only_before_output: true,
+        output_delivery,
     }
 }
 
 #[cfg(test)]
 mod sampler_retry_policy_tests {
     use super::configure_session_sampler_retry;
-
-    fn config_with_doom_recovery() -> sampler::SamplerConfig {
-        sampler::SamplerConfig {
-            doom_loop_recovery: Some(Default::default()),
-            ..Default::default()
-        }
-    }
-
     #[test]
-    fn primary_session_retries_only_before_output_and_keeps_doom_recovery() {
-        let mut config = config_with_doom_recovery();
-        let policy = configure_session_sampler_retry(&mut config, Some(7), false, false);
-
-        assert!(policy.retry_only_before_output);
-        assert_eq!(policy.max_retries, 7);
-        assert!(config.doom_loop_recovery.is_some());
-    }
-
-    #[test]
-    fn budgeted_and_workflow_children_keep_fail_closed_sampling_policy() {
-        for (task_output_budgeted, workflow_child_fail_closed) in [(true, false), (false, true)] {
-            let mut config = config_with_doom_recovery();
-            let policy = configure_session_sampler_retry(
-                &mut config,
-                None,
-                task_output_budgeted,
-                workflow_child_fail_closed,
-            );
-
-            assert!(policy.retry_only_before_output);
-            assert!(config.doom_loop_recovery.is_none());
+    fn delivery_is_explicit_and_disabling_retry_is_preserved() {
+        for delivery in [
+            sampler::OutputDelivery::Irreversible,
+            sampler::OutputDelivery::Retractable,
+            sampler::OutputDelivery::Buffered,
+        ] {
+            let policy = configure_session_sampler_retry(Some(0), delivery);
+            assert_eq!(policy.max_retries, 0);
+            assert_eq!(policy.output_delivery, delivery);
         }
+        assert_eq!(
+            configure_session_sampler_retry(None, Default::default()).max_retries,
+            5
+        );
     }
 }
 
@@ -1687,13 +1660,8 @@ pub(crate) async fn spawn_session_actor(
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let mut sampler_config_initial = sampling_config.clone();
     sampler_config_initial.idle_timeout_secs = Some(inference_idle_timeout_secs);
-    let task_output_budgeted = tool_context.task_output_token_budget.is_some();
-    let sampler_retry_policy = configure_session_sampler_retry(
-        &mut sampler_config_initial,
-        max_retries,
-        task_output_budgeted,
-        tool_context.sampler_retry_only_before_output,
-    );
+    let sampler_retry_policy =
+        configure_session_sampler_retry(max_retries, tool_context.sampling_output_delivery);
     let (sampler_event_tx, sampler_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<sampler::SamplingEvent>();
     let sampler_owner = sampler::SamplerActor::spawn_owned(
@@ -2606,6 +2574,7 @@ pub(crate) async fn spawn_session_actor(
         recap_epoch: std::cell::Cell::new(0),
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         turn_stream_drained: parking_lot::Mutex::new(None),
+        sampling_preview: parking_lot::Mutex::new(None),
         sampler_handle,
         sampler_owner: std::cell::RefCell::new(Some(sampler_owner)),
         sampler_event_drainer: TaskSlot::new(),
@@ -3138,7 +3107,8 @@ enum SessionThreadState {
 }
 struct SessionThreadOwner {
     persistence: Option<tokio::task::AbortHandle>,
-    persistence_sender: Option<tokio::sync::mpsc::WeakUnboundedSender<crate::session::persistence::PersistenceMsg>>,
+    persistence_sender:
+        Option<tokio::sync::mpsc::WeakUnboundedSender<crate::session::persistence::PersistenceMsg>>,
     state: std::sync::Mutex<SessionThreadState>,
 }
 type SessionReaperJob = (
@@ -3196,8 +3166,8 @@ impl Drop for SessionThreadOwner {
                 // Join off-runtime, then close the persistence mailbox even
                 // when external resources still retain a sender. A weak route
                 // does not itself prolong that mailbox's lifetime.
-                if let Err(error) = session_thread_reaper()
-                    .send((handle, self.persistence_sender.take()))
+                if let Err(error) =
+                    session_thread_reaper().send((handle, self.persistence_sender.take()))
                 {
                     let (handle, sender) = error.0;
                     let _ = handle.join();
@@ -3217,7 +3187,13 @@ impl SessionThread {
     fn new(join_handle: std::thread::JoinHandle<()>) -> Self {
         Self::with_persistence(join_handle, None, None)
     }
-    pub(crate) fn with_persistence(join_handle: std::thread::JoinHandle<()>, persistence: Option<tokio::task::AbortHandle>, persistence_sender: Option<tokio::sync::mpsc::WeakUnboundedSender<crate::session::persistence::PersistenceMsg>>) -> Self {
+    pub(crate) fn with_persistence(
+        join_handle: std::thread::JoinHandle<()>,
+        persistence: Option<tokio::task::AbortHandle>,
+        persistence_sender: Option<
+            tokio::sync::mpsc::WeakUnboundedSender<crate::session::persistence::PersistenceMsg>,
+        >,
+    ) -> Self {
         Self {
             owner: std::sync::Arc::new(SessionThreadOwner {
                 persistence,
@@ -3239,8 +3215,15 @@ impl SessionThread {
             SessionThreadState::Joined { .. } => true,
         };
         drop(state);
-        if !actor_finished { return false; }
-        if self.owner.persistence.as_ref().is_some_and(|task| !task.is_finished()) {
+        if !actor_finished {
+            return false;
+        }
+        if self
+            .owner
+            .persistence
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
             request_persistence_stop(self.owner.persistence_sender.as_ref());
             return false;
         }
@@ -3308,7 +3291,11 @@ async fn join_failed_session_init_thread(
     result
 }
 
-fn request_persistence_stop(sender: Option<&tokio::sync::mpsc::WeakUnboundedSender<crate::session::persistence::PersistenceMsg>>) {
+fn request_persistence_stop(
+    sender: Option<
+        &tokio::sync::mpsc::WeakUnboundedSender<crate::session::persistence::PersistenceMsg>,
+    >,
+) {
     if let Some(sender) = sender.and_then(|sender| sender.upgrade()) {
         let _ = sender.send(crate::session::persistence::PersistenceMsg::Stop);
     }
@@ -3435,7 +3422,12 @@ pub(crate) async fn spawn_session_on_thread(
     let persistence_sender = persistence.tx.downgrade();
     let sid = session_info.id.0.to_string();
     let thread_name = format!("ses-{}", &sid[..sid.len().min(8)]);
-    const SESSION_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+    // Unoptimized async poll frames need more stack than the release build.
+    const SESSION_THREAD_STACK_SIZE: usize = if cfg!(debug_assertions) {
+        32 * 1024 * 1024
+    } else {
+        8 * 1024 * 1024
+    };
     let join_handle = std::thread::Builder::new()
         .name(thread_name)
         .stack_size(SESSION_THREAD_STACK_SIZE)
@@ -3567,7 +3559,11 @@ pub(crate) async fn spawn_session_on_thread(
             );
         }
     };
-    let session_thread = SessionThread::with_persistence(join_handle, persistence_completion, Some(persistence_sender));
+    let session_thread = SessionThread::with_persistence(
+        join_handle,
+        persistence_completion,
+        Some(persistence_sender),
+    );
     if let Some(register) = on_thread_spawned {
         register(session_thread.clone());
     }
@@ -3799,30 +3795,57 @@ mod failed_session_init_join_tests {
     async fn reaper_stops_persistence_after_last_owner_thread_exit() {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let (release, wait) = std::sync::mpsc::channel::<()>();
-        let thread = std::thread::spawn(move || { let _ = wait.recv(); });
+        let thread = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
         let owner = SessionThread::with_persistence(thread, None, Some(sender.downgrade()));
         drop(owner.clone());
-        assert!(receiver.try_recv().is_err(), "non-final clone cannot stop persistence");
+        assert!(
+            receiver.try_recv().is_err(),
+            "non-final clone cannot stop persistence"
+        );
         drop(owner);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), receiver.recv()).await.is_err(), "live thread cannot be stopped by reaper");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err(),
+            "live thread cannot be stopped by reaper"
+        );
         release.send(()).unwrap();
         let stop = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv()).await;
-        assert!(matches!(stop, Ok(Some(crate::session::persistence::PersistenceMsg::Stop))), "reaper must stop persistence after join");
+        assert!(
+            matches!(
+                stop,
+                Ok(Some(crate::session::persistence::PersistenceMsg::Stop))
+            ),
+            "reaper must stop persistence after join"
+        );
     }
 
     #[tokio::test]
     async fn reaper_completed_session_is_not_blocked_by_live_predecessor() {
         let (release, wait) = std::sync::mpsc::channel::<()>();
-        let blocked = std::thread::spawn(move || { let _ = wait.recv(); });
+        let blocked = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
         drop(SessionThread::new(blocked));
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let finished = std::thread::spawn(|| {});
-        drop(SessionThread::with_persistence(finished, None, Some(sender.downgrade())));
+        drop(SessionThread::with_persistence(
+            finished,
+            None,
+            Some(sender.downgrade()),
+        ));
         let stop = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv()).await;
         // Always release the predecessor before asserting, including on failure.
         drop(release);
-        assert!(matches!(stop, Ok(Some(crate::session::persistence::PersistenceMsg::Stop))),
-            "a completed session must be reaped while its predecessor is still alive");
+        assert!(
+            matches!(
+                stop,
+                Ok(Some(crate::session::persistence::PersistenceMsg::Stop))
+            ),
+            "a completed session must be reaped while its predecessor is still alive"
+        );
     }
 
     #[tokio::test]
@@ -3833,43 +3856,80 @@ mod failed_session_init_join_tests {
         assert!(owner.clone().join().is_ok());
         assert!(receiver.try_recv().is_err());
         drop(owner);
-        assert!(matches!(receiver.try_recv(), Ok(crate::session::persistence::PersistenceMsg::Stop)), "joined final owner must stop persistence");
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Ok(crate::session::persistence::PersistenceMsg::Stop)
+            ),
+            "joined final owner must stop persistence"
+        );
     }
 
     #[tokio::test]
     async fn finished_actor_waits_for_persistence_owner() {
         use crate::session::storage::StorageAdapter;
         let root = tempfile::tempdir().unwrap();
-        let info = crate::session::info::Info { id: acp_transport::protocol::SessionId::new("delayed-writer"), cwd: "/test/workspace".into() };
-        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
-        storage.init_session(&info, crate::session::persistence::default_model_id()).await.unwrap();
-        let replacement = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
+        let info = crate::session::info::Info {
+            id: acp_transport::protocol::SessionId::new("delayed-writer"),
+            cwd: "/test/workspace".into(),
+        };
+        let storage =
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
+        storage
+            .init_session(&info, crate::session::persistence::default_model_id())
+            .await
+            .unwrap();
+        let replacement =
+            crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().into());
         let (release, wait) = tokio::sync::oneshot::channel::<()>();
         let owner = tokio::spawn(async move {
             let _storage = storage;
             let _ = wait.await;
         });
         let thread = std::thread::spawn(|| {});
-        while !thread.is_finished() { tokio::task::yield_now().await; }
+        while !thread.is_finished() {
+            tokio::task::yield_now().await;
+        }
         let session = SessionThread::with_persistence(thread, Some(owner.abort_handle()), None);
         let premature = session.is_finished();
-        assert!(replacement.load_session_for_write_without_updates(&info).await.is_err());
+        assert!(
+            replacement
+                .load_session_for_write_without_updates(&info)
+                .await
+                .is_err()
+        );
         let _ = release.send(());
         owner.await.unwrap();
-        assert!(!premature, "actor exit must not expose replacement while persistence owns its lease");
+        assert!(
+            !premature,
+            "actor exit must not expose replacement while persistence owns its lease"
+        );
         assert!(session.is_finished());
         assert!(session.join().is_ok());
-        replacement.load_session_for_write_without_updates(&info).await.unwrap();
+        replacement
+            .load_session_for_write_without_updates(&info)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn failed_initialization_waits_for_persistence_exit() {
         let (release, wait) = tokio::sync::oneshot::channel::<()>();
-        let owner = tokio::spawn(async move { let _ = wait.await; });
-        let registered = SessionThread::with_persistence(std::thread::spawn(|| {}), Some(owner.abort_handle()), None);
+        let owner = tokio::spawn(async move {
+            let _ = wait.await;
+        });
+        let registered = SessionThread::with_persistence(
+            std::thread::spawn(|| {}),
+            Some(owner.abort_handle()),
+            None,
+        );
         let joined = join_failed_session_init_thread(registered.clone());
         tokio::pin!(joined);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut joined).await.is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut joined)
+                .await
+                .is_err()
+        );
         assert!(!registered.is_finished());
         let _ = release.send(());
         assert!(joined.await.unwrap().is_ok());
@@ -3882,18 +3942,30 @@ mod failed_session_init_join_tests {
             let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             struct OnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
             impl Drop for OnDrop {
-                fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::SeqCst); }
+                fn drop(&mut self) {
+                    self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
             }
             let guard = OnDrop(dropped.clone());
             let owner = tokio::spawn(async move {
                 let _guard = guard;
-                if panic { panic!("persistence panic fixture"); }
+                if panic {
+                    panic!("persistence panic fixture");
+                }
                 std::future::pending::<()>().await;
             });
-            let registered = SessionThread::with_persistence(std::thread::spawn(|| {}), Some(owner.abort_handle()), None);
-            if !panic { owner.abort(); }
+            let registered = SessionThread::with_persistence(
+                std::thread::spawn(|| {}),
+                Some(owner.abort_handle()),
+                None,
+            );
+            if !panic {
+                owner.abort();
+            }
             let _ = owner.await;
-            while !registered.is_finished() { tokio::task::yield_now().await; }
+            while !registered.is_finished() {
+                tokio::task::yield_now().await;
+            }
             assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
             assert!(registered.join().is_ok());
         }

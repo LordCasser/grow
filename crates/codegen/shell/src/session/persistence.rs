@@ -342,6 +342,14 @@ pub enum PersistenceMsg {
     Stop,
     /// A session update (ACP update or Grow extension update)
     Update(SessionUpdate),
+    /// Ordered lifecycle boundary for a retractable sampling preview. This
+    /// controls the in-memory ACP candidate buffer and is never written as a
+    /// second history record.
+    SamplingAttempt {
+        request_id: String,
+        attempt: u32,
+        state: crate::extensions::notification::SamplingAttemptState,
+    },
     AppendUpdateDurablyAndAck {
         update: SessionUpdate,
         respond_to:
@@ -1833,12 +1841,36 @@ struct SessionPersistence {
     storage: Arc<dyn StorageAdapter>,
     /// Pending ACP notification for merging consecutive text chunks
     pending_notification: Option<acp::SessionNotification>,
+    /// ACP preview notifications held until their attempt is accepted. The
+    /// lifecycle boundary itself is transient; only accepted ACP content is
+    /// allowed to enter the persisted replay cache.
+    pending_sampling: Option<(SamplingAttemptKey, Vec<PendingSamplingNotification>)>,
+    sampling_attempt: Option<SamplingAttemptKey>,
+    /// The last terminal boundary is retained only as a bounded late-event
+    /// fence. It is deliberately not a history of every request: one
+    /// producer owns this queue and a newer active attempt rejects older
+    /// same-request ordinals before they can be staged.
+    terminal_sampling_attempt: Option<(
+        SamplingAttemptKey,
+        crate::extensions::notification::SamplingAttemptState,
+    )>,
     rx: mpsc::UnboundedReceiver<PersistenceMsg>,
     /// Client gateway for canonical ACP `SessionInfoUpdate.title`
     /// notifications. A title is announced only after its Timeline event was
     /// durably adopted and projected. `None` for subagents, whose lifecycle
     /// notifications are handled by the coordinator.
     gateway: Option<GatewaySender>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SamplingAttemptKey {
+    request_id: String,
+    attempt: u32,
+}
+
+struct PendingSamplingNotification {
+    notification: acp::SessionNotification,
+    candidate: bool,
 }
 
 impl SessionPersistence {
@@ -1868,6 +1900,153 @@ impl SessionPersistence {
                 empty_text && no_meta
             }
             _ => false,
+        }
+    }
+
+    fn sampling_attempt_key(notification: &acp::SessionNotification) -> Option<SamplingAttemptKey> {
+        let meta = notification.meta.as_ref()?;
+        Some(SamplingAttemptKey {
+            request_id: meta.get("samplingRequestId")?.as_str()?.to_owned(),
+            attempt: u32::try_from(meta.get("samplingAttempt")?.as_u64()?).ok()?,
+        })
+    }
+
+    fn sampling_attempt_rejected(&self, key: &SamplingAttemptKey) -> bool {
+        self.terminal_sampling_attempt
+            .as_ref()
+            .is_some_and(|(terminal, _)| {
+                terminal == key
+                    || (terminal.request_id == key.request_id && terminal.attempt > key.attempt)
+            })
+            || self.sampling_attempt.as_ref().is_some_and(|active| {
+                active.request_id == key.request_id && active.attempt > key.attempt
+            })
+    }
+
+    fn stage_sampling_notification(
+        &mut self,
+        key: SamplingAttemptKey,
+        notification: acp::SessionNotification,
+        candidate: bool,
+    ) {
+        if let Some((pending_key, notifications)) = &mut self.pending_sampling
+            && *pending_key == key
+        {
+            if !candidate
+                && let Some(previous) = notifications.last_mut()
+                && !previous.candidate
+                && Self::try_merge_staged_text(&mut previous.notification, &notification)
+            {
+                return;
+            }
+            notifications.push(PendingSamplingNotification {
+                notification,
+                candidate,
+            });
+            return;
+        }
+        self.pending_sampling = Some((
+            key,
+            vec![PendingSamplingNotification {
+                notification,
+                candidate,
+            }],
+        ));
+    }
+
+    /// Preserve the normal untagged text coalescing while retaining the first
+    /// notification's outer metadata (event identity included). Candidate
+    /// previews deliberately never use this helper: their upstream replay
+    /// buffer owns any coalescing before the persistence boundary.
+    fn try_merge_staged_text(
+        previous: &mut acp::SessionNotification,
+        incoming: &acp::SessionNotification,
+    ) -> bool {
+        match (&mut previous.update, &incoming.update) {
+            (
+                acp::SessionUpdate::AgentMessageChunk(previous_chunk),
+                acp::SessionUpdate::AgentMessageChunk(incoming_chunk),
+            )
+            | (
+                acp::SessionUpdate::AgentThoughtChunk(previous_chunk),
+                acp::SessionUpdate::AgentThoughtChunk(incoming_chunk),
+            ) => Self::try_merge_text(&mut previous_chunk.content, &incoming_chunk.content),
+            _ => false,
+        }
+    }
+
+    /// Flush a sampling window while optionally admitting its tagged preview.
+    /// Untagged ACP entries are always retained so an interleaved external
+    /// event keeps its original position and metadata when the candidate is
+    /// discarded.
+    async fn flush_sampling_candidate(&mut self, key: &SamplingAttemptKey, admit_candidate: bool) {
+        let Some((pending_key, notifications)) = self.pending_sampling.take() else {
+            return;
+        };
+        if &pending_key != key {
+            self.pending_sampling = Some((pending_key, notifications));
+            return;
+        }
+        for entry in notifications {
+            if entry.candidate && !admit_candidate {
+                continue;
+            }
+            if let Err(error) = self
+                .write_update(&SessionUpdate::Acp(Box::new(entry.notification)))
+                .await
+            {
+                tracing::warn!(%error, "failed to write accepted sampling preview");
+            }
+        }
+    }
+
+    async fn handle_sampling_attempt(
+        &mut self,
+        request_id: String,
+        attempt: u32,
+        state: crate::extensions::notification::SamplingAttemptState,
+    ) {
+        use crate::extensions::notification::SamplingAttemptState;
+        let key = SamplingAttemptKey {
+            request_id,
+            attempt,
+        };
+        match state {
+            SamplingAttemptState::Started => {
+                self.flush_pending().await;
+                if self.sampling_attempt_rejected(&key) {
+                    return;
+                }
+                if self.sampling_attempt.as_ref() == Some(&key) {
+                    return;
+                }
+                if let Some(active) = self.sampling_attempt.take() {
+                    self.flush_sampling_candidate(&active, false).await;
+                }
+                self.sampling_attempt = Some(key);
+            }
+            SamplingAttemptState::Discarded => {
+                self.flush_pending().await;
+                if self.sampling_attempt.as_ref() == Some(&key) {
+                    self.flush_sampling_candidate(&key, false).await;
+                    self.sampling_attempt = None;
+                    self.terminal_sampling_attempt = Some((key, SamplingAttemptState::Discarded));
+                }
+            }
+            SamplingAttemptState::Accepted => {
+                self.flush_pending().await;
+                if self.sampling_attempt.as_ref() != Some(&key)
+                    || self.sampling_attempt_rejected(&key)
+                {
+                    return;
+                }
+                self.flush_sampling_candidate(&key, true).await;
+                self.terminal_sampling_attempt =
+                    Some((key.clone(), SamplingAttemptState::Accepted));
+                if self.sampling_attempt.as_ref() == Some(&key) {
+                    self.sampling_attempt = None;
+                }
+            }
         }
     }
 
@@ -2004,7 +2183,14 @@ impl SessionPersistence {
                 spawn_worktree_touch(&self.info);
             }
             match msg {
-                PersistenceMsg::Stop => self.rx.close(),
+                PersistenceMsg::Stop => {
+                    if let Some(active) = self.sampling_attempt.take() {
+                        self.flush_sampling_candidate(&active, false).await;
+                    } else {
+                        self.pending_sampling = None;
+                    }
+                    self.rx.close();
+                }
                 PersistenceMsg::Flush => {
                     self.flush_pending().await;
                 }
@@ -2015,6 +2201,23 @@ impl SessionPersistence {
                 PersistenceMsg::Update(update) => {
                     match update {
                         SessionUpdate::Acp(notification) => {
+                            if let Some(key) = Self::sampling_attempt_key(&notification) {
+                                if self.sampling_attempt_rejected(&key)
+                                    || self.sampling_attempt.as_ref() != Some(&key)
+                                {
+                                    continue;
+                                }
+                                self.flush_pending().await;
+                                self.stage_sampling_notification(key, *notification, true);
+                                continue;
+                            }
+                            if let Some(key) =
+                                self.pending_sampling.as_ref().map(|(key, _)| key.clone())
+                            {
+                                self.flush_pending().await;
+                                self.stage_sampling_notification(key, *notification, false);
+                                continue;
+                            }
                             // ACP notifications use merging to coalesce consecutive text chunks
                             if let Some(to_write) = self.maybe_merge_notification(&notification) {
                                 match self
@@ -2036,6 +2239,14 @@ impl SessionPersistence {
                             }
                         }
                     }
+                }
+                PersistenceMsg::SamplingAttempt {
+                    request_id,
+                    attempt,
+                    state,
+                } => {
+                    self.handle_sampling_attempt(request_id, attempt, state)
+                        .await;
                 }
                 PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to } => {
                     let result = self.handle_durable_append(update).await;
@@ -2175,6 +2386,11 @@ impl SessionPersistence {
             }
         }
 
+        // Drain any untagged entries interleaved with a candidate before
+        // dropping the unaccepted candidate on channel close.
+        if let Some(active) = self.sampling_attempt.take() {
+            self.flush_sampling_candidate(&active, false).await;
+        }
         // Drain the merge buffer on channel close.
         self.flush_pending().await;
     }
@@ -2365,6 +2581,9 @@ pub(crate) async fn new(
             info: info_clone,
             storage: storage.clone(),
             pending_notification: None,
+            pending_sampling: None,
+            sampling_attempt: None,
+            terminal_sampling_attempt: None,
             rx,
             gateway,
         };
@@ -2424,6 +2643,9 @@ pub(crate) async fn new_child(
             info: info_clone,
             storage: storage.clone(),
             pending_notification: None,
+            pending_sampling: None,
+            sampling_attempt: None,
+            terminal_sampling_attempt: None,
             rx,
             gateway: None,
         };
@@ -2511,6 +2733,9 @@ pub(crate) async fn load_light(
             info: loaded_info,
             storage: storage.clone(),
             pending_notification: None,
+            pending_sampling: None,
+            sampling_attempt: None,
+            terminal_sampling_attempt: None,
             rx,
             gateway,
         };
@@ -2632,7 +2857,9 @@ pub fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
         let (sessions_deleted, errors) =
             match adapter.cleanup_stale_sessions_sync(ttl_days, skip_session_dir, |info| {
                 crate::session::storage::search::SEARCH_INDEX_MANAGER.enqueue(
-                    root.clone(), info.id.0.to_string(), info.cwd.clone(),
+                    root.clone(),
+                    info.id.0.to_string(),
+                    info.cwd.clone(),
                 );
             }) {
                 Ok(stats) => stats,
@@ -2659,8 +2886,12 @@ fn resolve_cleanup_ttl_days() -> io::Result<u32> {
 }
 
 fn cleanup_ttl_from_config(effective: &toml::Value) -> io::Result<u32> {
-    let invalid = || io::Error::new(io::ErrorKind::InvalidInput,
-        "storage.cleanup_ttl_days must be a positive integer representable as u32");
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "storage.cleanup_ttl_days must be a positive integer representable as u32",
+        )
+    };
     let Some(storage) = effective.get("storage") else {
         return Ok(DEFAULT_CLEANUP_TTL_DAYS);
     };
@@ -2683,19 +2914,35 @@ mod cleanup_ttl_tests {
     #[test]
     fn cleanup_ttl_preserves_default_and_valid_values() {
         for (text, expected) in [
-            ("", 30), ("[storage]", 30),
+            ("", 30),
+            ("[storage]", 30),
             ("[storage]\ncleanup_ttl_days = 90", 90),
             ("[storage]\ncleanup_ttl_days = 4294967295", u32::MAX),
         ] {
-            assert_eq!(cleanup_ttl_from_config(&toml::from_str(text).unwrap()).unwrap(), expected);
+            assert_eq!(
+                cleanup_ttl_from_config(&toml::from_str(text).unwrap()).unwrap(),
+                expected
+            );
         }
     }
 
     #[test]
     fn cleanup_ttl_rejects_wrapping_or_malformed_policy() {
-        for value in ["4294967296", "9223372036854775807", "0", "-1", "1.5", "true", "\"30\""] {
+        for value in [
+            "4294967296",
+            "9223372036854775807",
+            "0",
+            "-1",
+            "1.5",
+            "true",
+            "\"30\"",
+        ] {
             let config = toml::from_str(&format!("[storage]\ncleanup_ttl_days = {value}")).unwrap();
-            assert_eq!(cleanup_ttl_from_config(&config).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{value}");
+            assert_eq!(
+                cleanup_ttl_from_config(&config).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput,
+                "{value}"
+            );
         }
         assert!(cleanup_ttl_from_config(&toml::from_str("storage = 30").unwrap()).is_err());
     }

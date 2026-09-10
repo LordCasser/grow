@@ -42,6 +42,143 @@ fn response_without_usage() -> ConversationResponse {
     }
 }
 
+async fn settle_attempt(
+    actor: &SessionActor,
+    attempt_key: &str,
+    captured_prompt_index: usize,
+    model_id: &str,
+    response: &ConversationResponse,
+) {
+    let usage = response
+        .usage
+        .clone()
+        .expect("settlement fixture requires provider usage");
+    let sink = actor.sampling_usage_sink(model_id.to_owned(), captured_prompt_index);
+    sink(sampler::AttemptUsage::Known {
+        attempt_key: attempt_key.to_owned(),
+        cost_usd_ticks: response.cost_usd_ticks,
+        api_duration_ms: None,
+        scope: None,
+        usage,
+    })
+    .await
+    .expect("attempt usage settlement");
+}
+
+fn usage_with_completion_tokens(completion_tokens: u32) -> TokenUsage {
+    TokenUsage {
+        prompt_tokens: 0,
+        completion_tokens,
+        total_tokens: completion_tokens,
+        reasoning_tokens: 0,
+        cached_prompt_tokens: 0,
+        cache_creation_prompt_tokens: 0,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sampling_usage_sink_deduplicates_known_usage_and_debits_output_grant_once() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let budget = crate::tools::tool_context::TaskOutputTokenBudget::limited(10);
+            actor.tool_context.task_output_token_budget = Some(budget.clone());
+            record_test_prompt(&actor, "sink-known").await;
+            let captured_prompt_index = actor
+                .chat_state_handle
+                .current_prompt_index()
+                .await
+                .expect("current prompt index");
+            let sink = actor.sampling_usage_sink("test-model".into(), captured_prompt_index);
+
+    sink(sampler::AttemptUsage::Known {
+        attempt_key: "same-attempt".into(),
+        cost_usd_ticks: None,
+        api_duration_ms: None,
+        scope: None,
+        usage: usage_with_completion_tokens(4),
+    })
+    .await
+    .unwrap();
+    sink(sampler::AttemptUsage::Known {
+        attempt_key: "second-attempt".into(),
+        cost_usd_ticks: None,
+        api_duration_ms: None,
+        scope: None,
+        usage: usage_with_completion_tokens(3),
+    })
+    .await
+    .unwrap();
+    assert_eq!(budget.remaining(), Some(3));
+
+    // Replayed settlement is idempotent across both ledgers and the output
+    // grant, so it cannot reopen capacity for another provider request.
+    sink(sampler::AttemptUsage::Known {
+        attempt_key: "same-attempt".into(),
+        cost_usd_ticks: None,
+        api_duration_ms: None,
+        scope: None,
+        usage: usage_with_completion_tokens(4),
+    })
+    .await
+    .unwrap();
+    assert_eq!(budget.remaining(), Some(3));
+    let usage = actor
+        .chat_state_handle
+        .try_get_session_usage()
+        .await
+        .unwrap();
+    assert_eq!(usage.totals.model_calls, 2);
+    assert_eq!(usage.totals.output_tokens, 7);
+            assert!(!usage.incomplete);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sampling_usage_sink_marks_unknown_usage_and_exhausts_output_grant() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let budget = crate::tools::tool_context::TaskOutputTokenBudget::limited(10);
+            actor.tool_context.task_output_token_budget = Some(budget.clone());
+            record_test_prompt(&actor, "sink-incomplete").await;
+            let captured_prompt_index = actor
+                .chat_state_handle
+                .current_prompt_index()
+                .await
+                .expect("current prompt index");
+            let sink = actor.sampling_usage_sink("test-model".into(), captured_prompt_index);
+
+    sink(sampler::AttemptUsage::Incomplete {
+        attempt_key: "unknown-attempt".into(),
+        scope: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(budget.remaining(), Some(0));
+    assert_eq!(budget.usage(), (10, true));
+    let prompt = actor
+        .chat_state_handle
+        .try_get_prompt_usage()
+        .await
+        .unwrap()
+        .expect("prompt ledger");
+    let session = actor
+        .chat_state_handle
+        .try_get_session_usage()
+        .await
+        .unwrap();
+    assert!(prompt.incomplete);
+            assert!(session.incomplete);
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn usage_keeps_selected_provider_models_separate_from_wire_aliases() {
     tokio::task::LocalSet::new()
@@ -49,16 +186,29 @@ async fn usage_keeps_selected_provider_models_separate_from_wire_aliases() {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
+            record_test_prompt(&actor, "usage").await;
             let mut response = response_with_usage(150);
             if let ConversationItem::Assistant(item) = &mut response.items[0] {
                 item.model_id = Some("same-wire-model".into());
             }
             response.usage.as_mut().unwrap().cached_prompt_tokens = 80;
-            for catalog in [
+            for (attempt, catalog) in [
                 "provider-a/shared",
                 "provider-b/shared",
                 "provider-a/shared",
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                settle_attempt(
+                    &actor,
+                    &format!("usage-{attempt}"),
+                    captured_prompt_index,
+                    catalog,
+                    &response,
+                )
+                .await;
                 actor
                     .record_response_token_usage(&response, None, Some(catalog.into()), None, true)
                     .await
@@ -87,6 +237,8 @@ async fn quarantined_response_is_billed_without_restoring_its_context_anchor() {
             let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
+            record_test_prompt(&actor, "quarantined").await;
             actor
                 .chat_state_handle
                 .push_response_durably(
@@ -102,8 +254,17 @@ async fn quarantined_response_is_billed_without_restoring_its_context_anchor() {
                 .await
                 .unwrap();
             let repaired_tokens = actor.chat_state_handle.get_projected_tokens().await;
+            let response = response_with_usage(150_000);
+            settle_attempt(
+                &actor,
+                "quarantined-attempt",
+                captured_prompt_index,
+                "test",
+                &response,
+            )
+            .await;
             actor
-                .record_response_token_usage(&response_with_usage(150_000), None, None, None, false)
+                .record_response_token_usage(&response, None, None, None, false)
                 .await
                 .unwrap();
             assert_eq!(
@@ -132,15 +293,26 @@ async fn anchors_projected_context_from_response_usage() {
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
+            record_test_prompt(&actor, "anchor").await;
             let _sync = actor.chat_state_handle.get_projected_tokens().await;
             assert!(
                 actor.chat_state_handle.get_projected_tokens().await > 0,
                 "the immutable System governance head contributes to projected context"
             );
 
+            let response = response_with_usage(150_000);
+            settle_attempt(
+                &actor,
+                "anchor-attempt",
+                captured_prompt_index,
+                "provider/model",
+                &response,
+            )
+            .await;
             actor
                 .record_response_token_usage(
-                    &response_with_usage(150_000),
+                    &response,
                     None,
                     Some("provider/model".into()),
                     None,
@@ -186,7 +358,7 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
             let (persistence_tx, _persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             actor
                 .goal_tracker
                 .lock()
@@ -202,6 +374,15 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 .lock()
                 .select_behavior(tool_types::BehaviorId::Goal);
             actor.sync_goal_usage_window();
+            let (goal_tx, mut goal_rx) = tokio::sync::mpsc::unbounded_channel();
+            let goal_tx_keepalive = goal_tx.clone();
+            actor.goal_usage_window =
+                crate::session::actor::goal_support::GoalUsageWindow::new(
+                    goal_tx,
+                    Some("goal-1".into()),
+                );
+            let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
+            record_test_prompt(&actor, "goal").await;
 
             let mut first = response_with_usage(1_080);
             first.usage = Some(TokenUsage {
@@ -212,6 +393,43 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 cached_prompt_tokens: 700,
                 cache_creation_prompt_tokens: 0,
             });
+            let scope = actor
+                .goal_usage_window
+                .begin_model_attempt(&actor.session_id_string(), 0, Some("goal-1"))
+                .await
+                .unwrap()
+                .unwrap();
+            let sink = actor.sampling_usage_sink("test".into(), captured_prompt_index);
+            let settlement = sink(sampler::AttemptUsage::Known {
+                attempt_key: "goal-attempt-1".into(),
+                cost_usd_ticks: first.cost_usd_ticks,
+                api_duration_ms: None,
+                scope: Some(scope),
+                usage: first.usage.clone().unwrap(),
+            });
+            tokio::pin!(settlement);
+            let command = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::select! {
+                    command = goal_rx.recv() => command.expect("Goal usage command"),
+                    result = &mut settlement => panic!("settlement completed before root ack: {result:?}"),
+                }
+            })
+            .await
+            .expect("Goal usage command timeout");
+            let respond_to = match command {
+                crate::session::commands::SessionCommand::SettleGoalUsageAttempt {
+                    attempt_id,
+                    respond_to,
+                } => {
+                    assert_eq!(actor.goal_usage_window.attempt_goal_id(&attempt_id).as_deref(), Some("goal-1"));
+                    let result = actor.settle_claimed_goal_usage_attempt(&attempt_id).await;
+                    respond_to.send(result).expect("Goal settlement acknowledgement");
+                    true
+                }
+                _ => panic!("unexpected Goal usage command"),
+            };
+            assert!(respond_to);
+            settlement.await.expect("attempt usage settlement");
             actor
                 .record_response_token_usage(&first, None, None, Some("goal-1"), true)
                 .await
@@ -227,6 +445,40 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 cached_prompt_tokens: 300,
                 cache_creation_prompt_tokens: 0,
             });
+            let scope = actor
+                .goal_usage_window
+                .begin_model_attempt(&actor.session_id_string(), 0, Some("goal-1"))
+                .await
+                .unwrap()
+                .unwrap();
+            let sink = actor.sampling_usage_sink("test".into(), captured_prompt_index);
+            let settlement = sink(sampler::AttemptUsage::Known {
+                attempt_key: "goal-attempt-2".into(),
+                cost_usd_ticks: after_compaction.cost_usd_ticks,
+                api_duration_ms: None,
+                scope: Some(scope),
+                usage: after_compaction.usage.clone().unwrap(),
+            });
+            tokio::pin!(settlement);
+            let command = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::select! {
+                    command = goal_rx.recv() => command.expect("Goal usage command"),
+                    result = &mut settlement => panic!("settlement completed before root ack: {result:?}"),
+                }
+            })
+            .await
+            .expect("Goal usage command timeout");
+            match command {
+                crate::session::commands::SessionCommand::SettleGoalUsageAttempt {
+                    attempt_id,
+                    respond_to,
+                } => {
+                    let result = actor.settle_claimed_goal_usage_attempt(&attempt_id).await;
+                    respond_to.send(result).expect("Goal settlement acknowledgement");
+                }
+                _ => panic!("unexpected Goal usage command"),
+            }
+            settlement.await.expect("attempt usage settlement");
             actor
                 .record_response_token_usage(&after_compaction, None, None, Some("goal-1"), true)
                 .await
@@ -235,6 +487,7 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
             assert_eq!(actor.chat_state_handle.get_projected_tokens().await, 400);
             assert_eq!(actor.goal_tokens_used(), 1_480);
             assert_eq!(actor.goal_tracker.lock().snapshot().unwrap().usage_breakdown.unwrap_or_default(), crate::session::goal_tracker::GoalTokenUsage::new(1_350, 1_000, 130));
+            drop(goal_tx_keepalive);
         })
         .await;
 }
@@ -265,19 +518,38 @@ async fn descendant_model_usage_is_submitted_to_the_root_goal_window() {
                 cached_prompt_tokens: 700,
                 cache_creation_prompt_tokens: 0,
             });
-            let settlement =
-                actor.record_response_token_usage(&response, None, None, Some("goal-1"), true);
+            let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
+            record_test_prompt(&actor, "descendant").await;
+            let epoch = actor
+                .goal_usage_window
+                .owner_epoch(&actor.session_id_string());
+            let scope = actor
+                .goal_usage_window
+                .begin_model_attempt(&actor.session_id_string(), epoch, Some("goal-1"))
+                .await
+                .unwrap()
+                .unwrap();
+            let sink = actor.sampling_usage_sink("test".into(), captured_prompt_index);
+            let settlement = sink(sampler::AttemptUsage::Known {
+                attempt_key: "descendant-attempt".into(),
+                cost_usd_ticks: response.cost_usd_ticks,
+                api_duration_ms: None,
+                scope: Some(scope),
+                usage: response.usage.clone().unwrap(),
+            });
             tokio::pin!(settlement);
             let command = tokio::select! {
                 command = goal_rx.recv() => command.expect("Goal usage command"),
                 result = &mut settlement => panic!("settlement completed before root ack: {result:?}"),
             };
             let respond_to = match command {
-                crate::session::commands::SessionCommand::RecordGoalUsage {
-                    goal_id,
-                    tokens,
+                crate::session::commands::SessionCommand::SettleGoalUsageAttempt {
+                    attempt_id,
                     respond_to,
-                } if goal_id == "goal-1" && tokens == crate::session::goal_tracker::GoalTokenUsage::new(1_000, 700, 80) => respond_to,
+                } => {
+                    assert!(!attempt_id.is_empty());
+                    respond_to
+                }
                 _ => panic!("unexpected Goal usage command"),
             };
             let _ = respond_to.send(Ok(true));
@@ -380,8 +652,19 @@ async fn build_session_info_used_reflects_recorded_response() {
                 .await
                 .unwrap();
 
+            let response = response_with_usage(120_000);
+            let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
+            record_test_prompt(&actor, "session-info").await;
+            settle_attempt(
+                &actor,
+                "session-info-attempt",
+                captured_prompt_index,
+                "test",
+                &response,
+            )
+            .await;
             actor
-                .record_response_token_usage(&response_with_usage(120_000), None, None, None, true)
+                .record_response_token_usage(&response, None, None, None, true)
                 .await
                 .unwrap();
 
@@ -462,6 +745,8 @@ async fn stashes_per_turn_usage_in_chat_state() {
                 tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
+            record_test_prompt(&actor, "metadata").await;
 
             // Baseline: no stashed usage.
             assert!(
@@ -473,8 +758,17 @@ async fn stashes_per_turn_usage_in_chat_state() {
             );
 
             // Use existing fixture: total=200_000 → prompt=199_950, completion=50.
+            let response = response_with_usage(200_000);
+            settle_attempt(
+                &actor,
+                "stash-attempt",
+                captured_prompt_index,
+                "test",
+                &response,
+            )
+            .await;
             actor
-                .record_response_token_usage(&response_with_usage(200_000), None, None, None, true)
+                .record_response_token_usage(&response, None, None, None, true)
                 .await
                 .unwrap();
 

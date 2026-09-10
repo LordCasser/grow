@@ -866,6 +866,8 @@ impl SessionActor {
         };
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut auth_retry_schedule = AuthRetrySchedule::new();
+        let mut sampling_recovery = sampler::RecoveryBudget::default();
+        let _preview_guard = super::updates::SamplingPreviewGuard(self);
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
@@ -980,7 +982,8 @@ impl SessionActor {
                         return Err(e);
                     }
                 }
-                tools_changed_for_step = self.background_compaction_boundary().await?;
+                let async_compaction_applied = self.background_compaction_boundary().await?;
+                tools_changed_for_step = async_compaction_applied;
                 if model_changed || agent_changed {
                     // The request projection epoch changed. A provider
                     // overflow on the replacement route/Agent gets its own
@@ -1053,6 +1056,22 @@ impl SessionActor {
                     if !admission.can_continue_regular_turn(req_id) {
                         false
                     } else {
+                        // The owner has admitted another Step. Keep the handoff
+                        // after the retained tail, without reopening a completed
+                        // turn or turning a summary into a new user instruction.
+                        if async_compaction_applied && self.events.next_step_index() > 0 {
+                            self.chat_state_handle
+                                .push_user_message_durably(ConversationItem::auto_continue(
+                                    compaction::ASYNC_COMPACTION_CONTINUE_PROMPT,
+                                ))
+                                .await
+                                .map_err(|error| {
+                                    crate::session::commands::fatal_turn_boundary_error(
+                                        "async compaction continuation",
+                                        error.to_string(),
+                                    )
+                                })?;
+                        }
                         // The ended Step's immutable admission horizon was
                         // captured before controls were applied. Requests
                         // accepted afterwards remain pending for the Step
@@ -1195,7 +1214,10 @@ impl SessionActor {
                 )
                 .await
                 .map_err(|error| {
-                    let message = if matches!(error, chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)) {
+                    let message = if matches!(
+                        error,
+                        chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)
+                    ) {
                         Self::image_projection_failure_message(&error)
                     } else {
                         format!("failed to durably prepare model context: {error}")
@@ -1292,7 +1314,10 @@ impl SessionActor {
             // Bill the selected provider/model, not a provider-returned alias.
             // Capture before awaiting sampling so later control changes cannot reattribute it.
             let usage_model_id = self.current_catalog_model_id();
-            let (mut response, latency) = match self.run_turn_via_sampler(request.clone()).await {
+            let (mut response, latency) = match self
+                .run_turn_via_sampler(request.clone(), sampling_recovery.clone())
+                .await
+            {
                 Ok(SamplerTurnOutcome::Response(r, latency)) => (r, latency),
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
@@ -1357,7 +1382,10 @@ impl SessionActor {
                                 resubmit,
                                 "BYOK 401 retry: request carried no credential; retrying without charging rejection budget"
                             );
-                            sleep(std::time::Duration::from_millis(100)).await;
+                            sampling_recovery
+                                .wait_before_retry(std::time::Duration::from_millis(100))
+                                .await
+                                .map_err(|error| self.to_acp_error(error))?;
                             continue;
                         }
                         AuthRetryDecision::Backoff { attempt, delay } => {
@@ -1381,7 +1409,10 @@ impl SessionActor {
                                 },
                             ))
                             .await;
-                            sleep(delay).await;
+                            sampling_recovery
+                                .wait_before_retry(delay)
+                                .await
+                                .map_err(|error| self.to_acp_error(error))?;
                             continue;
                         }
                         AuthRetryDecision::Exhausted => {
@@ -1404,6 +1435,7 @@ impl SessionActor {
                     }
                 }
                 Ok(SamplerTurnOutcome::Steered) => {
+                    sampling_recovery = sampler::RecoveryBudget::default();
                     auth_retry_schedule.reset();
                     continue;
                 }
@@ -1532,6 +1564,8 @@ impl SessionActor {
                         "model response could not be durably admitted: {error}"
                     ))
                 })?;
+            self.finish_sampling_preview(quarantined == 0);
+            sampling_recovery = sampler::RecoveryBudget::default();
             // The response Surface facts must precede the provider anchor.
             // With usage, the anchor replaces their local estimates; without
             // usage, the estimates remain as fail-safe context pressure.

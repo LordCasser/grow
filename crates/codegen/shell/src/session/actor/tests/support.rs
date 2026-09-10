@@ -671,6 +671,7 @@ pub(crate) async fn create_test_actor_ex(
         recap_epoch: std::cell::Cell::new(0),
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         turn_stream_drained: parking_lot::Mutex::new(None),
+        sampling_preview: parking_lot::Mutex::new(None),
         sampler_handle: sampler::SamplerHandle::noop(),
         sampler_owner: std::cell::RefCell::new(None),
         sampler_event_drainer: TaskSlot::new(),

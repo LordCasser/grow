@@ -33,6 +33,8 @@ pub enum TimelineWriteError {
     SurfaceChanged { expected: u64, actual: u64 },
     #[error("image context could not be durably translated: {0}")]
     ImageDescriptionUnavailable(String),
+    #[error("model attempt usage was submitted with a conflicting payload")]
+    AttemptUsageConflict,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -204,6 +206,19 @@ pub enum ChatStateCommand {
         usage: TokenUsage,
         api_duration_ms: Option<u64>,
         cost_usd_ticks: Option<i64>,
+    },
+
+    /// Durably settle one provider model attempt before folding it into the
+    /// ordinary prompt/session ledgers. The attempt key makes this safe for
+    /// at-least-once completion delivery.
+    SettleModelAttemptUsage {
+        attempt_key: String,
+        model_id: String,
+        captured_prompt_index: usize,
+        usage: Option<TokenUsage>,
+        cost_usd_ticks: Option<i64>,
+        api_duration_ms: Option<u64>,
+        reply: oneshot::Sender<Result<bool, TimelineWriteError>>,
     },
 
     /// Subagent usage into session (and prompt when attributable). Replies when applied.
@@ -400,6 +415,8 @@ pub enum ChatStateCommand {
 
     /// Get current prompt index.
     GetPromptIndex { reply: oneshot::Sender<usize> },
+    /// Coordinate of the active/latest branch prompt, not the next free index.
+    CurrentPromptIndex { reply: oneshot::Sender<Option<usize>> },
 
     /// Get the current model-visible Surface revision without cloning it.
     GetSurfaceRevision { reply: oneshot::Sender<u64> },

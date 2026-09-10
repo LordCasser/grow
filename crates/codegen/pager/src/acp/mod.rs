@@ -72,6 +72,8 @@ pub struct AcpConnection {
 /// CLI flags that affect agent configuration, threaded from PagerArgs.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectFlags {
+    /// This consumer implements Started/Discarded/Accepted preview reduction.
+    pub sampling_attempt_lifecycle: bool,
     pub subagents: bool,
     pub experimental_memory: bool,
     pub no_memory: bool,
@@ -203,6 +205,7 @@ pub async fn connect_via_leader(
         .unwrap_or(HEADLESS_CLIENT_TYPE);
     let capabilities = ClientCapabilities {
         // Leader agent is pre-running; seed the per-client session mode via metadata.
+        sampling_attempt_lifecycle: flags.sampling_attempt_lifecycle,
         permission_mode: flags.default_permission_mode,
         default_model: agent_config.models.default.clone(),
         client_version: Some(PAGER_CLIENT_VERSION.to_string()),
@@ -322,6 +325,7 @@ fn build_initialize_meta(flags: &ConnectFlags) -> serde_json::Value {
         .as_deref()
         .unwrap_or(PAGER_CLIENT_TYPE);
     let mut meta = serde_json::json!({
+        "samplingAttemptLifecycle": flags.sampling_attempt_lifecycle,
         "clientType": client_type,
         "clientVersion": PAGER_CLIENT_VERSION,
     });

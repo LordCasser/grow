@@ -26,6 +26,7 @@ use crate::local_ipc::transport::{LocalListener, LocalStream};
 use agent_client_protocol::schema::v1::AGENT_METHOD_NAMES;
 use kanal::{AsyncReceiver, AsyncSender};
 use parking_lot::Mutex;
+use sampler::OutputDelivery as SamplingOutputDelivery;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
@@ -203,6 +204,153 @@ fn extract_session_id(json: &serde_json::Value) -> Option<String> {
                 .map(|s| s.to_string())
         })
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SamplingCandidateKey {
+    session_id: String,
+    request_id: String,
+    attempt: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SamplingAttemptBoundary {
+    Started,
+    Discarded,
+    Accepted,
+}
+
+#[derive(Debug, Clone)]
+struct SamplingAttemptSignal {
+    key: SamplingCandidateKey,
+    boundary: Option<SamplingAttemptBoundary>,
+    output_delivery: Option<SamplingOutputDelivery>,
+}
+
+/// Classify a sampling-attempt boundary or a provisional output update. The
+/// leader uses only the explicit request/attempt metadata; ordinary ACP and
+/// Grow notifications remain on their existing route.
+fn sampling_attempt_signal(json: &serde_json::Value) -> Option<SamplingAttemptSignal> {
+    let session_id = extract_session_id(json)?;
+    let params = json.get("params")?;
+    let meta = params
+        .get("_meta")
+        .or_else(|| params.get("params").and_then(|p| p.get("_meta")));
+    let output_delivery =
+        |meta: Option<&serde_json::Value>| match meta?.get("samplingOutputDelivery")?.as_str()? {
+            "retractable" => Some(SamplingOutputDelivery::Retractable),
+            "irreversible" => Some(SamplingOutputDelivery::Irreversible),
+            "buffered" => Some(SamplingOutputDelivery::Buffered),
+            _ => None,
+        };
+    let preview_key = || {
+        let meta = meta?;
+        Some(SamplingCandidateKey {
+            session_id: session_id.clone(),
+            request_id: meta.get("samplingRequestId")?.as_str()?.to_owned(),
+            attempt: u32::try_from(meta.get("samplingAttempt")?.as_u64()?).ok()?,
+        })
+    };
+
+    let update = params
+        .get("update")
+        .or_else(|| params.get("params").and_then(|p| p.get("update")));
+    if let Some(update) = update
+        && update.get("sessionUpdate").and_then(|v| v.as_str()) == Some("sampling_attempt")
+    {
+        let request_id = update
+            .get("request_id")
+            .or_else(|| update.get("requestId"))?
+            .as_str()?
+            .to_owned();
+        let attempt = u32::try_from(update.get("attempt")?.as_u64()?).ok()?;
+        let state = match update.get("state")?.as_str()? {
+            "started" => SamplingAttemptBoundary::Started,
+            "discarded" => SamplingAttemptBoundary::Discarded,
+            "accepted" => SamplingAttemptBoundary::Accepted,
+            _ => return None,
+        };
+        return Some(SamplingAttemptSignal {
+            key: SamplingCandidateKey {
+                session_id,
+                request_id,
+                attempt,
+            },
+            boundary: Some(state),
+            output_delivery: output_delivery(
+                update.get("_meta").or_else(|| update.get("meta")).or(meta),
+            ),
+        });
+    }
+    preview_key().map(|key| SamplingAttemptSignal {
+        key,
+        boundary: None,
+        output_delivery: output_delivery(meta),
+    })
+}
+
+#[derive(Debug, Default)]
+struct SamplingCandidate {
+    /// The one live candidate for a session. Once a terminal boundary arrives
+    /// this vector is cleared; the key is retained only as a bounded terminal
+    /// watermark until the next Started boundary replaces it.
+    key: Option<SamplingCandidateKey>,
+    payloads: Vec<SamplingBufferedPayload>,
+    terminal: Option<SamplingAttemptBoundary>,
+    buffer_unknown: bool,
+}
+
+#[derive(Debug)]
+struct SamplingBufferedPayload {
+    payload: Arc<str>,
+    candidate: bool,
+}
+
+/// Deliver temporarily held session payloads to clients that cannot render
+/// provisional sampling lifecycle events. This is called at a candidate
+/// boundary; late subscribers rely on durable session/load replay and are not
+/// backfilled from this transient buffer.
+fn fanout_sampling_payloads(
+    key: &SamplingCandidateKey,
+    payloads: &[Arc<str>],
+    clients: &HashMap<ClientId, ClientState>,
+    session_subscribers: &HashMap<String, HashSet<ClientId>>,
+    child_sessions: &HashMap<String, HashSet<String>>,
+    load_live_buffer: &mut HashMap<(ClientId, String), Vec<BufferedLive>>,
+) {
+    let Some(subscribers) = session_subscribers.get(&key.session_id) else {
+        return;
+    };
+    for &client_id in subscribers {
+        let Some(client) = clients.get(&client_id) else {
+            continue;
+        };
+        if client.capabilities.sampling_attempt_lifecycle {
+            continue;
+        }
+        let load_key = load_live_buffer.keys().find_map(|(cid, root)| {
+            (*cid == client_id
+                && (root == &key.session_id
+                    || live_descendant_sessions(root, child_sessions)
+                        .iter()
+                        .any(|descendant| descendant == &key.session_id)))
+            .then(|| (*cid, root.clone()))
+        });
+        let mut payloads = payloads.iter().cloned();
+        if let Some(load_key) = load_key {
+            let buffer = load_live_buffer.entry(load_key).or_default();
+            buffer.extend(payloads.by_ref().map(|payload| {
+                let seq = serde_json::from_str::<serde_json::Value>(&payload)
+                    .ok()
+                    .and_then(|json| event_seq_of(&json));
+                (payload, seq)
+            }));
+        } else {
+            for payload in payloads {
+                let _ = client.tx.try_send(ClientOutbound::Acp(payload));
+            }
+        }
+    }
+}
 /// Whether a payload is a `session/load` request. Used to start buffering live
 /// broadcasts to the loading client until its replay completes (the
 /// live-before-replay race, see `load_live_buffer`). Only `session/load`
@@ -232,6 +380,21 @@ fn extract_target_client_id(json: &serde_json::Value) -> Option<ClientId> {
         })
         .and_then(|v| v.as_u64())
         .map(ClientId)
+}
+
+/// Replay notifications are already ordered by session storage. They must
+/// never enter the live sampling candidate reducer, even when they are not
+/// targeted to a loading client.
+fn is_replay_notification(json: &serde_json::Value) -> bool {
+    let params = json.get("params");
+    let meta = params.and_then(|params| params.get("_meta")).or_else(|| {
+        params
+            .and_then(|params| params.get("params"))
+            .and_then(|params| params.get("_meta"))
+    });
+    meta.and_then(|meta| meta.get("isReplay"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
 }
 /// Extract the monotonic `event_seq` counter from a notification's
 /// `_meta.eventId` (format `"{sessionId}-{counter}"`). Mirrors the `_meta`
@@ -560,6 +723,10 @@ fn inject_capabilities_into_session_new(
             meta_obj.insert(
                 "clientFsWrite".to_string(),
                 serde_json::json!(capabilities.fs_write),
+            );
+            meta_obj.insert(
+                "samplingAttemptLifecycle".to_string(),
+                serde_json::json!(capabilities.sampling_attempt_lifecycle),
             );
         }
     }
@@ -1074,6 +1241,10 @@ pub async fn run_leader_server(
     let mut load_live_buffer: HashMap<(ClientId, String), Vec<BufferedLive>> = HashMap::new();
     let mut orphan_replay_warned: HashSet<ClientId> = HashSet::new();
     let mut load_replay_max_seq: HashMap<(ClientId, String), u64> = HashMap::new();
+    // Sampling previews are transient: retain at most the current candidate
+    // and its terminal watermark for each session. Durable session/load replay
+    // owns history and therefore must not be supplemented by late backfills.
+    let mut sampling_candidates: HashMap<String, SamplingCandidate> = HashMap::new();
     let mut interaction_requests: HashMap<String, HashMap<String, Arc<str>>> = HashMap::new();
     let mut last_active_client: Option<ClientId> = None;
     let mut had_clients = false;
@@ -1194,6 +1365,7 @@ pub async fn run_leader_server(
                         if now_empty {
                             session_subscribers.remove(&sid);
                             session_driver.remove(&sid);
+                            sampling_candidates.remove(&sid);
                             retired_sessions.insert(sid.clone());
                             detached_sessions.push(sid);
                         } else if session_driver.get(&sid) == Some(&id) {
@@ -1535,6 +1707,194 @@ pub async fn run_leader_server(
                 }
                 let payload: Arc<str> = payload.into();
                 let json = json;
+                // Targeted session/load replay is already ordered and
+                // unicast below. Keep it out of the live candidate reducer;
+                // replayed sampling metadata must not look like a late live
+                // preview or enter another observer's transient buffer.
+                let targeted_replay = json
+                    .as_ref()
+                    .is_some_and(|json| extract_target_client_id(json).is_some());
+                let sampling_live_notification = json.as_ref().is_some_and(|json| {
+                    json.get("id").is_none()
+                        && extract_session_id(json).is_some()
+                        && !is_machine_wide_broadcast_notification(json)
+                        && !targeted_replay
+                        && !is_replay_notification(json)
+                });
+                let sampling_signal = sampling_live_notification
+                    .then(|| json.as_ref().and_then(sampling_attempt_signal))
+                    .flatten();
+                let mut drop_sampling_preview = false;
+                let mut defer_unattributed = false;
+                let mut deferred_flush: Option<(SamplingCandidateKey, Vec<Arc<str>>)> = None;
+                if let Some(signal) = &sampling_signal {
+                    if retired_sessions.contains(&signal.key.session_id) {
+                        continue;
+                    }
+                    match signal.boundary {
+                        Some(SamplingAttemptBoundary::Started) => {
+                            let candidate = sampling_candidates
+                                .entry(signal.key.session_id.clone())
+                                .or_default();
+                            let stale_same_request =
+                                candidate.key.as_ref().is_some_and(|current| {
+                                    current.request_id == signal.key.request_id
+                                        && current.attempt > signal.key.attempt
+                                });
+                            if stale_same_request || candidate.key.as_ref() == Some(&signal.key) {
+                                // Duplicate/older boundaries are not new
+                                // lifecycle events. In particular, do not
+                                // leak a duplicate Started to a capable
+                                // client after the candidate is terminal.
+                                drop_sampling_preview = true;
+                            } else {
+                                if candidate.buffer_unknown && candidate.terminal.is_none() {
+                                    if let Some(old_key) = candidate.key.clone() {
+                                        let independent = candidate
+                                            .payloads
+                                            .iter()
+                                            .filter(|record| !record.candidate)
+                                            .map(|record| record.payload.clone())
+                                            .collect::<Vec<_>>();
+                                        if !independent.is_empty() {
+                                            deferred_flush = Some((old_key, independent));
+                                        }
+                                    }
+                                }
+                                candidate.key = Some(signal.key.clone());
+                                candidate.payloads.clear();
+                                candidate.terminal = None;
+                                candidate.buffer_unknown = signal.output_delivery
+                                    == Some(SamplingOutputDelivery::Retractable);
+                                if candidate.buffer_unknown {
+                                    candidate.payloads.push(SamplingBufferedPayload {
+                                        payload: payload.clone(),
+                                        candidate: true,
+                                    });
+                                }
+                            }
+                        }
+                        Some(SamplingAttemptBoundary::Discarded) => {
+                            let mut independent = None;
+                            let candidate = sampling_candidates
+                                .entry(signal.key.session_id.clone())
+                                .or_default();
+                            if candidate.key.as_ref() == Some(&signal.key)
+                                || candidate.key.is_none()
+                            {
+                                candidate.key = Some(signal.key.clone());
+                                if candidate.buffer_unknown {
+                                    independent = Some(
+                                        std::mem::take(&mut candidate.payloads)
+                                            .into_iter()
+                                            .filter(|record| !record.candidate)
+                                            .map(|record| record.payload)
+                                            .collect::<Vec<_>>(),
+                                    );
+                                } else {
+                                    candidate.payloads.clear();
+                                }
+                                candidate.terminal = Some(SamplingAttemptBoundary::Discarded);
+                            }
+                            if let Some(independent) = independent
+                                && !independent.is_empty()
+                            {
+                                fanout_sampling_payloads(
+                                    &signal.key,
+                                    &independent,
+                                    &clients,
+                                    &session_subscribers,
+                                    &child_sessions,
+                                    &mut load_live_buffer,
+                                );
+                            }
+                        }
+                        Some(SamplingAttemptBoundary::Accepted) => {
+                            let mut accepted_payloads = None;
+                            let candidate = sampling_candidates
+                                .entry(signal.key.session_id.clone())
+                                .or_default();
+                            if candidate.key.is_none() {
+                                candidate.key = Some(signal.key.clone());
+                            }
+                            if candidate.key.as_ref() == Some(&signal.key)
+                                && candidate.terminal.is_none()
+                            {
+                                if candidate.buffer_unknown {
+                                    let mut payloads = std::mem::take(&mut candidate.payloads)
+                                        .into_iter()
+                                        .map(|record| record.payload)
+                                        .collect::<Vec<_>>();
+                                    payloads.push(payload.clone());
+                                    accepted_payloads = Some(payloads);
+                                } else {
+                                    candidate.payloads.clear();
+                                }
+                                candidate.terminal = Some(SamplingAttemptBoundary::Accepted);
+                            }
+                            if let Some(payloads) = accepted_payloads {
+                                fanout_sampling_payloads(
+                                    &signal.key,
+                                    &payloads,
+                                    &clients,
+                                    &session_subscribers,
+                                    &child_sessions,
+                                    &mut load_live_buffer,
+                                );
+                            }
+                        }
+                        None => {
+                            let candidate = sampling_candidates
+                                .entry(signal.key.session_id.clone())
+                                .or_default();
+                            if candidate.key.is_none() {
+                                candidate.key = Some(signal.key.clone());
+                            }
+                            if candidate.key.as_ref() == Some(&signal.key)
+                                && candidate.terminal.is_none()
+                            {
+                                if candidate.buffer_unknown {
+                                    candidate.payloads.push(SamplingBufferedPayload {
+                                        payload: payload.clone(),
+                                        candidate: true,
+                                    });
+                                }
+                            } else {
+                                // A preview arriving after its terminal
+                                // boundary (or for an older request) belongs
+                                // to no live candidate and must not leak to
+                                // even lifecycle-capable subscribers.
+                                drop_sampling_preview = true;
+                            }
+                        }
+                    }
+                }
+                if sampling_live_notification
+                    && sampling_signal.is_none()
+                    && let Some(session_id) = json.as_ref().and_then(extract_session_id)
+                    && let Some(candidate) = sampling_candidates.get_mut(&session_id)
+                    && candidate.buffer_unknown
+                    && candidate.terminal.is_none()
+                {
+                    candidate.payloads.push(SamplingBufferedPayload {
+                        payload: payload.clone(),
+                        candidate: false,
+                    });
+                    defer_unattributed = true;
+                }
+                if let Some((key, payloads)) = deferred_flush {
+                    fanout_sampling_payloads(
+                        &key,
+                        &payloads,
+                        &clients,
+                        &session_subscribers,
+                        &child_sessions,
+                        &mut load_live_buffer,
+                    );
+                }
+                if drop_sampling_preview {
+                    continue;
+                }
                 if json
                     .as_ref()
                     .is_some_and(is_machine_wide_broadcast_notification)
@@ -1713,6 +2073,22 @@ pub async fn run_leader_server(
                         }
                     } else if let Some(subs) = session_subscribers.get(sid.as_str()) {
                         for &cid in subs.iter() {
+                            let buffer_unknown = defer_unattributed
+                                || sampling_signal.as_ref().is_some_and(|signal| {
+                                    sampling_candidates.get(&signal.key.session_id).is_some_and(
+                                        |candidate| {
+                                            candidate.key.as_ref() == Some(&signal.key)
+                                                && candidate.buffer_unknown
+                                        },
+                                    )
+                                });
+                            if buffer_unknown
+                                && clients.get(&cid).is_some_and(|client| {
+                                    !client.capabilities.sampling_attempt_lifecycle
+                                })
+                            {
+                                continue;
+                            }
                             let direct_load_key = (cid, sid.clone());
                             let load_key = if load_live_buffer.contains_key(&direct_load_key) {
                                 Some(direct_load_key)
@@ -2460,6 +2836,30 @@ mod tests {
                 mode,
                 protocol_version: LEADER_PROTOCOL_VERSION,
                 capabilities: ClientCapabilities::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let _: ServerMessage = read_message(&mut reader).await.unwrap();
+        (reader, writer)
+    }
+    async fn connect_and_register_with_capabilities(
+        sock_path: &std::path::Path,
+        client_type: &str,
+        capabilities: ClientCapabilities,
+    ) -> (
+        tokio::io::ReadHalf<LocalStream>,
+        tokio::io::WriteHalf<LocalStream>,
+    ) {
+        let stream = LocalStream::connect(sock_path).await.unwrap();
+        let (mut reader, mut writer) = tokio::io::split(stream);
+        write_message(
+            &mut writer,
+            &ClientMessage::Register {
+                client_type: client_type.into(),
+                mode: ClientMode::Stdio,
+                protocol_version: LEADER_PROTOCOL_VERSION,
+                capabilities,
             },
         )
         .await
@@ -3521,6 +3921,331 @@ mod tests {
         ));
         assert_eq!(json["params"]["_meta"]["permissionMode"], "auto");
     }
+    #[test]
+    fn sampling_attempt_signal_keeps_request_and_attempt_boundaries_separate() {
+        let started = serde_json::json!({
+            "method": "grow/session_notification",
+            "params": {
+                "sessionId": "s",
+                "update": {
+                    "sessionUpdate": "sampling_attempt",
+                    "request_id": "r",
+                    "attempt": 1,
+                    "state": "started"
+                }
+            }
+        });
+        let preview = serde_json::json!({
+            "method": "session/update",
+            "params": {
+                "sessionId": "s",
+                "_meta": {"samplingRequestId": "r", "samplingAttempt": 1}
+            }
+        });
+        let second_attempt = serde_json::json!({
+            "method": "session/update",
+            "params": {
+                "sessionId": "s",
+                "_meta": {"samplingRequestId": "r", "samplingAttempt": 2}
+            }
+        });
+        assert_eq!(
+            sampling_attempt_signal(&started).unwrap().boundary,
+            Some(SamplingAttemptBoundary::Started)
+        );
+        assert_eq!(sampling_attempt_signal(&preview).unwrap().key.attempt, 1);
+        assert_ne!(
+            sampling_attempt_signal(&preview).unwrap().key,
+            sampling_attempt_signal(&second_attempt).unwrap().key
+        );
+    }
+
+    #[tokio::test]
+    async fn sampling_attempt_mixed_clients_buffer_unknown_until_accept_and_drop_discard() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, response_tx, mut acp_rx) =
+            setup_persistent_server_with_agent(&temp).await;
+        let (mut capable_reader, mut capable_writer) = connect_and_register_with_capabilities(
+            &sock_path,
+            "capable",
+            ClientCapabilities {
+                sampling_attempt_lifecycle: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let (mut buffered_reader, mut buffered_writer) =
+            connect_and_register(&sock_path, "buffered").await;
+        for writer in [&mut capable_writer, &mut buffered_writer] {
+            write_message(
+                writer,
+                &ClientMessage::Acp {
+                    payload: r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sampling-session"}}"#.into(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+                .await
+                .expect("timed out waiting for session subscription")
+                .expect("agent channel closed");
+        }
+
+        let started = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sampling-session","_meta":{"samplingOutputDelivery":"retractable"},"update":{"sessionUpdate":"sampling_attempt","request_id":"req-1","attempt":1,"state":"started"}}}"#;
+        let preview = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sampling-session","_meta":{"samplingRequestId":"req-1","samplingAttempt":1,"eventId":"sampling-session-19"},"value":"preview-1"}}"#;
+        let interleaved = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sampling-session","_meta":{"eventId":"sampling-session-20"},"value":"interleaved-20"}}"#;
+        let accepted = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sampling-session","update":{"sessionUpdate":"sampling_attempt","request_id":"req-1","attempt":1,"state":"accepted"}}}"#;
+        response_tx.send(started.into()).unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                read_message::<_, ServerMessage>(&mut buffered_reader)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            next_acp_payload(&mut capable_reader)
+                .await
+                .is_some_and(|payload| payload.contains("started"))
+        );
+        response_tx.send(preview.into()).unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                read_message::<_, ServerMessage>(&mut buffered_reader)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            next_acp_payload(&mut capable_reader)
+                .await
+                .is_some_and(|payload| payload.contains("preview-1"))
+        );
+        response_tx.send(interleaved.into()).unwrap();
+        assert!(
+            next_acp_payload(&mut capable_reader)
+                .await
+                .is_some_and(|payload| payload.contains("interleaved-20"))
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                read_message::<_, ServerMessage>(&mut buffered_reader)
+            )
+            .await
+            .is_err()
+        );
+        response_tx.send(accepted.into()).unwrap();
+        assert!(
+            next_acp_payload(&mut capable_reader)
+                .await
+                .is_some_and(|payload| payload.contains("accepted"))
+        );
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_some_and(|payload| payload.contains("started"))
+        );
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_some_and(|payload| payload.contains("preview-1"))
+        );
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_some_and(|payload| payload.contains("interleaved-20"))
+        );
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_some_and(|payload| payload.contains("accepted"))
+        );
+
+        // A duplicate terminal Started and an older attempt boundary are
+        // suppressed for lifecycle-capable clients as well.
+        response_tx.send(started.into()).unwrap();
+        response_tx
+            .send(started.replace("\"attempt\":1", "\"attempt\":0"))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                read_message::<_, ServerMessage>(&mut capable_reader)
+            )
+            .await
+            .is_err()
+        );
+
+        let discarded_started = started.replace("req-1", "req-2");
+        let discarded_preview = preview.replace("req-1", "req-2");
+        let discarded = accepted
+            .replace("req-1", "req-2")
+            .replace("accepted", "discarded");
+        response_tx.send(discarded_started).unwrap();
+        response_tx.send(discarded_preview).unwrap();
+        response_tx
+            .send(
+                r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sampling-session","_meta":{"eventId":"sampling-session-40"},"value":"discard-independent"}}"#
+                    .into(),
+            )
+            .unwrap();
+        response_tx.send(discarded).unwrap();
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_some_and(|payload| payload.contains("discard-independent"))
+        );
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_none_or(|payload| !payload.contains("preview-1"))
+        );
+
+        // A headless/irreversible attempt must stay live for every client;
+        // capability=false alone is not a reason to delay its output.
+        let irreversible_started = started
+            .replace("req-1", "req-3")
+            .replace("retractable", "irreversible");
+        let irreversible_preview = preview.replace("req-1", "req-3");
+        let irreversible_accepted = accepted.replace("req-1", "req-3");
+        response_tx.send(irreversible_started.into()).unwrap();
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_some_and(|payload| payload.contains("started"))
+        );
+        response_tx.send(irreversible_preview.into()).unwrap();
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_some_and(|payload| payload.contains("preview-1"))
+        );
+        response_tx.send(irreversible_accepted.into()).unwrap();
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_some_and(|payload| payload.contains("accepted"))
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn accepted_sampling_candidate_flushes_pending_load_once() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, response_tx, mut acp_rx) =
+            setup_persistent_server_with_agent(&temp).await;
+        let (mut reader, mut writer) = connect_and_register(&sock_path, "buffered").await;
+        load_session(&mut writer, "sampling-load").await;
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+            .await
+            .expect("timed out waiting for forwarded sampling load")
+            .expect("agent channel closed");
+        let load_id = serde_json::from_str::<serde_json::Value>(&forwarded)
+            .unwrap()
+            .get("id")
+            .cloned()
+            .unwrap();
+        let started = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sampling-load","_meta":{"samplingOutputDelivery":"retractable"},"update":{"sessionUpdate":"sampling_attempt","request_id":"req-load","attempt":1,"state":"started"}}}"#;
+        let preview = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sampling-load","_meta":{"samplingRequestId":"req-load","samplingAttempt":1},"value":"load-preview"}}"#;
+        let accepted = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sampling-load","_meta":{"eventId":"sampling-load-10"},"update":{"sessionUpdate":"sampling_attempt","request_id":"req-load","attempt":1,"state":"accepted"}}}"#;
+        response_tx.send(started.into()).unwrap();
+        response_tx.send(preview.into()).unwrap();
+        response_tx.send(accepted.into()).unwrap();
+        let target_client = serde_json::from_str::<serde_json::Value>(&forwarded)
+            .unwrap()["params"]["_meta"]["grow/leaderClientId"]
+            .clone();
+        response_tx
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "grow/session_notification",
+                    "params": {
+                        "sessionId": "sampling-load",
+                        "_meta": {
+                            "grow/leaderClientId": target_client,
+                            "eventId": "sampling-load-10"
+                        },
+                        "update": {
+                            "sessionUpdate": "sampling_attempt",
+                            "request_id": "req-load",
+                            "attempt": 1,
+                            "state": "accepted"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+        response_tx
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": load_id,
+                    "result": {"models": []}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let mut flushed = Vec::new();
+        for _ in 0..4 {
+            flushed.push(
+                next_acp_payload(&mut reader)
+                    .await
+                    .expect("load flush frame"),
+            );
+        }
+        assert_eq!(
+            flushed
+                .iter()
+                .filter(|payload| payload.contains("accepted"))
+                .count(),
+            1,
+            "accepted replay and buffered live copy must overlap by event sequence only once"
+        );
+        assert!(flushed.iter().any(|payload| payload.contains("started")));
+        assert!(
+            flushed
+                .iter()
+                .any(|payload| payload.contains("load-preview"))
+        );
+
+        load_session(&mut writer, "sampling-load").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        assert!(
+            next_acp_payload_matching(&mut reader, "load-preview")
+                .await
+                .is_none()
+        );
+        cancel.cancel();
+    }
+
+    #[test]
+    fn inject_capabilities_includes_sampling_attempt_lifecycle_policy() {
+        let caps = ClientCapabilities {
+            sampling_attempt_lifecycle: true,
+            ..Default::default()
+        };
+        let mut json = serde_json::json!({
+            "method": "session/new",
+            "params": {"_meta": {}}
+        });
+        assert!(inject_capabilities_into_session_new(
+            &mut json,
+            &caps,
+            "grow-web",
+            ClientId(1)
+        ));
+        assert_eq!(
+            json["params"]["_meta"]["samplingAttemptLifecycle"],
+            serde_json::json!(true)
+        );
+    }
+
     #[test]
     fn inject_capabilities_adds_client_identifier_to_session_new() {
         let payload = format!(
@@ -4722,6 +5447,50 @@ mod tests {
         );
         cancel.cancel();
     }
+
+    #[tokio::test]
+    async fn driver_only_request_during_sampling_candidate_is_not_buffered() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, response_tx, mut acp_rx) =
+            setup_persistent_server_with_agent(&temp).await;
+        let (mut driver_reader, mut driver_writer) =
+            connect_and_register(&sock_path, "driver").await;
+        load_session(&mut driver_writer, "sess-driver-sampling").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        let _ = next_acp_payload(&mut driver_reader).await;
+        let (mut observer_reader, mut observer_writer) =
+            connect_and_register(&sock_path, "observer").await;
+        load_session(&mut observer_writer, "sess-driver-sampling").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        let _ = next_acp_payload(&mut observer_reader).await;
+
+        let started = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sess-driver-sampling","_meta":{"samplingOutputDelivery":"retractable"},"update":{"sessionUpdate":"sampling_attempt","request_id":"req-driver","attempt":1,"state":"started"}}}"#;
+        response_tx.send(started.into()).unwrap();
+        let request = r#"{"jsonrpc":"2.0","id":42,"method":"fs/read_text_file","params":{"sessionId":"sess-driver-sampling","path":"/tmp/x"}}"#;
+        response_tx.send(request.into()).unwrap();
+        assert!(
+            next_acp_payload(&mut driver_reader)
+                .await
+                .is_some_and(|payload| payload.contains("read_text_file"))
+        );
+        assert!(
+            next_acp_payload(&mut observer_reader)
+                .await
+                .is_none_or(|payload| !payload.contains("read_text_file"))
+        );
+
+        let accepted = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sess-driver-sampling","update":{"sessionUpdate":"sampling_attempt","request_id":"req-driver","attempt":1,"state":"accepted"}}}"#;
+        response_tx.send(accepted.into()).unwrap();
+        for _ in 0..2 {
+            assert!(
+                next_acp_payload(&mut observer_reader)
+                    .await
+                    .is_some_and(|payload| !payload.contains("read_text_file"))
+            );
+        }
+        cancel.cancel();
+    }
+
     /// A blocking interaction reverse-request (permission / `ask_user_question` /
     /// plan-approval) is SHARED: broadcast to every subscriber so any client can
     /// render + answer the modal. Contrast

@@ -615,6 +615,30 @@ impl SessionActor {
     pub(crate) async fn handle_sampling_event(self: &Arc<Self>, event: sampler::SamplingEvent) {
         use sampler::{SamplingChannel, SamplingEvent};
         match event {
+            SamplingEvent::ReplayUnsafe { .. } => {}
+            SamplingEvent::AttemptStarted {
+                request_id,
+                attempt,
+            } => {
+                self.finish_sampling_preview(false);
+                *self.sampling_preview.lock() = Some((request_id.as_str().to_owned(), attempt));
+                self.send_buffered_grow_update(GrowSessionUpdate::SamplingAttempt {
+                    request_id: request_id.as_str().to_owned(),
+                    attempt,
+                    state: crate::extensions::notification::SamplingAttemptState::Started,
+                })
+                .await;
+            }
+            SamplingEvent::AttemptDiscarded {
+                request_id,
+                attempt,
+            } => {
+                if self.sampling_preview.lock().as_ref()
+                    == Some(&(request_id.as_str().to_owned(), attempt))
+                {
+                    self.finish_sampling_preview(false);
+                }
+            }
             SamplingEvent::StreamStarted { timestamp_ms, .. } => {
                 self.chat_state_handle.record_stream_start(timestamp_ms);
             }
@@ -764,20 +788,8 @@ impl SessionActor {
                 .await;
             }
             SamplingEvent::Failed { request_id, error } => {
-                if let Some(usage) = &error.usage {
-                    // Rejection does not undo billed output. Keep independent
-                    // ledgers without anchoring context to unadmitted content.
-                    // Goal attempt usage was already settled by the sampler.
-                    self.tool_context
-                        .record_task_model_output(u64::from(usage.completion_tokens));
-                    self.chat_state_handle.record_last_turn_usage(usage.clone());
-                    self.chat_state_handle
-                        .record_model_call_usage(None, usage.clone(), None, None);
-                    self.signals_handle().record_response_output_usage(
-                        usage.completion_tokens,
-                        usage.reasoning_tokens,
-                    );
-                }
+                // All provider attempts, including rejected candidates, were
+                // already settled before this terminal diagnostic was emitted.
                 let timeline_error = crate::util::truncate(&error.message, 500).to_string();
                 self.events.request_failed(
                     request_id.as_str(),
