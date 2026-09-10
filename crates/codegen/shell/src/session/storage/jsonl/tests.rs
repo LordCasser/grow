@@ -148,6 +148,10 @@ async fn session_creation_round_trip_commits_and_reopens_the_timeline() {
         .append_timeline_event_durable(&info, &control)
         .await
         .expect("commit the initial Agent role transition");
+    let observed = crate::session::storage::load_timeline_by_id_at(info.id.0.as_ref(), &root)
+        .expect("coordination must read a live source's committed history")
+        .expect("the live source must remain discoverable by id");
+    assert_eq!(observed.events().len(), timeline.events().len() + 1);
     drop(writer);
 
     let resumed = JsonlStorageAdapter::with_root(root);

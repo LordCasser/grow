@@ -86,7 +86,10 @@ class ModelHandler(http.server.BaseHTTPRequestHandler):
             return
         serialized = json.dumps(body)
         sideband = "Another local Grow session is asking" in serialized
-        tool_flow = not sideband and "COORDINATION_TOOL_FLOW" in serialized
+        tool_names = [tool.get("name") or tool.get("function", {}).get("name")
+                      for tool in body.get("tools", [])]
+        ordinary_turn = not sideband and "FinishTurn" in tool_names
+        tool_flow = ordinary_turn and "COORDINATION_TOOL_FLOW" in serialized
         with self.server.lock:
             self.server.requests.append((sideband, body))
             if sideband and body.get("tools"):
@@ -94,7 +97,7 @@ class ModelHandler(http.server.BaseHTTPRequestHandler):
         if sideband:
             if self.server.block:
                 self.server.release.wait(60)
-        elif not tool_flow:
+        elif ordinary_turn and not tool_flow:
             self.server.foreground.set()
             self.server.foreground_release.wait(60)
         tool_call = None
@@ -104,11 +107,8 @@ class ModelHandler(http.server.BaseHTTPRequestHandler):
             elif "call_coord_ask_ui" not in serialized:
                 tool_call = ("call_coord_ask_ui", "ask_session", {
                     "target_session_id": self.server.tool_target, "question": "UI tool flow status?"})
-        completion_call = not sideband and tool_call is None
+        completion_call = ordinary_turn and tool_call is None
         if completion_call:
-            names = [tool.get("name") or tool.get("function", {}).get("name")
-                     for tool in body.get("tools", [])]
-            assert "FinishTurn" in names, "ordinary turn must advertise explicit completion"
             tool_call = ("finish_" + uuid.uuid4().hex, "FinishTurn", {
                 "status": "completed", "reason": "Requested fixture answer delivered."})
         answer = "COORDINATION_SIDE_ANSWER" if sideband else "TOOL_FLOW_DONE" if tool_flow else "FOREGROUND_ANSWER"

@@ -25,3 +25,7 @@ Windows contained storage SHALL publish immutable artifacts and session entities
 #### Scenario: Publication target has any legal filename alignment
 - **WHEN** a file or session directory is published with a legal name of any UTF-16 alignment
 - **THEN** the exact intended name is committed, no extra suffix appears, and existing targets remain unchanged on collision.
+
+#### Scenario: Coordination reads a live source's durable inquiry history
+- **WHEN** coordination resolves its source Timeline by session id while that session's publication handle remains live
+- **THEN** the read uses the existing independent observation capability, validates the same identity and Timeline, and does not acquire or cache writer authority.

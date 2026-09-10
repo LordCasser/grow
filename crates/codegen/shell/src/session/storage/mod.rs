@@ -1705,7 +1705,7 @@ pub fn load_timeline_by_id_at(
     grow_home: &Path,
 ) -> io::Result<Option<chat_state::Timeline>> {
     let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
-    let Some(opened) = storage.open_session_by_id(session_id)? else {
+    let Some(opened) = storage.open_session_by_id_shared_read(session_id)? else {
         return Ok(None);
     };
     Ok(Some(opened.validated_timeline(session_id)?.timeline))
