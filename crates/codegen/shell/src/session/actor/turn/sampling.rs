@@ -2059,6 +2059,7 @@ impl SessionActor {
                 Ok(SamplerTurnOutcome::Response(
                     Box::new(response),
                     Box::new(metrics),
+                    request_id_str,
                 ))
             }
             Err(rich_err) => {

@@ -717,6 +717,8 @@ impl SessionActor {
                             .map(|usage| u64::from(usage.cache_creation_prompt_tokens)),
                     },
                     response.items.len(),
+                    metrics.attempts,
+                    response.provider_terminal.clone(),
                 );
                 if let Some(tx) = self.turn_stream_drained.lock().take() {
                     let _ = tx.send(());

@@ -1631,6 +1631,7 @@ mod tests {
                     duration_ms: 1,
                     tool_count: 0,
                     terminal: chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Host,
                         stop_reason: "end_turn".into(),
                         completion_kind: "completed".into(),
                     },

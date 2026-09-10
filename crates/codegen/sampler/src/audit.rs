@@ -19,6 +19,7 @@ pub type EvidenceSink =
 
 #[derive(Default)]
 struct Capture {
+    provider_terminal: Option<sampling_types::ProviderTerminal>,
     response: Arc<Vec<u8>>,
     status: Option<u16>,
     overflow: bool,
@@ -36,6 +37,17 @@ pub struct AttemptEvidence {
 tokio::task_local! { static CURRENT: AttemptEvidence; }
 
 impl AttemptEvidence {
+    /// Keep the first observed native terminal even if later validation fails.
+    pub(crate) fn observe_terminal(terminal: sampling_types::ProviderTerminal) {
+        if let Some(evidence) = Self::current() {
+            evidence
+                .capture
+                .lock()
+                .expect("evidence capture poisoned")
+                .provider_terminal
+                .get_or_insert(terminal);
+        }
+    }
     pub fn new(sink: EvidenceSink) -> Self {
         Self {
             sink,
@@ -121,7 +133,7 @@ impl AttemptEvidence {
     /// captures raw bytes before BOM removal, SSE decoding or extension filters.
     /// A bounded prefix is retained on overflow and the attempt fails closed.
     pub async fn finish(&self, metadata: Value) -> Result<(), String> {
-        let (body, status, overflow, failure, stream_end, dispatched) = {
+        let (body, status, overflow, failure, stream_end, dispatched, provider_terminal) = {
             let capture = self.capture.lock().expect("evidence capture poisoned");
             (
                 capture.response.clone(),
@@ -130,6 +142,7 @@ impl AttemptEvidence {
                 capture.failure.clone(),
                 capture.stream_end,
                 capture.dispatched,
+                capture.provider_terminal.clone(),
             )
         };
         if let Some(error) = failure {
@@ -137,7 +150,7 @@ impl AttemptEvidence {
         }
         (self.sink)(Evidence {
             kind: "response",
-            metadata: json!({"status": status, "stream_end": stream_end, "http_dispatched": dispatched, "truncated_by_evidence_limit": overflow, "outcome": metadata}),
+            metadata: json!({"status": status, "stream_end": stream_end, "provider_terminal": provider_terminal, "http_dispatched": dispatched, "truncated_by_evidence_limit": overflow, "outcome": metadata}),
             body,
         }).await?;
         self.capture

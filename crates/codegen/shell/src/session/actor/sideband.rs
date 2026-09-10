@@ -935,8 +935,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         }
     }

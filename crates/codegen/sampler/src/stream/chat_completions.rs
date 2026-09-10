@@ -214,6 +214,9 @@ pub fn stream_chat_completions<'a>(
                         return;
                     }
                     raw_finish_reason = Some(fr.as_str().to_owned());
+                    crate::audit::AttemptEvidence::observe_terminal(sampling_types::ProviderTerminal::ChatCompletions {
+                        finish_reason: fr.as_str().to_owned(),
+                    });
                     finish_reason = Some(fr.into());
                     tail_deadline.get_or_insert_with(|| tokio::time::Instant::now() + USAGE_TAIL_TIMEOUT);
                     chunk_has_content |= !already_finished;
@@ -387,10 +390,7 @@ pub fn stream_chat_completions<'a>(
             })
             .collect();
 
-        // A complete call can accompany length or another terminal reason.
-        if !tool_calls.is_empty() {
-            finish_reason = Some(StopReason::ToolCalls);
-        }
+        // Tool completeness and provider termination are independent facts.
 
         // Build the trailing Assistant + any reasoning sibling.
         let mut items: Vec<ConversationItem> = Vec::new();
@@ -435,8 +435,7 @@ pub fn stream_chat_completions<'a>(
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: raw_finish_reason,
-            stop_sequence: None,
+            provider_terminal: raw_finish_reason.map(|finish_reason| sampling_types::ProviderTerminal::ChatCompletions { finish_reason }),
             native_continuation,
         };
 
@@ -707,7 +706,7 @@ mod tests {
                 let a = response.assistant().expect("assistant item present");
                 assert_eq!(a.content.as_ref(), "Hello, world!");
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
-                assert_eq!(response.raw_stop_reason.as_deref(), Some("stop"));
+                assert_eq!(response.raw_stop_reason().as_deref(), Some("stop"));
                 assert_eq!(response.message_chunks_emitted, 2);
             }
             other => panic!("expected Completed, got {other:?}"),
@@ -743,7 +742,7 @@ mod tests {
             match events.last().unwrap() {
                 SamplingEvent::Completed { response, .. } => {
                     assert_eq!(response.stop_reason, Some(typed));
-                    assert_eq!(response.raw_stop_reason.as_deref(), Some(raw_reason));
+                    assert_eq!(response.raw_stop_reason().as_deref(), Some(raw_reason));
                 }
                 other => panic!("expected Completed, got {other:?}"),
             }
@@ -775,7 +774,7 @@ mod tests {
                 assert_eq!(response.assistant_text(), "done");
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
                 assert_eq!(
-                    response.raw_stop_reason.as_deref(),
+                    response.raw_stop_reason().as_deref(),
                     Some("unexpected_state")
                 );
                 let usage = response.usage.as_ref().expect("terminal usage preserved");
@@ -788,7 +787,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_finish_reason_with_tool_call_normalizes_to_tool_calls() {
+    async fn unknown_finish_reason_with_tool_call_preserves_reason_and_call() {
         let tool_chunk = make_chunk(vec![ChatChunkDelta {
             role: Some(Role::Assistant),
             content: None,
@@ -821,10 +820,10 @@ mod tests {
 
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
-                assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+                assert_eq!(response.stop_reason, Some(StopReason::Stop));
                 assert_eq!(response.tool_calls().len(), 1);
                 assert_eq!(
-                    response.raw_stop_reason.as_deref(),
+                    response.raw_stop_reason().as_deref(),
                     Some("unexpected_state")
                 );
             }
@@ -833,7 +832,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_tool_call_overrides_typed_length_but_preserves_raw_length() {
+    async fn complete_tool_call_preserves_typed_and_raw_length() {
         let tool_chunk = make_chunk(vec![ChatChunkDelta {
             role: Some(Role::Assistant),
             content: None,
@@ -860,8 +859,8 @@ mod tests {
 
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
-                assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
-                assert_eq!(response.raw_stop_reason.as_deref(), Some("length"));
+                assert_eq!(response.stop_reason, Some(StopReason::Length));
+                assert_eq!(response.raw_stop_reason().as_deref(), Some("length"));
                 assert_eq!(response.tool_calls().len(), 1);
             }
             other => panic!("expected Completed, got {other:?}"),
@@ -897,7 +896,7 @@ mod tests {
                 assert!(response.is_empty());
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
                 assert_eq!(
-                    response.raw_stop_reason.as_deref(),
+                    response.raw_stop_reason().as_deref(),
                     Some("unexpected_state")
                 );
             }

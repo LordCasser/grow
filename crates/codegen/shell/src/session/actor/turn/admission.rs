@@ -14,6 +14,21 @@ enum AdmittedTurnSuccess {
     Model(TurnOutcome),
 }
 
+fn cancellation_terminal_source(
+    category: Option<crate::session::events::CancellationCategory>,
+) -> chat_state::TurnTerminalSource {
+    use crate::session::events::CancellationCategory;
+    match category {
+        Some(
+            CancellationCategory::MidTurnAbort
+            | CancellationCategory::PermissionRejected
+            | CancellationCategory::PermissionCancelled,
+        ) => chat_state::TurnTerminalSource::UserCancellation,
+        Some(CancellationCategory::HookDenied | CancellationCategory::PermissionTimedOut)
+        | None => chat_state::TurnTerminalSource::Host,
+    }
+}
+
 pub(in crate::session::actor) fn should_capture_implicit_goal_objective(
     origin: &crate::session::PromptOrigin,
     goal_behavior_selected: bool,
@@ -964,6 +979,7 @@ impl SessionActor {
                     PromptCompletionKind::Completed => (
                         crate::session::events::TurnOutcomeLabel::Completed,
                         chat_state::TurnTerminal {
+                            source: chat_state::TurnTerminalSource::Host,
                             stop_reason: "end_turn".into(),
                             completion_kind: "completed".into(),
                         },
@@ -973,6 +989,7 @@ impl SessionActor {
                     PromptCompletionKind::StationarityEnded => (
                         crate::session::events::TurnOutcomeLabel::Completed,
                         chat_state::TurnTerminal {
+                            source: chat_state::TurnTerminalSource::Host,
                             stop_reason: "end_turn".into(),
                             completion_kind: "stationarity_ended".into(),
                         },
@@ -982,6 +999,7 @@ impl SessionActor {
                     PromptCompletionKind::Cancelled { category, context } => (
                         crate::session::events::TurnOutcomeLabel::Cancelled,
                         chat_state::TurnTerminal {
+                            source: cancellation_terminal_source(*category),
                             stop_reason: "cancelled".into(),
                             completion_kind: "cancelled".into(),
                         },
@@ -993,6 +1011,7 @@ impl SessionActor {
                     PromptCompletionKind::MaxTurnsReached { limit } => (
                         crate::session::events::TurnOutcomeLabel::Cancelled,
                         chat_state::TurnTerminal {
+                            source: chat_state::TurnTerminalSource::Host,
                             stop_reason: "cancelled".into(),
                             completion_kind: "max_turns_reached".into(),
                         },
@@ -1005,6 +1024,7 @@ impl SessionActor {
                     PromptCompletionKind::Rewound | PromptCompletionKind::RemovedFromQueue => (
                         crate::session::events::TurnOutcomeLabel::Error,
                         chat_state::TurnTerminal {
+                            source: chat_state::TurnTerminalSource::Host,
                             stop_reason: "error".into(),
                             completion_kind: "invalid_admitted_completion".into(),
                         },
@@ -1014,20 +1034,21 @@ impl SessionActor {
                 },
                 Ok(AdmittedTurnSuccess::Model(TurnOutcome::Completed {
                     refusal,
-                    completion_intent,
+                    request_id,
                     ..
                 })) => (
                     crate::session::events::TurnOutcomeLabel::Completed,
                     chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Provider {
+                            request_id: request_id.clone(),
+                        },
                         stop_reason: if refusal.is_some() {
                             "refusal"
                         } else {
                             "end_turn"
                         }
                         .into(),
-                        completion_kind: completion_intent
-                            .map_or("completed", CompletionIntent::terminal_kind)
-                            .into(),
+                        completion_kind: "provider_response".into(),
                     },
                     None,
                     None,
@@ -1035,6 +1056,7 @@ impl SessionActor {
                 Ok(AdmittedTurnSuccess::Model(TurnOutcome::ControlEnded { .. })) => (
                     crate::session::events::TurnOutcomeLabel::Completed,
                     chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Host,
                         stop_reason: "end_turn".into(),
                         completion_kind: "control_boundary".into(),
                     },
@@ -1044,6 +1066,7 @@ impl SessionActor {
                 Ok(AdmittedTurnSuccess::Model(TurnOutcome::GoalSpendingStopped { .. })) => (
                     crate::session::events::TurnOutcomeLabel::Completed,
                     chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Host,
                         stop_reason: "end_turn".into(),
                         completion_kind: "goal_spending_stopped".into(),
                     },
@@ -1053,6 +1076,7 @@ impl SessionActor {
                 Ok(AdmittedTurnSuccess::Model(TurnOutcome::StationarityEnded { .. })) => (
                     crate::session::events::TurnOutcomeLabel::Completed,
                     chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Host,
                         stop_reason: "end_turn".into(),
                         completion_kind: "stationarity_ended".into(),
                     },
@@ -1062,6 +1086,7 @@ impl SessionActor {
                 Ok(AdmittedTurnSuccess::Model(TurnOutcome::Cancelled { category, context })) => (
                     crate::session::events::TurnOutcomeLabel::Cancelled,
                     chat_state::TurnTerminal {
+                        source: cancellation_terminal_source(*category),
                         stop_reason: "cancelled".into(),
                         completion_kind: "cancelled".into(),
                     },
@@ -1071,6 +1096,7 @@ impl SessionActor {
                 Ok(AdmittedTurnSuccess::Model(TurnOutcome::MaxTurnsReached { limit })) => (
                     crate::session::events::TurnOutcomeLabel::Cancelled,
                     chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Host,
                         stop_reason: "cancelled".into(),
                         completion_kind: "max_turns_reached".into(),
                     },
@@ -1083,6 +1109,7 @@ impl SessionActor {
                 Err(_) => (
                     crate::session::events::TurnOutcomeLabel::Error,
                     chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Host,
                         stop_reason: "error".into(),
                         completion_kind: timeline_error_override
                             .as_ref()

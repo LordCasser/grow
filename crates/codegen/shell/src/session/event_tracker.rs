@@ -470,6 +470,8 @@ impl EventTracker {
         time_to_first_token_ms: Option<u64>,
         usage: RequestUsage,
         response_message_count: usize,
+        attempt: u32,
+        provider_terminal: Option<sampling_types::ProviderTerminal>,
     ) -> bool {
         let Some(request) = self.active_requests.borrow_mut().remove(id) else {
             return false;
@@ -481,6 +483,8 @@ impl EventTracker {
                 time_to_first_token_ms,
                 usage,
                 response_message_count,
+                attempt,
+                provider_terminal,
             }));
         true
     }
@@ -650,6 +654,7 @@ mod tests {
 
     fn terminal(stop_reason: &str, completion_kind: &str) -> TurnTerminal {
         TurnTerminal {
+            source: chat_state::TurnTerminalSource::Host,
             stop_reason: stop_reason.into(),
             completion_kind: completion_kind.into(),
         }
@@ -746,7 +751,14 @@ mod tests {
                     ))
                     .await
                     .unwrap();
-                assert!(tracker.request_completed("request", Some(3), RequestUsage::default(), 1,));
+                assert!(tracker.request_completed(
+                    "request",
+                    Some(3),
+                    RequestUsage::default(),
+                    1,
+                    0,
+                    None,
+                ));
                 tracker
                     .emit_turn_ended(
                         TurnOutcomeLabel::Completed,

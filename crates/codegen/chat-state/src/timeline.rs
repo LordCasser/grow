@@ -195,8 +195,26 @@ pub struct TurnIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnTerminal {
+    /// Authority that caused the host to close this Turn. The two strings
+    /// below are host labels, never verbatim provider evidence.
+    #[serde(default)]
+    pub source: TurnTerminalSource,
     pub stop_reason: String,
     pub completion_kind: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TurnTerminalSource {
+    Provider {
+        request_id: String,
+    },
+    Host,
+    UserCancellation,
+    Recovery,
+    /// Historical records without provenance cannot be attributed by guessing.
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,6 +310,10 @@ pub enum RequestEvent {
         time_to_first_token_ms: Option<u64>,
         usage: RequestUsage,
         response_message_count: usize,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_terminal: Option<sampling_types::ProviderTerminal>,
     },
     Failed {
         id: String,
@@ -1462,6 +1484,8 @@ impl TimelineEvent {
 
 #[derive(Debug, Clone, Default)]
 struct LifecycleFold {
+    /// Only the current Turn's completed provider requests may close it.
+    provider_requests: BTreeSet<String>,
     active_turn: Option<TurnId>,
     active_step: Option<StepId>,
     seen_turns: BTreeSet<TurnId>,
@@ -1630,6 +1654,10 @@ pub enum TimelineError {
     RequestAlreadyOpen(String),
     #[error("request {0} has no matching start event")]
     RequestNotOpen(String),
+    #[error(
+        "turn terminal references request {0} without an observed provider terminal in this turn"
+    )]
+    InvalidProviderTerminalSource(String),
     #[error("tool call {0} already has a start event")]
     ToolAlreadyOpen(String),
     #[error("tool call {0} has no matching start event")]
@@ -2686,6 +2714,7 @@ impl Timeline {
                 duration_ms: duration_since(started, now),
                 tool_count: 0,
                 terminal: TurnTerminal {
+                    source: crate::TurnTerminalSource::Recovery,
                     stop_reason: "interrupted".into(),
                     completion_kind: "recovered_interruption".into(),
                 },
@@ -2974,7 +3003,12 @@ impl Timeline {
         Ok(())
     }
 
-    fn apply_validated_event(&mut self, event: TimelineEvent, active_turn: bool, active_step: bool) {
+    fn apply_validated_event(
+        &mut self,
+        event: TimelineEvent,
+        active_turn: bool,
+        active_step: bool,
+    ) {
         match &event.kind {
             TimelineEventKind::Messages(messages) => self.apply_messages(event.seq, messages),
             TimelineEventKind::ImageProjection(projection) => {
@@ -4883,7 +4917,7 @@ impl LifecycleFold {
                 }
                 self.active_turn = Some(*id);
             }
-            TimelineEventKind::Turn(TurnEvent::Ended { id, .. }) => {
+            TimelineEventKind::Turn(TurnEvent::Ended { id, terminal, .. }) => {
                 if self.active_turn != Some(*id) {
                     return Err(TimelineError::TurnMismatch {
                         active: self.active_turn,
@@ -4900,12 +4934,20 @@ impl LifecycleFold {
                 {
                     return Err(TimelineError::OpenChildren { boundary: "turn" });
                 }
+                if let TurnTerminalSource::Provider { request_id } = &terminal.source
+                    && !self.provider_requests.contains(request_id)
+                {
+                    return Err(TimelineError::InvalidProviderTerminalSource(
+                        request_id.clone(),
+                    ));
+                }
                 for input in self.inputs.values_mut() {
                     if input.reserved_turn == Some(*id) {
                         input.reserved_turn = None;
                     }
                 }
                 self.active_turn = None;
+                self.provider_requests.clear();
             }
             TimelineEventKind::Step(StepEvent::Started { id }) => {
                 if self
@@ -4981,8 +5023,20 @@ impl LifecycleFold {
                     return Err(TimelineError::RequestNotOpen(id.clone()));
                 }
             }
-            TimelineEventKind::Request(RequestEvent::Completed { id, .. })
-            | TimelineEventKind::Request(RequestEvent::Failed { id, .. })
+            TimelineEventKind::Request(RequestEvent::Completed {
+                id,
+                attempt,
+                provider_terminal,
+                ..
+            }) => {
+                if self.open_requests.remove(id).is_none() {
+                    return Err(TimelineError::RequestNotOpen(id.clone()));
+                }
+                if *attempt > 0 && provider_terminal.is_some() {
+                    self.provider_requests.insert(id.clone());
+                }
+            }
+            TimelineEventKind::Request(RequestEvent::Failed { id, .. })
             | TimelineEventKind::Request(RequestEvent::Cancelled { id, .. }) => {
                 if self.open_requests.remove(id).is_none() {
                     return Err(TimelineError::RequestNotOpen(id.clone()));
@@ -6615,6 +6669,94 @@ mod tests {
     }
 
     #[test]
+    fn provider_terminal_source_requires_this_turns_completed_request() {
+        let native = sampling_types::ProviderTerminal::ChatCompletions {
+            finish_reason: "stop".into(),
+        };
+        for (attempt, observed) in [
+            (0, None),
+            (1, None),
+            (0, Some(native.clone())),
+            (2, Some(native.clone())),
+        ] {
+            let mut timeline = Timeline::default();
+            let turn = start_internal_turn(&mut timeline, 1);
+            let step = StepId { turn, index: 0 };
+            timeline
+                .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Request(RequestEvent::Started {
+                    id: "r1".into(),
+                    turn,
+                    step,
+                    model_id: "original/model".into(),
+                    input_message_count: 0,
+                    tool_count: 0,
+                }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Request(RequestEvent::Completed {
+                    id: "r1".into(),
+                    duration_ms: 1,
+                    time_to_first_token_ms: None,
+                    usage: RequestUsage::default(),
+                    response_message_count: 1,
+                    attempt,
+                    provider_terminal: observed.clone(),
+                }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Step(StepEvent::Ended {
+                    id: step,
+                    outcome: "completed".into(),
+                    duration_ms: 1,
+                }))
+                .unwrap();
+            let ended = |id| {
+                TimelineEventKind::Turn(TurnEvent::Ended {
+                    id,
+                    outcome: "completed".into(),
+                    duration_ms: 1,
+                    tool_count: 0,
+                    terminal: TurnTerminal {
+                        source: TurnTerminalSource::Provider {
+                            request_id: "r1".into(),
+                        },
+                        ..completed_terminal()
+                    },
+                    cancellation_category: None,
+                    details: None,
+                })
+            };
+            if attempt > 0 && observed.is_some() {
+                timeline.record(ended(turn)).unwrap();
+                assert_bulk_matches(&timeline);
+                let next = start_internal_turn(&mut timeline, 2);
+                assert!(matches!(
+                    timeline.record(ended(next)),
+                    Err(TimelineError::InvalidProviderTerminalSource(_))
+                ));
+            } else {
+                assert!(matches!(
+                    timeline.record(ended(turn)),
+                    Err(TimelineError::InvalidProviderTerminalSource(_))
+                ));
+                // Host recovery still closes its own lifecycle; it does not invent a provider fact.
+                timeline.recover_interrupted().unwrap();
+                assert!(matches!(&timeline.events().last().unwrap().kind,
+                    TimelineEventKind::Turn(TurnEvent::Ended { terminal, .. }) if terminal.source == TurnTerminalSource::Recovery));
+                assert_bulk_matches(&timeline);
+            }
+        }
+        let historical: TurnTerminal = serde_json::from_value(
+            serde_json::json!({"stop_reason":"end_turn", "completion_kind":"completed"}),
+        )
+        .unwrap();
+        assert_eq!(historical.source, TurnTerminalSource::Unknown);
+    }
+
+    #[test]
     fn bulk_replay_preserves_large_request_history_and_rejects_invalid_suffix() {
         let mut timeline = Timeline::default();
         let turn = TurnId(7);
@@ -6654,6 +6796,8 @@ mod tests {
                     time_to_first_token_ms: None,
                     usage: RequestUsage::default(),
                     response_message_count: 0,
+                    attempt: 0,
+                    provider_terminal: None,
                 }))
                 .unwrap();
         }
@@ -6808,6 +6952,7 @@ mod tests {
 
     fn completed_terminal() -> TurnTerminal {
         TurnTerminal {
+            source: crate::TurnTerminalSource::Host,
             stop_reason: "end_turn".into(),
             completion_kind: "completed".into(),
         }
@@ -10558,17 +10703,32 @@ mod tests {
         let mut timeline = Timeline::from_seed(vec![original]).unwrap();
         let group = sampling_types::conversation::conversation_image_groups(timeline.surface()).remove(0);
         let mut projection = ImageProjectionEvent {
-            trigger_runtime: sampling_types::ModelImageInputKey::new("model", "messages", "endpoint"),
+            trigger_runtime: sampling_types::ModelImageInputKey::new(
+                "model", "messages", "endpoint",
+            ),
             source_revision: timeline.surface_revision(),
             shadows: vec![ImageShadow {
-                source: timeline.surface_ids()[0], fingerprint: group.fingerprint,
-                image_count: 1, replacement: "local OCR text".into(),
-                provenance: ImageShadowSource::LocalOcr { engine: "invalid".into() },
-            }], tool_calls: vec![],
+                source: timeline.surface_ids()[0],
+                fingerprint: group.fingerprint,
+                image_count: 1,
+                replacement: "local OCR text".into(),
+                provenance: ImageShadowSource::LocalOcr {
+                    engine: "invalid".into(),
+                },
+            }],
+            tool_calls: vec![],
         };
-        assert!(timeline.record(TimelineEventKind::ImageProjection(projection.clone())).is_err());
-        projection.shadows[0].provenance = ImageShadowSource::LocalOcr { engine: "tesseract".into() };
-        timeline.record(TimelineEventKind::ImageProjection(projection)).unwrap();
+        assert!(
+            timeline
+                .record(TimelineEventKind::ImageProjection(projection.clone()))
+                .is_err()
+        );
+        projection.shadows[0].provenance = ImageShadowSource::LocalOcr {
+            engine: "tesseract".into(),
+        };
+        timeline
+            .record(TimelineEventKind::ImageProjection(projection))
+            .unwrap();
         let replay = Timeline::from_events(timeline.events().to_vec()).unwrap();
         assert_eq!(sampling_types::conversation::item_image_description(&replay.surface()[0]), Some("local OCR text"));
         assert_eq!(sampling_types::conversation::conversation_image_groups(replay.surface())[0].image_urls[0].as_ref(),

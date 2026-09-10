@@ -481,6 +481,7 @@ impl SessionActor {
         self.emit_turn_ended(
             crate::session::events::TurnOutcomeLabel::Error,
             chat_state::TurnTerminal {
+                source: chat_state::TurnTerminalSource::Host,
                 stop_reason: "error".into(),
                 completion_kind: "foreground_owner_panicked".into(),
             },
@@ -1020,6 +1021,11 @@ impl SessionActor {
             .emit_turn_ended(
                 crate::session::events::TurnOutcomeLabel::Cancelled,
                 chat_state::TurnTerminal {
+                    source: if matches!(trigger.as_deref(), Some("shutdown" | "behavior_switch")) {
+                        chat_state::TurnTerminalSource::Host
+                    } else {
+                        chat_state::TurnTerminalSource::UserCancellation
+                    },
                     stop_reason: "cancelled".into(),
                     completion_kind: "cancelled".into(),
                 },

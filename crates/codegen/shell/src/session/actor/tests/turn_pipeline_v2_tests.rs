@@ -4,12 +4,11 @@ use super::support::*;
 use super::turn::should_capture_implicit_goal_objective;
 use super::*;
 
-/// Match the dedicated production session thread's stack. The full prompt
-/// admission future is intentionally large and does not fit the test harness'
-/// smaller default thread stack in debug builds.
+/// Match spawn.rs's 32 MiB debug session stack. Release sessions use 8 MiB,
+/// which does not cover the unoptimized prompt-admission poll frames here.
 fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
+        .stack_size(32 * 1024 * 1024)
         .spawn(body)
         .unwrap()
         .join()
@@ -545,6 +544,7 @@ async fn panic_after_durable_turn_terminal_never_appends_a_second_terminal() {
                 .emit_turn_ended(
                     crate::session::events::TurnOutcomeLabel::Completed,
                     chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Host,
                         stop_reason: "completed".into(),
                         completion_kind: "completed".into(),
                     },

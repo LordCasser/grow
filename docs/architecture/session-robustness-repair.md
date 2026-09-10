@@ -11,19 +11,22 @@ finish/terminal 的流使用 `IncompleteStream`，身份或状态冲突仍然停
 session 的认证、native continuation 等修复与 sampler 共用一个 `RecoveryBudget`。
 行为契约见 [model-sampling](../../openspec/specs/model-sampling/spec.md)。
 
-普通 Turn 的完成协议由 `shell/src/session/actor/turn/completion.rs` 负责。
-`end_turn`、`stop` 和 `response.completed` 只证明 provider 的一次响应结束。
-模型须在最终答案或明确等待说明的同一响应中，单独调用宿主 `FinishTurn`，声明
-completed、waiting_for_user 或 waiting_for_background。该调用及结果先进入 Timeline，
-然后才进入 Stop gate；Turn terminal 的 completion_kind 分别为 explicit_completion、
-waiting_for_user、waiting_for_background。这些是模型声明和宿主判定，不是原始响应字段，
-也不是对业务结果正确性的证明。
+普通 Turn 尊重三 API 的原生终止，不要求额外的 `FinishTurn`，也不因正文以冒号结尾而自动续采样。
+原生终止只结束一次响应；完整业务调用仍进入工具循环，Goal 是否完成仍由 Goal 自身契约决定。
+拒绝响应中的完整调用保留在历史中，并写入明确未执行的配对结果；拒绝不会被工具存在这一事实覆盖。
+结构化输出、用户插话、显式 Agent completion requirement、Stop hook、取消和预算各自保持已有边界。
 
-无声明的文本响应保留为已接纳事实，协议纠正通过既有 Step 边界继续当前 Turn。
-连续三次无有效声明且无业务调用会明确报错；业务调用后重新计数。此过程不按标点判定、
-不启动分类 Sideband、不重放历史工具，也不绕过控制切换、取消和 Goal 预算。
-结构化输出、拒绝和宿主控制终止继续使用各自的终止契约。等待声明仅结束本 Turn，
-不替代 Goal 生命周期工具。详见 [显式完成契约](../../openspec/specs/model-sampling/spec.md#requirement-ordinary-turns-require-explicit-completion-intent)。
+`sampling-types::ProviderTerminal` 保存原始 Chat finish_reason、Messages stop_reason/stop_sequence，
+以及 Responses terminal event/status/incomplete reason。中性 StopReason 供流程判定使用，不能反向当成原始字段。
+attempt 的原始 HTTP 证据及观察到的 terminal 在接纳、拒收或重试前保存；缺少 terminal 时保留为空，
+不能用 EOF、[DONE] 或错误收尾补造自然终止。Request::Completed 关联已返回候选的 attempt 和原生 terminal。
+
+`TurnTerminal.source` 标明 Provider（引用该 Turn 中的 request）、Host、UserCancellation 或 Recovery。
+旧 stop_reason/completion_kind 字段只是宿主分类；历史缺少来源的记录为 Unknown，不根据 end_turn 猜测。
+provider 已结束后，宿主仍可能因取消、持久化错误或崩溃恢复而关闭 Turn，两层事实可以同时存在。
+排查时沿 request/attempt 查看当时的 route 和原始证据，不能用切换后的模型重建之前的来源。
+详见 [响应终止契约](../../openspec/specs/model-sampling/spec.md#requirement-provider-termination-remains-distinct-from-host-control)
+与 [宿主终态来源](../../openspec/specs/session-timeline/spec.md#requirement-turn-terminals-identify-their-actual-authority)。
 
 通知中的 `samplingRequestId` / `samplingAttempt` 标识临时候选，
 `SamplingAttempt` 按 Started → Discarded / Accepted 经过相同 FIFO 和合并缓冲。

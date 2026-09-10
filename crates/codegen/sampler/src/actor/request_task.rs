@@ -1317,7 +1317,7 @@ fn build_empty_context(
         None => (0, 0, String::new(), false),
     };
 
-    let finish_reason = response.raw_stop_reason.clone().or_else(|| {
+    let finish_reason = response.raw_stop_reason().or_else(|| {
         response
             .stop_reason
             .map(|stop_reason| stop_reason.as_str().to_owned())
@@ -1524,6 +1524,15 @@ mod tests {
                 let cancel = cancel_sink.clone();
                 let settled = settled.clone();
                 Box::pin(async move {
+                    if record.kind == "response" {
+                        assert_eq!(
+                            record.metadata["provider_terminal"],
+                            serde_json::json!({
+                                "backend": "responses", "event": "response.completed", "status": "completed", "incomplete_reason": null,
+                            }),
+                            "native completion remains evidence even when malformed calls reject the candidate"
+                        );
+                    }
                     if record.kind == "retry" {
                         assert!(
                             !settled.lock().unwrap().is_empty(),
@@ -1871,6 +1880,10 @@ mod tests {
                         .unwrap()
                         .unwrap();
                     if record.kind == "response" {
+                        assert!(
+                            record.metadata["provider_terminal"].is_null(),
+                            "HTTP errors cannot synthesize a provider terminal"
+                        );
                         assert_eq!(*record.body, raw);
                         saw_raw = true;
                     }
@@ -2610,8 +2623,9 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: Some("unexpected_state".into()),
-            stop_sequence: None,
+            provider_terminal: Some(sampling_types::ProviderTerminal::ChatCompletions {
+                finish_reason: "unexpected_state".into(),
+            }),
             native_continuation: None,
         };
 
@@ -2631,8 +2645,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
 
@@ -2688,8 +2701,7 @@ mod tests {
             doom_loop_signals: doom_signals,
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         let metrics = InferenceLatencyStats::from_timestamps(Instant::now(), &[], Instant::now());
@@ -2825,8 +2837,9 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: Some("stop".into()),
-            stop_sequence: None,
+            provider_terminal: Some(sampling_types::ProviderTerminal::ChatCompletions {
+                finish_reason: "stop".into(),
+            }),
             native_continuation: None,
         };
         let metrics = InferenceLatencyStats::from_timestamps(Instant::now(), &[], Instant::now());

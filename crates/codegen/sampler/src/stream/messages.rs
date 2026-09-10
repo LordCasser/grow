@@ -586,6 +586,12 @@ pub fn stream_messages<'a>(
                 }
 
                 MessageStreamEvent::MessageStop => {
+                    if let Some(stop_reason) = final_raw_stop_reason.as_ref() {
+                        crate::audit::AttemptEvidence::observe_terminal(sampling_types::ProviderTerminal::Messages {
+                            stop_reason: stop_reason.clone(),
+                            stop_sequence: final_stop_sequence.clone(),
+                        });
+                    }
                     message_stop_seen = true;
                     break;
                 }
@@ -654,13 +660,7 @@ pub fn stream_messages<'a>(
             return;
         }
 
-        let stop_reason = if !assistant_tool_calls.is_empty() {
-            // Completed tool_use blocks win even over Refusal: the calls are
-            // real model output the agent loop must resolve.
-            Some(StopReason::ToolCalls)
-        } else {
-            final_stop_reason
-        };
+        let stop_reason = final_stop_reason;
 
         let assistant_item = ConversationItem::Assistant(AssistantItem {
             content: std::sync::Arc::<str>::from(assistant_text),
@@ -691,8 +691,9 @@ pub fn stream_messages<'a>(
             doom_loop_signals: Vec::new(),
             stop_message: final_stop_message,
             message_id: final_message_id,
-            raw_stop_reason: final_raw_stop_reason,
-            stop_sequence: final_stop_sequence,
+            provider_terminal: final_raw_stop_reason.map(|stop_reason| sampling_types::ProviderTerminal::Messages {
+                stop_reason, stop_sequence: final_stop_sequence,
+            }),
             // Never replay unsigned thinking. Visible facts above remain
             // available to the portable projector, including all tool calls.
             native_continuation: if native_blocks.values().any(|block| {

@@ -187,7 +187,7 @@ fn async_compaction_scenario(action: &'static str) {
                 ].into_iter().map(|event| SseEvent::data(event.to_string())).collect()));
             let mut foreground = server.expect_response("foreground continues",
                 InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
-                with_finish_turn(messages_turn_with_usage(&[("foreground response after freeze", END_TURN)], END_TURN, 74_000)));
+                messages_turn_with_usage(&[("foreground response after freeze", END_TURN)], END_TURN, 74_000));
             let (actor, mut notifications) = actor_with_sampler_cw_ex(&server, sampling_types::ApiBackend::Messages, 100_000, None, if action == "timeout" { 2 } else { 0 }).await;
             use tools::implementations::{context_recall::ContextRecallImpl, grow_build::{todo::TodoWriteTool, read_file::ReadFileTool}};
             use tools::registry::types::ToolConfig;
@@ -301,7 +301,7 @@ fn async_compaction_scenario(action: &'static str) {
                 assert!(actor.chat_state_handle.get_last_compaction_prompt_index().await.is_none());
                 let mut next = server.expect_response("first sample after idle summary",
                     InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
-                    with_finish_turn(messages_turn(&[("next turn response", END_TURN)], END_TURN)));
+                    messages_turn(&[("next turn response", END_TURN)], END_TURN));
                 run_user_turn(&actor, "async-next-turn").await.unwrap();
                 tokio::time::timeout(std::time::Duration::from_secs(5), next.wait_satisfied()).await.unwrap();
                 let requests = server.request_bodies();
@@ -805,7 +805,7 @@ fn pre_prune_resolves_pressure_and_skips_summary() {
             let server = MockInferenceServer::start().await.unwrap();
             server.enqueue_response(
                 "/v1/messages",
-                with_finish_turn(messages_turn(&[("hello", END_TURN)], END_TURN)),
+                messages_turn(&[("hello", END_TURN)], END_TURN),
             );
             let (actor, mut gateway_rx) =
                 actor_with_sampler_cw(&server, sampling_types::ApiBackend::Messages, 100_000)
@@ -845,8 +845,7 @@ fn pre_prune_resolves_pressure_and_skips_summary() {
             // one is untouched (the plan stops as soon as the target is met).
             let conversation = actor.chat_state_handle.get_conversation().await;
             let tool_texts = tool_result_texts(&conversation);
-            assert_eq!(tool_texts.len(), 3, "two business results and the FinishTurn result");
-            assert!(tool_texts[2].contains("Turn completion declaration accepted"));
+            assert_eq!(tool_texts.len(), 2, "two business results");
             let (pruned, kept) = (&tool_texts[0], &tool_texts[1]);
             assert_ne!(pruned, &big_tool_text(), "oldest tool result must be pruned");
             // Budget: 5% of 100K = 5000 tokens → 20000 bytes, never exceeded.

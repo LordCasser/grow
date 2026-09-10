@@ -304,29 +304,33 @@ Portable prefix 与 live suffix 的切点 SHALL NOT 将同一完整工具往返�
 - **THEN** 投影保留完整配对及图片，估算与实际投影一致，不吞并后续 native span 或新消息。
 
 #### Scenario: Normal final answer
-- **WHEN** 修复后的普通模型请求收到合法 provider 终止且没有业务工具调用
-- **THEN** 仍须通过显式 Turn 完成协议；末尾标点不参与判定，合法响应结束不自动表示任务完成。
+- **WHEN** 普通模型请求收到完整、合法的正常 provider 终止和可见回复，且没有待执行调用或独立宿主继续理由
+- **THEN** 正常结束本 Turn，不要求 FinishTurn；末尾标点和正文是否像行动预告不参与完成判定。
 
-### Requirement: Ordinary turns require explicit completion intent
+### Requirement: Provider termination remains distinct from host control
 
-普通模型 Turn SHALL 使用宿主提供的 FinishTurn 工具明确声明 completed、waiting_for_user 或 waiting_for_background，并附非空理由。该声明 SHALL 是本响应唯一工具调用且伴随非空用户可见文本；宿主 SHALL 先持久化调用与结果，再允许正常结束。provider 的 end_turn、stop、response.completed 只结束一次响应，SHALL NOT 单独构成 Turn 完成授权。结构化输出、provider 拒绝、控制终止、取消和预算终止 SHALL 保留独立终止路径。
+三 backend SHALL 保存实际收到的原生 terminal 信息，并保留独立的中性终止语义。工具调用的存在 SHALL NOT 覆写拒绝、截断或其他 provider 原因。provider 结束仅表示该响应结束，SHALL NOT 自动完成 Goal。原始终止事实 SHALL 与所属 request/attempt 关联并在候选拒收后仍可追溯。
 
-#### Scenario: Action preamble with a valid provider terminator
-- **WHEN** Messages、Chat Completions 或 Responses 返回无工具行动预告及合法响应终止
-- **THEN** 原始响应保留，追加协议纠正并经下一 Step 继续相同 Turn，不要求用户发送“继续”，不根据中文或英文冒号匹配。
+#### Scenario: Natural stop without a completion tool
+- **WHEN** Chat stop、Messages end_turn 或 Responses completed 返回正常可见回复且无业务调用
+- **THEN** 普通 Turn 可正常结束，不因缺少 FinishTurn 再次采样，原始 backend 字段保留。
 
-#### Scenario: Explicit final answer or waiting
-- **WHEN** 模型返回用户可见答案/问题和独立有效的 FinishTurn 声明，且没有新接纳输入
-- **THEN** 记录声明结果并进入现有 Stop gate；Turn terminal 保留显式完成或等待种类，等待声明不自行完成或暂停 Goal。
+#### Scenario: Natural stop with complete calls
+- **WHEN** 合法响应带完整可执行调用
+- **THEN** 宿主按工具协议执行后续步骤，原始终止仍保持 provider 给出的原因。
 
-#### Scenario: Mixed or invalid completion calls
-- **WHEN** FinishTurn 与业务工具同批、重复出现、参数无效或没有可见回答
-- **THEN** 完成声明被拒绝并写入匹配结果，FinishTurn 不进入业务工具派发；业务工具仍按正常权限路径执行，已执行的历史调用不重放。
+#### Scenario: Refusal after complete tool output
+- **WHEN** provider 拒绝响应同时包含完整工具调用
+- **THEN** 记录拒绝及调用事实，生成明确未执行的配对结果，不执行该批业务工具，不把拒绝转换成普通完成或无声明恢复。
 
-#### Scenario: Repeated protocol violations
-- **WHEN** 连续三次响应未提供有效完成声明，也未交付业务工具调用
-- **THEN** 返回明确协议错误并停止采样，不记录正常完成；有业务调用后重新计算连续违约，模型切换本身不能重置计数。
+#### Scenario: Terminal received but candidate rejected
+- **WHEN** 已观察到 provider terminal，随后参数/协议校验失败或宿主拒收候选
+- **THEN** attempt evidence 同时保留已观察的原生 terminal 和宿主拒收/失败结果，不能将 terminal 改成未收到。
 
-#### Scenario: Control and pending input take precedence
-- **WHEN** 恢复或完成期间出现取消、预算耗尽、控制切换或已接纳的新输入
-- **THEN** 后续采样遵守原有 Step 边界和准入；取消/预算/终止控制不被完成协议重新打开，新输入不能沿用旧响应的完成声明。
+#### Scenario: No provider terminal received
+- **WHEN** EOF、传输故障或取消发生且未收到原生终止
+- **THEN** 不合成 provider 成功终止；按既有失败/恢复预算处理，宿主生命周期单独关闭。
+
+#### Scenario: Provider switch after a response
+- **WHEN** 响应 A 结束后切换到端点或模型 B
+- **THEN** A 的 terminal 仍绑定 A 的 request/attempt 和原始 backend，后续宿主终态不能用 B 的配置覆盖它。

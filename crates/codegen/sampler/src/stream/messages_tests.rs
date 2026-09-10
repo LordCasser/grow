@@ -415,7 +415,7 @@ async fn usage_only_delta_keeps_stop_and_message_stop_does_not_poll_tail() {
         panic!("{events:?}");
     };
     assert_eq!(response.stop_reason, Some(StopReason::Stop));
-    assert_eq!(response.raw_stop_reason.as_deref(), Some("end_turn"));
+    assert_eq!(response.raw_stop_reason().as_deref(), Some("end_turn"));
     assert_eq!(response.usage.as_ref().unwrap().completion_tokens, 9);
 }
 
@@ -488,7 +488,7 @@ async fn text_block_assembles_into_completed_response() {
             // Provider message id and the verbatim wire stop reason survive
             // onto the response (collapsed `stop_reason` loses the string).
             assert_eq!(response.message_id.as_deref(), Some("msg_1"));
-            assert_eq!(response.raw_stop_reason.as_deref(), Some("end_turn"));
+            assert_eq!(response.raw_stop_reason().as_deref(), Some("end_turn"));
             let u = response.usage.as_ref().expect("usage extracted");
             assert_eq!(u.prompt_tokens, 10);
             assert_eq!(u.completion_tokens, 5);
@@ -952,12 +952,12 @@ async fn truncated_incomplete_tool_use_fails() {
 }
 
 /// A COMPLETED tool_use block followed by a max_tokens cut-off keeps its
-/// tool calls, and the ToolCalls override wins over Length — the calls are
+/// tool calls while preserving Length independently — the calls are
 /// real model output the agent loop must resolve (same philosophy as
 /// refusal_after_tool_use). Behavior change pinned here: previously this
 /// stream failed and discarded everything.
 #[tokio::test]
-async fn complete_tool_use_with_length_truncation_keeps_tool_calls() {
+async fn complete_tool_use_preserves_length() {
     let tool_start = MessageStreamEvent::ContentBlockStart {
         index: 0,
         content_block: ContentBlock::ToolUse {
@@ -994,18 +994,17 @@ async fn complete_tool_use_with_length_truncation_keeps_tool_calls() {
             assert_eq!(response.tool_calls().len(), 1);
             assert_eq!(
                 response.stop_reason,
-                Some(StopReason::ToolCalls),
-                "completed tool_use blocks must win over the Length truncation"
+                Some(StopReason::Length),
+                "completed tool_use blocks must not overwrite the Length truncation"
             );
         }
         other => panic!("expected Completed, got {other:?}"),
     }
 }
 
-/// Pins the pre-existing override: completed tool_use blocks beat a terminal
-/// Refusal, so the agent loop still resolves the calls.
+/// A complete tool_use never hides a provider refusal from the caller.
 #[tokio::test]
-async fn refusal_after_tool_use_blocks_keeps_tool_calls_stop_reason() {
+async fn refusal_after_tool_use_preserves_refusal() {
     let tool_start = MessageStreamEvent::ContentBlockStart {
         index: 0,
         content_block: ContentBlock::ToolUse {
@@ -1037,8 +1036,8 @@ async fn refusal_after_tool_use_blocks_keeps_tool_calls_stop_reason() {
             assert_eq!(response.tool_calls().len(), 1);
             assert_eq!(
                 response.stop_reason,
-                Some(StopReason::ToolCalls),
-                "tool_use blocks must win over the refusal stop_reason"
+                Some(StopReason::ContentFilter),
+                "tool_use blocks must not overwrite the refusal stop_reason"
             );
         }
         other => panic!("expected Completed, got {other:?}"),

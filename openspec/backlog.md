@@ -7,15 +7,15 @@ Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，�
 
 远程配置管理、deployment-config 服务、签名策略同步及其专用 CLI 不在规划范围内。
 
-## 行动预告后任务提前结束（宿主完成协议已修复）
+## 行动预告后任务提前结束（尊重原生终止，来源分离）
 
 用户确认中文冒号处停顿跨端点存在。`audit-provider-stop-provenance` 复核发现：Grow 确实会自行把 Turn 终态标为 end_turn，不能拿这个标签反推端点响应；但原 session 的三份 HTTP 原始 body 也明确包含 end_turn/message_stop。补充 DeepSeek Responses 会话的两处已定位中文冒号片段实际带 commentary 和工具调用，随后继续，仍需用户指出其观察的具体停顿。证据见 [来源审计](changes/archive/2026-09-10-audit-provider-stop-provenance/investigation.md)。
 
-`require-explicit-turn-completion` 将普通 Turn 的完成权威移到显式 FinishTurn 声明：只有预告和合法 provider 终止时继续同一 Turn，连续三次无声明/无业务调用则明确报错；完成、等待用户和等待后台结果分别保留终态种类。声明与业务工具同批时不能收尾，新的用户输入不能沿用旧声明，取消、预算、拒绝及结构化输出保留原终止权威。见 [完成协议验证](changes/archive/2026-09-10-require-explicit-turn-completion/verification.md)。
+此前 `require-explicit-turn-completion` 强制使用 FinishTurn 纠正行动预告，审查发现它不能证明任务完成，也引入了等待调度、插话计数和端点能力问题。`respect-provider-termination-provenance` 按用户修正整体撤下该协议：普通无工具响应尊重原生终止，正文冒号不触发额外调用；Goal、真实等待依赖、结构化输出仍遵循各自契约。原始暂停的 provider 本身确实可能自然结束，这种模型行为不能宣称已被宿主消除。
 
-这是对宿主“无工具响应即完成”的修复；显式声明仍可能被模型错误使用，不能把协议回归当作业务结果正确性的证明。下列历史投影修复与本次完成协议分别处理事实丢失和终止判定。
+本次实现分离原生终止与 Turn 生命周期来源，并修复审计中有工具时覆盖拒绝/截断的 P1 问题；拒绝不会派发业务工具。FinishTurn 的等待标签、连续违约计数和全局工具依赖随协议删除，不能继续作为待修机制保留。审查基线见 [状态机审查](changes/archive/2026-09-10-review-turn-completion-state-machine/review.md)；本次验证见 [来源分离验证](changes/archive/2026-09-10-respect-provider-termination-provenance/verification.md)。
 
-- **Responses phase 的 portable 保留**：原生片段保留 phase，中性 Assistant 投影仍丢失其阶段和消息边界。当前完成协议不依赖该字段，跨模型完整阶段保留需要单独定义中性消息契约及恢复/压缩验证，不混入本次 Turn 终止修复。
+- **Responses phase 的 portable 保留**：原生片段保留 phase，中性 Assistant 投影仍丢失其阶段和消息边界。当前自然终止判定不依赖该字段，跨模型完整阶段保留需要单独定义中性消息契约及恢复/压缩验证，不混入本次 Turn 终止修复。
 
 ## 压缩后的 portable 工具历史（已完成）
 
@@ -34,6 +34,8 @@ Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，�
 ## 工具关联 ID 的目标编码
 
 2026-09-10 发布审查核对 `sampling-types/src/conversation.rs::build_messages_request`：既有 ID 清洗器把非字母数字/下划线/连字符替换成 `_`，因此中性历史中不同的 `a.b` 与 `a/b` 会得到相同目标 ID。此次真实会话的 ID 没有触发该情况，当前配对修复不扩展到 ID 编码重构。后续单独定义无碰撞的目标映射，并同时验证 live、portable 与完整 native span 的调用/结果身份，避免单改结果 ID 破坏原生 continuation。
+
+`review-turn-completion-state-machine` 的真实请求编码器探针已确认调用和结果都变为重复的 `a_b`。这是切换到 Messages 的明确风险；修复仍按独立身份映射 change 处理。
 
 ## 长期：MCP Elicitation 与交互式 MCP
 

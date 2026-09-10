@@ -9,3 +9,7 @@ Make only ordinary final-response fixture branches emit visible answer text and 
 # Capabilities
 
 No production behavior or contract changes; skip_specs is true because this aligns a test fixture with the archived explicit completion protocol.
+
+## Superseded contract
+
+`respect-provider-termination-provenance` removes the mandatory FinishTurn contract at the user’s request. The local coordination fixture is updated in that change to identify foreground requests by its existing coordination capability and return native final responses. Do not reinstate FinishTurn when completing the remaining process verification work here.

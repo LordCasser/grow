@@ -939,10 +939,14 @@ impl SessionActor {
             .and_then(sampling_types::NativeContinuationFragment::signature);
         GrowSessionUpdate::ResponseCompleted {
             message_id: response.message_id.clone(),
-            stop_reason: response.raw_stop_reason.clone(),
+            stop_reason: response.raw_stop_reason(),
             usage,
             signature,
-            stop_sequence: response.stop_sequence.clone(),
+            stop_sequence: response
+                .provider_terminal
+                .as_ref()
+                .and_then(|terminal| terminal.stop_sequence())
+                .map(str::to_owned),
         }
     }
     /// [`Self::send_grow_notification`] with caller-supplied `_meta` keys merged

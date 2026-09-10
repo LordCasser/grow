@@ -7,9 +7,6 @@ mod settlement;
 use crate::session::behavior::BehaviorChangeOutcome;
 use settlement::*;
 mod admission;
-mod completion;
-pub(crate) use completion::CompletionIntent;
-use completion::{FINISH_TURN_TOOL, finish_turn_tool};
 pub(in crate::session::actor) use admission::should_capture_implicit_goal_objective;
 #[cfg(test)]
 use admission::{UserEchoMode, user_echo_mode};
@@ -453,16 +450,8 @@ impl SessionActor {
                 return result;
             }
             if let Err(error) = &result
-                && (crate::session::commands::is_fatal_turn_boundary_error(error)
-                    || error
-                        .data
-                        .as_ref()
-                        .and_then(|data| data.get("error_kind"))
-                        .and_then(serde_json::Value::as_str)
-                        == Some("turn_completion_protocol_failed"))
+                && crate::session::commands::is_fatal_turn_boundary_error(error)
             {
-                // An Agent's legacy tool requirement cannot reopen a failed
-                // host completion protocol or an uncommitted boundary.
                 return result;
             }
             if matches!(
@@ -893,7 +882,6 @@ impl SessionActor {
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
-        let mut completion_violations: u8 = 0;
         let mut image_projection_retries: u8 = 0;
         let mut pending_forced_compaction: Option<compaction::AutoCompactTriggerInfo> = None;
         let mut plan_handoff_resample_pending = false;
@@ -1205,17 +1193,6 @@ impl SessionActor {
                 );
             }
             let mut effective_tools: Vec<ToolSpec> = self.turn_base_tool_specs(&tool_definitions);
-            let requires_completion_intent = json_schema.is_none();
-            if requires_completion_intent {
-                if effective_tools
-                    .iter()
-                    .any(|tool| tool.name == FINISH_TURN_TOOL)
-                {
-                    return Err(acp::Error::internal_error()
-                        .data("FinishTurn is reserved for the host completion protocol."));
-                }
-                effective_tools.push(finish_turn_tool());
-            }
             if structured_output_tool && let Some(schema) = json_schema.clone() {
                 effective_tools.push(ToolSpec {
                     name: STRUCTURED_OUTPUT_TOOL.to_string(),
@@ -1348,11 +1325,13 @@ impl SessionActor {
             // Bill the selected provider/model, not a provider-returned alias.
             // Capture before awaiting sampling so later control changes cannot reattribute it.
             let usage_model_id = self.current_catalog_model_id();
-            let (mut response, latency) = match self
+            let (mut response, latency, response_request_id) = match self
                 .run_turn_via_sampler(request.clone(), sampling_recovery.clone())
                 .await
             {
-                Ok(SamplerTurnOutcome::Response(r, latency)) => (r, latency),
+                Ok(SamplerTurnOutcome::Response(r, latency, request_id)) => {
+                    (r, latency, request_id)
+                }
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
                     return Err(error);
@@ -1581,7 +1560,6 @@ impl SessionActor {
             let turn_refused = stop_reason == Some(sampling_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
-            let has_answer = !response.assistant_text().trim().is_empty();
             let persisted_items = response.items.len();
             let response_items = std::mem::take(&mut response.items);
             let native_continuation = response.native_continuation.take();
@@ -1787,12 +1765,25 @@ impl SessionActor {
                 _ => {}
             }
             self.send_buffered_grow_update(response_completed).await;
-            let completion_intent = if requires_completion_intent {
-                self.accept_completion_intent(&mut tool_calls, has_answer)
-                    .await?
-            } else {
-                None
-            };
+            if turn_refused {
+                // Preserve every complete call, but never execute a refused
+                // response. Durable results close the protocol without claiming
+                // the requested action happened.
+                for call in tool_calls.drain(..) {
+                    self.chat_state_handle
+                        .push_tool_result_durably(ConversationItem::tool_result(
+                            call.id.to_string(),
+                            "Not executed: the provider refused this response.",
+                        ))
+                        .await
+                        .map_err(|error| {
+                            crate::session::commands::fatal_turn_boundary_error(
+                                "provider refusal tool closure",
+                                error.to_string(),
+                            )
+                        })?;
+                }
+            }
             if tool_calls.is_empty() {
                 if self.drain_pending_interjections().await
                     || self.drain_deferred_completions().await
@@ -1800,18 +1791,6 @@ impl SessionActor {
                     tracing::info!(
                         "Drained foreground event(s) before turn completion — continuing"
                     );
-                    continue;
-                }
-                if requires_completion_intent && !turn_refused && completion_intent.is_none() {
-                    if self
-                        .enforce_goal_spending_limit_for_prompt(Some(req_id))
-                        .await
-                    {
-                        // The normal Step boundary owns the budget terminal.
-                        continue;
-                    }
-                    self.recover_missing_completion(&mut completion_violations)
-                        .await?;
                     continue;
                 }
                 let snapshot = self
@@ -1840,11 +1819,7 @@ impl SessionActor {
                     _ => None,
                 };
                 return Ok(TurnOutcome::Completed {
-                    completion_intent: if turn_refused {
-                        None
-                    } else {
-                        completion_intent
-                    },
+                    request_id: response_request_id,
                     snapshot: Box::new(snapshot),
                     tools_called: turn_tools_called,
                     structured_output,
@@ -1872,7 +1847,7 @@ impl SessionActor {
                             )
                             .await;
                         return Ok(TurnOutcome::Completed {
-                            completion_intent: None,
+                            request_id: response_request_id,
                             snapshot: Box::new(snapshot),
                             tools_called: turn_tools_called,
                             structured_output: Some(validated),
@@ -1883,7 +1858,6 @@ impl SessionActor {
                     StructuredOutputStep::Proceed => {}
                 }
             }
-            completion_violations = 0;
             for tc in &tool_calls {
                 if let Some((server, tool)) =
                     crate::session::mcp_servers::parse_mcp_tool_name(&tc.name)

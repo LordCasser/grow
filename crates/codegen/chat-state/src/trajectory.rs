@@ -1627,6 +1627,7 @@ fn describe_request(event: &RequestEvent, scopes: &BTreeMap<String, (String, u32
             time_to_first_token_ms,
             usage,
             response_message_count,
+            ..
         } => {
             let (turn, step) = scope(scopes, id);
             let mut metrics = Vec::new();
@@ -2507,6 +2508,7 @@ mod tests {
                 duration_ms: 1,
                 tool_count: 0,
                 terminal: crate::TurnTerminal {
+                    source: crate::TurnTerminalSource::Host,
                     stop_reason: "end_turn".into(),
                     completion_kind: "completed".into(),
                 },
@@ -2628,6 +2630,7 @@ mod tests {
                 duration_ms: 1,
                 tool_count: 0,
                 terminal: crate::TurnTerminal {
+                    source: crate::TurnTerminalSource::Host,
                     stop_reason: "end_turn".into(),
                     completion_kind: "control_boundary".into(),
                 },
@@ -2792,6 +2795,8 @@ mod tests {
                     ..Default::default()
                 },
                 response_message_count: 1,
+                attempt: 0,
+                provider_terminal: None,
             }))
             .unwrap();
 

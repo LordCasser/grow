@@ -8,6 +8,7 @@ async fn end_active_test_turn(actor: &SessionActor) {
         .emit_turn_ended(
             crate::session::events::TurnOutcomeLabel::Completed,
             chat_state::TurnTerminal {
+                source: chat_state::TurnTerminalSource::Host,
                 stop_reason: "end_turn".into(),
                 completion_kind: "completed".into(),
             },

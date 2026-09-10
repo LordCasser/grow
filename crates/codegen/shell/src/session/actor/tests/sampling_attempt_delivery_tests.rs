@@ -71,8 +71,7 @@ async fn sampling_candidate_is_scoped_and_dropped_until_durable_admission() {
                 doom_loop_signals: vec![],
                 stop_message: None,
                 message_id: None,
-                raw_stop_reason: None,
-                stop_sequence: None,
+                provider_terminal: None,
                 native_continuation: None,
             };
             actor

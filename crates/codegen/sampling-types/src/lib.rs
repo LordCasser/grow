@@ -11,7 +11,9 @@ pub mod doom_loop;
 pub mod error;
 pub mod messages;
 pub mod serde_helpers;
+pub mod termination;
 pub mod types;
+pub use termination::ProviderTerminal;
 
 pub use self::conversation::*;
 pub use self::doom_loop::{

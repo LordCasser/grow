@@ -79,8 +79,8 @@ pub use timeline::{
     SubagentOutcome, SubagentResultEvent, SubagentSeedEvent, SubagentSpawnEvent,
     SubagentTerminalEvent, SurfaceId, SurfaceOp, SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline,
     TimelineError, TimelineEvent, TimelineEventKind, ToolEvent, TurnEvent, TurnId, TurnIdentity,
-    TurnInputKind, TurnTerminal, WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle,
-    WorkflowTurnHandoff, notification_id,
+    TurnInputKind, TurnTerminal, TurnTerminalSource, WorkflowEvent, WorkflowExecutionStatus,
+    WorkflowLifecycle, WorkflowTurnHandoff, notification_id,
 };
 pub use trajectory::{
     SurfaceVisibility, TRAJECTORY_SCHEMA_VERSION, TrajectoryIssueSeverity, TrajectoryProjector,

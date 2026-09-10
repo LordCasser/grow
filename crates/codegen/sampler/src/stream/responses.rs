@@ -14,8 +14,7 @@ use futures_util::StreamExt;
 use futures_util::stream::{BoxStream, Stream};
 
 use sampling_types::{
-    ConversationItem, ConversationResponse, ResponseModelMetadata, SamplingError, StopReason,
-    TokenUsage, rs,
+    ConversationResponse, ResponseModelMetadata, SamplingError, StopReason, TokenUsage, rs,
 };
 
 use super::protocol_failure;
@@ -169,11 +168,8 @@ pub(crate) fn responses_event_may_have_output(event: &rs::ResponseStreamEvent) -
 /// become control semantics. The typed mapping remains the sole authority for
 /// turn behavior; this string only retains the exact status and, when present,
 /// the exact incomplete-detail reason carried alongside it.
-fn responses_raw_stop_reason(
-    status: &rs::Status,
-    incomplete_details: Option<&rs::IncompleteDetails>,
-) -> String {
-    let status = match status {
+fn responses_terminal(event: &str, response: &rs::Response) -> sampling_types::ProviderTerminal {
+    let status = match response.status {
         rs::Status::Completed => "completed",
         rs::Status::Failed => "failed",
         rs::Status::InProgress => "in_progress",
@@ -181,10 +177,14 @@ fn responses_raw_stop_reason(
         rs::Status::Queued => "queued",
         rs::Status::Incomplete => "incomplete",
     };
-    incomplete_details.map_or_else(
-        || status.to_owned(),
-        |details| format!("{status}:{}", details.reason),
-    )
+    sampling_types::ProviderTerminal::Responses {
+        event: event.into(),
+        status: status.into(),
+        incomplete_reason: response
+            .incomplete_details
+            .as_ref()
+            .map(|details| details.reason.clone()),
+    }
 }
 
 /// Transform a raw Responses API event stream into a stream of
@@ -243,6 +243,7 @@ pub(crate) fn stream_responses_tracked<'a>(
         }
 
         let mut final_response: Option<rs::Response> = None;
+        let mut provider_terminal = None;
         let mut response_id: Option<String> = None;
         let mut chunk_index: u64 = 0;
         let mut message_chunk_count: u64 = 0;
@@ -294,6 +295,18 @@ pub(crate) fn stream_responses_tracked<'a>(
             }
             if responses_event_may_have_output(&event) {
                 output_observed.store(true, Ordering::Relaxed);
+            }
+
+            // Observation survives later host rejection of this candidate.
+            let observed_terminal = match &event {
+                ResponseStreamEvent::ResponseCompleted(e) => Some(responses_terminal("response.completed", &e.response)),
+                ResponseStreamEvent::ResponseIncomplete(e) => Some(responses_terminal("response.incomplete", &e.response)),
+                ResponseStreamEvent::ResponseFailed(e) => Some(responses_terminal("response.failed", &e.response)),
+                _ => None,
+            };
+            if let Some(terminal) = observed_terminal {
+                crate::audit::AttemptEvidence::observe_terminal(terminal.clone());
+                provider_terminal = Some(terminal);
             }
 
             // A confident server-detected loop aborts the attempt (dropping
@@ -618,8 +631,6 @@ pub(crate) fn stream_responses_tracked<'a>(
             .and_then(|s| s.parse::<i64>().ok());
 
         let status = response.status.clone();
-        let raw_stop_reason =
-            responses_raw_stop_reason(&status, response.incomplete_details.as_ref());
         let incomplete_stop = match response.incomplete_details.as_ref().map(|details| details.reason.as_str()) {
             Some("max_output_tokens") => StopReason::Length,
             Some("content_filter") => StopReason::ContentFilter,
@@ -660,19 +671,10 @@ pub(crate) fn stream_responses_tracked<'a>(
         };
         sampling_types::inject_streaming_reasoning_fallback(&mut items, reasoning_acc);
 
-        let has_tool_calls = items.iter().any(|i| match i {
-            ConversationItem::Assistant(a) => !a.tool_calls.is_empty(),
-            _ => false,
-        });
-
-        let stop_reason = if has_tool_calls {
-            Some(StopReason::ToolCalls)
-        } else {
-            match status {
-                Status::Completed => Some(StopReason::Stop),
-                Status::Incomplete => Some(incomplete_stop),
-                _ => None,
-            }
+        let stop_reason = match status {
+            Status::Completed => Some(StopReason::Stop),
+            Status::Incomplete => Some(incomplete_stop),
+            _ => None,
         };
 
         let stream_end = Instant::now();
@@ -702,8 +704,7 @@ pub(crate) fn stream_responses_tracked<'a>(
             doom_loop_signals,
             stop_message: None, // not reported on the Responses API
             message_id: None,   // no provider message id on the Responses API
-            raw_stop_reason: Some(raw_stop_reason),
-            stop_sequence: None,
+            provider_terminal,
             native_continuation,
         };
 
@@ -878,7 +879,7 @@ mod tests {
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
-                assert_eq!(response.raw_stop_reason.as_deref(), Some("completed"));
+                assert_eq!(response.raw_stop_reason().as_deref(), Some("completed"));
             }
             other => panic!("expected Completed, got {other:?}"),
         }
@@ -900,7 +901,7 @@ mod tests {
             SamplingEvent::Completed { response, .. } => {
                 assert_eq!(response.stop_reason, Some(StopReason::Length));
                 assert_eq!(
-                    response.raw_stop_reason.as_deref(),
+                    response.raw_stop_reason().as_deref(),
                     Some("incomplete:max_output_tokens")
                 );
             }
@@ -1316,7 +1317,7 @@ mod tests {
             };
             assert_eq!(response.stop_reason, Some(expected));
             assert_eq!(
-                response.raw_stop_reason.as_deref(),
+                response.raw_stop_reason().as_deref(),
                 Some(format!("incomplete:{reason}").as_str())
             );
         }
@@ -1408,7 +1409,7 @@ mod tests {
             );
             if let Some(SamplingEvent::Completed { response, .. }) = events.last() {
                 assert_eq!(response.tool_calls()[0].id.as_ref(), "call_a");
-                assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+                assert_eq!(response.stop_reason, Some(StopReason::Stop));
             }
         }
     }

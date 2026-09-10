@@ -118,7 +118,7 @@ fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id()
                     }
                     server.enqueue_response(
                         "/v1/responses",
-                        with_finish_turn(ScriptedResponse::sse(responses_api_script_exact("done", "test"))),
+                        ScriptedResponse::sse(responses_api_script_exact("done", "test")),
                     );
 
                     let sampling_cfg = sampler::SamplerConfig {

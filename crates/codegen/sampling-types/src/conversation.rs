@@ -1764,7 +1764,7 @@ pub struct ConversationResponse {
     /// item is always an `Assistant` item (possibly with empty content if
     /// the model only emitted reasoning or tool calls).
     pub items: Vec<ConversationItem>,
-    /// Why the model stopped generating
+    /// Provider termination semantics, independent of tool-call presence.
     pub stop_reason: Option<StopReason>,
     /// Token usage statistics
     pub usage: Option<TokenUsage>,
@@ -1791,18 +1791,9 @@ pub struct ConversationResponse {
     /// Provider message id (Messages `message.id`); `None` on backends that do
     /// not carry one (OAI Chat Completions / Responses).
     pub message_id: Option<String>,
-    /// Wire termination reason before it collapses into [`StopReason`]
-    /// (e.g. `end_turn`, `tool_use`, `pause_turn`). Responses API terminal
-    /// status is recorded as-is; when it also carries an incomplete reason,
-    /// both raw values are retained as `incomplete:<reason>`. This field is
-    /// diagnostic only and must never drive provider-neutral control flow.
-    /// `None` when the provider reported no terminal reason.
-    pub raw_stop_reason: Option<String>,
-    /// The provider's matched stop sequence (Messages API
-    /// `message_delta.stop_sequence`), present only when the model stopped on a
-    /// configured stop sequence; `None` otherwise and on backends that do not
-    /// report one (OAI Chat Completions / Responses).
-    pub stop_sequence: Option<String>,
+    /// Original terminal metadata with its provider protocol identity. Missing
+    /// evidence stays missing; the host must never synthesize this field.
+    pub provider_terminal: Option<crate::ProviderTerminal>,
     /// Provider-native continuation for this response. It is admitted into
     /// ChatState only after the durable Timeline write succeeds.
     pub native_continuation: Option<NativeContinuationFragment>,
@@ -1819,6 +1810,13 @@ pub fn reported_cost_ticks(raw: Option<i64>) -> Option<i64> {
 }
 
 impl ConversationResponse {
+    /// Render original provider metadata for diagnostics, never for control.
+    pub fn raw_stop_reason(&self) -> Option<String> {
+        self.provider_terminal
+            .as_ref()
+            .map(crate::ProviderTerminal::display_reason)
+    }
+
     /// The trailing `Assistant` item, if any. The producer
     /// (`response_to_conversation_items` and the streaming consumers) always
     /// appends exactly one Assistant item, but this returns `None`
@@ -8004,8 +8002,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert!(response.is_empty());
@@ -8020,8 +8017,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert!(!response.is_empty());
@@ -8040,8 +8036,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert!(!response.is_empty());
@@ -8066,8 +8061,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert!(
@@ -8091,8 +8085,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert!(
@@ -8120,8 +8113,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert!(
@@ -8152,8 +8144,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
 
@@ -8176,8 +8167,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert_eq!(
@@ -8199,8 +8189,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert!(response.fallback_text().is_none());
@@ -8218,8 +8207,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert!(response.fallback_text().is_none());
@@ -8241,8 +8229,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert_eq!(
@@ -8267,8 +8254,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert!(response.fallback_text().is_none());
@@ -9687,8 +9673,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         }
     }
@@ -9735,8 +9720,7 @@ mod tests {
             doom_loop_signals: Vec::new(),
             stop_message: None,
             message_id: None,
-            raw_stop_reason: None,
-            stop_sequence: None,
+            provider_terminal: None,
             native_continuation: None,
         };
         assert_eq!(
