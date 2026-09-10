@@ -410,6 +410,9 @@ impl AccessKind {
             | ToolInput::SchedulerDelete(_)
             | ToolInput::CreateGoal(_)
             | ToolInput::UpdateGoal(_)
+            | ToolInput::AskParent(_)
+            | ToolInput::AskSubagent(_)
+            | ToolInput::SendSubagentMessage(_)
             | ToolInput::AskSession(_)
             | ToolInput::Workflow(_) => AccessKind::InternalControl {
                 name: tool_name.to_owned(),

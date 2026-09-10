@@ -396,8 +396,15 @@ impl InquiryCancellation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InquiryAuthority {
+    Peer,
+    Delegation,
+}
+
 #[derive(Debug)]
 pub struct InboundInquiry {
+    pub(crate) authority: InquiryAuthority,
     pub inquiry_id: String,
     pub source_peer_id: String,
     pub source_session_id: String,

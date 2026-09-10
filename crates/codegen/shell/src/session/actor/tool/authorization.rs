@@ -114,11 +114,13 @@ pub(super) fn project_call_access(
         | ToolInput::Lsp(_)
         | ToolInput::SchedulerList(_)
         | ToolInput::ListActiveSessions(_)
+        | ToolInput::AskParent(_)
+        | ToolInput::AskSubagent(_)
         | ToolInput::AskSession(_)
         | ToolInput::GetInquiry(_)
         | ToolInput::GetGoal(_) => ToolAccess::Read,
         ToolInput::SearchReplace(_) | ToolInput::HashlineEdit(_) => ToolAccess::ReadWrite,
-        ToolInput::Write(_) => ToolAccess::Write,
+        ToolInput::Write(_) | ToolInput::SendSubagentMessage(_) => ToolAccess::Write,
         ToolInput::Bash(input) => shell_required_access(&input.command),
         ToolInput::Monitor(input) => shell_required_access(&input.command),
         ToolInput::KillTask(_) => ToolAccess::None,

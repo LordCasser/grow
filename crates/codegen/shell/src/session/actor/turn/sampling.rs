@@ -2019,9 +2019,12 @@ impl SessionActor {
         tokio::pin!(collect);
         let (collected, steered) = tokio::select! {
             biased;
-            _ = super::super::wait_for_pending_interjection(
-                &self.pending_interjections,
-            ) => {
+            _ = async {
+                tokio::select! {
+                    _ = super::super::wait_for_pending_interjection(&self.pending_interjections) => {},
+                    _ = async { let mut signal = self.parent_message_interrupt.subscribe(); let _ = signal.wait_for(|pending| *pending).await; } => {},
+                }
+            } => {
                 self.events
                     .request_cancel_requested(&request_id_str, "steered");
                 self.sampler_handle.cancel(request_id.clone());

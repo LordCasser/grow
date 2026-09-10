@@ -547,11 +547,25 @@ impl SessionActor {
             task.steering_open = false;
             self.pending_interjections.drain_all()
         };
-        if entries.is_empty() {
-            return false;
+        let had_interjections = !entries.is_empty();
+        if had_interjections {
+            self.inject_pending_interjections(entries).await;
         }
-        self.inject_pending_interjections(entries).await;
-        true
+        let has_parent_message = self
+            .chat_state_handle
+            .pending_notifications()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|item| {
+                matches!(
+                    &item.source,
+                    chat_state::NotificationSource::ParentMessage { .. }
+                )
+            });
+        let delivered_parent_message =
+            has_parent_message && self.drain_active_notifications().await;
+        had_interjections || delivered_parent_message
     }
 
     pub(super) async fn reopen_steering(&self, prompt_id: &str) {

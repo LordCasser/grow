@@ -1624,6 +1624,7 @@ pub(crate) struct SessionActor {
     /// Pending mid-turn interjections from the user (Ctrl+Enter).
     /// Pushed by `SessionCommand::Interject` handler, drained at safe
     /// points in `process_conversation_turn`. Internally synchronized.
+    pub(crate) parent_message_interrupt: tokio::sync::watch::Sender<bool>,
     pub(crate) pending_interjections: InterjectionBuffer<acp::ImageContent>,
     /// Results of waits that user steering moved to the background. Keeps the
     /// original tool result paired while routing eventual completion through

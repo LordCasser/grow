@@ -131,6 +131,7 @@ impl SessionActor {
             }
         }
 
+        let delegated = inquiry.authority == crate::coordination::InquiryAuthority::Delegation;
         let same_cwd = match (
             dunce::canonicalize(&inquiry.source_cwd),
             dunce::canonicalize(&self.session_info.cwd),
@@ -138,7 +139,7 @@ impl SessionActor {
             (Ok(source), Ok(target)) => source == target,
             _ => false,
         };
-        if !same_cwd {
+        if !same_cwd && !delegated {
             let target_cwd = crate::coordination::canonical_cwd(Path::new(&self.session_info.cwd));
             inquiry
                 .progress
@@ -223,9 +224,16 @@ impl SessionActor {
                 }
             }
         }
-        if same_cwd {
+        if same_cwd || delegated {
             if let Err(error) = self
-                .record_coordination_approval_notice(inquiry, "approved (same workspace)")
+                .record_coordination_approval_notice(
+                    inquiry,
+                    if delegated {
+                        "approved (direct delegation)"
+                    } else {
+                        "approved (same workspace)"
+                    },
+                )
                 .await
             {
                 return failed(
@@ -635,6 +643,7 @@ mod tests {
         let (respond_to, response) = tokio::sync::oneshot::channel();
         (
             crate::coordination::InboundInquiry {
+                authority: crate::coordination::InquiryAuthority::Peer,
                 inquiry_id: uuid::Uuid::now_v7().to_string(),
                 source_peer_id: "peer".to_owned(),
                 source_session_id: format!("source-{id}"),
@@ -872,6 +881,74 @@ mod tests {
                 assert_eq!(attempts, 1, "inquiry executes exactly one provider attempt");
             })
             .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delegated_inquiry_during_foreground_bypasses_peer_approval_without_injecting_input() {
+        tokio::task::LocalSet::new().run_until(async {
+            use axum::{Json, Router, response::Sse, response::sse::Event, routing::post};
+            let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+            let release = Arc::new(tokio::sync::Notify::new());
+            let response_release = Arc::clone(&release);
+            let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<serde_json::Value>| {
+                let request_tx = request_tx.clone();
+                let release = Arc::clone(&response_release);
+                async move {
+                    request_tx.send(body).unwrap();
+                    release.notified().await;
+                    let chunks = [
+                        serde_json::json!({"id":"question", "object":"chat.completion.chunk", "created":0, "model":"test",
+                            "choices":[{"index":0,"delta":{"role":"assistant","content":"Use the existing interface."},"finish_reason":"stop"}],
+                            "usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}).to_string(),
+                        "[DONE]".into(),
+                    ];
+                    Sse::new(futures::stream::iter(chunks.into_iter().map(|chunk| Ok::<_, std::convert::Infallible>(Event::default().data(chunk)))))
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            config.base_url = base_url.clone();
+            config.api_backend = sampling_types::ApiBackend::ChatCompletions;
+            actor.chat_state_handle.update_sampling_config(config);
+            let mut route = actor.model_route.snapshot();
+            route.sampling_config.base_url = base_url;
+            route.sampling_config.api_backend = sampling_types::ApiBackend::ChatCompletions;
+            actor.model_route.replace(route.model_id, route.sampling_config);
+            crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+            actor.notifications.gateway_enabled.store(false, std::sync::atomic::Ordering::Release);
+            let before = serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap();
+            let (mut question, response) = inquiry(7);
+            question.authority = crate::coordination::InquiryAuthority::Delegation;
+            question.source_cwd = "/delegated-worktree".into();
+            question.target_session_id = actor.session_info.id.to_string();
+            let id = question.inquiry_id.clone();
+            actor.enqueue_coordination_inquiry(question).await;
+            let request = tokio::time::timeout(Duration::from_secs(5), request_rx.recv()).await.unwrap().unwrap();
+            assert!(request.get("tools").is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)));
+            assert!(actor.state.lock().await.foreground.regular().is_some());
+            assert!(actor.coordination_inquiry_active.get());
+            release.notify_one();
+            let outcome = tokio::time::timeout(Duration::from_secs(5), response).await.unwrap().unwrap();
+            assert_eq!(outcome.status, crate::coordination::InquiryStatus::Answered);
+            assert_eq!(outcome.answer.as_deref(), Some("Use the existing interface."));
+            assert!(actor.state.lock().await.foreground.regular().is_some());
+            assert_eq!(serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap(), before);
+            assert!(actor.pending_interjections.is_empty());
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let receipts: Vec<_> = events.iter().filter_map(|event| match crate::coordination::InquiryEvent::from_timeline(event).unwrap() {
+                Some(crate::coordination::InquiryEvent::Incoming { inquiry_id, audit }) => Some((inquiry_id, audit)),
+                _ => None,
+            }).collect();
+            assert!(receipts.len() >= 3);
+            assert!(receipts.iter().all(|(key, _)| key == &id), "all UI lifecycle updates must use one inquiry row identity");
+            assert!(receipts.last().unwrap().1.outcome.is_some());
+            assert!(events.iter().any(|event| matches!(&event.kind, chat_state::TimelineEventKind::Sideband(spawn) if spawn.purpose == chat_state::SidebandPurpose::InfoRequest)));
+            chat_state::Timeline::from_events(events).unwrap();
+            server.abort();
+        }).await;
     }
 
     #[tokio::test(flavor = "current_thread")]

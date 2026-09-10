@@ -198,6 +198,7 @@ impl SessionActor {
                 chat_state::NotificationSource::MonitorProgress { .. }
                 | chat_state::NotificationSource::TaskStillRunning { .. }
                 | chat_state::NotificationSource::PlanHandoff { .. }
+                | chat_state::NotificationSource::ParentMessage { .. }
                 | chat_state::NotificationSource::WorkflowHandoff { .. } => false,
             })
             .map(|notification| notification.id)

@@ -1,0 +1,5 @@
+- [x] Implement runtime-authenticated parent-child ask/send routing and role-gated tools.
+- [x] Reuse asynchronous Sideband inquiry and single correlated receiving UI row.
+- [x] Add durable attributed parent intervention with queued/interrupt timing.
+- [x] Update prompts/docs and verify routing, sideband, steering, replay, cancellation and Goal regressions.
+- [x] Validate/archive OpenSpec and coordinate shared artifact cleanup; commit the verified implementation.

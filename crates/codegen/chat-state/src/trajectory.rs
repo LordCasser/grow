@@ -1333,6 +1333,7 @@ fn describe(
 
 fn notification_source_label(source: &NotificationSource) -> &'static str {
     match source {
+        NotificationSource::ParentMessage { .. } => "parent message",
         NotificationSource::MonitorProgress { .. } => "monitor progress",
         NotificationSource::TaskStillRunning { .. } => "task still running",
         NotificationSource::TaskCompleted { .. } => "task completed",

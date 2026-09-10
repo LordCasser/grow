@@ -589,6 +589,7 @@ pub(crate) async fn create_test_actor_ex(
         max_retries: std::cell::Cell::new(3),
         subagent_classifier_input: crate::config::SubagentClassifierInput::Context,
         max_turns: None,
+        parent_message_interrupt: tokio::sync::watch::channel(false).0,
         pending_interjections: InterjectionBuffer::new(),
         completion_delivery: Default::default(),
         pending_system_reminders: Mutex::new(Vec::new()),

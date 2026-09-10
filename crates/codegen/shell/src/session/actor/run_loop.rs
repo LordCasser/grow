@@ -1447,6 +1447,10 @@ pub(super) async fn run_session(
                         let state = session.state.lock().await;
                         let _ = respond_to.send(state.foreground.snapshot());
                     }
+                    SessionCommand::ReceiveParentMessage { source_session_id, message_id, message, interrupt, respond_to } => {
+                        let result = session.receive_parent_message(source_session_id, message_id, message, interrupt).await;
+                        let _ = respond_to.send(result);
+                    }
                     SessionCommand::ReceiveNotification {
                         source,
                         source_version,
@@ -1463,6 +1467,7 @@ pub(super) async fn run_session(
                             chat_state::NotificationSource::MonitorProgress { .. }
                             | chat_state::NotificationSource::TaskStillRunning { .. }
                             | chat_state::NotificationSource::PlanHandoff { .. }
+                            | chat_state::NotificationSource::ParentMessage { .. }
                             | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
                         };
                         let admission = session

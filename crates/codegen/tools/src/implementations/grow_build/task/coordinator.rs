@@ -174,6 +174,43 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
     fn handle_command(&mut self, command: SubagentEvent) {
         match command {
+            SubagentEvent::Interact(request) => {
+                let target = match request.target_child_id.as_deref() {
+                    Some(id) => self
+                        .active
+                        .get(id)
+                        .filter(|child| {
+                            child.immediate_parent_session_id == request.source_session_id
+                                && !child.cancellation.is_cancelled()
+                                && !child.request.owner.is_workflow()
+                        })
+                        .map(|child| child.child_session_id.clone()),
+                    None if matches!(
+                        &request.action,
+                        super::interaction::AgentInteraction::Ask { .. }
+                    ) =>
+                    {
+                        self.active
+                            .values()
+                            .find(|child| {
+                                child.child_session_id == request.source_session_id
+                                    && !child.cancellation.is_cancelled()
+                            })
+                            .map(|child| child.immediate_parent_session_id.clone())
+                    }
+                    None => None,
+                };
+                match target {
+                    Some(target) if !request.cancellation.is_cancelled() => {
+                        self.runner.interact(request, target)
+                    }
+                    _ => {
+                        let _ = request.respond_to.send(Err(
+                            "No active direct parent-child route for this operation".into(),
+                        ));
+                    }
+                }
+            }
             SubagentEvent::Spawn(command) => {
                 let mut request = *command.request;
                 let immediate_parent_session_id = request.parent_session_id.clone();

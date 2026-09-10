@@ -610,6 +610,7 @@ pub struct SubagentValidateTypeRequest {
 
 /// Coordinator message enum. Kept exhaustive so every actor command is handled.
 pub enum SubagentEvent {
+    Interact(super::interaction::AgentInteractionRequest),
     Spawn(SubagentSpawnRequest),
     Query(SubagentQueryRequest),
     Cancel(SubagentCancelRequest),

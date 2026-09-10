@@ -111,6 +111,12 @@ fn expected_builtin_tool_kinds() -> HashMap<String, ToolKind> {
         entry::<grow_build::ListActiveSessionsTool>(ToolKind::Other, ToolAccess::Read),
         entry::<grow_build::GetInquiryTool>(ToolKind::Other, ToolAccess::Read),
         entry::<grow_build::AskSessionTool>(ToolKind::Other, ToolAccess::Read),
+        entry::<grow_build::task::interaction::AskParentTool>(ToolKind::Other, ToolAccess::Read),
+        entry::<grow_build::task::interaction::AskSubagentTool>(ToolKind::Other, ToolAccess::Read),
+        entry::<grow_build::task::interaction::SendSubagentMessageTool>(
+            ToolKind::Other,
+            ToolAccess::Write,
+        ),
         // ── Grow integration dispatch ──────────────────────────────────────
         entry::<use_tool::UseTool>(ToolKind::UseTool, ToolAccess::All),
         entry::<search_tool::SearchTool>(ToolKind::SearchTool, ToolAccess::None),

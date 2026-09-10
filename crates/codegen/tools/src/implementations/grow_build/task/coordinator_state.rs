@@ -96,6 +96,16 @@ pub struct ChildCompletion<D> {
 /// A local runner may return non-`Send` futures, while a multithreaded runner
 /// may return `Send` futures.
 pub trait ChildRunner: 'static {
+    fn interact(
+        &self,
+        request: super::interaction::AgentInteractionRequest,
+        _target_session_id: String,
+    ) {
+        let _ = request.respond_to.send(Err(
+            "Parent-child communication is unavailable in this host".into(),
+        ));
+    }
+
     type Control: ChildControl;
     type CompletionData: Default + 'static;
     type RunFuture: Future<Output = ChildRunOutput<Self::CompletionData>> + 'static;

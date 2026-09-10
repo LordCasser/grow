@@ -149,6 +149,17 @@ fn coordination_source_tools_keep_normal_running_rows_and_full_return_values() {
             ToolOutput::ListActiveSessions(ListActiveSessionsOutput { sessions: vec![] }),
         ),
         (
+            "ask_parent",
+            ToolOutput::AgentInteraction(
+                tools::implementations::grow_build::task::interaction::AgentInteractionOutput {
+                    id: "child:question".into(),
+                    status: "answered".into(),
+                    answer: Some("Use the existing interface".into()),
+                    error: None,
+                },
+            ),
+        ),
+        (
             "ask_session",
             ToolOutput::CoordinationInquiry(CoordinationInquiryResult {
                 inquiry_id: "inquiry-1".into(),
@@ -210,7 +221,7 @@ fn coordination_source_tools_keep_normal_running_rows_and_full_return_values() {
             "source is a real tool, not a passive notice"
         );
     }
-    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 2);
+    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 3);
 }
 
 #[test]
@@ -427,4 +438,41 @@ fn coordination_runtime_health_errors_remain_visible() {
         app.agents[&AgentId(0)].scrollback.entry(0).unwrap().block,
         RenderBlock::Notice(_)
     ));
+}
+
+#[test]
+fn delegated_question_updates_one_primary_view_row() {
+    let mut app = make_app_with_agent("parent");
+    for subject in ["incoming inquiry", "inquiry approval", "inquiry completed"] {
+        let GrowSessionUpdate::UiNotice(mut update) =
+            notice("child:call", subject, "Answering child", UiNoticeTone::Info)
+        else {
+            panic!()
+        };
+        let mut audit: shell::coordination::IncomingInquiryAudit =
+            serde_json::from_str(update.details.as_ref().unwrap()).unwrap();
+        audit.source_peer_id = "local-delegation".into();
+        audit.source_session_id = "child".into();
+        update.details = Some(serde_json::to_string(&audit).unwrap());
+        handle(
+            make_ext_session_notification("parent", GrowSessionUpdate::UiNotice(update)),
+            &mut app,
+        );
+        assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 1);
+        assert!(app.agents[&AgentId(0)].session.tracker.activity().is_none());
+    }
+    assert!(
+        !app.agents[&AgentId(0)]
+            .scrollback
+            .entry(0)
+            .unwrap()
+            .is_running
+    );
+    assert!(
+        tool_row(&app, 0)
+            .output
+            .as_ref()
+            .unwrap()
+            .contains("Working on tests")
+    );
 }

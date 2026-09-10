@@ -432,6 +432,7 @@ pub fn acp_tool_update(
                 .raw_output(raw_output_json(output, rewriter)),
         )),
         ToolOutput::ListActiveSessions(_)
+        | ToolOutput::AgentInteraction(_)
         | ToolOutput::CoordinationInquiry(_)
         | ToolOutput::CoordinationInquiryState(_) => Some(acp::ToolCallUpdate::new(
             acp::ToolCallId::new(Arc::from(tool_call_id)),

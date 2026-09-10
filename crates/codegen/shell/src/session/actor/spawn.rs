@@ -2511,6 +2511,7 @@ pub(crate) async fn spawn_session_actor(
         max_turns,
         max_retries: std::cell::Cell::new(sampler::resolve_max_retries(max_retries)),
         subagent_classifier_input,
+        parent_message_interrupt: tokio::sync::watch::channel(false).0,
         pending_interjections: InterjectionBuffer::new(),
         completion_delivery: Default::default(),
         pending_system_reminders: Mutex::new(Vec::new()),

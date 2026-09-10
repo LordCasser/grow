@@ -2,6 +2,7 @@
 //! The shared coordinator actor lives in `tools`; this module plugs
 //! its `!Send` local-session runner into `spawn_local`.
 use super::*;
+mod interaction;
 struct ShellChildRunner {
     agent_ref: LocalRef<MvpAgent>,
 }
@@ -14,6 +15,32 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
     type ValidateFuture = tools::implementations::grow_build::task::coordinator::LocalBoxFuture<
         tools::implementations::grow_build::task::types::SubagentValidateTypeOutcome,
     >;
+    fn interact(
+        &self,
+        request: tools::implementations::grow_build::task::interaction::AgentInteractionRequest,
+        target_id: String,
+    ) {
+        let agent = self.agent_ref.get();
+        let lookup = |id: &str| {
+            let id = acp::SessionId::new(id);
+            agent
+                .sessions
+                .borrow()
+                .get(&id)
+                .cloned()
+                .or_else(|| agent.active_child_sessions.borrow().get(&id).cloned())
+        };
+        let endpoints = lookup(&request.source_session_id).zip(lookup(&target_id));
+        tokio::task::spawn_local(async move {
+            let Some((source, target)) = endpoints else {
+                let _ = request
+                    .respond_to
+                    .send(Err("Agent endpoint is no longer running".into()));
+                return;
+            };
+            interaction::run(request, source, target).await;
+        });
+    }
     fn run(
         &self,
         run: tools::implementations::grow_build::task::coordinator::ChildRunRequest<Self::Control>,

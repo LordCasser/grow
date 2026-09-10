@@ -454,7 +454,7 @@ impl Drop for CancelCoordinationOnDrop {
     }
 }
 
-async fn record_coordination_inquiry(
+pub(super) async fn record_coordination_inquiry(
     session: &SessionHandle,
     event: crate::coordination::InquiryEvent,
 ) -> Result<(), CoordinationError> {

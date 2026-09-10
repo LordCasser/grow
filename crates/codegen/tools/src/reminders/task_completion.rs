@@ -324,6 +324,7 @@ pub fn consumed_completion_ids(output: &ToolOutput) -> Vec<&str> {
         | ToolOutput::SchedulerDelete(_)
         | ToolOutput::SchedulerList(_)
         | ToolOutput::ListActiveSessions(_)
+        | ToolOutput::AgentInteraction(_)
         | ToolOutput::CoordinationInquiry(_)
         | ToolOutput::CoordinationInquiryState(_)
         | ToolOutput::CreateGoal(_)

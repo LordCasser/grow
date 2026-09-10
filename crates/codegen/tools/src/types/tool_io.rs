@@ -74,6 +74,11 @@ pub enum ToolInput {
     SchedulerList(crate::implementations::grow_build::scheduler::list::SchedulerListInput),
     ListActiveSessions(crate::implementations::grow_build::coordination::ListActiveSessionsInput),
     AskSession(crate::implementations::grow_build::coordination::AskSessionInput),
+    AskParent(crate::implementations::grow_build::task::interaction::AskParentInput),
+    AskSubagent(crate::implementations::grow_build::task::interaction::AskSubagentInput),
+    SendSubagentMessage(
+        crate::implementations::grow_build::task::interaction::SendSubagentMessageInput,
+    ),
     GetInquiry(crate::implementations::grow_build::coordination::GetInquiryInput),
     CreateGoal(crate::implementations::grow_build::update_goal::CreateGoalInput),
     GetGoal(crate::implementations::grow_build::update_goal::GetGoalInput),

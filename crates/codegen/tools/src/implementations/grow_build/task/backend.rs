@@ -29,6 +29,16 @@ use tool_runtime::ToolError;
 /// identically regardless of the underlying transport.
 #[async_trait::async_trait]
 pub trait SubagentBackend: Send + Sync + 'static {
+    async fn interact(
+        &self,
+        _id: String,
+        _target: Option<String>,
+        _action: super::interaction::AgentInteraction,
+        _cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<super::interaction::AgentInteractionOutput, String> {
+        Err("This host does not support parent-child communication.".into())
+    }
+
     /// Spawn a subagent and await its result.
     ///
     /// For blocking mode the caller awaits the returned future directly.
@@ -274,6 +284,36 @@ impl Drop for CancelResultReceiverOnDrop {
 
 #[async_trait::async_trait]
 impl SubagentBackend for ChannelBackend {
+    async fn interact(
+        &self,
+        id: String,
+        target_child_id: Option<String>,
+        action: super::interaction::AgentInteraction,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<super::interaction::AgentInteractionOutput, String> {
+        let source_session_id = self
+            .parent_session_id()
+            .ok_or("Unbound agent communication source")?;
+        let (respond_to, response) = oneshot::channel();
+        self.tx
+            .send(SubagentEvent::Interact(
+                super::interaction::AgentInteractionRequest {
+                    source_session_id,
+                    target_child_id,
+                    id,
+                    action,
+                    cancellation: cancellation.clone(),
+                    respond_to,
+                },
+            ))
+            .map_err(|_| "Subagent coordinator closed")?;
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err("Agent interaction cancelled".into()),
+            result = response => result.map_err(|_| "Agent interaction endpoint closed")?,
+        }
+    }
+
     async fn spawn(&self, mut request: SubagentRequest) -> Result<SubagentResult, ToolError> {
         if let Some(parent_session_id) = self.parent_session_id.as_deref() {
             request.parent_session_id = parent_session_id.to_owned();

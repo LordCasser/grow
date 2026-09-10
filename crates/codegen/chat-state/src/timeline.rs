@@ -709,6 +709,11 @@ pub enum PlanHandoffKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NotificationSource {
+    ParentMessage {
+        parent_session_id: String,
+        message_id: String,
+        interrupt: bool,
+    },
     MonitorProgress {
         task_id: String,
         owner: NotificationOwner,
@@ -748,6 +753,10 @@ pub enum NotificationSource {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum NotificationSourceIdentity {
+    ParentMessage {
+        parent_session_id: String,
+        message_id: String,
+    },
     MonitorProgress {
         task_id: String,
     },
@@ -776,6 +785,7 @@ enum NotificationSourceIdentity {
 impl NotificationSource {
     fn subject_id(&self) -> &str {
         match self {
+            Self::ParentMessage { message_id, .. } => message_id,
             Self::MonitorProgress { task_id, .. }
             | Self::TaskStillRunning { task_id, .. }
             | Self::TaskCompleted { task_id, .. } => task_id,
@@ -800,7 +810,7 @@ impl NotificationSource {
                 artifact_revision: *artifact_revision,
                 handoff: *handoff,
             },
-            Self::WorkflowHandoff { .. } => NotificationOwner::Session,
+            Self::WorkflowHandoff { .. } | Self::ParentMessage { .. } => NotificationOwner::Session,
         }
     }
 
@@ -810,13 +820,23 @@ impl NotificationSource {
             | Self::TaskStillRunning { owner, .. }
             | Self::TaskCompleted { owner, .. } => *owner = notification_owner,
             Self::SubagentCompleted { owner, .. } => *owner = notification_owner,
-            Self::PlanHandoff { .. } | Self::WorkflowHandoff { .. } => {}
+            Self::PlanHandoff { .. }
+            | Self::WorkflowHandoff { .. }
+            | Self::ParentMessage { .. } => {}
         }
         self
     }
 
     fn identity(&self) -> NotificationSourceIdentity {
         match self {
+            Self::ParentMessage {
+                parent_session_id,
+                message_id,
+                ..
+            } => NotificationSourceIdentity::ParentMessage {
+                parent_session_id: parent_session_id.clone(),
+                message_id: message_id.clone(),
+            },
             Self::MonitorProgress { task_id, .. } => NotificationSourceIdentity::MonitorProgress {
                 task_id: task_id.clone(),
             },
@@ -3197,7 +3217,8 @@ impl Timeline {
                         }
                         self.pending_notifications.insert(id.clone(), notification);
                     }
-                    NotificationSource::SubagentCompleted { .. }
+                    NotificationSource::ParentMessage { .. }
+                    | NotificationSource::SubagentCompleted { .. }
                     | NotificationSource::PlanHandoff { .. }
                     | NotificationSource::WorkflowHandoff { .. } => {
                         self.pending_notifications.insert(id.clone(), notification);
@@ -5677,6 +5698,18 @@ fn valid_notification_source_version(
     version: &NotificationSourceVersion,
 ) -> bool {
     match (source, version) {
+        (
+            NotificationSource::ParentMessage {
+                parent_session_id,
+                message_id,
+                ..
+            },
+            NotificationSourceVersion::Ordinal { value },
+        ) => {
+            *value == 1
+                && valid_notification_identifier(parent_session_id)
+                && valid_notification_identifier(message_id)
+        }
         (
             NotificationSource::MonitorProgress { .. }
             | NotificationSource::TaskStillRunning { .. },

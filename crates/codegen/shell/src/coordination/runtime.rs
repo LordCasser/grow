@@ -1171,6 +1171,7 @@ async fn run_inquiry(
 
     let (respond_to, response) = tokio::sync::oneshot::channel();
     let inbound = InboundInquiry {
+        authority: crate::coordination::InquiryAuthority::Peer,
         inquiry_id: inquiry_id.clone(),
         source_peer_id,
         source_session_id: record.payload.source_session_id.clone(),

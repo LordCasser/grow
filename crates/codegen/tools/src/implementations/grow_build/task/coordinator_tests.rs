@@ -51,6 +51,21 @@ struct TestRunner {
 }
 
 impl ChildRunner for TestRunner {
+    fn interact(
+        &self,
+        request: super::super::interaction::AgentInteractionRequest,
+        target: String,
+    ) {
+        let _ = request
+            .respond_to
+            .send(Ok(super::super::interaction::AgentInteractionOutput {
+                id: request.id,
+                status: "answered".into(),
+                answer: Some(format!("{}->{target}", request.source_session_id)),
+                error: None,
+            }));
+    }
+
     type Control = TestControl;
     type CompletionData = String;
     type RunFuture = SendBoxFuture<ChildRunOutput<String>>;
@@ -727,6 +742,28 @@ async fn workflow_cancel_waits_for_drain_and_hides_owned_children() {
     assert!(harness.backend.inspect("workflow-active").await.is_some());
     assert!(harness.backend.inspect("workflow-pending").await.is_some());
     assert!(harness.backend.list_running("parent").await.is_empty());
+    for action in [
+        super::super::interaction::AgentInteraction::Ask {
+            question: "status?".into(),
+        },
+        super::super::interaction::AgentInteraction::Send {
+            message: "change direction".into(),
+            interrupt: true,
+        },
+    ] {
+        assert!(
+            parent_backend(&harness)
+                .interact(
+                    "workflow-intervention".into(),
+                    Some("workflow-active".into()),
+                    action,
+                    CancellationToken::new(),
+                )
+                .await
+                .is_err(),
+            "Workflow-owned children remain outside manual parent control"
+        );
+    }
     let (list_respond_to, list_response_rx) = oneshot::channel();
     harness
         .backend
@@ -1769,4 +1806,124 @@ async fn completed_cache_evicts_oldest_entry_at_cap() {
             .is_some()
     );
     harness.actor.abort();
+}
+
+#[tokio::test]
+async fn interactions_use_direct_lineage_and_do_not_block_foreground_spawns() {
+    use super::super::interaction::AgentInteraction;
+    let mut h = harness(false, std::time::Duration::from_secs(60));
+    let parent = parent_backend(&h);
+    let spawn_backend = parent.clone();
+    let spawn = tokio::spawn(async move { spawn_backend.spawn(request("child", false)).await });
+    assert_eq!(h.started.recv().await.as_deref(), Some("child"));
+    let child = ChannelBackend::for_session(h.backend.sender(), "child");
+    let nested_backend = child.clone();
+    let nested = tokio::spawn(async move { nested_backend.spawn(request("nested", true)).await });
+    assert_eq!(h.started.recv().await.as_deref(), Some("nested"));
+    let nested_agent = ChannelBackend::for_session(h.backend.sender(), "nested");
+    for (sender, target, expected) in [
+        (&parent, Some("child"), "parent->child"),
+        (&child, None, "child->parent"),
+        (&nested_agent, None, "nested->child"),
+        (&child, Some("nested"), "child->nested"),
+    ] {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            sender.interact(
+                "ask".into(),
+                target.map(str::to_owned),
+                AgentInteraction::Ask {
+                    question: "clarify".into(),
+                },
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.answer.as_deref(), Some(expected));
+    }
+    assert!(
+        !spawn.is_finished(),
+        "sideband routing must not need child completion"
+    );
+    for (sender, target) in [
+        (&parent, Some("nested")),
+        (&nested_agent, Some("child")),
+        (&parent, None),
+        (&child, Some("unknown")),
+    ] {
+        assert!(
+            sender
+                .interact(
+                    "bad".into(),
+                    target.map(str::to_owned),
+                    AgentInteraction::Ask {
+                        question: "no".into()
+                    },
+                    CancellationToken::new()
+                )
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        child
+            .interact(
+                "upward".into(),
+                None,
+                AgentInteraction::Send {
+                    message: "no".into(),
+                    interrupt: true
+                },
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        h.backend
+            .interact(
+                "unbound".into(),
+                Some("child".into()),
+                AgentInteraction::Ask {
+                    question: "no".into()
+                },
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(
+        parent
+            .interact(
+                "cancel".into(),
+                Some("child".into()),
+                AgentInteraction::Ask {
+                    question: "no".into()
+                },
+                cancelled
+            )
+            .await
+            .is_err()
+    );
+    parent.cancel("child").await;
+    assert!(
+        parent
+            .interact(
+                "closed".into(),
+                Some("child".into()),
+                AgentInteraction::Ask {
+                    question: "no".into()
+                },
+                CancellationToken::new()
+            )
+            .await
+            .is_err()
+    );
+    spawn.abort();
+    nested.abort();
+    h.actor.abort();
 }

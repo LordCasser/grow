@@ -57,6 +57,18 @@ This facility is for coordination between already-running primary sessions. Use 
 
 ---
 
+## Questions and interventions
+
+The behavior contract is maintained in [local-coordination](../../../../../openspec/specs/local-coordination/spec.md).
+
+A child can use `ask_parent` to ask its immediate delegating agent for clarification. A primary agent can use `ask_subagent` with a directly-owned running child's ID. Both use the existing asynchronous, tool-free Sideband inquiry: the caller receives the answer as a tool result, while the target's foreground task continues. A child question produces one correlated inquiry row in the main-agent view, updated as it runs and completes. Delegated worktrees do not require the cross-workspace peer approval flow. Cross-session discovery and inquiry remain primary-only.
+
+To change a running child's instructions, the primary agent uses `send_subagent_message` with `subagent_id`, `message` and an explicit `interrupt` boolean. `false` queues the attributed message for the next step's sampling. `true` safely preempts the model request or interruptible wait before resampling; tools with non-interruptible side effects finish safely. Success means the target durably received the message, not that it finished the task. A receipt that races terminal closure is rejected rather than silently accepted and lost. Parent messages do not grant human authorization or expand child permissions.
+
+Questions do not enter the target foreground conversation; interventions do. Children cannot send intervention messages upward or contact unrelated sessions. Received interventions use Timeline notification receipt/consumption and survive restoration without duplicate delivery. An interrupted inquiry is closed during restoration rather than automatically reissuing the model request.
+
+---
+
 ## Built-in Agent types
 
 The `subagent_type` argument selects the child definition:

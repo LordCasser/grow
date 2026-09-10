@@ -200,6 +200,7 @@ impl SessionActor {
                     chat_state::NotificationSource::MonitorProgress { .. }
                     | chat_state::NotificationSource::TaskStillRunning { .. }
                     | chat_state::NotificationSource::PlanHandoff { .. }
+                    | chat_state::NotificationSource::ParentMessage { .. }
                     | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
                     chat_state::NotificationSource::TaskCompleted { task_id, .. } => Some(task_id),
                     chat_state::NotificationSource::SubagentCompleted { subagent_id, .. } => {

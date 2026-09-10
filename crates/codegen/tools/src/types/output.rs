@@ -495,6 +495,7 @@ pub enum ToolOutput {
     SchedulerDelete(crate::implementations::grow_build::scheduler::delete::SchedulerDeleteOutput),
     SchedulerList(crate::implementations::grow_build::scheduler::list::SchedulerListOutput),
     ListActiveSessions(crate::implementations::grow_build::coordination::ListActiveSessionsOutput),
+    AgentInteraction(crate::implementations::grow_build::task::interaction::AgentInteractionOutput),
     CoordinationInquiry(
         crate::implementations::grow_build::coordination::CoordinationInquiryResult,
     ),
@@ -519,6 +520,7 @@ impl ToolOutput {
     /// never report a *false failure*.
     pub fn is_error(&self) -> bool {
         match self {
+            ToolOutput::AgentInteraction(outcome) => outcome.error.is_some(),
             ToolOutput::CoordinationInquiry(outcome) => outcome.status != "answered",
             ToolOutput::MCP(m) => m.is_error,
             ToolOutput::Bash(b) => b.exit_code != 0,
@@ -730,6 +732,7 @@ impl ToolOutput {
             ToolOutput::ListActiveSessions(o) => {
                 serde_json::to_string_pretty(o).unwrap_or_default()
             }
+            ToolOutput::AgentInteraction(o) => serde_json::to_string_pretty(o).unwrap_or_default(),
             ToolOutput::CoordinationInquiry(o) => {
                 serde_json::to_string_pretty(o).unwrap_or_default()
             }

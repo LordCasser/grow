@@ -3,6 +3,57 @@
 use super::*;
 
 impl SessionActor {
+    pub(super) async fn receive_parent_message(
+        &self,
+        parent_session_id: String,
+        message_id: String,
+        message: String,
+        interrupt: bool,
+    ) -> Result<String, String> {
+        if message.trim().is_empty() || message.len() > 16 * 1024 {
+            return Err("Invalid parent message length".into());
+        }
+        let _control_gate = self.step_control_gate.lock().await;
+        {
+            let state = self.state.lock().await;
+            if !state.termination.is_open()
+                || !state
+                    .foreground
+                    .regular()
+                    .is_some_and(|task| !task.is_finished() && task.steering_open)
+            {
+                return Err("Child is not accepting interventions in an active turn".into());
+            }
+        }
+        let source = chat_state::NotificationSource::ParentMessage {
+            parent_session_id: parent_session_id.clone(),
+            message_id: message_id.clone(),
+            interrupt,
+        };
+        let body = format!(
+            "Message from delegating agent {parent_session_id} (message {message_id}). This is agent guidance, not new human authorization.\n\n{message}"
+        );
+        let id = self
+            .receive_notification(
+                source,
+                chat_state::NotificationSourceVersion::Ordinal { value: 1 },
+                body,
+            )
+            .await?;
+        if interrupt
+            && self
+                .chat_state_handle
+                .pending_notifications()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .any(|item| item.id == id)
+        {
+            self.parent_message_interrupt.send_replace(true);
+        }
+        Ok(id)
+    }
+
     /// Stream write-ahead payload candidates and reconcile each bounded batch
     /// against the current Timeline projection within this writer epoch.
     pub(super) async fn reconcile_notification_payloads(
@@ -313,6 +364,7 @@ impl SessionActor {
             }
             chat_state::NotificationSource::SubagentCompleted { .. }
             | chat_state::NotificationSource::PlanHandoff { .. }
+            | chat_state::NotificationSource::ParentMessage { .. }
             | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
         };
         let goal_owner = task_id.as_ref().and_then(|task_id| {
@@ -330,6 +382,7 @@ impl SessionActor {
                     | chat_state::NotificationSource::TaskCompleted { task_id, .. } => task_id,
                     chat_state::NotificationSource::SubagentCompleted { .. }
                     | chat_state::NotificationSource::PlanHandoff { .. }
+                    | chat_state::NotificationSource::ParentMessage { .. }
                     | chat_state::NotificationSource::WorkflowHandoff { .. } => return None,
                 };
                 match notification.source.owner() {
@@ -619,6 +672,7 @@ impl SessionActor {
         &self,
         excluded_notification_ids: &[String],
     ) -> bool {
+        self.parent_message_interrupt.send_replace(false);
         let Some(turn) = self.events.current_turn() else {
             return false;
         };
@@ -827,6 +881,7 @@ impl SessionActor {
                 chat_state::NotificationSource::TaskCompleted { .. }
                 | chat_state::NotificationSource::SubagentCompleted { .. }
                 | chat_state::NotificationSource::PlanHandoff { .. }
+                | chat_state::NotificationSource::ParentMessage { .. }
                 | chat_state::NotificationSource::WorkflowHandoff { .. } => 0u8,
             };
             (priority, notification.received_seq)
@@ -1087,6 +1142,7 @@ impl SessionActor {
                 | chat_state::NotificationSource::TaskStillRunning { .. }
                 | chat_state::NotificationSource::SubagentCompleted { .. }
                 | chat_state::NotificationSource::PlanHandoff { .. }
+                | chat_state::NotificationSource::ParentMessage { .. }
                 | chat_state::NotificationSource::WorkflowHandoff { .. } => {
                     sections.push(vec![acp::ContentBlock::Text(acp::TextContent::new(
                         payload.clone(),
@@ -1164,7 +1220,8 @@ impl SessionActor {
                     );
                 }
                 chat_state::NotificationSource::MonitorProgress { .. } => {}
-                chat_state::NotificationSource::TaskStillRunning { .. } => {}
+                chat_state::NotificationSource::TaskStillRunning { .. }
+                | chat_state::NotificationSource::ParentMessage { .. } => {}
             }
         }
         (
@@ -1250,6 +1307,130 @@ mod tests {
             Some(&stale),
             &notification,
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parent_intervention_is_durable_attributed_and_has_explicit_timing() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+                crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+                let id = actor
+                    .receive_parent_message(
+                        "parent".into(),
+                        "queued".into(),
+                        "use the shared interface".into(),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                assert!(!*actor.parent_message_interrupt.borrow());
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert!(
+                    !actor
+                        .chat_state_handle
+                        .get_conversation()
+                        .await
+                        .iter()
+                        .any(|item| item.text_content().contains("shared interface"))
+                );
+                let retry = actor
+                    .receive_parent_message(
+                        "parent".into(),
+                        "queued".into(),
+                        "use the shared interface".into(),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(retry, id);
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let restored = chat_state::Timeline::from_events(events).unwrap();
+                assert_eq!(restored.pending_notifications().len(), 1);
+                assert!(actor.drain_active_notifications().await);
+                let text = actor
+                    .chat_state_handle
+                    .get_conversation()
+                    .await
+                    .iter()
+                    .map(|item| item.text_content())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(text.contains("Message from delegating agent parent"));
+                assert!(text.contains("not new human authorization"));
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                actor
+                    .receive_parent_message(
+                        "parent".into(),
+                        "queued".into(),
+                        "use the shared interface".into(),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                actor
+                    .receive_parent_message(
+                        "parent".into(),
+                        "interrupt".into(),
+                        "change direction".into(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                assert!(*actor.parent_message_interrupt.borrow());
+                assert!(actor.close_steering_and_drain("test-active-turn").await);
+                assert!(!*actor.parent_message_interrupt.borrow());
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .pending_notifications()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(
+                    actor
+                        .receive_parent_message(
+                            "parent".into(),
+                            "late".into(),
+                            "late message".into(),
+                            true
+                        )
+                        .await
+                        .is_err()
+                );
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert!(
+                    chat_state::Timeline::from_events(events)
+                        .unwrap()
+                        .pending_notifications()
+                        .is_empty()
+                );
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]

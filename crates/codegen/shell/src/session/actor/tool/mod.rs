@@ -364,6 +364,7 @@ impl SessionActor {
         let workflow_manager = self.workflow_manager.clone();
         let behavior = self.behavior.clone();
         let pending_interjections = self.pending_interjections.clone();
+        let parent_message_interrupt = self.parent_message_interrupt.clone();
         let completion_delivery = self.completion_delivery.clone();
         let goal_active = self.goal_loop_active();
         let wait_owner_turn = self
@@ -382,6 +383,7 @@ impl SessionActor {
                 let behavior = behavior.clone();
                 let session_id = session_id.clone();
                 let pending_interjections = pending_interjections.clone();
+                let parent_message_interrupt = parent_message_interrupt.clone();
                 let completion_delivery = completion_delivery.clone();
                 let wait_owner_turn = wait_owner_turn.clone();
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
@@ -444,7 +446,15 @@ impl SessionActor {
                                     completion_delivery.finish_wait(&tracked_task_ids);
                                     result
                                 },
-                                _ = wait_for_pending_interjection(&pending_interjections) => {
+                                from_parent = async {
+                                    tokio::select! {
+                                        _ = wait_for_pending_interjection(&pending_interjections) => false,
+                                        _ = async {
+                                            let mut signal = parent_message_interrupt.subscribe();
+                                            let _ = signal.wait_for(|pending| *pending).await;
+                                        } => true,
+                                    }
+                                } => {
                                     // Transfer ownership before dropping the
                                     // wait future. Completion sources can now
                                     // race safely with waiter teardown.
@@ -452,9 +462,18 @@ impl SessionActor {
                                     tracing::info!(
                                         tool = %prepared.tool_name,
                                         task_ids = ?tracked_task_ids,
-                                        "abort wait tool: interjection pending"
+                                        "abort wait tool: steering input pending"
                                     );
-                                    let result = if tracked_task_ids.is_empty() {
+                                    let result = if from_parent {
+                                        interrupted_wait_tool_result_with_msg(
+                                            &prepared.parsed_args,
+                                            if tracked_task_ids.is_empty() {
+                                                "Wait ended early because the delegating agent sent an intervention."
+                                            } else {
+                                                "Wait moved to background because the delegating agent sent an intervention. The task is still running and its completion will be delivered automatically."
+                                            },
+                                        )
+                                    } else if tracked_task_ids.is_empty() {
                                         interrupted_wait_tool_result_with_msg(
                                             &prepared.parsed_args,
                                             "Wait ended early because the user sent a message.",

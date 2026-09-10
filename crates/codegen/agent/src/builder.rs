@@ -172,7 +172,24 @@ fn apply_coordination_tool_gates(
     };
     use tools::types::tool::ToolNamespace;
 
+    use tools::implementations::grow_build::task::interaction::{
+        AskParentTool, AskSubagentTool, SendSubagentMessageTool,
+    };
     let namespace = ToolNamespace::Grow;
+    tool_config.tools.retain(|tool| {
+        !["ask_parent", "ask_subagent", "send_subagent_message"]
+            .iter()
+            .any(|id| tool.id == format!("{namespace}:{id}"))
+    });
+    match prompt_audience {
+        crate::prompt::context::PromptAudience::Primary => {
+            tool_config.tools.push((&AskSubagentTool).into());
+            tool_config.tools.push((&SendSubagentMessageTool).into());
+        }
+        crate::prompt::context::PromptAudience::Subagent => {
+            tool_config.tools.push((&AskParentTool).into())
+        }
+    }
     let list_id = format!("{namespace}:{LIST_ACTIVE_SESSIONS_TOOL_NAME}");
     let ask_id = format!("{namespace}:{ASK_SESSION_TOOL_NAME}");
     tool_config
@@ -1085,7 +1102,8 @@ mod tests {
             &mut subagent,
             crate::prompt::context::PromptAudience::Subagent,
         );
-        assert!(subagent.tools.is_empty());
+        assert_eq!(subagent.tools.len(), 1);
+        assert!(subagent.tools[0].id.ends_with(":ask_parent"));
     }
 
     /// reqwest is built with `rustls-no-provider` (see the vendoring notes on
