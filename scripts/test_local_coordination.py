@@ -180,6 +180,7 @@ class Client:
         self.counter = 0
         self.notices = []
         self.permissions = []
+        self.replies = []
         self.approve = False
         self.reader = threading.Thread(target=self.read, daemon=True)
         self.reader.start()
@@ -224,6 +225,8 @@ class Client:
         try:
             self.write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
             reply = result.get(timeout=timeout)
+            self.replies.append({"method": method, "reply": reply})
+            self.replies[:] = self.replies[-20:]
             if raw:
                 return reply
             assert "error" not in reply, (method, reply)
@@ -502,6 +505,8 @@ context_window = 200000
         if failed:
             for client in clients:
                 print(f"Grow fixture pid={client.proc.pid} exit={client.proc.returncode}", file=sys.stderr)
+                print("Recent RPC replies: " + json.dumps(client.replies, ensure_ascii=False)[-16384:],
+                      file=sys.stderr)
                 print(json.dumps({"notices": client.notices[-20:], "permissions": client.permissions},
                                  ensure_ascii=False)[-16384:], file=sys.stderr)
             for log in sorted(root.glob("*.stderr.log")):
