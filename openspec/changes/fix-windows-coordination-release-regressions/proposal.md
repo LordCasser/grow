@@ -19,3 +19,5 @@ Preserve bounded stderr and exit diagnostics on failed process regressions. An e
 Give only the Windows coordination debug executable a larger main-thread stack after a confirmed stack overflow. Run the unchanged process scenarios against native distribution executables as a release smoke gate, preserving production stack settings.
 
 Coordination manifest publication, JSONL session observation, the portable actor test fixture and existing regression cases. Windows execution is required before archiving. Linux/macOS regression and release builds remain gates in the parent release record.
+
+The native Windows process regression also exposes an immutable input artifact rename using an ordinary DOS path beyond MAX_PATH. Reuse the existing verbatim/UNC path encoder for the pinned-handle no-replace publication. Normalize a confirmed non-directory child to the existing invalid-entity scan exclusion, without suppressing operational I/O errors.

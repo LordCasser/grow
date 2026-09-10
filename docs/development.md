@@ -85,7 +85,7 @@ cargo build --locked -p cli --bin grow
 
 核心、跨平台协调及 Windows 存储回归统一设置 `RUST_MIN_STACK=16777216`，为调试测试夹具提供足够的测试线程栈。
 
-Windows 协调清单用句柄级原子替换保留已有读者；独立会话加载使用共享读取目录能力，写者能力仍由独占 lease 管理。对应契约见 [本机协调](../openspec/specs/local-coordination/spec.md) 与 [会话 Timeline](../openspec/specs/session-timeline/spec.md)。
+Windows 协调清单用句柄级原子替换保留已有读者；独立会话加载使用共享读取目录能力，写者能力仍由独占 lease 管理。 Windows 存储回归还覆盖超过 MAX_PATH 的输入 artifact 和会话发布，以及扫描时排除普通文件而保留有效会话。对应契约见 [本机协调](../openspec/specs/local-coordination/spec.md) 与 [会话 Timeline](../openspec/specs/session-timeline/spec.md)。
 
 跨会话协调与 Windows 存储还应检查对应 `.github/workflows/` 的平台回归。OpenSpec CI 只做文档格式与归档完成状态检查，语义由场景、源码、测试和 review 共同核对。
 

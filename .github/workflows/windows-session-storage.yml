@@ -7,6 +7,7 @@ on:
       - ".github/workflows/windows-session-storage.yml"
       - "crates/codegen/shell/src/session/storage/**"
       - "crates/codegen/shell/src/session/persistence.rs"
+      - "crates/codegen/shell/src/session/input_inbox.rs"
       - "crates/codegen/chat-state/**"
       - "Cargo.lock"
 
@@ -39,7 +40,16 @@ jobs:
 
       - name: Exercise the complete session creation boundary
         shell: pwsh
-        run: >-
-          cargo test --locked -p shell --lib
-          session::storage::jsonl::tests::session_creation_round_trip_commits_and_reopens_the_timeline
-          -- --exact --nocapture
+        run: |
+          $tests = @(
+            "session::storage::jsonl::tests::session_creation_round_trip_commits_and_reopens_the_timeline",
+            "session::storage::jsonl::tests::long_windows_cwds_roundtrip_under_long_storage_root",
+            "session::storage::jsonl::tests::scan_opened_sessions_skips_non_sessions_and_invalid_summaries",
+            "session::storage::tests::contained_no_replace_rename_preserves_both_existing_entities",
+            "session::storage::tests::pinned_child_capability_publishes_without_reopening_source",
+            "session::input_inbox::tests::long_profile_payload_round_trip_preserves_immutable_artifacts"
+          )
+          foreach ($test in $tests) {
+            cargo test --locked -p shell --lib $test -- --exact --nocapture
+            if ($LASTEXITCODE -ne 0) { throw "Storage regression failed: $test" }
+          }

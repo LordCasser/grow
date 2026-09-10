@@ -822,6 +822,30 @@ pub(crate) mod tests {
         assert_eq!(reference, write_payload(&session, &restored).unwrap());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn long_profile_payload_round_trip_preserves_immutable_artifacts() {
+        use std::os::windows::ffi::OsStrExt as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("profile".repeat(20)).join("session".repeat(20));
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(path.as_os_str().encode_wide().count() > 260);
+        let session = open_test_session(&path);
+        let payload = image_payload();
+        let reference = write_payload(&session, &payload).unwrap();
+        let restored = read_payload(&session, &reference).unwrap();
+        assert_eq!(serde_json::to_value(&restored).unwrap(), serde_json::to_value(&payload).unwrap());
+        assert_eq!(reference, write_payload(&session, &restored).unwrap());
+
+        let image = image_ref(&session, &reference);
+        let image_path = path.join(IMAGE_DIRECTORY).join(format!("{}.json", image.blake3));
+        std::fs::write(&image_path, b"existing conflicting bytes").unwrap();
+        assert!(write_payload(&session, &payload).is_err());
+        assert_eq!(std::fs::read(&image_path).unwrap(), b"existing conflicting bytes");
+        assert!(read_manifest(&session, &reference).is_ok());
+    }
+
     #[test]
     fn image_corruption_is_separate_from_manifest_corruption() {
         let temp = tempfile::tempdir().unwrap();

@@ -1084,7 +1084,6 @@ impl ContainedDirectory {
         source_handle: windows::Win32::Foundation::HANDLE,
         target_display: &Path,
     ) -> io::Result<()> {
-        use std::os::windows::ffi::OsStrExt as _;
         use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, HANDLE};
         use windows::Win32::Storage::FileSystem::{
             FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfo, SetFileInformationByHandle,
@@ -1097,7 +1096,10 @@ impl ContainedDirectory {
         // source is still the exact validated handle, and `target_display`'s
         // parent cannot be renamed while its pinned capability denies
         // FILE_SHARE_DELETE.
-        let target = target_display.as_os_str().encode_wide().collect::<Vec<_>>();
+        // Direct Win32 rename requires a verbatim path beyond MAX_PATH.
+        // The existing parent remains pinned while the encoder resolves it.
+        let mut target = crate::local_ipc::security::wide_path(target_display)?;
+        target.pop(); // FILE_RENAME_INFO counts bytes without the terminator.
         let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
         let byte_len = header
             .checked_add(target.len().saturating_mul(std::mem::size_of::<u16>()))
@@ -1283,8 +1285,15 @@ impl ContainedDirectory {
         use std::os::windows::fs::MetadataExt as _;
 
         let directory = parent.open_dir_nofollow(name).map_err(|error| {
+            // Match Unix ENOTDIR admission: a plain file is an invalid
+            // directory entity, not an operational failure of enumeration.
+            let kind = if error.kind() == io::ErrorKind::NotADirectory {
+                io::ErrorKind::InvalidData
+            } else {
+                error.kind()
+            };
             io::Error::new(
-                error.kind(),
+                kind,
                 format!("{description} is not a contained regular directory: {error}"),
             )
         })?;

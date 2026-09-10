@@ -3848,12 +3848,15 @@ fn scan_opened_sessions_skips_non_sessions_and_invalid_summaries() {
     let cwd = crate::util::grow_home::encode_cwd_dirname("/project");
     let cwd_dir = tmp.path().join("sessions").join(&cwd);
     std::fs::create_dir_all(&cwd_dir).unwrap();
+    std::fs::write(tmp.path().join("sessions/stray-cwd.txt"), b"oops").unwrap();
     std::fs::write(cwd_dir.join("stray-file.txt"), b"oops").unwrap();
     std::fs::create_dir(cwd_dir.join("real-session")).unwrap();
     std::fs::write(cwd_dir.join("real-session/summary.json"), b"{}").unwrap();
+    write_test_summary(tmp.path(), &cwd, "valid-session", chrono::Utc::now(), None, None, None);
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
     let sessions = adapter.scan_opened_sessions(None, |opened| opened).unwrap();
-    assert!(sessions.is_empty());
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].summary().info.id, acp::SessionId::new("valid-session"));
 }
 #[tokio::test]
 async fn list_sessions_recent_returns_most_recent_by_mtime() {
